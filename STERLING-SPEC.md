@@ -263,6 +263,8 @@ brief:
   out_of_scope: string[]               # enforced by the pre-edit contract gate
   phases:
     - {phase_id, goal, subtasks: string[], ac_ids: string[],
+       files: string[]?, rank_terms: string[]?,   # prep [S]'s staging inputs — planning outputs (7.6);
+                                                  # optional: absent files fall back to blast_radius
        difficulty: {level: normal|hard, reasons: string[]},   # reasons cite the rubric:
        # algorithmic/logical complexity | blast radius > N (mechanical) | thin knowledge support
        # (mechanical: prep retrieval volume) | ambiguity residue | poorly-covered external integration
