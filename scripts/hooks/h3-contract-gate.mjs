@@ -40,12 +40,11 @@ try {
     allow();
   }
 
-  // direct mode
+  // direct mode (file-touch registration is H7's job, PostToolUse)
   if (!rel) allow(); // outside the repo: the contract governs the repository
   if (!isCreation && !hasRead(ledgerPath(cwd, undefined, input.agent_id), rel)) {
     deny(`H3 [direct mode]: no read-evidence for '${rel}' — Read the exact file before editing`);
   }
-  store.recordCheckSkipped('h7-file-touch-reconcile', 'not_built', undefined, new Date().toISOString());
   allow();
 } finally {
   store.close();

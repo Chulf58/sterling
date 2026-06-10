@@ -90,6 +90,9 @@ export const runRecordSchema = z.object({
   dispatch_counts: z.record(z.string(), z.number().int().nonnegative()),
   escalations: z.array(z.unknown()),
   started_at: z.string().datetime(),
+  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
+  // completion; dispose-run verifies the union of this and the brief's list.
+  reconcile_needed: z.array(z.string()).optional(),
   // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
   // survive disposal — the packs and check_skipped rows themselves are
   // run-scoped and die with the run. Shown at the merge gate.

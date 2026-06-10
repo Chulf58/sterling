@@ -330,13 +330,16 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     assert.equal(signal.action.action, 'complete_run');
     assert.equal(store.getRun('r-loop').machine_state, 'completing');
 
-    // completeness [S]: mechanical checks pass; judgment/wiring/reviewers/test-integrity skip loudly
-    const comp = runScript('completeness-check.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    // completeness [S] (final): mechanical checks pass; judgment/reviewers/test-integrity
+    // skip loudly; H12 wiring skips on the node adapter's absent capability (§9.1)
+    const comp = runScript('completeness-check.mjs', ['--run', 'r-loop', '--phase', 'p1', '--final', '--target', dir], dir);
     assert.equal(comp.code, 0, comp.stderr);
-    assert.deepEqual(
-      JSON.parse(comp.stdout).check_skipped.map((s) => s.check),
-      ['completeness-judgment', 'wiring-zero-consumer', 'reviewer-dispatch', 'test-integrity']
-    );
+    assert.deepEqual(JSON.parse(comp.stdout).check_skipped, [
+      { check: 'completeness-judgment', reason: 'not_built' },
+      { check: 'reviewer-dispatch', reason: 'not_built' },
+      { check: 'test-integrity', reason: 'not_built' },
+      { check: 'wiring-zero-consumer', reason: 'capability_absent:node' },
+    ]);
 
     // capture: article (AC-traced, fulfills the todo), decision, todo removed by the fulfilling write
     const { record: article } = tools.knowledgeCreate('feature_article', articleFields(brief.id, { traceAC: true, fulfills: [todo.id] }));

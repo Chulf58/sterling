@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS check_skipped (
   reason TEXT NOT NULL,
   at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
 `;
 
 /** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
@@ -347,23 +353,76 @@ export class SterlingStore {
   }
 
   /**
-   * Append an escalation/warn entry to the run record (H6 context warns land
-   * here, §6). Optimistic concurrency: hooks write concurrently with the
-   * brain, so the append retries on body change and fails loudly if it keeps
-   * losing the race — never a silent drop (P5).
+   * Optimistic non-state mutation of the run record (hooks write concurrently
+   * with the brain): retries on body change, fails loudly if it keeps losing
+   * the race — never a silent drop (P5). machine_state is CAS-only and must
+   * not change through this path.
    */
-  appendRunEscalation(runId: string, entry: unknown, attempts = 5): void {
+  updateRunOptimistic(runId: string, mutate: (run: RunRecord) => RunRecord, attempts = 5): RunRecord {
     for (let i = 0; i < attempts; i++) {
       const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
-      if (!row) throw new Error(`appendRunEscalation: no run '${runId}'`);
-      const run = JSON.parse(row.body) as RunRecord;
-      run.escalations.push(entry);
+      if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
+      const current = JSON.parse(row.body) as RunRecord;
+      const next = runRecordSchema.parse(mutate(current));
+      if (next.machine_state !== current.machine_state) {
+        throw new Error('updateRunOptimistic: machine_state changes go through casTransition only (§5.2)');
+      }
       const res = this.db
         .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
-        .run(JSON.stringify(run), new Date().toISOString(), runId, row.body);
-      if (res.changes === 1) return;
+        .run(JSON.stringify(next), new Date().toISOString(), runId, row.body);
+      if (res.changes === 1) return next;
     }
-    throw new Error(`appendRunEscalation: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
+    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
+  }
+
+  /** H6 context warns + run_escalate land here (§6). */
+  appendRunEscalation(runId: string, entry: unknown): void {
+    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
+  }
+
+  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
+  appendRunReconcileNeeded(runId: string, articleId: string): void {
+    this.updateRunOptimistic(runId, (run) =>
+      (run.reconcile_needed ?? []).includes(articleId)
+        ? run
+        : { ...run, reconcile_needed: [...(run.reconcile_needed ?? []), articleId] }
+    );
+  }
+
+  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
+  incrementDispatchCount(runId: string, agentType: string): number {
+    const next = this.updateRunOptimistic(runId, (run) => ({
+      ...run,
+      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 },
+    }));
+    return next.dispatch_counts[agentType];
+  }
+
+  /** H11 (§3.2.6): append extraction ids to a note's derived[] — raw_text is never touched. */
+  appendNoteDerived(noteId: string, derivedIds: string[]): void {
+    const note = this.get(noteId);
+    if (!note || note.type !== 'note') throw new Error(`appendNoteDerived: '${noteId}' is not a note`);
+    const updated = validateRecord({ ...note, derived: [...new Set([...(note as { derived: string[] }).derived, ...derivedIds])] });
+    this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(updated), noteId);
+  }
+
+  /**
+   * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
+   * transactionally — read + delete in one transaction, never a signal file (P4).
+   */
+  writeSelection(type: string, recordId: string, at: string): void {
+    this.db
+      .prepare('INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at')
+      .run(type, recordId, at);
+  }
+
+  takeSelection(): { type: string; record_id: string; at: string } | undefined {
+    let row: { type: string; record_id: string; at: string } | undefined;
+    this.tx(() => {
+      row = this.db.prepare('SELECT type, record_id, at FROM selection WHERE slot = 1').get() as typeof row;
+      if (row) this.db.prepare('DELETE FROM selection WHERE slot = 1').run();
+    });
+    return row;
   }
 
   /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4). */

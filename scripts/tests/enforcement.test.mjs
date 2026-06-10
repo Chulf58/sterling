@@ -264,8 +264,8 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
   }
 });
 
-test('H3 [direct mode]: read-before-edit via conductor ledger; H7 registration skipped loudly', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: false });
+test('H3 [direct mode]: read-before-edit via conductor ledger (file-touch registration is H7, PostToolUse)', () => {
+  const { dir, cleanup } = makeProject({ withRun: false });
   try {
     const edit = () =>
       runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'feature.ts') } }), dir);
@@ -276,8 +276,6 @@ test('H3 [direct mode]: read-before-edit via conductor ledger; H7 registration s
     seedLedger(dir, undefined, undefined, ['src/feature.ts']);
     r = edit();
     assert.equal(r.code, 0, r.stderr);
-    const skips = store.listCheckSkipped();
-    assert.ok(skips.some((s) => s.check_name === 'h7-file-touch-reconcile' && s.reason === 'not_built'), 'H7 registration skipped loudly, never silently (§16.1.9)');
   } finally {
     cleanup();
   }
