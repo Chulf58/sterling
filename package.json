@@ -1,0 +1,14 @@
+{
+  "name": "sterling",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Sterling monorepo — plugin sources. The shipped plugin is described in STERLING-SPEC.md section 2.2.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test \"scripts/tests/*.test.mjs\"",
+    "check": "node scripts/check-agent-registry.mjs"
+  }
+}
