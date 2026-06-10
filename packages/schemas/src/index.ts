@@ -3,6 +3,10 @@ export { LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, envelopeFields, refineSuper
 export {
   verifiableAt,
   decisionSchema,
+  antiPatternSchema,
+  researchFindingSchema,
+  referenceMaterialSchema,
+  disconfirmedHypothesisSchema,
   featureArticleSchema,
   noteSchema,
   todoSchema,

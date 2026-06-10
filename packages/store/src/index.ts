@@ -135,7 +135,9 @@ export class SterlingStore {
   query(opts: QueryOptions = {}): DurableRecord[] {
     const cap = opts.cap ?? 20;
     const params: (string | number)[] = [];
-    const where: string[] = ["r.status = 'active'"];
+    // != superseded, not = active: flagged_stale research findings are still
+    // served — only as "stale — re-verify" (§3.2.4); the tool layer attaches the flag.
+    const where: string[] = ["r.status != 'superseded'"];
     if (!opts.include_unconfirmed) where.push('r.derived_unconfirmed = 0');
     if (opts.types?.length) {
       where.push(`r.type IN (${opts.types.map(() => '?').join(',')})`);

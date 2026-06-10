@@ -197,8 +197,67 @@ test('note schema and handoff/run-record transient shapes', () => {
   });
 });
 
-test('registry: spine types registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
-  assert.deepEqual(Object.keys(RECORD_TYPES).sort(), ['brief', 'decision', 'feature_article', 'note', 'todo']);
+test('full §3.2 record set: anti_pattern, research_finding, reference_material, disconfirmed_hypothesis', () => {
+  const ap = validateRecord({
+    ...envelope('anti_pattern'),
+    title: 'No raw SQL concat',
+    trigger: 'when building queries from user input',
+    guidance: 'use parameterized queries, not string concat',
+    wrong_way: '"SELECT * FROM x WHERE id=" + id',
+    right_way: 'db.prepare("... WHERE id = ?").get(id)',
+    source_evidence: 'run r-0042, src/db.ts:88',
+    file_keys: ['src\\db.ts'],
+    severity: 'block',
+  });
+  assert.equal((ap as { basis: string }).basis, 'codebase', 'basis defaults to codebase');
+  assert.deepEqual((ap as { file_keys: string[] }).file_keys, ['src/db.ts']);
+
+  const rf = validateRecord({
+    ...envelope('research_finding'),
+    question: 'genesys rate limit scope?',
+    answer: 'per-org, not per-token',
+    source_urls: ['https://developer.genesys.cloud/x'],
+    source_date: '2026-01-15',
+    capture_date: '2026-06-01',
+    volatility_hint: 'medium',
+  });
+  assert.equal(rf.type, 'research_finding');
+  // research adds flagged_stale to the status enum (§3.2.4)
+  validateRecord({ ...(rf as unknown as Record<string, unknown>), id: randomUUID(), status: 'flagged_stale' });
+  assert.throws(() => validateRecord({ ...(envelope('decision') as object), status: 'flagged_stale', title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' }), /invalid/i);
+
+  validateRecord({
+    ...envelope('reference_material'),
+    title: 'Genesys API guide',
+    kind: 'url',
+    location: 'https://developer.genesys.cloud',
+    summary: 'platform API reference',
+    source_date: '2025-11-01',
+    capture_date: '2026-06-01',
+    basis: 'platform',
+  });
+
+  validateRecord({
+    ...envelope('disconfirmed_hypothesis'),
+    question: 'is the cache stale?',
+    rejected_answer: 'no — TTL was correct; root cause was clock skew',
+    evidence: 'debug run r-0099, traces at src/cache.ts:40',
+    file_keys: ['src/cache.ts'],
+  });
+});
+
+test('registry: full record set registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
+  assert.deepEqual(Object.keys(RECORD_TYPES).sort(), [
+    'anti_pattern',
+    'brief',
+    'decision',
+    'disconfirmed_hypothesis',
+    'feature_article',
+    'note',
+    'reference_material',
+    'research_finding',
+    'todo',
+  ]);
   for (const [name, entry] of Object.entries(RECORD_TYPES)) {
     assert.equal(typeof entry.fts, 'function', `${name} needs an fts extractor`);
     assert.equal(typeof entry.fileKeys, 'function', `${name} needs a fileKeys extractor`);
@@ -206,7 +265,7 @@ test('registry: spine types registered 1:1, unregistered type rejected loudly (i
   assert.equal(RECORD_TYPES.decision.immutable, true);
   const validated = validateRecord(validDecision());
   assert.equal(validated.type, 'decision');
-  assert.throws(() => validateRecord({ ...envelope('anti_pattern'), title: 'x' }), /unregistered record type 'anti_pattern'/);
+  assert.throws(() => validateRecord({ ...envelope('escalation_log'), title: 'x' }), /unregistered record type 'escalation_log'/);
   assert.throws(() => validateRecord({ no_type: true }), /no record type/);
 });
 

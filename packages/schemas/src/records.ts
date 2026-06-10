@@ -60,6 +60,65 @@ export const featureArticleSchema = base
     }
   });
 
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}/, 'ISO date required');
+
+// §3.2.2 — trigger and provenance are top-level, never buried in prose.
+export const antiPatternSchema = base
+  .extend({
+    type: z.literal('anti_pattern'),
+    title: z.string().min(1),
+    trigger: z.string().min(1),
+    guidance: z.string().min(1),
+    wrong_way: z.string().min(1),
+    right_way: z.string().min(1),
+    source_evidence: z.string().min(1),
+    file_keys: z.array(repoPath).optional(),
+    severity: z.enum(['info', 'warn', 'block']).optional(),
+    basis: z.enum(['codebase', 'platform', 'external']).default('codebase'),
+  })
+  .superRefine(refineSupersession);
+
+// §3.2.4 — the decaying type: two clocks, freshness computed at read (lazy).
+// Status adds flagged_stale; retrieval serves it only as "stale — re-verify".
+export const researchFindingSchema = base
+  .extend({
+    type: z.literal('research_finding'),
+    status: z.enum(['active', 'superseded', 'flagged_stale']),
+    question: z.string().min(1),
+    answer: z.string().min(1),
+    source_urls: z.array(z.string()),
+    source_date: isoDate,
+    capture_date: isoDate,
+    volatility_hint: z.enum(['fast', 'medium', 'stable']).optional(),
+  })
+  .superRefine(refineSupersession);
+
+// §3.2.5 — large, stable, loaded on demand; never bulk-injected.
+export const referenceMaterialSchema = base
+  .extend({
+    type: z.literal('reference_material'),
+    title: z.string().min(1),
+    kind: z.enum(['pdf', 'url', 'doc']),
+    location: z.string().min(1),
+    summary: z.string().min(1),
+    source_date: isoDate,
+    capture_date: isoDate,
+    basis: z.enum(['codebase', 'platform', 'external']).default('codebase'),
+  })
+  .superRefine(refineSupersession);
+
+// §3.2.8 — refuted trails live here instead of dying; debug runs must not
+// re-litigate false trails already disproved.
+export const disconfirmedHypothesisSchema = base
+  .extend({
+    type: z.literal('disconfirmed_hypothesis'),
+    question: z.string().min(1),
+    rejected_answer: z.string().min(1),
+    evidence: z.string().min(1),
+    file_keys: z.array(repoPath).optional(),
+  })
+  .superRefine(refineSupersession);
+
 // §3.2.6 — raw text immutable; extraction re-runnable.
 export const noteSchema = base
   .extend({
@@ -167,6 +226,30 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     fts: (r) => [s(r.title), s(r.statement), s(r.rationale)].join('\n'),
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
   },
+  anti_pattern: {
+    schema: antiPatternSchema,
+    immutable: false,
+    fts: (r) => [s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+  },
+  research_finding: {
+    schema: researchFindingSchema,
+    immutable: false,
+    fts: (r) => [s(r.question), s(r.answer)].join('\n'),
+    fileKeys: () => [],
+  },
+  reference_material: {
+    schema: referenceMaterialSchema,
+    immutable: false,
+    fts: (r) => [s(r.title), s(r.summary)].join('\n'),
+    fileKeys: () => [],
+  },
+  disconfirmed_hypothesis: {
+    schema: disconfirmedHypothesisSchema,
+    immutable: false,
+    fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+  },
   feature_article: {
     schema: featureArticleSchema,
     immutable: false,
@@ -200,6 +283,10 @@ export type RecordType = keyof typeof RECORD_TYPES;
 
 export type DurableRecord =
   | z.infer<typeof decisionSchema>
+  | z.infer<typeof antiPatternSchema>
+  | z.infer<typeof researchFindingSchema>
+  | z.infer<typeof referenceMaterialSchema>
+  | z.infer<typeof disconfirmedHypothesisSchema>
   | z.infer<typeof featureArticleSchema>
   | z.infer<typeof noteSchema>
   | z.infer<typeof todoSchema>

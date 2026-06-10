@@ -72,7 +72,7 @@ test('WAL mode is active on a file-backed store (§3.1 criterion 6)', () => {
 test('create validates: unregistered type and malformed record are rejected, nothing written', () => {
   const { dir, store } = tempStore();
   try {
-    assert.throws(() => store.create({ ...envelope('anti_pattern'), title: 'x' }), /unregistered record type/);
+    assert.throws(() => store.create({ ...envelope('escalation_log'), title: 'x' }), /unregistered record type/);
     assert.throws(() => store.create(decision({ rationale: '' })), /rationale/i);
     assert.equal(store.query({ cap: 100 }).length, 0);
   } finally {
@@ -144,6 +144,30 @@ test('fallback rank without rank_terms: file-key overlap count, then updated_at 
     assert.equal((ranked[0] as { title: string }).title, 'two keys', 'higher overlap ranks first');
     const tie = store.query({ types: ['decision'] });
     assert.equal((tie[0] as { title: string }).title, 'one key', 'tie breaks on updated_at desc');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('flagged_stale research findings are still served by query; superseded are not (§3.2.4)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const rf = (status: string) => ({
+      ...envelope('research_finding'),
+      status,
+      superseded_by: status === 'superseded' ? randomUUID() : null,
+      question: `q-${status}`,
+      answer: 'a',
+      source_urls: [],
+      source_date: '2026-01-01',
+      capture_date: '2026-06-01',
+    });
+    store.create(rf('active'));
+    store.create(rf('flagged_stale'));
+    store.create(rf('superseded'));
+    const served = store.query({ types: ['research_finding'], cap: 10 });
+    assert.deepEqual(served.map((r) => (r as { status: string }).status).sort(), ['active', 'flagged_stale']);
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

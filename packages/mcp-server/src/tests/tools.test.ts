@@ -48,7 +48,7 @@ test('knowledge_create assembles the envelope server-side and emits check_skippe
     assert.equal(record.author, 'conductor');
     assert.match(record.id, /^[0-9a-f-]{36}$/);
     assert.deepEqual(check_skipped, [{ check: 'dedup-merge', reason: 'not_built' }]);
-    assert.throws(() => tools.knowledgeCreate('anti_pattern', { title: 'x' }), /unregistered record type/);
+    assert.throws(() => tools.knowledgeCreate('escalation_log', { title: 'x' }), /unregistered record type/);
   } finally {
     cleanup();
   }
