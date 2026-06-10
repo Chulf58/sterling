@@ -11,7 +11,17 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
-import { RECORD_TYPES, validateRecord, normalizeRepoPath, type DurableRecord } from '@sterling/schemas';
+import {
+  RECORD_TYPES,
+  validateRecord,
+  normalizeRepoPath,
+  handoffSchema,
+  runRecordSchema,
+  type DurableRecord,
+  type Handoff,
+  type MachineState,
+  type RunRecord,
+} from '@sterling/schemas';
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS records (
@@ -46,7 +56,40 @@ CREATE TABLE IF NOT EXISTS record_links (
 );
 CREATE INDEX IF NOT EXISTS idx_links_target ON record_links(target_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON handoffs(run_id, phase_id);
+CREATE TABLE IF NOT EXISTS check_skipped (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
 `;
+
+/** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
+export interface RecordedExit {
+  signal: string;
+  payload?: Record<string, unknown>;
+  phase_id?: string;
+  agent_role?: string;
+  at: string;
+}
+
+const ACTIVE_STATES = ['running', 'completing', 'awaiting_merge_gate', 'halted'];
 
 // §3.4: rank_terms are plain keywords — an array of single terms with a
 // per-term length cap; a keyword array cannot smuggle in a freeform question.
@@ -199,6 +242,120 @@ export class SterlingStore {
 
   close(): void {
     this.db.close();
+  }
+
+  // -------------------------------------------------------------------------
+  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
+  // state, but they live in SQLite, not in a shared mutable file (P4), because
+  // brain transitions need atomic compare-and-swap and the TUI reads them live.
+  // They are NOT knowledge records: knowledge_query never sees them.
+  // -------------------------------------------------------------------------
+
+  /** Run begins at gate approval. One active run at a time (§7.5). */
+  createRun(input: unknown): RunRecord {
+    const run = runRecordSchema.parse(input);
+    const active = this.getRun();
+    if (active) {
+      throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) — one active run at a time`);
+    }
+    this.db
+      .prepare('INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)')
+      .run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    return run;
+  }
+
+  /** By id, or the single active run when no id is given. */
+  getRun(id?: string): RunRecord | undefined {
+    const row = (
+      id
+        ? this.db.prepare('SELECT body FROM runs WHERE id = ?').get(id)
+        : this.db
+            .prepare(
+              `SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => '?').join(',')}) ORDER BY updated_at DESC LIMIT 1`
+            )
+            .get(...ACTIVE_STATES)
+    ) as { body: string } | undefined;
+    return row ? (runRecordSchema.parse(JSON.parse(row.body)) as RunRecord) : undefined;
+  }
+
+  /**
+   * §5.2 brain transition: atomic compare-and-swap on machine_state
+   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
+   * caller carried stale state — rejected loudly, never re-applied. Clears any
+   * pending exit (it is consumed by the transition).
+   */
+  casTransition(observed: MachineState, next: unknown): RunRecord {
+    const run = runRecordSchema.parse(next);
+    const res = this.db
+      .prepare('UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
+      .run(run.machine_state, JSON.stringify(run), new Date().toISOString(), run.id, observed);
+    if (res.changes === 0) {
+      throw new Error(
+        `CAS rejected: run '${run.id}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
+      );
+    }
+    return run;
+  }
+
+  /** agent_exit lands here; run_signal consumes it. An unconsumed exit is never silently overwritten (P5). */
+  recordPendingExit(runId: string, exit: RecordedExit): void {
+    const existing = this.getPendingExit(runId);
+    if (existing) {
+      throw new Error(
+        `recordPendingExit: run '${runId}' already has an unconsumed exit ('${existing.signal}' from ${existing.agent_role ?? 'unknown'}) — call run_signal first`
+      );
+    }
+    const res = this.db.prepare('UPDATE runs SET pending_exit = ? WHERE id = ?').run(JSON.stringify(exit), runId);
+    if (res.changes === 0) throw new Error(`recordPendingExit: no run '${runId}'`);
+  }
+
+  getPendingExit(runId: string): RecordedExit | undefined {
+    const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(runId) as
+      | { pending_exit: string | null }
+      | undefined;
+    if (!row) throw new Error(`getPendingExit: no run '${runId}'`);
+    return row.pending_exit ? (JSON.parse(row.pending_exit) as RecordedExit) : undefined;
+  }
+
+  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
+  writeHandoff(runId: string, input: unknown, at: string): Handoff {
+    const handoff = handoffSchema.parse(input);
+    if (!this.db.prepare('SELECT 1 FROM runs WHERE id = ?').get(runId)) {
+      throw new Error(`writeHandoff: no run '${runId}'`);
+    }
+    this.db
+      .prepare('INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
+    return handoff;
+  }
+
+  readHandoffs(runId: string, filter: { phase_id?: string; files?: string[] } = {}): Handoff[] {
+    const rows = (
+      filter.phase_id
+        ? this.db.prepare('SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at').all(runId, filter.phase_id)
+        : this.db.prepare('SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at').all(runId)
+    ) as { body: string }[];
+    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
+    if (filter.files?.length) {
+      const wanted = new Set(filter.files.map(normalizeRepoPath));
+      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
+    }
+    return handoffs;
+  }
+
+  /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
+  recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
+    this.db
+      .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
+      .run(runId ?? null, check, reason, at);
+  }
+
+  listCheckSkipped(runId?: string): { run_id: string | null; check_name: string; reason: string; at: string }[] {
+    return (
+      runId
+        ? this.db.prepare('SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq').all(runId)
+        : this.db.prepare('SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq').all()
+    ) as { run_id: string | null; check_name: string; reason: string; at: string }[];
   }
 
   private insertRecord(record: DurableRecord): void {

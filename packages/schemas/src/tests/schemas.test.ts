@@ -83,6 +83,9 @@ test('todo: system source requires system_reason; no done status exists (§3.2.7
   assert.equal(ok.system_reason, 'reconcile_needed');
   assert.ok(!('done' in ok));
   todoSchema.parse({ ...envelope('todo'), text: 'user item', source: 'user' });
+  const prio = todoSchema.parse({ ...envelope('todo'), text: 'user item', source: 'user', priority: 'high' });
+  assert.equal(prio.priority, 'high');
+  assert.throws(() => todoSchema.parse({ ...envelope('todo'), text: 'x', source: 'user', priority: 'urgent' }), /invalid/i);
 });
 
 test('feature_article: dormant requires state_reason + wiring_todo_id (§3.2.3)', () => {

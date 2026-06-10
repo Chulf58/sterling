@@ -82,8 +82,6 @@ export const SYSTEM_REASONS = [
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:
 // done = removed by the artifact-writing event (P4).
-// NOTE: the spec marks `priority` as an enum but does not name its members —
-// raised as a spec gap; the field is deliberately absent until specified.
 export const todoSchema = base
   .extend({
     type: z.literal('todo'),
@@ -91,6 +89,7 @@ export const todoSchema = base
     source: z.enum(['user', 'system']),
     file_keys: z.array(repoPath).optional(),
     feature_link: z.string().uuid().optional(),
+    priority: z.enum(['low', 'normal', 'high']).optional(),
     system_reason: z.enum(SYSTEM_REASONS).optional(),
   })
   .superRefine((rec, ctx) => {
