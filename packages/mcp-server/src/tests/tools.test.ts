@@ -105,6 +105,105 @@ test('board tools: add/query separates board from maintenance queue; remove is t
   }
 });
 
+test('stale-at-read (§3.4): research findings get both clocks + flag; platform basis gets verify_before_use', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const mk = (over: Record<string, unknown>) =>
+      tools.knowledgeCreate('research_finding', {
+        question: `q-${Math.random()}`,
+        answer: 'a',
+        source_urls: [],
+        source_date: '2026-05-20',
+        capture_date: '2026-06-01',
+        ...over,
+      });
+    mk({ volatility_hint: 'stable', question: 'fresh-stable' });
+    mk({ source_date: '2026-01-15', volatility_hint: 'medium', question: 'old-medium' });
+    const served = tools.knowledgeQuery({ types: ['research_finding'], cap: 10 }) as unknown as {
+      question: string;
+      staleness: { stale: boolean; source_age_days: number; note?: string };
+    }[];
+    const fresh = served.find((r) => r.question === 'fresh-stable')!;
+    const old = served.find((r) => r.question === 'old-medium')!;
+    assert.equal(fresh.staleness.stale, false);
+    assert.equal(old.staleness.stale, true, 'born from an old source on a medium topic = stale at first read');
+    assert.match(old.staleness.note!, /re-verify/);
+    assert.equal(typeof old.staleness.source_age_days, 'number');
+
+    tools.knowledgeCreate('reference_material', {
+      title: 'old platform doc',
+      kind: 'url',
+      location: 'https://x',
+      summary: 's',
+      source_date: '2025-01-01',
+      capture_date: '2025-01-01',
+      basis: 'platform',
+      created_at: '2025-01-01T00:00:00.000Z',
+      updated_at: '2025-01-01T00:00:00.000Z',
+    });
+    const refs = tools.knowledgeQuery({ types: ['reference_material'], cap: 10 }) as unknown as { verify_before_use?: boolean }[];
+    assert.equal(refs[0].verify_before_use, true, 'wrong old knowledge is worse than no knowledge');
+  } finally {
+    cleanup();
+  }
+});
+
+test('dedup-merge (§3.2.2): overlapping anti_pattern merges evidence into the existing record, never duplicates', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const first = tools.knowledgeCreate('anti_pattern', {
+      title: 'No raw SQL concatenation',
+      trigger: 'building queries from user input',
+      guidance: 'parameterize',
+      wrong_way: 'concat',
+      right_way: 'prepare',
+      source_evidence: 'run r-1, src/db.ts:10',
+      file_keys: ['src/db.ts'],
+    });
+    assert.equal(first.merged_into, undefined);
+    const second = tools.knowledgeCreate('anti_pattern', {
+      title: 'SQL concatenation strikes again',
+      trigger: 'queries from user input',
+      guidance: 'parameterize',
+      wrong_way: 'concat',
+      right_way: 'prepare',
+      source_evidence: 'run r-2, src/api.ts:44',
+      file_keys: ['src/db.ts'],
+    });
+    assert.equal(second.merged_into, first.record.id, 'file-key overlap merges instead of duplicating');
+    const active = tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 });
+    assert.equal(active.length, 1);
+    const evidence = (active[0] as unknown as { source_evidence: string }).source_evidence;
+    assert.ok(evidence.includes('run r-1') && evidence.includes('run r-2'), 'evidence merged into the surviving record');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_link, run_escalate, maintenance queue tools (§10)', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const { record: a } = tools.knowledgeCreate('decision', { title: 'a', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    const { record: b } = tools.knowledgeCreate('note', { raw_text: 'context note', captured_at: NOW, capture_source: 'conductor', derived: [] });
+    const linked = tools.knowledgeLink(a.id, 'informed_by', b.id);
+    assert.ok(linked.links.some((l) => l.rel === 'informed_by' && l.target_id === b.id));
+    assert.throws(() => tools.knowledgeLink(a.id, 'replaces', b.id), /invalid/i, 'rel is the closed §3.2 set');
+    assert.throws(() => tools.knowledgeLink(a.id, 'cites', randomUUID()), /no target record/);
+
+    startRun(store);
+    const esc = tools.runEscalate({ kind: 'plan-broken', detail: 'assumption X contradicted' });
+    assert.equal(esc.escalations, 1);
+
+    const { record: item } = tools.maintenanceEnqueue({ reason: 'stale_research', text: 're-verify genesys limits' });
+    assert.equal((item as { source: string }).source, 'system');
+    assert.equal(tools.maintenanceQuery({ system_reason: 'stale_research' }).length, 1);
+    assert.equal(tools.maintenanceQuery({ system_reason: 'capture_owed' }).length, 0);
+    assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'maintenance items never pollute the user board');
+  } finally {
+    cleanup();
+  }
+});
+
 test('agent_exit: in-band rejection of non-enum signals; valid exit lands on the run record (§5.2)', () => {
   const { store, tools, cleanup } = harness();
   try {

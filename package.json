@@ -11,7 +11,7 @@
     "build": "tsc -p packages/schemas/tsconfig.json && tsc -p packages/store/tsconfig.json && tsc -p packages/mcp-server/tsconfig.json",
     "build:hooks": "node scripts/build-hooks.mjs",
     "test": "node --test \"scripts/tests/*.test.mjs\" \"packages/schemas/dist/tests/*.test.js\" \"packages/store/dist/tests/*.test.js\" \"packages/mcp-server/dist/tests/*.test.js\"",
-    "check": "node scripts/check-agent-registry.mjs"
+    "check": "node scripts/check-agent-registry.mjs && node scripts/check-totality.mjs && node scripts/check-spawn-contracts.mjs && node scripts/check-agent-prompts.mjs && node scripts/check-skills.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.9.2",

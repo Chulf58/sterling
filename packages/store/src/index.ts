@@ -15,6 +15,7 @@ import {
   RECORD_TYPES,
   validateRecord,
   normalizeRepoPath,
+  linkSchema,
   handoffSchema,
   runRecordSchema,
   type DurableRecord,
@@ -363,6 +364,21 @@ export class SterlingStore {
       if (res.changes === 1) return;
     }
     throw new Error(`appendRunEscalation: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
+  }
+
+  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4). */
+  addLink(sourceId: string, rel: string, targetId: string): DurableRecord {
+    const source = this.get(sourceId);
+    if (!source) throw new Error(`addLink: no record '${sourceId}'`);
+    if (!this.get(targetId)) throw new Error(`addLink: no target record '${targetId}'`);
+    const parsedRel = linkSchema.shape.rel.parse(rel);
+    if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
+    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
+    this.tx(() => {
+      this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(updated), sourceId);
+      this.db.prepare('INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)').run(sourceId, parsedRel, targetId);
+    });
+    return updated as DurableRecord;
   }
 
   /**

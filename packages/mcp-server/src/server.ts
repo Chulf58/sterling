@@ -3,7 +3,10 @@
 // including spawned agents — see the message and self-correct (§5.2).
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { readFileSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { z } from 'zod';
+import { parseConfig } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from './tools.js';
 
@@ -11,7 +14,10 @@ const passthrough = z.object({}).passthrough();
 
 export function createSterlingServer(storePath: string): { server: McpServer; store: SterlingStore; tools: SterlingTools } {
   const store = new SterlingStore(storePath);
-  const tools = new SterlingTools({ store });
+  // config.json sits beside the store in .sterling/ (§12); malformed fails loud
+  const configPath = join(dirname(storePath), 'config.json');
+  const config = parseConfig(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {});
+  const tools = new SterlingTools({ store, config });
   const server = new McpServer({ name: 'sterling', version: '0.1.0' });
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
@@ -134,6 +140,51 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       },
     },
     (args) => json(tools.runSignal(args))
+  );
+
+  server.registerTool(
+    'knowledge_link',
+    {
+      description: 'Add a typed link between records: cites | informed_by | fulfills | supersedes.',
+      inputSchema: { from: z.string(), rel: z.string(), to: z.string() },
+    },
+    ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to))
+  );
+
+  server.registerTool(
+    'run_escalate',
+    {
+      description: 'Surface a judgment branch / typed escalation onto the active run record.',
+      inputSchema: { payload: passthrough },
+    },
+    ({ payload }) => json(tools.runEscalate(payload))
+  );
+
+  server.registerTool(
+    'maintenance_enqueue',
+    {
+      description: 'Enqueue a maintenance item (system todo): reconcile_needed | stale_research | deletion_candidate | capture_owed | promotion_review | wire_in_dormant.',
+      inputSchema: {
+        reason: z.string(),
+        text: z.string(),
+        file_keys: z.array(z.string()).optional(),
+        feature_link: z.string().optional(),
+      },
+    },
+    (args) => json(tools.maintenanceEnqueue(args))
+  );
+
+  server.registerTool(
+    'maintenance_query',
+    {
+      description: 'List open maintenance-queue items (system todos), optionally by system_reason or file keys.',
+      inputSchema: {
+        system_reason: z.string().optional(),
+        file_keys: z.array(z.string()).optional(),
+        cap: z.number().int().positive().optional(),
+      },
+    },
+    (args) => json(tools.maintenanceQuery(args))
   );
 
   server.registerTool(

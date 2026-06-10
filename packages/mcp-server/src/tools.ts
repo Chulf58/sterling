@@ -3,7 +3,7 @@
 // safe because schemas are exact: every write revalidates at the store.
 
 import { randomUUID } from 'node:crypto';
-import { spineSignal, SPINE_SIGNALS, type DurableRecord, type RunRecord } from '@sterling/schemas';
+import { spineSignal, SPINE_SIGNALS, parseConfig, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import type { QueryOptions, RecordedExit, SterlingStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -14,17 +14,22 @@ export interface SkippedCheck {
 
 export interface ToolDeps {
   store: SterlingStore;
+  config?: SterlingConfig;
   now?: () => string;
   newId?: () => string;
 }
 
+const DAY_MS = 86_400_000;
+
 export class SterlingTools {
   private store: SterlingStore;
+  private config: SterlingConfig;
   private now: () => string;
   private newId: () => string;
 
   constructor(deps: ToolDeps) {
     this.store = deps.store;
+    this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => new Date().toISOString());
     this.newId = deps.newId ?? randomUUID;
   }
@@ -42,9 +47,12 @@ export class SterlingTools {
 
   // -- knowledge CRUD ---------------------------------------------------------
 
-  knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
+  knowledgeCreate(
+    type: string,
+    fields: Record<string, unknown>
+  ): { record: DurableRecord; check_skipped: SkippedCheck[]; merged_into?: string } {
     const ts = this.now();
-    const record = this.store.create({
+    const candidate = {
       id: this.newId(),
       type,
       created_at: ts,
@@ -56,15 +64,83 @@ export class SterlingTools {
       scope: (fields.scope as string) ?? 'project',
       stack_tags: fields.stack_tags ?? [],
       ...fields,
-    });
-    const skipped = [this.skip('dedup-merge', this.activeRunId())];
-    if (type === 'anti_pattern') skipped.push(this.skip('noise-gate', this.activeRunId()));
+    };
+    const skipped: SkippedCheck[] = [];
+
+    if (type === 'anti_pattern') {
+      // dedup-merge (§3.2.2, mechanical): keyword/tag overlap against existing
+      // records merges evidence into the existing record instead of duplicating.
+      const match = this.findAntiPatternOverlap(candidate);
+      if (match) {
+        skipped.push(this.skip('noise-gate', this.activeRunId()));
+        const merged = this.knowledgeUpdate(match.id, {
+          source_evidence: `${(match as { source_evidence: string }).source_evidence}\n${String(fields.source_evidence ?? '')}`,
+        });
+        return { record: merged, check_skipped: skipped, merged_into: match.id };
+      }
+      skipped.push(this.skip('noise-gate', this.activeRunId()));
+    } else {
+      // evidence-merging is defined for anti_patterns; other types skip loudly
+      skipped.push(this.skip('dedup-merge', this.activeRunId()));
+    }
+
+    const record = this.store.create(candidate);
     if (type === 'note') skipped.push(this.skip('note-structuring-h11', this.activeRunId()));
     return { record, check_skipped: skipped };
   }
 
-  knowledgeQuery(opts: QueryOptions): DurableRecord[] {
-    return this.store.query(opts);
+  private findAntiPatternOverlap(candidate: Record<string, unknown>): DurableRecord | undefined {
+    const existing = this.store.query({ types: ['anti_pattern'], cap: 1000 });
+    const candKeys = new Set(((candidate.file_keys as string[]) ?? []).map((p) => p.replace(/\\/g, '/')));
+    const tokens = (r: Record<string, unknown>) =>
+      new Set(
+        `${r.title ?? ''} ${r.trigger ?? ''}`
+          .toLowerCase()
+          .split(/\W+/)
+          .filter((w) => w.length > 3)
+      );
+    const candTokens = tokens(candidate);
+    return existing.find((e) => {
+      const rec = e as unknown as Record<string, unknown>;
+      const keyOverlap = ((rec.file_keys as string[]) ?? []).some((k) => candKeys.has(k));
+      let shared = 0;
+      for (const t of tokens(rec)) if (candTokens.has(t)) shared++;
+      return keyOverlap || shared >= 2;
+    });
+  }
+
+  /**
+   * Retrieval (§3.4): records pass through with lazy stale-at-read
+   * annotations — research findings get both clocks + a staleness flag;
+   * platform/external-basis records past threshold get verify_before_use.
+   * Annotations are computed at read, never persisted (P4: no sweeps).
+   */
+  knowledgeQuery(opts: QueryOptions): (DurableRecord & { staleness?: object; verify_before_use?: boolean })[] {
+    const nowMs = Date.parse(this.now());
+    const ageDays = (iso: string) => Math.floor((nowMs - Date.parse(iso)) / DAY_MS);
+    return this.store.query(opts).map((record) => {
+      if (record.type === 'research_finding') {
+        const r = record as unknown as { source_date: string; capture_date: string; volatility_hint?: 'fast' | 'medium' | 'stable'; status: string };
+        const threshold = this.config.staleness.research_days[r.volatility_hint ?? 'medium'];
+        const sourceAge = ageDays(r.source_date);
+        const stale = r.status === 'flagged_stale' || sourceAge > threshold;
+        return {
+          ...record,
+          staleness: {
+            source_age_days: sourceAge,
+            capture_age_days: ageDays(r.capture_date),
+            threshold_days: threshold,
+            stale,
+            ...(stale ? { note: 'stale — re-verify before use; re-verification supersedes this finding' } : {}),
+          },
+        };
+      }
+      const basis = (record as unknown as { basis?: string }).basis;
+      if ((basis === 'platform' || basis === 'external') && ageDays(record.updated_at) > this.config.staleness.platform_external_days) {
+        return { ...record, verify_before_use: true };
+      }
+      return record;
+    });
   }
 
   knowledgeGet(id: string): DurableRecord {
@@ -185,6 +261,41 @@ export class SterlingTools {
     const next: RunRecord = { ...run, machine_state: nextState, phases, escalations };
     this.store.casTransition(run.machine_state, next);
     return { action, machine_state: nextState, run_id: run.id };
+  }
+
+  /** knowledge_link (§10): typed graph edge. */
+  knowledgeLink(from: string, rel: string, to: string): DurableRecord {
+    return this.store.addLink(from, rel, to);
+  }
+
+  /** run_escalate (§10): surface a judgment branch / typed escalation onto the run record. */
+  runEscalate(payload: Record<string, unknown>): { run_id: string; escalations: number } {
+    const run = this.runState();
+    this.store.appendRunEscalation(run.id, { kind: 'escalation', payload, at: this.now() });
+    const after = this.runState(run.id);
+    return { run_id: run.id, escalations: after.escalations.length };
+  }
+
+  /**
+   * maintenance_enqueue / maintenance_query (§10): the maintenance queue IS
+   * the todo store filtered source=system (§3.2.7) — no second queue exists.
+   */
+  maintenanceEnqueue(args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }): {
+    record: DurableRecord;
+    check_skipped: SkippedCheck[];
+  } {
+    return this.boardAdd({
+      text: args.text,
+      source: 'system',
+      system_reason: args.reason,
+      file_keys: args.file_keys,
+      feature_link: args.feature_link,
+    });
+  }
+
+  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
+    const items = this.boardQuery({ source: 'system', file_keys: filter.file_keys, cap: filter.cap });
+    return filter.system_reason ? items.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason) : items;
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------

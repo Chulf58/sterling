@@ -8,17 +8,21 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createSterlingServer } from '../server.js';
 
-const SPINE_TOOLS = [
+const SERVED_TOOLS = [
   'knowledge_create',
   'knowledge_query',
   'knowledge_get',
   'knowledge_update',
+  'knowledge_link',
   'board_add',
   'board_query',
   'board_remove',
   'run_state',
+  'run_escalate',
   'agent_exit',
   'run_signal',
+  'maintenance_enqueue',
+  'maintenance_query',
   'handoff_write',
   'handoff_read',
 ];
@@ -47,7 +51,7 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
   const { client, store, cleanup } = await harness();
   try {
     const listed = (await client.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(listed, [...SPINE_TOOLS].sort(), 'exactly the §16.1 spine tools are served');
+    assert.deepEqual(listed, [...SERVED_TOOLS].sort(), 'exactly the §10 tool surface is served');
 
     // knowledge round trip over the wire
     const created = payload(
