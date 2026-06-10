@@ -116,6 +116,23 @@ test('handoff pair: schema-validated write; read by phase and by files; path-nor
   }
 });
 
+test('appendRunEscalation: appends under optimistic concurrency, loud on missing run', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    store.appendRunEscalation(run.id, { kind: 'context_warn', agent_id: 'a1', fill_pct: 63 });
+    store.appendRunEscalation(run.id, { kind: 'context_warn', agent_id: 'a1', fill_pct: 71 });
+    const after = store.getRun(run.id)!;
+    assert.equal(after.escalations.length, 2);
+    assert.equal((after.escalations[1] as { fill_pct: number }).fill_pct, 71);
+    assert.equal(after.machine_state, 'running', 'escalation append does not touch machine_state');
+    assert.throws(() => store.appendRunEscalation('r-none', {}), /no run/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('check_skipped: recorded and listable, run-scoped or global (§16.1.9)', () => {
   const { dir, store } = tempStore();
   try {

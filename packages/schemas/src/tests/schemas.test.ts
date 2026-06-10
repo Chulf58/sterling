@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import {
   normalizeRepoPath,
   toRepoRelative,
+  matchesGlob,
   decisionSchema,
   featureArticleSchema,
   todoSchema,
@@ -53,6 +54,18 @@ test('path invariant: normalization and rejections (§3.2)', () => {
   assert.throws(() => normalizeRepoPath('../escape.ts'), /parent-escaping/);
   assert.throws(() => normalizeRepoPath(''), /empty/);
   assert.throws(() => normalizeRepoPath('./.'), /empty/);
+});
+
+test('matchesGlob: ** crosses segments, * stays within, ? single char', () => {
+  assert.equal(matchesGlob('tests/a/b.test.ts', 'tests/**'), true);
+  assert.equal(matchesGlob('src/x.test.ts', '**/*.test.ts'), true);
+  assert.equal(matchesGlob('x.test.ts', '**/*.test.ts'), true);
+  assert.equal(matchesGlob('src/x.ts', '**/*.test.ts'), false);
+  assert.equal(matchesGlob('src/a/b.ts', 'src/*.ts'), false);
+  assert.equal(matchesGlob('src/b.ts', 'src/*.ts'), true);
+  assert.equal(matchesGlob('src\\b.ts', 'src/*.ts'), true, 'backslash input normalized');
+  assert.equal(matchesGlob('axts', 'a?ts'), true);
+  assert.equal(matchesGlob('a/ts', 'a?ts'), false, '? never matches a separator');
 });
 
 test('toRepoRelative relativizes against repo root', () => {

@@ -39,6 +39,35 @@ export const repoPath = z.string().transform((value, ctx) => {
   }
 });
 
+/**
+ * Minimal POSIX glob matcher for the path machinery (H3 out_of_scope, H5 test
+ * freeze, H4 read wall): '**' crosses segments, '*' within a segment, '?' one
+ * char. One definition — hooks and checks import this, never reimplement.
+ */
+export function matchesGlob(path: string, glob: string): boolean {
+  const g = glob.replace(/\\/g, '/');
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*') {
+      if (g[i + 1] === '*') {
+        re += '(?:.*)';
+        i++;
+        if (g[i + 1] === '/') i++;
+      } else {
+        re += '[^/]*';
+      }
+    } else if (c === '?') {
+      re += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      re += '\\' + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp('^' + re + '$').test(path.replace(/\\/g, '/'));
+}
+
 /** Helper for callers holding an absolute path plus repo-root context. */
 export function toRepoRelative(absolutePath: string, repoRoot: string): string {
   const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');

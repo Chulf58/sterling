@@ -215,6 +215,24 @@ export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStart
   return { visible: problems.length === 0, problems };
 }
 
+/**
+ * §6 emission rule applied to hooks.json: walk every {type:'command'} handler
+ * and flag backslash paths in command strings (git bash mangles them silently
+ * — enforcement vanishes; Layer 0 finding).
+ */
+export function findBackslashCommandsInHooksJson(node) {
+  const bad = [];
+  const walk = (n) => {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (n && typeof n === 'object') {
+      if (n.type === 'command' && typeof n.command === 'string' && n.command.includes('\\')) bad.push(n.command);
+      Object.values(n).forEach(walk);
+    }
+  };
+  walk(node);
+  return bad;
+}
+
 // Registry consistency check (spec §15, invariant 3): templates dir and
 // registry must agree 1:1; template frontmatter names must match registry
 // names; shipped/scaffolded content carries no dead terms and no backslash

@@ -1,4 +1,4 @@
-export { normalizeRepoPath, repoPath, toRepoRelative } from './paths.js';
+export { normalizeRepoPath, repoPath, toRepoRelative, matchesGlob } from './paths.js';
 export { LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, envelopeFields, refineSupersession } from './envelope.js';
 export {
   verifiableAt,

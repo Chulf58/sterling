@@ -343,6 +343,26 @@ export class SterlingStore {
     return handoffs;
   }
 
+  /**
+   * Append an escalation/warn entry to the run record (H6 context warns land
+   * here, §6). Optimistic concurrency: hooks write concurrently with the
+   * brain, so the append retries on body change and fails loudly if it keeps
+   * losing the race — never a silent drop (P5).
+   */
+  appendRunEscalation(runId: string, entry: unknown, attempts = 5): void {
+    for (let i = 0; i < attempts; i++) {
+      const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
+      if (!row) throw new Error(`appendRunEscalation: no run '${runId}'`);
+      const run = JSON.parse(row.body) as RunRecord;
+      run.escalations.push(entry);
+      const res = this.db
+        .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
+        .run(JSON.stringify(run), new Date().toISOString(), runId, row.body);
+      if (res.changes === 1) return;
+    }
+    throw new Error(`appendRunEscalation: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
+  }
+
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
     this.db
