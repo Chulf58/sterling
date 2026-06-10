@@ -132,6 +132,11 @@ export const briefSchema = base
         ac_ids: z.array(z.string()),
         difficulty: z.object({ level: z.enum(['normal', 'hard']), reasons: z.array(z.string()) }),
         model_hint: z.string(),
+        // prep's staging inputs are planning outputs (§7.1/§7.6): the phase
+        // declares its file list + rank_terms. Optional pending §4 alignment
+        // (raised as a spec gap); prep falls back to blast_radius files.
+        files: z.array(repoPath).optional(),
+        rank_terms: z.array(z.string().regex(/^\S{1,64}$/)).optional(),
       })
     ),
     decisions_made: z.array(z.string().uuid()),

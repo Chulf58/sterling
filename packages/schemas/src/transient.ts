@@ -44,5 +44,23 @@ export const runRecordSchema = z.object({
   dispatch_counts: z.record(z.string(), z.number().int().nonnegative()),
   escalations: z.array(z.unknown()),
   started_at: z.string().datetime(),
+  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
+  // survive disposal — the packs and check_skipped rows themselves are
+  // run-scoped and die with the run. Shown at the merge gate.
+  summaries: z
+    .object({
+      check_skipped: z.array(z.object({ check_name: z.string(), reason: z.string(), count: z.number().int().positive() })),
+      knowledge_packs: z.array(
+        z.object({
+          phase_id: z.string(),
+          consumer_role: z.string(),
+          returned: z.number().int().nonnegative(),
+          cap_omissions: z.number().int().nonnegative(),
+          mandatory: z.array(z.object({ record_id: z.string(), reason: z.string() })),
+        })
+      ),
+      snapshot_path: z.string(),
+    })
+    .optional(),
 });
 export type RunRecord = z.infer<typeof runRecordSchema>;

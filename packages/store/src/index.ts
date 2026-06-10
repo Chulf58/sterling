@@ -363,6 +363,33 @@ export class SterlingStore {
     throw new Error(`appendRunEscalation: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
   }
 
+  /**
+   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
+   * summaries onto the run record (the only facts that survive — §3.7),
+   * advances completing → awaiting_merge_gate via CAS, and deletes the
+   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
+   * binding follows the data (P4). The run record itself persists: the merge
+   * gate still needs it. Callers (dispose-run) verify promotion conditions
+   * and snapshot BEFORE calling this.
+   */
+  disposeRunRows(runId: string, summaries: NonNullable<RunRecord['summaries']>): RunRecord {
+    const run = this.getRun(runId);
+    if (!run) throw new Error(`disposeRunRows: no run '${runId}'`);
+    if (run.machine_state !== 'completing') {
+      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' — disposal is the completion sequence only`);
+    }
+    const next = runRecordSchema.parse({ ...run, machine_state: 'awaiting_merge_gate', summaries });
+    this.tx(() => {
+      const res = this.db
+        .prepare('UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
+        .run(next.machine_state, JSON.stringify(next), new Date().toISOString(), runId, 'completing');
+      if (res.changes === 0) throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
+      this.db.prepare('DELETE FROM handoffs WHERE run_id = ?').run(runId);
+      this.db.prepare('DELETE FROM check_skipped WHERE run_id = ?').run(runId);
+    });
+    return next;
+  }
+
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
     this.db
