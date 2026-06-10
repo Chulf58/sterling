@@ -110,7 +110,7 @@ The backing store must satisfy, efficiently, at single-user scale (thousands of 
 
 ### 3.2 Record schemas (FULL PRECISION — implement exactly)
 
-Common envelope on every record: `id` (uuid), `type`, `created_at`, `updated_at`, `author` (`user | conductor | agent:<role> | system`), `status` (enum `active | superseded`) + `superseded_by` (id, nullable — set iff status is `superseded`; an enum conflated with a foreign key queries badly, so they are separate columns), `links[]` (`{rel: cites|informed_by|fulfills|supersedes, target_id}`), `scope` (`project | domain:<name>`), `stack_tags[]`.
+Common envelope on every record: `id` (uuid), `type`, `created_at`, `updated_at`, `author` (`user | conductor | agent:<role> | system`), `status` (enum `active | superseded`) + `superseded_by` (id, nullable — set iff status is `superseded`; an enum conflated with a foreign key queries badly, so they are separate columns), `links[]` (`{rel: cites|informed_by|fulfills|supersedes, target_id}`), `scope` (`project | domain:<name>`), `stack_tags[]`, `derived_unconfirmed` (optional bool — placed on the envelope because 3.2.6's retrieval semantics apply across record types).
 
 **Path invariant (global):** every path anywhere in the system — `file_keys`, blast radius, hook input, glob match, helper scripts — is stored and compared as a **repo-relative POSIX path** (forward slashes, no drive prefix), normalized in the shared zod schema package at every boundary so no caller can write a backslash path. Windows tool surfaces emit mixed separators; without one normalization point, file-key joins silently return nothing — the exact silent decay P5 forbids.
 
@@ -145,13 +145,13 @@ Body (replaced wholesale on reconciliation; prior version retained via supersess
 | what_it_does | string | ✔ | current behavior, plain language |
 | intended_behavior | string | ✔ | the "how it was meant to work" oracle for breakage |
 | files | `{path, role}[]` | ✔ | **the blast-radius key** — role is what the file does *for this feature now* |
-| current_ac | `{ac_id, text, verifiable_at: phaseN|final}[]` | ✔ | |
+| current_ac | `{ac_id, text, verifiable_at: phase:<n>|final}[]` | ✔ | canonical syntax matches the brief (§4) — article ACs originate there |
 | dependencies | `{relies_on[], relied_by[]}` | ✔ | |
 | steps_runbook | string | – | click-path/runbook (non-code features) |
 | state | enum `planned|built|wired_in|active|dormant|deprecated` | ✔ | `dormant` requires `state_reason` + `wiring_todo_id` |
 | known_gaps | `{site, kind: mutation_survivor|other, evidence, recorded_run}[]` | – | **compounding wire**: mutation survivors persist here at capture; the file-key join stages them automatically into the next run touching these files — this run's blind spot is the next run's warning, with nobody remembering anything |
 | version | int | ✔ | |
-Article-level (append-only): `history[]` — dated links to originating brief, change briefs, plans, red/green verification events; `live_test_refs[]` — `{ac_id, test_paths[]}` (current, updated on change).
+Article-level (append-only): `history[]` — entries `{date, event, target_id?}`: dated links to originating brief, change briefs, plans, red/green verification events; `live_test_refs[]` — `{ac_id, test_paths[]}` (current, updated on change).
 **Invariant:** a run cannot complete with a feature in `built` that is unreachable and undeclared — see wiring checks (Sections 6, 8.1). Accidental un-wired is unrepresentable; deliberate dormancy is declared + tracked.
 
 **3.2.4 `research_finding`** (the decaying type)
@@ -176,7 +176,7 @@ Status adds `flagged_stale`. **Freshness is computed at read** (lazy): retrieval
 | source | enum `user|system` | ✔ | the board view filters `user`; the maintenance queue is the same records filtered `system` |
 | file_keys | string[] | – | enables bundling + blast-radius surfacing |
 | feature_link | id | – | |
-| priority | enum | – | |
+| priority | enum `low\|normal\|high` | – | three members on purpose — an `urgent` tier invites everything becoming urgent |
 | system_reason | enum `reconcile_needed|stale_research|deletion_candidate|capture_owed|promotion_review|wire_in_dormant` | req if source=system | |
 **There is no `done` status.** Done = the record is **removed**, atomically, by the same hook that writes the durable artifact representing its completion (P4). History lives in the artifact (which `fulfills`-links the todo's text), not on the board. The board only ever contains open work.
 
