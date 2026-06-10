@@ -101,6 +101,7 @@ function makeLoopProject({ backupPath = true, reconcileGapArticle = false } = {}
     blast_radius: {
       files: [
         { path: 'src/calc.mjs', owning_articles: [] },
+        { path: 'src/main.mjs', owning_articles: [] },
         { path: 'tests/calc.test.mjs', owning_articles: [] },
       ],
       reconcile_list: reconcileGapArticle ? [gapArticle.id] : [],
@@ -149,7 +150,10 @@ function writeHandoffs(tools, { decisions = ['kept add minimal'] } = {}) {
     handoff: {
       phase_id: 'p1',
       agent_role: 'coder',
-      what_changed: [{ path: 'src/calc.mjs', change_role: 'implemented add' }],
+      what_changed: [
+        { path: 'src/calc.mjs', change_role: 'implemented add' },
+        { path: 'src/main.mjs', change_role: 'wired add into the entry point' },
+      ],
       wired: ['add'],
       deferred: [],
       decisions_made: decisions,
@@ -315,8 +319,9 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     const notGreen = runScript('test-check.mjs', ['--expect', 'green', '--scope', 'tests/calc.test.mjs', '--target', dir], dir);
     assert.equal(notGreen.code, 1);
 
-    // coder stand-in implements; both roles hand off through the store (§7.4)
+    // coder stand-in implements AND wires (H12 is live for node now); handoffs through the store (§7.4)
     writeFileSync(join(dir, 'src', 'calc.mjs'), 'export const add = (a, b) => a + b;\n');
+    writeFileSync(join(dir, 'src', 'main.mjs'), "import { add } from './calc.mjs';\nconsole.log(add(2, 3));\n");
     writeHandoffs(tools);
 
     // green check: pass + mutation check skipped loudly where it would have run
@@ -331,15 +336,16 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     assert.equal(store.getRun('r-loop').machine_state, 'completing');
 
     // completeness [S] (final): mechanical checks pass; judgment/reviewers/test-integrity
-    // skip loudly; H12 wiring skips on the node adapter's absent capability (§9.1)
+    // skip loudly; H12 wiring RUNS (node adapter static_wiring live, step 7) and is clean
     const comp = runScript('completeness-check.mjs', ['--run', 'r-loop', '--phase', 'p1', '--final', '--target', dir], dir);
     assert.equal(comp.code, 0, comp.stderr);
-    assert.deepEqual(JSON.parse(comp.stdout).check_skipped, [
+    const compOut = JSON.parse(comp.stdout);
+    assert.deepEqual(compOut.check_skipped, [
       { check: 'completeness-judgment', reason: 'not_built' },
       { check: 'reviewer-dispatch', reason: 'not_built' },
       { check: 'test-integrity', reason: 'not_built' },
-      { check: 'wiring-zero-consumer', reason: 'capability_absent:node' },
     ]);
+    assert.deepEqual(compOut.wiring.violations, [], 'add is wired via src/main.mjs — H12 live and clean');
 
     // capture: article (AC-traced, fulfills the todo), decision, todo removed by the fulfilling write
     const { record: article } = tools.knowledgeCreate('feature_article', articleFields(brief.id, { traceAC: true, fulfills: [todo.id] }));
@@ -366,7 +372,6 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
       'board-remove-artifact-binding',
       'mutation-check',
       'completeness-judgment',
-      'wiring-zero-consumer',
       'reviewer-dispatch',
       'test-integrity',
       'objection-triage',
@@ -387,7 +392,7 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     const gate = runScript('merge-gate.mjs', ['--run', 'r-loop', '--target', dir], dir);
     assert.equal(gate.code, 0, gate.stderr);
     const gateSummary = JSON.parse(gate.stdout);
-    assert.ok(gateSummary.summaries.check_skipped.length >= 9, 'the merge-gate summary lists every skip (§9.1)');
+    assert.ok(gateSummary.summaries.check_skipped.length >= 8, 'the merge-gate summary lists every skip (§9.1)');
 
     const merged = runScript('merge-gate.mjs', ['--run', 'r-loop', '--decision', 'merge', '--target', dir], dir);
     assert.equal(merged.code, 0, merged.stderr);

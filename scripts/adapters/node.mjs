@@ -8,12 +8,16 @@
 //   not ok + anything else         -> crash (throws, syntax errors, file-level failures)
 //   spawn failure / no TAP results -> crash
 import { spawnSync } from 'node:child_process';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { matchesGlob } from '@sterling/schemas';
 
 export const name = 'node';
 
-// Optional capabilities (§9.1): declared absent — consuming checks must record
-// check_skipped at their call sites, never silently pass (P5).
-export const capabilities = { mutation: false, static_wiring: false };
+// Optional capabilities (§9.1): static_wiring implemented (H12's static half);
+// mutation deliberately absent — consuming checks record check_skipped at the
+// call site, never silently pass (P5). Revisit mutation on real run data.
+export const capabilities = { mutation: false, static_wiring: true };
 
 // The single definition of "what is a test file" — consumed by H4's read wall
 // and H5's test freeze. Baked into project config at init.
@@ -46,6 +50,68 @@ export function runTests({ cwd, scope = [] }) {
       ? 'assertion_fail'
       : 'pass';
   return { overall, results, raw };
+}
+
+/**
+ * static_wiring (§9.1, H12's static half): exports declared in the scope files
+ * that are referenced ONLY by test files = built-but-not-wired. Mechanical:
+ * declaration regexes + word-boundary reference search over project sources.
+ */
+export function staticWiring({ cwd, scope = [] }) {
+  const scopeSet = new Set(scope.map((p) => p.replace(/\\/g, '/')));
+  const allFiles = walkSources(cwd);
+  const exportsByFile = [];
+  for (const file of allFiles) {
+    if (!scopeSet.has(file)) continue;
+    const content = readFileSync(join(cwd, file), 'utf8');
+    const names = new Set();
+    for (const m of content.matchAll(/export\s+(?:async\s+)?(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) {
+      names.add(m[1]);
+    }
+    for (const m of content.matchAll(/export\s*\{([^}]+)\}/g)) {
+      for (const part of m[1].split(',')) {
+        const renamed = part.trim().match(/(?:[\w$]+\s+as\s+)?([\w$]+)\s*$/);
+        if (renamed) names.add(renamed[1]);
+      }
+    }
+    if (names.size) exportsByFile.push({ file, names: [...names] });
+  }
+
+  const isTest = (file) => testPathGlobs.some((g) => matchesGlob(file, g));
+  const test_only_exports = [];
+  for (const { file, names } of exportsByFile) {
+    for (const exportName of names) {
+      const re = new RegExp(`\\b${exportName.replace(/[$]/g, '\\$&')}\\b`);
+      let nonTestRef = false;
+      let testRef = false;
+      for (const other of allFiles) {
+        if (other === file) continue;
+        if (!re.test(readFileSync(join(cwd, other), 'utf8'))) continue;
+        if (isTest(other)) testRef = true;
+        else {
+          nonTestRef = true;
+          break;
+        }
+      }
+      if (!nonTestRef && testRef) test_only_exports.push({ file, name: exportName });
+    }
+  }
+  return { test_only_exports };
+}
+
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.sterling', '.claude']);
+
+function walkSources(cwd, dir = cwd, out = []) {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    const stat = statSync(full);
+    if (stat.isDirectory()) {
+      if (!SKIP_DIRS.has(entry)) walkSources(cwd, full, out);
+    } else if (/\.(mjs|js|ts|tsx|jsx)$/.test(entry)) {
+      out.push(relative(cwd, full).replace(/\\/g, '/'));
+    }
+  }
+  return out;
 }
 
 function parseTap(stdout) {

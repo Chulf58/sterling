@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { runTests } from '../adapters/node.mjs';
+import { runTests, staticWiring } from '../adapters/node.mjs';
 import { resolveToolchains, checkAdapterRegistry } from '../adapters/resolve.mjs';
 import { findBackslashCommandsInHooksJson } from '../lib/agent-distribution.mjs';
 
@@ -179,9 +179,29 @@ test('adapter registry: resolveToolchains bakes declarations; unknown adapter fa
   const baked = await resolveToolchains([{ adapter: 'node', path_globs: ['**/*.mjs'] }]);
   assert.deepEqual(baked[0].run_commands, { test: 'node --test' });
   assert.ok(baked[0].test_globs.includes('**/*.test.mjs'));
-  assert.deepEqual(baked[0].capabilities, { mutation: false, static_wiring: false }, 'optional capabilities declared absent');
+  assert.deepEqual(baked[0].capabilities, { mutation: false, static_wiring: true }, 'static_wiring live (step 7); mutation deliberately absent');
   await assert.rejects(() => resolveToolchains([{ adapter: 'apex', path_globs: [] }]), /no registered adapter/);
   assert.deepEqual(await checkAdapterRegistry(), []);
+});
+
+test('node adapter static_wiring: test-only exports flagged; wired and renamed exports pass (§9.1/H12)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-wiring-'));
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'wired.mjs'), 'export const used = 1;\nexport function alsoUsed() {}\n');
+    writeFileSync(join(dir, 'src', 'unwired.mjs'), 'const orphan = () => 0;\nexport { orphan as exportedOrphan };\nexport class OrphanClass {}\n');
+    writeFileSync(join(dir, 'src', 'app.mjs'), "import { used, alsoUsed } from './wired.mjs';\nalsoUsed(used);\n");
+    writeFileSync(join(dir, 'tests', 'x.test.mjs'), "import { exportedOrphan, OrphanClass } from '../src/unwired.mjs';\nexportedOrphan(new OrphanClass());\n");
+    const result = staticWiring({ cwd: dir, scope: ['src/wired.mjs', 'src/unwired.mjs'] });
+    assert.deepEqual(
+      result.test_only_exports.map((e) => e.name).sort(),
+      ['OrphanClass', 'exportedOrphan'],
+      'referenced only by tests = built-but-not-wired'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
