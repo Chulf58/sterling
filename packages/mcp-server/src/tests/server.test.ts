@@ -108,7 +108,7 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     });
     await client.callTool({
       name: 'agent_exit',
-      arguments: { phase_id: 'p1', agent_role: 'coder', signal: 'complete' },
+      arguments: { phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } },
     });
     const signal = payload(await client.callTool({ name: 'run_signal', arguments: {} })) as {
       action: { action: string };

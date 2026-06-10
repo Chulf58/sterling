@@ -3,7 +3,7 @@
 // safe because schemas are exact: every write revalidates at the store.
 
 import { randomUUID } from 'node:crypto';
-import { spineSignal, SPINE_SIGNALS, parseConfig, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import type { QueryOptions, RecordedExit, SterlingStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -210,16 +210,29 @@ export class SterlingTools {
   agentExit(args: { run_id?: string; phase_id: string; agent_role: string; signal: string; payload?: Record<string, unknown> }): {
     recorded: RecordedExit;
   } {
-    const parsed = spineSignal.safeParse(args.signal);
+    const parsed = signalSchema.safeParse(args.signal);
     if (!parsed.success) {
       throw new Error(
-        `agent_exit: '${args.signal}' is not a registered signal — the enum is closed: ${SPINE_SIGNALS.join(' | ')}. Re-call agent_exit with a valid member.`
+        `agent_exit: '${args.signal}' is not a registered signal — the enum is closed: ${SIGNALS.join(' | ')}. Re-call agent_exit with a valid member.`
+      );
+    }
+    if (parsed.data === 'agent-died') {
+      throw new Error(
+        "agent_exit: 'agent-died' is conductor-reported, never agent-emitted (§5.1) — the conductor maps abnormal Task returns via run_signal's exit parameter."
+      );
+    }
+    const payloadCheck = SIGNAL_PAYLOADS[parsed.data].safeParse(args.payload ?? {});
+    if (!payloadCheck.success) {
+      throw new Error(
+        `agent_exit: payload for '${parsed.data}' does not match its typed schema (§5.1): ${payloadCheck.error.issues
+          .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+          .join('; ')}. Correct the payload and re-call agent_exit.`
       );
     }
     const run = this.runState(args.run_id);
     const exit: RecordedExit = {
       signal: parsed.data,
-      payload: args.payload,
+      payload: payloadCheck.data as Record<string, unknown>,
       phase_id: args.phase_id,
       agent_role: args.agent_role,
       at: this.now(),
@@ -242,7 +255,10 @@ export class SterlingTools {
         `run_signal: no exit recorded for run '${run.id}' — if the Task returned without an exit, report {signal: 'agent-died', payload: {observed: 'empty_output'}} (§5.2)`
       );
     }
-    const { action, nextState } = react(run, exit);
+    const { action, nextState } = react(run, exit, {
+      phase_death_cap: this.config.caps.phase_death_cap,
+      research_resume_per_phase: this.config.caps.research_resume_per_phase,
+    });
     const phases = run.phases.map((p) => ({ ...p, signals: [...p.signals] }));
     const idx = exit.phase_id ? phases.findIndex((p) => p.id === exit.phase_id) : phases.findIndex((p) => p.status === 'in_progress');
     if (idx !== -1) {

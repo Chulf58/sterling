@@ -325,7 +325,7 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     assert.deepEqual(JSON.parse(green.stdout).check_skipped, [{ check: 'mutation-check', reason: 'not_built' }]);
 
     // exit wire + brain: single phase completes the run
-    tools.agentExit({ run_id: 'r-loop', phase_id: 'p1', agent_role: 'coder', signal: 'complete' });
+    tools.agentExit({ run_id: 'r-loop', phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
     const signal = tools.runSignal({ run_id: 'r-loop' });
     assert.equal(signal.action.action, 'complete_run');
     assert.equal(store.getRun('r-loop').machine_state, 'completing');

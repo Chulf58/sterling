@@ -209,11 +209,11 @@ test('agent_exit: in-band rejection of non-enum signals; valid exit lands on the
   try {
     startRun(store);
     assert.throws(() => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'victory' }), /enum is closed/);
-    const { recorded } = tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete' });
+    const { recorded } = tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
     assert.equal(recorded.signal, 'complete');
     assert.equal(store.getPendingExit('r-0001')!.phase_id, 'p1');
     assert.throws(
-      () => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'blocked' }),
+      () => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'blocked', payload: { reason: 'second exit' } }),
       /unconsumed exit/,
       'a second exit before run_signal is a protocol violation'
     );
@@ -226,7 +226,7 @@ test('run_signal: reads the stored exit, applies the CAS transition, advances ph
   const { store, tools, cleanup } = harness();
   try {
     startRun(store);
-    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete' });
+    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
     const r1 = tools.runSignal();
     assert.deepEqual(r1.action, { action: 'spawn', phase_id: 'p2', respawn: false });
     const after = tools.runState();
@@ -236,7 +236,7 @@ test('run_signal: reads the stored exit, applies the CAS transition, advances ph
     assert.equal(store.getPendingExit('r-0001'), undefined, 'exit consumed');
 
     // final phase → completing + complete_run
-    tools.agentExit({ phase_id: 'p2', agent_role: 'coder', signal: 'complete' });
+    tools.agentExit({ phase_id: 'p2', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p2/coder' } });
     const r2 = tools.runSignal();
     assert.equal(r2.action.action, 'complete_run');
     assert.equal(tools.runState('r-0001').machine_state, 'completing');

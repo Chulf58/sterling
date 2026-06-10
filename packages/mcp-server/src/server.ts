@@ -115,7 +115,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'agent_exit',
     {
       description:
-        'The exit wire (never prose): record your typed exit signal before finishing. Valid signals: complete | blocked | agent-died. Invalid signals are rejected — correct and re-call.',
+        'The exit wire (never prose): record your typed exit signal + payload before finishing. Signals: complete{handoff_ref} | research-needed{question,context,blocking} | review-unresolved | blocked{reason} | tests-invalid{evidence} | contract-violated{path,rule} | bug-found{description,location,depends_on_current_work,workaround_built} | phase-overflow{agent,fill_pct}. agent-died is conductor-reported, never agent-emitted. Invalid signal or payload is rejected — correct and re-call.',
       inputSchema: {
         run_id: z.string().optional(),
         phase_id: z.string(),

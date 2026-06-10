@@ -4,12 +4,58 @@ import { repoPath } from './paths.js';
 // Run-scoped transient shapes (spec §3.2.9) — NOT knowledge-store records.
 // They live with the run and are disposed after promotion (P4).
 
-// Signal enum — MVP-spine members only (spec §16.1 item 4). Single source of
-// truth: the brain's reaction table (Slice 3) derives from this and the
-// totality check fails any member without a reaction + resolution flag.
-export const SPINE_SIGNALS = ['complete', 'blocked', 'agent-died'] as const;
-export const spineSignal = z.enum(SPINE_SIGNALS);
-export type SpineSignal = z.infer<typeof spineSignal>;
+// The signal enum (spec §5.1 — CLOSED, totality-checked). Single source of
+// truth: the brain's reaction table derives from this; the totality check
+// fails any member without a reaction + resolution flag. Emitting anything
+// else is a validation error; an unknown signal reaching the brain halts the
+// run loudly (P5).
+export const SIGNALS = [
+  'complete',
+  'research-needed',
+  'review-unresolved',
+  'blocked',
+  'tests-invalid',
+  'contract-violated',
+  'bug-found',
+  'phase-overflow',
+  'agent-died',
+] as const;
+export const signalSchema = z.enum(SIGNALS);
+export type Signal = z.infer<typeof signalSchema>;
+
+// Typed payloads per signal (§5.1 payload column). agent_exit validates the
+// emitting agent's payload in-band; agent-died is conductor-reported, never
+// agent-emitted.
+export const SIGNAL_PAYLOADS: Record<Signal, z.ZodTypeAny> = {
+  complete: z.object({ handoff_ref: z.string().min(1) }),
+  'research-needed': z.object({ question: z.string().min(1), context: z.string(), blocking: z.boolean() }),
+  'review-unresolved': z.object({
+    objections: z.array(z.unknown()),
+    reviewer_agreement: z.enum(['agreed_broken', 'disagreed']),
+  }),
+  blocked: z.object({ reason: z.string().min(1) }),
+  'tests-invalid': z.object({ evidence: z.string().min(1) }),
+  'contract-violated': z.object({ path: repoPath, rule: z.string().min(1) }),
+  'bug-found': z.object({
+    description: z.string().min(1),
+    location: z.string().min(1),
+    depends_on_current_work: z.boolean(),
+    workaround_built: z.boolean(),
+  }),
+  'phase-overflow': z.object({ agent: z.string().min(1), fill_pct: z.number() }),
+  'agent-died': z.object({
+    agent: z.string().min(1),
+    phase_id: z.string().optional(),
+    observed: z.enum(['crash', 'empty_output', 'malformed_exit']),
+    raw_excerpt: z.string(),
+  }),
+};
+
+// Backward-compatible aliases for the spine vocabulary (same enum object —
+// one definition; the spine names remain in commit history and tests).
+export const SPINE_SIGNALS = SIGNALS;
+export const spineSignal = signalSchema;
+export type SpineSignal = Signal;
 
 export const handoffSchema = z.object({
   phase_id: z.string().min(1),
@@ -19,7 +65,7 @@ export const handoffSchema = z.object({
   deferred: z.array(z.string()),
   decisions_made: z.array(z.string()),
   tests_produced: z.array(repoPath),
-  exit_signal: spineSignal,
+  exit_signal: signalSchema,
   unresolved: z.array(z.string()),
 });
 export type Handoff = z.infer<typeof handoffSchema>;

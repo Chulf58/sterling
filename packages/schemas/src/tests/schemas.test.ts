@@ -269,6 +269,9 @@ test('registry: full record set registered 1:1, unregistered type rejected loudl
   assert.throws(() => validateRecord({ no_type: true }), /no record type/);
 });
 
-test('spine signal enum is exactly the three spine members (§16.1)', () => {
-  assert.deepEqual([...SPINE_SIGNALS], ['complete', 'blocked', 'agent-died']);
+test('the signal enum is closed at the full nine §5.1 members', () => {
+  assert.deepEqual(
+    [...SPINE_SIGNALS],
+    ['complete', 'research-needed', 'review-unresolved', 'blocked', 'tests-invalid', 'contract-violated', 'bug-found', 'phase-overflow', 'agent-died']
+  );
 });
