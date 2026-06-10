@@ -8,7 +8,12 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test \"scripts/tests/*.test.mjs\"",
+    "build": "tsc -p packages/schemas/tsconfig.json && tsc -p packages/store/tsconfig.json",
+    "test": "node --test \"scripts/tests/*.test.mjs\" \"packages/schemas/dist/tests/*.test.js\" \"packages/store/dist/tests/*.test.js\"",
     "check": "node scripts/check-agent-registry.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "typescript": "^6.0.3"
   }
 }
