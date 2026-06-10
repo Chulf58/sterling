@@ -6,7 +6,19 @@ marked `STERLING-DEFERRED`. Reversible unless noted.
 
 ## Open
 
-(none yet)
+3. **Plan mode: native vs plan-mode-shaped** (step 8 ★verify). Current docs:
+   native plan mode is read-only with prompts identical to default — MCP
+   write tools (planning-time decision capture) would prompt per call (P1
+   ceremony), and the approved plan is not programmatically deliverable as
+   the brief object. CHOSE: plan-mode-shaped — the planning skill's
+   read-only discipline + the store brief as the single authority; native
+   plan mode is not load-bearing. Reversible: skill text + conductor
+   contract only. `STERLING-DEFERRED(plan-mode)` in skills/planning.
+4. **Mutation capability** (step 7): deliberately absent on the node
+   adapter; the green check skips it loudly. Implementing it is additive
+   (adapter capability + §9.2 round logic); deferred to real run data per
+   the spec's own economics. No code marker (the degrade path IS the
+   designed behavior).
 
 ## Carried forward from earlier steps (already flagged in commits/session log)
 

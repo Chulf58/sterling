@@ -98,6 +98,15 @@ export interface RecordedExit {
 
 const ACTIVE_STATES = ['running', 'completing', 'awaiting_merge_gate', 'halted'];
 
+function deepReplaceString(value: unknown, from: string, to: string): unknown {
+  if (typeof value === 'string') return value === from ? to : value;
+  if (Array.isArray(value)) return value.map((v) => deepReplaceString(v, from, to));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, deepReplaceString(v, from, to)]));
+  }
+  return value;
+}
+
 // §3.4: rank_terms are plain keywords — an array of single terms with a
 // per-term length cap; a keyword array cannot smuggle in a freeform question.
 export const rankTerms = z.array(z.string().regex(/^\S{1,64}$/, 'rank_terms must be single keywords (no whitespace, ≤64 chars)')).max(16);
@@ -423,6 +432,28 @@ export class SterlingStore {
       if (row) this.db.prepare('DELETE FROM selection WHERE slot = 1').run();
     });
     return row;
+  }
+
+  /**
+   * fs-move support (§7.1): renames inside the machinery never orphan
+   * knowledge — every owning record's stored paths are rewritten as part of
+   * the move (exact normalized-path matches only), revalidated, and the
+   * file-key index updated, in one transaction.
+   */
+  renameFileKey(oldPath: string, newPath: string): number {
+    const from = normalizeRepoPath(oldPath);
+    const to = normalizeRepoPath(newPath);
+    const rows = this.db.prepare('SELECT record_id FROM record_file_keys WHERE path = ?').all(from) as { record_id: string }[];
+    this.tx(() => {
+      for (const { record_id } of rows) {
+        const record = this.get(record_id);
+        if (!record) continue;
+        const rewritten = validateRecord(deepReplaceString(record as unknown, from, to));
+        this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(rewritten), record_id);
+        this.db.prepare('UPDATE record_file_keys SET path = ? WHERE record_id = ? AND path = ?').run(to, record_id, from);
+      }
+    });
+    return rows.length;
   }
 
   /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4). */
