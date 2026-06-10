@@ -15,12 +15,19 @@ const targetDir = targetIdx !== -1 ? resolve(args[targetIdx + 1]) : process.cwd(
 
 const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 
+// machine-detected, forward-slash, quoted (§6 emission rule)
+const vars = {
+  NODE: `"${process.execPath.replace(/\\/g, '/')}"`,
+  HOOKS_DIR: join(pluginRoot, 'hooks').replace(/\\/g, '/'),
+};
+
 const { report, restartInstruction } = installAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(targetDir, '.claude', 'agents'),
   pluginVersion,
   now: new Date().toISOString(),
+  vars,
 });
 
 for (const r of report) console.log(`${r.status}: ${r.name}`);

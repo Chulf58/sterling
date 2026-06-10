@@ -24,6 +24,10 @@ const { report, restartInstruction } = syncAgents({
   targetAgentsDir: join(targetDir, '.claude', 'agents'),
   pluginVersion,
   now: new Date().toISOString(),
+  vars: {
+    NODE: `"${process.execPath.replace(/\\/g, '/')}"`,
+    HOOKS_DIR: join(pluginRoot, 'hooks').replace(/\\/g, '/'),
+  },
 });
 
 let refused = 0;

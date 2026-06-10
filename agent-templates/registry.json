@@ -1,4 +1,14 @@
 {
   "version": 1,
-  "agents": []
+  "agents": [
+    { "name": "test-writer", "file": "test-writer.md" },
+    { "name": "coder", "file": "coder.md" },
+    { "name": "reviewer-correctness", "file": "reviewer-correctness.md" },
+    { "name": "reviewer-security", "file": "reviewer-security.md" },
+    { "name": "reviewer-skeptic", "file": "reviewer-skeptic.md" },
+    { "name": "reviewer-performance", "file": "reviewer-performance.md" },
+    { "name": "implementation-architect", "file": "implementation-architect.md" },
+    { "name": "researcher", "file": "researcher.md" },
+    { "name": "explorer", "file": "explorer.md" }
+  ]
 }

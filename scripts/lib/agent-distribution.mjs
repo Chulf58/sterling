@@ -61,8 +61,20 @@ export function findBackslashHookCommands(frontmatter) {
 export const HEADER_RE =
   /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 
-export function renderInstalledAgent(templateContent, label, { pluginVersion, now }) {
-  const { name, frontmatter, body } = parseTemplate(templateContent, label);
+export function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars = {} }) {
+  // Install-time variable substitution: installed agents are project-side and
+  // cannot use ${CLAUDE_PLUGIN_ROOT}; templates carry {{NODE}}/{{HOOKS_DIR}}
+  // tokens that install bakes to machine-detected forward-slash paths (§6
+  // emission rule — the backslash check below guards the substituted result).
+  let substituted = templateContent;
+  for (const [key, value] of Object.entries(vars)) {
+    substituted = substituted.split(`{{${key}}}`).join(value);
+  }
+  const { name, frontmatter, body } = parseTemplate(substituted, label);
+  const unsubstituted = frontmatter.match(/\{\{[A-Z_]+\}\}/);
+  if (unsubstituted) {
+    throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value — refusing to install a half-baked hook command (P5)`);
+  }
   const badCommands = findBackslashHookCommands(frontmatter);
   if (badCommands.length) {
     throw new Error(
@@ -109,13 +121,13 @@ export const RESTART_INSTRUCTION = [
   '================================================================',
 ].join('\n');
 
-export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now }) {
+export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {} }) {
   const registry = loadRegistry(registryPath);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of registry.agents) {
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
-    const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now });
+    const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
     }
@@ -141,7 +153,7 @@ export function refuseInstruction(name) {
 // installs; refuse to overwrite local modification (refuse-and-instruct stub for
 // the three-way review). Statuses: installed | refreshed | up_to_date |
 // locally_modified_up_to_date | refused_local_modification | foreign_file.
-export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now }) {
+export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {} }) {
   const registry = loadRegistry(registryPath);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
@@ -149,7 +161,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
     const installedPath = join(targetAgentsDir, `${entry.name}.md`);
     const render = () => {
-      const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now });
+      const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars });
       if (name !== entry.name) {
         throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
       }
