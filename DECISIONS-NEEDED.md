@@ -19,6 +19,16 @@ marked `STERLING-DEFERRED`. Reversible unless noted.
    (adapter capability + §9.2 round logic); deferred to real run data per
    the spec's own economics. No code marker (the degrade path IS the
    designed behavior).
+5. **ink-terminal evaluation** (step 10 ★verify): exists on npm only at
+   0.1.0-alpha.1 — alpha is not a shippable base. CHOSE: base ink 7
+   (stable, react 19), arrow-key navigation; mouse support door-open.
+   Reversible: a renderer swap inside packages/tui.
+6. **Per-phase JUDGMENT completeness checker** (step 8): "every subtask
+   evidenced" is an LLM judgment; the mechanical halves are scripted and
+   the judgment half skips loudly (completeness-judgment). Options: a
+   classifier-tier prompt step at phase completeness, or conductor-run
+   review against the handoff. Choose when the first real run shows what
+   the handoffs actually contain.
 
 ## Carried forward from earlier steps (already flagged in commits/session log)
 

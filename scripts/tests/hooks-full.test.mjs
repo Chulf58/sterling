@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { selectReviewers } from '../reviewer-selection.mjs';
+import { selectReviewers } from '../lib/reviewer-selection.mjs';
 import { runWiringCheck } from '../lib/wiring-check.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');

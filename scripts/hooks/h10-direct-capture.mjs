@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, deny, allow, openStore, loadConfig } from './lib/common.mjs';
-import { selectReviewers } from '../reviewer-selection.mjs';
+import { selectReviewers } from '../lib/reviewer-selection.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 

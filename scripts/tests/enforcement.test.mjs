@@ -490,6 +490,36 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
     });
     assert.equal(r.status, 2, r.stderr);
     assert.match(r.stderr ?? '', /frozen/);
+
+    // EVERY bundled hook must run standalone on a benign input — a bundled
+    // dependency with main-detection once turned h10 into an exit-2 at import
+    // (found live; this guards the whole set).
+    const benign = {
+      PreToolUse: { tool_name: 'Glob', tool_input: {} },
+      PostToolUse: { tool_name: 'Glob', tool_input: {}, tool_response: {} },
+      Stop: {},
+      SessionStart: {},
+      UserPromptSubmit: {},
+    };
+    const events = {
+      'h1-session-start.mjs': 'SessionStart',
+      'h2-selection-inject.mjs': 'UserPromptSubmit',
+      'h6-selfcheck.mjs': 'SessionStart',
+      'h7-file-touch.mjs': 'PostToolUse',
+      'h9-stop-backstop.mjs': 'Stop',
+      'h10-direct-capture.mjs': 'Stop',
+      'h13-clear-conductor.mjs': 'UserPromptSubmit',
+      'h13-reads-ledger.mjs': 'PostToolUse',
+    };
+    for (const [file, event] of Object.entries(events)) {
+      const res = spawnSync(process.execPath, [join(root, 'hooks', file)], {
+        input: JSON.stringify(hookInput(dir, { hook_event_name: event, ...benign[event] })),
+        encoding: 'utf8',
+        cwd: dir,
+        timeout: 30_000,
+      });
+      assert.equal(res.status, 0, `${file} on benign ${event}: exit ${res.status} — ${res.stderr}`);
+    }
   } finally {
     cleanup();
   }
