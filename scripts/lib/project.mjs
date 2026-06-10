@@ -2,6 +2,7 @@
 // merge-gate): target-project resolution, config, store, args.
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseConfig } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 
 export function arg(name, argv = process.argv.slice(2)) {
@@ -24,7 +25,12 @@ export function openProject(cwd = process.cwd()) {
   const dbPath = join(cwd, '.sterling', 'sterling.db');
   if (!existsSync(dbPath)) fail(`no Sterling store at ${dbPath} — not an initialized project`);
   const configPath = join(cwd, '.sterling', 'config.json');
-  const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {};
+  let config;
+  try {
+    config = parseConfig(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {});
+  } catch (e) {
+    fail(`malformed .sterling/config.json — failing loud, never half-applying (P5): ${e.message}`);
+  }
   return { cwd, store: new SterlingStore(dbPath), config };
 }
 

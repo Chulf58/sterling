@@ -1,0 +1,51 @@
+{
+  "toolchains": [],
+  "prep_cap": 20,
+  "caps": {
+    "inner_loop_n": 3,
+    "outer_loop_m": 2,
+    "research_resume_per_phase": 2,
+    "dispatch_per_agent_type": 25,
+    "phase_death_cap": 1
+  },
+  "context_watch": {
+    "warn_pct": 60,
+    "block_pct": 95,
+    "mode": "observe",
+    "windows": { "default": 200000 }
+  },
+  "models": {
+    "test_writer": { "model": "opus", "effort": "high" },
+    "reviewers": { "model": "opus", "effort": "low" },
+    "implementation_architect": { "model": "opus", "effort": "high" },
+    "coder": { "model": "sonnet", "effort": "high" },
+    "coder_hard": { "model": "opus", "effort": "xhigh" },
+    "researcher": { "model": "sonnet", "effort": "medium" },
+    "explorer": { "model": "haiku", "effort": "low" },
+    "classifiers": { "model": "haiku", "effort": "low" }
+  },
+  "reviewer_selection": {
+    "security_path_patterns": ["(^|/)auth/", "token", "secret", "credential"],
+    "security_content_patterns": [
+      "SELECT .*\\+",
+      "exec\\(",
+      "spawn\\(",
+      "process\\.env",
+      "(^|\\W)eval\\(",
+      "router\\.(get|post|put|delete)"
+    ],
+    "perf_path_patterns": [],
+    "perf_content_patterns": ["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"],
+    "dependency_manifests": ["package.json", "requirements.txt", "pom.xml", "*.csproj"],
+    "skeptic_diff_size_threshold": 400,
+    "skeptic_new_export_threshold": 5
+  },
+  "difficulty": {
+    "blast_radius_hard_threshold": 8,
+    "thin_knowledge_retrieval_threshold": 2
+  },
+  "staleness": {
+    "research_days": { "fast": 30, "medium": 90, "stable": 365 },
+    "platform_external_days": 180
+  }
+}

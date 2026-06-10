@@ -14,3 +14,5 @@ export {
 export type { RecordType, RecordTypeEntry, DurableRecord } from './records.js';
 export { SPINE_SIGNALS, spineSignal, handoffSchema, MACHINE_STATES, machineState, runRecordSchema } from './transient.js';
 export type { SpineSignal, Handoff, MachineState, RunRecord } from './transient.js';
+export { configSchema, parseConfig } from './config.js';
+export type { SterlingConfig } from './config.js';
