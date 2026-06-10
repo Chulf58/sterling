@@ -1,0 +1,213 @@
+import { test, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import {
+  startRunBranch,
+  phaseCommit,
+  resetToLastPhaseCommit,
+  mergeRun,
+  discardRun,
+  wholeRunDiffFiles,
+  isGitRepo,
+} from '../lib/branch-manager.mjs';
+import { writeBaseline, compareBaseline, gitTestIntegrity } from '../lib/test-integrity.mjs';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const NOW = '2026-06-10T12:00:00.000Z';
+
+let SterlingStore;
+before(async () => {
+  ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+});
+
+function git(cwd, args) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  return (r.stdout ?? '').trim();
+}
+
+function makeGitProject() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-git-'));
+  git(dir, ['init', '-b', 'main']);
+  git(dir, ['config', 'user.email', 'test@sterling.local']);
+  git(dir, ['config', 'user.name', 'Sterling Test']);
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n');
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-m', 'base']);
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const run = store.createRun({
+    id: 'r-git',
+    brief_ref: randomUUID(),
+    branch: 'pending',
+    machine_state: 'running',
+    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+    dispatch_counts: {},
+    escalations: [],
+    started_at: NOW,
+  });
+  const cleanup = () => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { dir, store, run, cleanup };
+}
+
+test('branch manager: run branch in-place, per-phase commits recorded, reset, merge --no-ff (§8.1)', () => {
+  const { dir, store, cleanup } = makeGitProject();
+  try {
+    const { branch, base } = startRunBranch({ cwd: dir, store, runId: 'r-git' });
+    assert.equal(branch, 'sterling/run-r-git');
+    assert.equal(base, 'main');
+    assert.equal(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']), branch, 'checked out IN-PLACE — the observed tree is the run');
+    assert.equal(store.getRun('r-git').base_branch, 'main');
+
+    // phase work + commit recorded on the run record
+    writeFileSync(join(dir, 'src', 'feature.mjs'), 'export const f = 2;\n');
+    const sha = phaseCommit({ cwd: dir, store, runId: 'r-git', phaseId: 'p1' });
+    assert.deepEqual(store.getRun('r-git').phases[0].commits, [sha]);
+    assert.deepEqual(wholeRunDiffFiles({ cwd: dir, store, runId: 'r-git' }), ['src/feature.mjs']);
+
+    // agent-died reset: uncommitted partial work discarded back to the phase commit (P7)
+    writeFileSync(join(dir, 'src', 'partial.mjs'), 'broken');
+    writeFileSync(join(dir, 'src', 'feature.mjs'), 'export const f = 999; // partial');
+    resetToLastPhaseCommit({ cwd: dir });
+    assert.equal(existsSync(join(dir, 'src', 'partial.mjs')), false);
+    assert.match(readFileSync(join(dir, 'src', 'feature.mjs'), 'utf8'), /f = 2/);
+
+    // merge gate approval: --no-ff into base, run branch deleted
+    mergeRun({ cwd: dir, store, runId: 'r-git' });
+    assert.equal(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main');
+    assert.ok(existsSync(join(dir, 'src', 'feature.mjs')), 'merged work present on main');
+    const branches = git(dir, ['branch', '--list', 'sterling/*']);
+    assert.equal(branches, '', 'run branch deleted after merge');
+  } finally {
+    cleanup();
+  }
+});
+
+test('branch manager: dirty tree refuses run start; discard leaves main untouched (P7)', () => {
+  const { dir, store, cleanup } = makeGitProject();
+  try {
+    writeFileSync(join(dir, 'src', 'dirty.mjs'), 'x');
+    assert.throws(() => startRunBranch({ cwd: dir, store, runId: 'r-git' }), /dirty.*owns the whole tree/s);
+    rmSync(join(dir, 'src', 'dirty.mjs'));
+
+    startRunBranch({ cwd: dir, store, runId: 'r-git' });
+    writeFileSync(join(dir, 'src', 'rejected.mjs'), 'export const r = 1;\n');
+    phaseCommit({ cwd: dir, store, runId: 'r-git', phaseId: 'p1' });
+    discardRun({ cwd: dir, store, runId: 'r-git' });
+    assert.equal(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main');
+    assert.equal(existsSync(join(dir, 'src', 'rejected.mjs')), false, 'rejection is cheap: branch deleted, main untouched');
+  } finally {
+    cleanup();
+  }
+});
+
+test('test-integrity: frozen baseline detects modification and deletion; clean baseline passes (§9.2)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ti-'));
+  try {
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    writeFileSync(join(dir, 'tests', 'a.test.mjs'), 'test-a-v1');
+    writeFileSync(join(dir, 'tests', 'b.test.mjs'), 'test-b-v1');
+    const runDir = join(dir, '.sterling', 'runs', 'r-1');
+    assert.equal(writeBaseline({ cwd: dir, runDir, phaseId: 'p1', testFiles: ['tests/a.test.mjs', 'tests/b.test.mjs'] }), 2);
+
+    assert.deepEqual(compareBaseline({ cwd: dir, runDir, phaseId: 'p1' }), { baseline_missing: false, modified: [], deleted: [] });
+    writeFileSync(join(dir, 'tests', 'a.test.mjs'), 'test-a-WEAKENED');
+    rmSync(join(dir, 'tests', 'b.test.mjs'));
+    const r = compareBaseline({ cwd: dir, runDir, phaseId: 'p1' });
+    assert.deepEqual(r.modified, ['tests/a.test.mjs']);
+    assert.deepEqual(r.deleted, ['tests/b.test.mjs']);
+    assert.equal(compareBaseline({ cwd: dir, runDir, phaseId: 'p9' }).baseline_missing, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('test-integrity [direct]: vs git HEAD — modified/deleted test files flagged, additions fine, no-git degrades', () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    writeFileSync(join(dir, 'tests', 'x.test.mjs'), 'v1');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'tests']);
+
+    writeFileSync(join(dir, 'tests', 'x.test.mjs'), 'v2-weakened');
+    writeFileSync(join(dir, 'tests', 'new.test.mjs'), 'brand new');
+    const ti = gitTestIntegrity({ cwd: dir, testGlobs: ['tests/**'] });
+    assert.equal(ti.no_git, false);
+    assert.deepEqual(ti.modified, ['tests/x.test.mjs']);
+    assert.deepEqual(ti.deleted, []);
+  } finally {
+    cleanup();
+  }
+  const bare = mkdtempSync(join(tmpdir(), 'sterling-nogit-'));
+  try {
+    assert.equal(gitTestIntegrity({ cwd: bare, testGlobs: ['tests/**'] }).no_git, true);
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('completeness blocks when a frozen test was weakened during the loop', () => {
+  // minimal project: store + config + run + brief + handoff + tampered baseline
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-weaken-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] }));
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const brief = store.create({
+      id: randomUUID(), type: 'brief', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      slug: 'f', title: 'F', problem: 'p', feature: 'f',
+      user_stated: { criteria: [], constraints: [] }, conductor_proposals: [],
+      acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+      blast_radius: { files: [{ path: 'tests/y.test.mjs', owning_articles: [] }], reconcile_list: [] },
+      incidental_scope: [], out_of_scope: [],
+      phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+      decisions_made: [],
+    });
+    store.createRun({ id: 'r-w', brief_ref: brief.id, branch: 'b', machine_state: 'running', phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW });
+    store.writeHandoff('r-w', { phase_id: 'p1', agent_role: 'test-writer', what_changed: [{ path: 'tests/y.test.mjs', change_role: 'authored' }], wired: [], deferred: [], decisions_made: [], tests_produced: ['tests/y.test.mjs'], exit_signal: 'complete', unresolved: [] }, NOW);
+
+    writeFileSync(join(dir, 'tests', 'y.test.mjs'), 'oracle-v1');
+    writeBaseline({ cwd: dir, runDir: join(dir, '.sterling', 'runs', 'r-w'), phaseId: 'p1', testFiles: ['tests/y.test.mjs'] });
+    writeFileSync(join(dir, 'tests', 'y.test.mjs'), 'oracle-WEAKENED');
+    store.close();
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-w', '--phase', 'p1', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /test-integrity.*MODIFIED/s);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('merge gate runs real branch operations in a git project', () => {
+  const { dir, store, cleanup } = makeGitProject();
+  try {
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [] }));
+    startRunBranch({ cwd: dir, store, runId: 'r-git' });
+    writeFileSync(join(dir, 'src', 'feature.mjs'), 'export const f = 2;\n');
+    phaseCommit({ cwd: dir, store, runId: 'r-git', phaseId: 'p1' });
+    store.casTransition('running', { ...store.getRun('r-git'), machine_state: 'completing' });
+    store.casTransition('completing', { ...store.getRun('r-git'), machine_state: 'awaiting_merge_gate' });
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'merge-gate.mjs'), '--run', 'r-git', '--decision', 'merge', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout).branch, { merged_into: 'main' });
+    assert.equal(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main');
+    assert.equal(store.getRun('r-git').machine_state, 'merged');
+  } finally {
+    cleanup();
+  }
+});

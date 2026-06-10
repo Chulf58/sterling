@@ -5,6 +5,7 @@
 // manager — skipped loudly here.
 //   node scripts/merge-gate.mjs --run <id> [--decision merge|reject] [--target <dir>]
 import { arg, fail, openProject, requireRun } from './lib/project.mjs';
+import { isGitRepo, mergeRun, discardRun } from './lib/branch-manager.mjs';
 
 const target = arg('--target') ?? process.cwd();
 const { store } = openProject(target);
@@ -34,9 +35,16 @@ if (decision !== 'merge' && decision !== 'reject') {
   fail("merge-gate: --decision must be 'merge' or 'reject'");
 }
 
-// Branch manager (run branch merge/discard) is §16.2 step 8 — skipped loudly.
-store.recordCheckSkipped(decision === 'merge' ? 'branch-merge' : 'branch-discard', 'not_built', run.id, new Date().toISOString());
+// Branch operations through the §8.1 branch manager; non-git projects degrade loud.
+let branchNote;
+if (isGitRepo(target) && run.base_branch) {
+  branchNote = decision === 'merge' ? mergeRun({ cwd: target, store, runId: run.id }) : discardRun({ cwd: target, store, runId: run.id });
+} else {
+  const check = decision === 'merge' ? 'branch-merge' : 'branch-discard';
+  store.recordCheckSkipped(check, run.base_branch ? 'no_git' : 'no_base_branch', run.id, new Date().toISOString());
+  branchNote = { skipped: check };
+}
 const next = { ...run, machine_state: decision === 'merge' ? 'merged' : 'rejected' };
 store.casTransition('awaiting_merge_gate', next);
 store.close();
-console.log(JSON.stringify({ run_id: run.id, decision, machine_state: next.machine_state, note: 'branch operations skipped loudly (branch manager not built)' }));
+console.log(JSON.stringify({ run_id: run.id, decision, machine_state: next.machine_state, branch: branchNote }));

@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, deny, allow, openStore, loadConfig } from './lib/common.mjs';
 import { selectReviewers } from '../reviewer-selection.mjs';
+import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 
 const input = readStdin();
@@ -38,10 +39,15 @@ try {
   const config = parseConfig(loadConfig(input.cwd) ?? {}); // schema defaults apply (reviewer_selection sets etc.)
   const now = new Date().toISOString();
 
-  // test-touching → test-integrity vs git HEAD (machinery lands at step 8) — loud skip
+  // test-touching → test-integrity vs git HEAD (§8.2); non-git degrades loud
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
+  let integrityNote = '';
   if (touches.some((t) => testGlobs.some((g) => matchesGlob(t.path, g)))) {
-    store.recordCheckSkipped('test-integrity', 'not_built', undefined, now);
+    const ti = gitTestIntegrity({ cwd: input.cwd, testGlobs });
+    if (ti.no_git) store.recordCheckSkipped('test-integrity', 'no_git', undefined, now);
+    else if (ti.modified.length || ti.deleted.length) {
+      integrityNote = `\nTest-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${JSON.stringify(ti.deleted)} — review these before capture.`;
+    }
   }
 
   // code-touching → deterministic reviewer selection (paths only at this surface)
@@ -53,7 +59,8 @@ try {
     deny(
       `H10: direct-mode work touched ${touches.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
         `Capture what was learned inline (knowledge_create), or state explicitly that nothing durable was learned.\n` +
-        `Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.`
+        `Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` +
+        integrityNote
     );
   }
 

@@ -4,9 +4,12 @@
 // adapter capability. The judgment half (subtask coverage), reviewer dispatch,
 // and test-integrity are not built — each is skipped LOUDLY where it would run.
 //   node scripts/completeness-check.mjs --run <id> --phase <id> [--final] [--target <dir>]
-import { arg, fail, openProject, requireRun, requireBrief } from './lib/project.mjs';
+import { join } from 'node:path';
+import { arg, fail, openProject, requireRun, requireBrief, runDir } from './lib/project.mjs';
 import { loadAdapter } from './adapters/resolve.mjs';
 import { runWiringCheck } from './lib/wiring-check.mjs';
+import { compareBaseline } from './lib/test-integrity.mjs';
+import { isGitRepo, wholeRunDiffFiles } from './lib/branch-manager.mjs';
 
 const target = arg('--target') ?? process.cwd();
 const { store, config } = openProject(target);
@@ -31,16 +34,56 @@ if (!handoffs.some((h) => h.tests_produced.length > 0)) {
 
 const now = new Date().toISOString();
 const skipped = [];
-for (const check of ['completeness-judgment', 'reviewer-dispatch', 'test-integrity']) {
-  store.recordCheckSkipped(check, 'not_built', run.id, now);
-  skipped.push({ check, reason: 'not_built' });
+const skip = (check, reason) => {
+  store.recordCheckSkipped(check, reason, run.id, now);
+  skipped.push({ check, reason });
+};
+for (const check of ['completeness-judgment', 'reviewer-dispatch']) skip(check, 'not_built');
+
+// test-integrity (§9.2): the phase's frozen baseline written at the red check
+const integrity = compareBaseline({ cwd: target, runDir: runDir(target, run.id), phaseId });
+if (integrity.baseline_missing) {
+  skip('test-integrity', 'no_baseline_for_phase');
+} else {
+  for (const f of integrity.modified) problems.push(`test-integrity: frozen test '${f}' was MODIFIED during the loop (§9.2 — the oracle never weakens itself)`);
+  for (const f of integrity.deleted) problems.push(`test-integrity: frozen test '${f}' was DELETED during the loop`);
 }
 
-// H12 runs at final completeness, through the adapter capability (§6 H12, §9.1)
+// Final completeness (§8.1): every AC's traced tests pass (verifiable_at
+// honored — final ACs run HERE), whole-run diff within contract, H12 wiring,
+// reconcile list fully reconciled.
 let wiring = null;
 if (isFinal) {
   const adapterName = config.toolchains?.[0]?.adapter;
   const adapterModule = adapterName ? await loadAdapter(adapterName) : { name: 'none', capabilities: {} };
+
+  // every AC has passing traced tests: run the union of produced tests
+  const allTests = [...new Set(store.readHandoffs(run.id).flatMap((h) => h.tests_produced))];
+  if (allTests.length && typeof adapterModule.runTests === 'function') {
+    const suite = adapterModule.runTests({ cwd: target, scope: allTests });
+    if (suite.overall !== 'pass') {
+      problems.push(`final completeness: the run's traced test suite is ${suite.overall}, not green — ACs are not collectively satisfied`);
+    }
+  }
+
+  // whole-run diff within contract (needs the branch manager's base)
+  if (isGitRepo(target) && run.base_branch) {
+    const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope]);
+    for (const f of wholeRunDiffFiles({ cwd: target, store, runId: run.id })) {
+      if (!allowed.has(f)) problems.push(`whole-run diff outside contract: '${f}' (§8.1 final completeness)`);
+    }
+  } else {
+    skip('whole-run-diff', run.base_branch ? 'no_git' : 'no_base_branch');
+  }
+
+  // reconcile list (brief ∪ H7 marks) fully reconciled — same rule dispose-run enforces
+  for (const id of new Set([...brief.blast_radius.reconcile_list, ...(run.reconcile_needed ?? [])])) {
+    const rec = store.get(id);
+    if (rec && rec.status === 'active' && rec.updated_at < run.started_at) {
+      problems.push(`reconcile_list: article '${id}' not reconciled during the run`);
+    }
+  }
+
   const article = store
     .query({ types: ['feature_article'], cap: 1000 })
     .find((a) => a.history.some((h) => h.target_id === brief.id));
@@ -52,10 +95,7 @@ if (isFinal) {
     store,
     now,
   });
-  if (wiring.skipped) {
-    store.recordCheckSkipped(wiring.skipped.check, wiring.skipped.reason, run.id, now);
-    skipped.push(wiring.skipped);
-  }
+  if (wiring.skipped) skip(wiring.skipped.check, wiring.skipped.reason);
   problems.push(...wiring.violations);
 }
 store.close();

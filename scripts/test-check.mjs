@@ -5,8 +5,10 @@
 //                               [--run <id>] [--target <dir>] [--adapter <name>]
 // red:   overall must be assertion_fail (a crash-red proves nothing; a pass means no oracle)
 // green: overall must be pass; on green, the unbuilt mutation check is skipped LOUDLY.
+import { join } from 'node:path';
 import { arg, argAll, fail, openProject } from './lib/project.mjs';
 import { loadAdapter } from './adapters/resolve.mjs';
+import { writeBaseline } from './lib/test-integrity.mjs';
 
 const expect = arg('--expect');
 if (expect !== 'red' && expect !== 'green') fail('usage: test-check.mjs --expect red|green --scope <path>...');
@@ -27,8 +29,16 @@ const summary = { expect, overall: result.overall, results: result.results };
 
 let ok;
 if (expect === 'red') {
-  if (result.overall === 'assertion_fail') ok = true;
-  else if (result.overall === 'pass') summary.refusal = 'tests pass before implementation — not a valid red (no oracle)';
+  if (result.overall === 'assertion_fail') {
+    ok = true;
+    // freeze the phase's oracle (§9.2): the baseline test-integrity compares against
+    const runId = arg('--run') ?? store.getRun()?.id;
+    const phaseId = arg('--phase');
+    if (runId && phaseId) {
+      const frozen = writeBaseline({ cwd: target, runDir: join(target, '.sterling', 'runs', runId), phaseId, testFiles: scope });
+      summary.baseline_frozen = frozen;
+    }
+  } else if (result.overall === 'pass') summary.refusal = 'tests pass before implementation — not a valid red (no oracle)';
   else summary.refusal = 'tests crash before implementation — a crash-red proves nothing (§9.2); fix the test scaffold';
 } else {
   ok = result.overall === 'pass';

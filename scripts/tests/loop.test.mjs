@@ -310,10 +310,11 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
       "import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from '../src/calc.mjs';\ntest('AC1: add(2,3) is 5', () => assert.equal(add(2, 3), 5));\n"
     );
 
-    // red check: must fail on assertions
-    const red = runScript('test-check.mjs', ['--expect', 'red', '--scope', 'tests/calc.test.mjs', '--target', dir], dir);
+    // red check: must fail on assertions; freezes the phase's test baseline (§9.2)
+    const red = runScript('test-check.mjs', ['--expect', 'red', '--scope', 'tests/calc.test.mjs', '--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
     assert.equal(red.code, 0, red.stdout + red.stderr);
     assert.equal(JSON.parse(red.stdout).overall, 'assertion_fail');
+    assert.equal(JSON.parse(red.stdout).baseline_frozen, 1, 'oracle frozen at red');
 
     // a green expectation at this point correctly fails
     const notGreen = runScript('test-check.mjs', ['--expect', 'green', '--scope', 'tests/calc.test.mjs', '--target', dir], dir);
@@ -343,9 +344,10 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     assert.deepEqual(compOut.check_skipped, [
       { check: 'completeness-judgment', reason: 'not_built' },
       { check: 'reviewer-dispatch', reason: 'not_built' },
-      { check: 'test-integrity', reason: 'not_built' },
+      { check: 'whole-run-diff', reason: 'no_base_branch' },
     ]);
     assert.deepEqual(compOut.wiring.violations, [], 'add is wired via src/main.mjs — H12 live and clean');
+    assert.ok(!compOut.problems.some((p) => /test-integrity/.test(p)), 'frozen baseline intact — integrity ran clean');
 
     // capture: article (AC-traced, fulfills the todo), decision, todo removed by the fulfilling write
     const { record: article } = tools.knowledgeCreate('feature_article', articleFields(brief.id, { traceAC: true, fulfills: [todo.id] }));
@@ -373,7 +375,7 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
       'mutation-check',
       'completeness-judgment',
       'reviewer-dispatch',
-      'test-integrity',
+      'whole-run-diff',
       'objection-triage',
       'mutation-survivors-to-known-gaps',
     ]) {
