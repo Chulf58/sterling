@@ -24,7 +24,7 @@ packages/store        SQLite access layer (WAL, FTS5) — the one write code pat
 packages/mcp-server   the brain (state machine) + tool surface
 packages/tui          Ink app
 scripts/              hooks, toolchain adapters, fs helpers, dispose-run, reviewer-selection
-agents/               agent definitions (markdown + frontmatter)
+agent-templates/      agent templates (markdown + frontmatter) — NOT named agents/, which the platform auto-serves with hooks stripped; init installs into project .claude/agents/
 skills/               SOP skills
 templates/            shipped templates, incl. target-claude-md.md (what init generates)
 ```

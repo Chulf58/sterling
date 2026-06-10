@@ -70,7 +70,8 @@ sterling/
                                    # installs concrete agents into the project's .claude/agents/ with a generated
                                    # header (plugin version + template hash). The plugin is the distributor;
                                    # THE PROJECT IS THE ENFORCEMENT SURFACE.
-  commands/sterling/*.md         # slash commands (Section 13)
+  commands/*.md                    # slash commands (Section 13) — FLAT: plugin namespacing already prefixes
+                                   # /sterling:*; a sterling/ subdir would double it (/sterling:sterling:*)
   skills/*/SKILL.md                # workflow SOP skills (Section 7.6) — ship WITH the plugin
   hooks/hooks.json                 # project-level hook declarations (Section 6)
   hooks/*.mjs                      # hook scripts
