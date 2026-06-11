@@ -14,4 +14,6 @@ Then execute the manifest:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/init.mjs" --target "<project dir>" --project-name "<name>" --stack-tags <a,b> --toolchain <adapter>:<glob,glob> (--backup-path <p> | --backup-opt-out)
 ```
 
-Relay the report and the RESTART instruction prominently — the first pipeline run is blocked until a restarted session passes the agent-visibility gate (start-run enforces it).
+Init is an ENSURE operation (§12): re-running it is safe and needs no flags — declarations are read back from `.sterling/config.json`. Per item it creates what is absent, skips what matches, and leaves-and-reports anything hand-edited (a pre-existing CLAUDE.md is never clobbered — relay the report's merge instruction). Skip the mini-grill when the project already has a recorded config; only ask for what a fresh config needs.
+
+Relay the per-item report table and the RESTART instruction prominently — the first pipeline run is blocked until a restarted session passes the agent-visibility gate (start-run enforces it).

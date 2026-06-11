@@ -31,6 +31,9 @@ export const configSchema = z.object({
   // §3.3: declared at init — the mount manifest for domain stores
   stack_tags: z.array(z.string()).default([]),
   domains: z.array(z.string()).default([]),
+  // §12 ensure-manifest: declarations are read back from the recorded config on
+  // re-runs (no flags required), so the project name is recorded alongside them.
+  project_name: z.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: z.number().positive().max(1).default(0.35),
   prep_cap: z.number().int().positive().default(20),

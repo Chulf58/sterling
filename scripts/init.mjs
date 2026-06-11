@@ -1,89 +1,188 @@
 // /sterling:init [S] (spec §12, FULL PRECISION except store internals).
 // The conductor runs the mini-grill (stack tags, toolchains, backup path —
 // ask, don't guess); this script is the deterministic manifest executor.
-// Refusals happen BEFORE any write.
 //
-//   node scripts/init.mjs --target <dir> --project-name <name>
-//     --stack-tags a,b --toolchain <adapter>:<glob>[,<glob>...]
-//     (--backup-path <p> | --backup-opt-out) [--domains d1,d2]
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+// ENSURE-MANIFEST SEMANTICS (§12, adjudicated): init is an ensure operation,
+// not a one-shot. Every manifest item is verified individually:
+//   absent            → created
+//   matches expected  → skipped, reported as `matches`
+//   differs           → left untouched, reported (`differs`) — init never
+//                       overwrites content it cannot prove it generated
+// Refusal is reserved for destructive actions only (a file occupying a path
+// the manifest requires as a directory; an unparseable config it would have
+// to clobber). "Already initialized" is NOT a refusal. Every artifact is
+// individually regenerable: delete it and re-run — declarations are read
+// back from the recorded config, so re-runs need no flags.
+//
+//   node scripts/init.mjs --target <dir> [--project-name <name>]
+//     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
+//     [--backup-path <p> | --backup-opt-out] [--domains d1,d2]
+//   (declaration flags are required only when no recorded config exists)
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { parseConfig } from '@sterling/schemas';
 import { arg, argAll, fail } from './lib/project.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
-import { installAgents, findDeadTerms } from './lib/agent-distribution.mjs';
+import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const target = resolve(arg('--target') ?? process.cwd());
-const projectName = arg('--project-name') ?? 'project';
-const stackTags = (arg('--stack-tags') ?? '').split(',').filter(Boolean);
-const domains = (arg('--domains') ?? '').split(',').filter(Boolean);
-const backupPath = arg('--backup-path');
-const backupOptOut = process.argv.includes('--backup-opt-out');
+const projectNameFlag = arg('--project-name');
+const stackTagsFlag = (arg('--stack-tags') ?? '').split(',').filter(Boolean);
+const domainsFlag = (arg('--domains') ?? '').split(',').filter(Boolean);
+const backupPathFlag = arg('--backup-path');
+const backupOptOutFlag = process.argv.includes('--backup-opt-out');
 const declaredToolchains = argAll('--toolchain').map((spec) => {
   const [adapter, globs] = spec.split(':');
   return { adapter, path_globs: (globs ?? '').split(',').filter(Boolean) };
 });
 
-// ---- refusals first: nothing is written until everything validates ----
+const fwd = (p) => p.replace(/\\/g, '/');
+const normalize = (s) => s.replace(/\r\n/g, '\n');
+// canonical compare: key order must not decide "hand-edited"
+const canonical = (v) =>
+  JSON.stringify(v, (_, val) =>
+    val && typeof val === 'object' && !Array.isArray(val)
+      ? Object.fromEntries(Object.keys(val).sort().map((k) => [k, val[k]]))
+      : val
+  );
+
+// ---- verify pass: every refusal happens BEFORE any write ----
 if (!existsSync(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
-if (existsSync(join(target, '.sterling'))) fail(`init REFUSED: '${target}' is already initialized (.sterling exists)`, 2);
-if (existsSync(join(target, 'CLAUDE.md'))) {
-  fail(`init REFUSED: '${target}' already has a CLAUDE.md — merge the conductor contract manually, never clobber`, 2);
-}
-if (!backupPath && !backupOptOut) {
-  fail('init REFUSED: a backup path is required, or an EXPLICIT opt-out (--backup-opt-out) — the knowledge base must not live in exactly one gitignored file (§2.3)', 2);
-}
-if (!declaredToolchains.length) fail('init REFUSED: at least one --toolchain <adapter>:<globs> declaration is required (§9.1)', 2);
-if (!stackTags.length) fail('init REFUSED: --stack-tags is required (ask, don’t guess — §12 mini-grill)', 2);
 const mcpServerEntry = join(pluginRoot, 'packages', 'mcp-server', 'dist', 'main.js');
 if (!existsSync(mcpServerEntry)) fail('init REFUSED: MCP server not built — run `npm run build` in the plugin first', 2);
-
-const baked = await resolveToolchains(declaredToolchains); // throws loudly on unregistered adapters
-
-// ---- §12 manifest, in order ----
-const report = [];
-const fwd = (p) => p.replace(/\\/g, '/');
-
-// .sterling/ + runs/ + docs/briefs/
-mkdirSync(join(target, '.sterling', 'runs'), { recursive: true });
-mkdirSync(join(target, 'docs', 'briefs'), { recursive: true });
-report.push('created: .sterling/ (+runs/), docs/briefs/');
-
-// default config + declarations baked
-const config = parseConfig({
-  ...JSON.parse(readFileSync(join(pluginRoot, 'templates', 'default-config.json'), 'utf8')),
-  toolchains: baked,
-  stack_tags: stackTags,
-  domains,
-  // stored ABSOLUTE: disposal must hit the same place regardless of caller cwd
-  ...(backupPath ? { backup_path: fwd(resolve(target, backupPath)) } : { backup_opt_out: true }),
-});
-writeFileSync(join(target, '.sterling', 'config.json'), JSON.stringify(config, null, 2));
-report.push(`config: ${baked.map((t) => t.adapter).join(', ')} toolchain(s), stack tags [${stackTags.join(', ')}], backup ${backupPath ? fwd(backupPath) : 'OPTED OUT (recorded; snapshots will skip loudly)'}`);
-for (const tc of baked) {
-  for (const [cap, present] of Object.entries(tc.capabilities ?? {})) {
-    if (!present) report.push(`warn: ${tc.adapter}: no ${cap} capability — ${cap} checks will skip loudly (§9.1)`);
+for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claude', '.claude/agents']) {
+  const p = join(target, rel);
+  if (existsSync(p) && !statSync(p).isDirectory()) {
+    fail(`init REFUSED (destructive): '${rel}' exists as a file but the manifest requires a directory — refusing to replace it`, 2);
   }
 }
 
-// store (substrate per the Slice 2 selection; DDL on first open)
-const { SterlingStore } = await import('@sterling/store');
-new SterlingStore(join(target, '.sterling', 'sterling.db')).close();
-report.push('store: .sterling/sterling.db (WAL, FTS5)');
+// recorded config = the declaration source on re-runs (§12 ensure-manifest)
+const configPath = join(target, '.sterling', 'config.json');
+let recorded;
+if (existsSync(configPath)) {
+  try {
+    recorded = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+  } catch (e) {
+    fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate — cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
+  }
+}
+if (!recorded) {
+  if (!backupPathFlag && !backupOptOutFlag) {
+    fail('init REFUSED: a backup path is required, or an EXPLICIT opt-out (--backup-opt-out) — the knowledge base must not live in exactly one gitignored file (§2.3)', 2);
+  }
+  if (!declaredToolchains.length) fail('init REFUSED: at least one --toolchain <adapter>:<globs> declaration is required (§9.1)', 2);
+  if (!stackTagsFlag.length) fail('init REFUSED: --stack-tags is required (ask, don’t guess — §12 mini-grill)', 2);
+}
 
-// CLAUDE.md from the shipped template — specified content, never improvised
-const claudeMd = readFileSync(join(pluginRoot, 'templates', 'target-claude-md.md'), 'utf8')
-  .replaceAll('{{PROJECT_NAME}}', projectName)
-  .replaceAll('{{STACK_TAGS}}', stackTags.join(', '))
+// effective declarations: recorded config wins; flags only seed a fresh config
+const baked = recorded ? recorded.toolchains : await resolveToolchains(declaredToolchains); // throws loudly on unregistered adapters
+const eff = recorded
+  ? {
+      stackTags: recorded.stack_tags,
+      domains: recorded.domains,
+      backupPath: recorded.backup_path, // stored absolute
+      backupOptOut: recorded.backup_opt_out,
+      projectName: recorded.project_name ?? projectNameFlag ?? 'project',
+      splitRatio: recorded.tui_split_ratio,
+    }
+  : {
+      stackTags: stackTagsFlag,
+      domains: domainsFlag,
+      // stored ABSOLUTE: disposal must hit the same place regardless of caller cwd
+      backupPath: backupPathFlag ? fwd(resolve(target, backupPathFlag)) : undefined,
+      backupOptOut: backupOptOutFlag,
+      projectName: projectNameFlag ?? 'project',
+      splitRatio: undefined, // default from schema below
+    };
+
+const expectedConfig = parseConfig({
+  ...JSON.parse(readFileSync(join(pluginRoot, 'templates', 'default-config.json'), 'utf8')),
+  toolchains: baked,
+  stack_tags: eff.stackTags,
+  domains: eff.domains,
+  // mirror the recorded name on re-runs so a pre-project_name config can still match
+  ...((recorded ? recorded.project_name : eff.projectName) !== undefined
+    ? { project_name: recorded ? recorded.project_name : eff.projectName }
+    : {}),
+  ...(eff.backupPath ? { backup_path: eff.backupPath } : { backup_opt_out: eff.backupOptOut }),
+});
+if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_ratio;
+
+// flags passed on a re-run that contradict the recorded config are reported,
+// never silently applied — the config may be tuned; editing it is the owner's act
+const notes = [];
+if (recorded) {
+  const flagDiffs = [];
+  if (stackTagsFlag.length && canonical(stackTagsFlag) !== canonical(recorded.stack_tags)) flagDiffs.push('--stack-tags');
+  if (domainsFlag.length && canonical(domainsFlag) !== canonical(recorded.domains)) flagDiffs.push('--domains');
+  if (declaredToolchains.length && canonical(declaredToolchains) !== canonical(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push('--toolchain');
+  if (backupPathFlag && fwd(resolve(target, backupPathFlag)) !== recorded.backup_path) flagDiffs.push('--backup-path');
+  if (backupOptOutFlag && !recorded.backup_opt_out) flagDiffs.push('--backup-opt-out');
+  if (projectNameFlag && recorded.project_name && projectNameFlag !== recorded.project_name) flagDiffs.push('--project-name');
+  if (flagDiffs.length) {
+    notes.push(`note: ${flagDiffs.join(', ')} differ(s) from the recorded config — NOT applied; edit .sterling/config.json directly if the change is intended`);
+  }
+}
+
+// ---- §12 manifest, in order: per-item verify → create absent → skip matching → leave-and-report ----
+const items = []; // { item, status: created|matches|differs|exists|refused|refreshed, detail }
+const warns = [];
+
+// directories: a present directory is simply `exists` (a dir cannot be hand-edited)
+for (const [label, leaf] of [['.sterling/ (+runs/)', '.sterling/runs'], ['docs/briefs/', 'docs/briefs']]) {
+  const existed = existsSync(join(target, leaf));
+  mkdirSync(join(target, leaf), { recursive: true });
+  items.push({ item: label, status: existed ? 'exists' : 'created', detail: '' });
+}
+
+// config: created from declarations | matches defaults+declarations | tuned/hand-edited → left
+const backupDetail = eff.backupPath ? eff.backupPath : 'OPTED OUT (recorded; snapshots will skip loudly)';
+if (!recorded) {
+  writeFileSync(configPath, JSON.stringify(expectedConfig, null, 2));
+  items.push({ item: '.sterling/config.json', status: 'created', detail: `${baked.map((t) => t.adapter).join(', ')} toolchain(s); stack tags [${eff.stackTags.join(', ')}]; backup ${backupDetail}` });
+  for (const tc of baked) {
+    for (const [cap, present] of Object.entries(tc.capabilities ?? {})) {
+      if (!present) warns.push(`warn: ${tc.adapter}: no ${cap} capability — ${cap} checks will skip loudly (§9.1)`);
+    }
+  }
+} else if (canonical(recorded) === canonical(expectedConfig)) {
+  items.push({ item: '.sterling/config.json', status: 'matches', detail: 'defaults + recorded declarations' });
+} else {
+  items.push({ item: '.sterling/config.json', status: 'differs', detail: 'left untouched (tuned or hand-edited) — declarations were read from it' });
+}
+
+// store: data, never recreated or compared — present means leave it alone
+const dbPath = join(target, '.sterling', 'sterling.db');
+if (existsSync(dbPath)) {
+  items.push({ item: '.sterling/sterling.db', status: 'exists', detail: 'data store — left as-is, never recreated' });
+} else {
+  const { SterlingStore } = await import('@sterling/store');
+  new SterlingStore(dbPath).close();
+  items.push({ item: '.sterling/sterling.db', status: 'created', detail: 'WAL, FTS5' });
+}
+
+// CLAUDE.md from the shipped template — specified content, never improvised,
+// NEVER clobbered: a differing CLAUDE.md is the human's; merging is their act.
+const expectedClaudeMd = readFileSync(join(pluginRoot, 'templates', 'target-claude-md.md'), 'utf8')
+  .replaceAll('{{PROJECT_NAME}}', eff.projectName)
+  .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
   .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.join(', ')})`).join('; '))
-  .replaceAll('{{DOMAINS}}', domains.length ? domains.join(', ') : '(none mounted yet — created lazily on first need)')
-  .replaceAll('{{BACKUP_PATH}}', backupPath ? fwd(backupPath) : '(opted out — recorded)')
+  .replaceAll('{{DOMAINS}}', eff.domains.length ? eff.domains.join(', ') : '(none mounted yet — created lazily on first need)')
+  .replaceAll('{{BACKUP_PATH}}', eff.backupPath ? eff.backupPath : '(opted out — recorded)')
   .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)');
-writeFileSync(join(target, 'CLAUDE.md'), claudeMd);
-report.push('CLAUDE.md: generated from templates/target-claude-md.md');
+const claudeMdPath = join(target, 'CLAUDE.md');
+if (!existsSync(claudeMdPath)) {
+  writeFileSync(claudeMdPath, expectedClaudeMd);
+  items.push({ item: 'CLAUDE.md', status: 'created', detail: 'from templates/target-claude-md.md' });
+} else if (normalize(readFileSync(claudeMdPath, 'utf8')) === normalize(expectedClaudeMd)) {
+  items.push({ item: 'CLAUDE.md', status: 'matches', detail: 'generated content, unmodified' });
+} else {
+  items.push({ item: 'CLAUDE.md', status: 'differs', detail: 'left untouched — merge the conductor contract by hand (template: templates/target-claude-md.md)' });
+}
 
 // split launcher from the template, machine-detected paths, gitignored (§11)
 const where = (exe) => {
@@ -92,18 +191,26 @@ const where = (exe) => {
 };
 const claudePath = process.env.CLAUDE_CODE_EXECPATH ?? where('claude') ?? join(process.env.USERPROFILE ?? '~', '.local', 'bin', 'claude.exe');
 const wtPath = where('wt') ?? join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WindowsApps', 'wt.exe');
-const launcher = readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
+const expectedLauncher = readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
   .replaceAll('{{WT}}', `"${wtPath}"`)
   .replaceAll('{{CLAUDE}}', `"${claudePath}" --plugin-dir "${fwd(pluginRoot)}"`)
   .replaceAll('{{NODE}}', `"${process.execPath}"`)
   .replaceAll('{{TUI_BUNDLE}}', join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'))
-  .replaceAll('{{SPLIT_RATIO}}', String(config.tui_split_ratio));
-writeFileSync(join(target, 'sterling.bat'), launcher);
-report.push(`launcher: sterling.bat (claude: ${claudePath})`);
+  .replaceAll('{{SPLIT_RATIO}}', String(eff.splitRatio));
+const launcherPath = join(target, 'sterling.bat');
+if (!existsSync(launcherPath)) {
+  writeFileSync(launcherPath, expectedLauncher);
+  items.push({ item: 'sterling.bat', status: 'created', detail: `claude: ${claudePath}` });
+} else if (normalize(readFileSync(launcherPath, 'utf8')) === normalize(expectedLauncher)) {
+  items.push({ item: 'sterling.bat', status: 'matches', detail: 'machine-detected paths unchanged' });
+} else {
+  items.push({ item: 'sterling.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+}
 
-// agent installation with version/hash headers (§2.2) + restart gate
+// agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
+// up_to_date | locally-modified left | refuse-on-local-modification
 const vars = { NODE: `"${fwd(process.execPath)}"`, HOOKS_DIR: fwd(join(pluginRoot, 'hooks')) };
-const { report: agentReport, restartInstruction } = installAgents({
+const { report: agentReport } = syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(target, '.claude', 'agents'),
@@ -111,42 +218,97 @@ const { report: agentReport, restartInstruction } = installAgents({
   now: new Date().toISOString(),
   vars,
 });
-report.push(`agents: ${agentReport.length} installed into .claude/agents/`);
+const agentInstructions = [];
+for (const a of agentReport) {
+  const map = {
+    installed: { status: 'created', detail: 'installed with version/hash header' },
+    refreshed: { status: 'refreshed', detail: 'clean install, newer template — regenerated' },
+    up_to_date: { status: 'matches', detail: 'template hash + content hash match' },
+    locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },
+    refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },
+    foreign_file: { status: 'refused', detail: 'not Sterling-generated — never overwritten (see guidance below)' },
+  }[a.status];
+  items.push({ item: `.claude/agents/${a.name}.md`, status: map.status, detail: map.detail });
+  if (a.instruction) agentInstructions.push(a.instruction);
+}
+const restartNeeded = agentReport.some((a) => a.status === 'installed' || a.status === 'refreshed');
 
-// .mcp.json wiring
-writeFileSync(
-  join(target, '.mcp.json'),
-  JSON.stringify(
-    { mcpServers: { sterling: { command: process.execPath, args: [fwd(mcpServerEntry), '--store', fwd(join(target, '.sterling', 'sterling.db'))] } } },
-    null,
-    2
-  )
-);
-report.push('.mcp.json: sterling MCP server wired');
+// .mcp.json: the manifest item is the `sterling` server ENTRY — merge-in
+// preserves whatever else lives in the file
+const mcpPath = join(target, '.mcp.json');
+const expectedMcpEntry = {
+  command: process.execPath,
+  args: [fwd(mcpServerEntry), '--store', fwd(join(target, '.sterling', 'sterling.db'))],
+};
+if (!existsSync(mcpPath)) {
+  writeFileSync(mcpPath, JSON.stringify({ mcpServers: { sterling: expectedMcpEntry } }, null, 2));
+  items.push({ item: '.mcp.json', status: 'created', detail: 'sterling MCP server wired' });
+} else {
+  let mcp;
+  try {
+    mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    if (mcp === null || typeof mcp !== 'object' || Array.isArray(mcp)) throw new Error('not an object');
+  } catch {
+    mcp = undefined;
+    items.push({ item: '.mcp.json', status: 'differs', detail: 'exists but is not a parseable object — cannot verify, left untouched; add the sterling server entry by hand' });
+  }
+  if (mcp) {
+    const entry = mcp.mcpServers?.sterling;
+    if (!entry) {
+      mcp.mcpServers = { ...(mcp.mcpServers ?? {}), sterling: expectedMcpEntry };
+      writeFileSync(mcpPath, JSON.stringify(mcp, null, 2));
+      items.push({ item: '.mcp.json', status: 'created', detail: 'sterling entry merged into existing .mcp.json (other servers preserved)' });
+    } else if (canonical(entry) === canonical(expectedMcpEntry)) {
+      items.push({ item: '.mcp.json', status: 'matches', detail: 'sterling entry as generated' });
+    } else {
+      items.push({ item: '.mcp.json', status: 'differs', detail: 'sterling entry differs from generated — left untouched' });
+    }
+  }
+}
 
 // hook registrations: the project-level §6 set ships in the PLUGIN's
 // hooks.json and activates with the plugin — init does not duplicate it.
-report.push('hooks: project-level set active via the plugin (hooks/hooks.json) — not duplicated');
+items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the plugin (hooks/hooks.json) — not duplicated into the project' });
 
-// gitignore entries (§2.3/§11/§12): store, launcher, per-machine agents, in-repo backup path
+// gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');
-const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
+const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
 const entries = ['.sterling/', 'sterling.bat', '.claude/agents/'];
-if (backupPath) {
-  const abs = fwd(resolve(target, backupPath));
+if (eff.backupPath) {
   const root = fwd(target);
-  if (abs === root || abs.startsWith(root + '/')) entries.push(abs === root ? '/' : abs.slice(root.length + 1) + '/');
+  if (eff.backupPath === root || eff.backupPath.startsWith(root + '/')) {
+    entries.push(eff.backupPath === root ? '/' : eff.backupPath.slice(root.length + 1) + '/');
+  }
 }
-const missing = entries.filter((e) => !existing.split(/\r?\n/).includes(e));
-if (missing.length) appendFileSync(gitignorePath, (existing && !existing.endsWith('\n') ? '\n' : '') + missing.join('\n') + '\n');
-report.push(`gitignore: ${missing.join(', ') || '(all present)'}`);
+const missing = entries.filter((e) => !existingIgnore.split(/\r?\n/).includes(e));
+if (missing.length) {
+  appendFileSync(gitignorePath, (existingIgnore && !existingIgnore.endsWith('\n') ? '\n' : '') + missing.join('\n') + '\n');
+  items.push({ item: '.gitignore', status: 'created', detail: `appended: ${missing.join(', ')}` });
+} else {
+  items.push({ item: '.gitignore', status: 'matches', detail: 'all entries present' });
+}
 
-// dead-term check over the scaffolded content (§12)
-for (const [label, content] of [['CLAUDE.md', claudeMd], ['sterling.bat', launcher]]) {
+// dead-term check over the GENERATED content (§12) — rendered expected content
+// every run (catches template rot), never the human's own files
+for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling.bat', expectedLauncher]]) {
   const hits = findDeadTerms(content);
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(', ')}`, 1);
 }
-report.push('dead-term check: clean');
 
-for (const line of report) console.log(line);
-console.log('\n' + restartInstruction);
+// ---- the per-item report table ----
+const width = Math.max(...items.map((i) => i.item.length));
+const statusWidth = Math.max(...items.map((i) => i.status.length));
+console.log('item'.padEnd(width) + '  ' + 'status'.padEnd(statusWidth) + '  detail');
+for (const i of items) {
+  console.log(i.item.padEnd(width) + '  ' + i.status.padEnd(statusWidth) + '  ' + i.detail);
+}
+console.log('\ndead-term check: clean');
+for (const line of warns) console.log(line);
+for (const line of notes) console.log(line);
+for (const instruction of agentInstructions) console.log('\n' + instruction);
+
+if (restartNeeded) {
+  console.log('\n' + RESTART_INSTRUCTION);
+} else {
+  console.log('\nno agent changes — no restart required');
+}

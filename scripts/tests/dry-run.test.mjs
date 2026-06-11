@@ -76,8 +76,11 @@ test('§16.2 step 11 — end-to-end dry run: init → conductor-direct capture �
     for (const line of ['.sterling/', 'sterling.bat', '.claude/agents/', 'backups/']) {
       assert.ok(gitignore.includes(line), `gitignore has ${line} (in-repo backup path per §12)`);
     }
+    // re-run is an ensure pass (§12), not a refusal: everything matches, contradicting flags reported
     const rerun = sh('init.mjs', ['--target', dir, '--project-name', 'dry', '--stack-tags', 'node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'], dir);
-    assert.equal(rerun.code, 2, 'refuses re-init');
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(rerun.stdout, /^CLAUDE\.md\s+matches\b/m);
+    assert.match(rerun.stdout, /note: --toolchain, --project-name differ\(s\) from the recorded config — NOT applied/);
     git(dir, ['add', '-A']);
     git(dir, ['commit', '-m', 'sterling init']);
 
