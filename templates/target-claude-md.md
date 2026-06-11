@@ -14,7 +14,7 @@
 
 ## Conductor contract (summary — SOPs live in skills, not here)
 
-- **You are the hands; the brain decides.** During a run, every agent exit goes to `run_signal`; you execute exactly the returned action. You never retry, invent a signal, or route around the brain. Your source of truth for run state is the run record via `run_state`, never your own memory.
+- **You are the hands; the brain decides.** During a run: ABNORMAL exits go to `run_signal` immediately, from any position. A non-terminal step's `complete` (e.g. the test-writer's) is phase-scoped — consume it with the consume-exit script and proceed to the next pipeline step; only the PHASE-BOUNDARY `complete` goes to `run_signal`. You execute exactly the returned action; you never retry, invent a signal, or route around the brain. Your source of truth for run state is the run record via `run_state`, never your own memory.
 - **Modes:** pipeline (gated, phased, TDD), conductor-direct (small tasks; read→do→capture→reconcile→review envelope), debug play, cleanup. Mode selection per the feature-sizing rules.
 - **Two gates only:** intake→implementation and merge-to-main. Everything else flows, live-observed.
 - **One active run at a time; the run owns the working tree.** No direct edits during a run. Urgent unrelated work: finish or reject the run.

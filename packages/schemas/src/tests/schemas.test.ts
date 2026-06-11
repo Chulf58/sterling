@@ -158,6 +158,23 @@ test('brief: attribution sections and verifiable_at syntax (§4)', () => {
     () => briefSchema.parse({ ...brief, acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'phase1' }] }),
     /invalid/i
   );
+
+  // §7.1/§7.6 risk flags: closed set, frozen into data before the run
+  const flagged = briefSchema.parse({ ...brief, risk_flags: ['security_relevant'] });
+  assert.deepEqual(flagged.risk_flags, ['security_relevant']);
+  assert.throws(() => briefSchema.parse({ ...brief, risk_flags: ['urgent'] }), /invalid/i);
+
+  // §8.1 per-phase interface slice: names must exist in technical_design.interfaces
+  const withInterfaces = {
+    ...brief,
+    technical_design: { approach: 'a', interfaces: [{ name: 'exportBoard', contract: '(todos) -> csv' }], shared_structures: [] },
+    phases: [{ ...brief.phases[0], interfaces: ['exportBoard'] }],
+  };
+  briefSchema.parse(withInterfaces);
+  assert.throws(
+    () => briefSchema.parse({ ...withInterfaces, phases: [{ ...brief.phases[0], interfaces: ['ghostInterface'] }] }),
+    /undeclared interface 'ghostInterface'/
+  );
 });
 
 test('note schema and handoff/run-record transient shapes', () => {

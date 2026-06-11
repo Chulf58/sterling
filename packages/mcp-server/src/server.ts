@@ -131,7 +131,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'run_signal',
     {
       description:
-        'The brain: computes the reaction to the recorded exit and returns the next action. The conductor executes exactly the returned action.',
+        "The brain: computes the reaction to the recorded exit and returns the next action; the conductor executes exactly that. Routing (§5.2): abnormal exits come here immediately; normal 'complete' only at the PHASE BOUNDARY — intra-phase completes are consumed via scripts/consume-exit.mjs as the next §8.1 step, never signalled here.",
       inputSchema: {
         run_id: z.string().optional(),
         exit: z

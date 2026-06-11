@@ -246,6 +246,14 @@ export class SterlingTools {
    * conductor-reported one, e.g. agent-died{empty_output}) and the transition
    * is applied as a CAS on machine_state. The conductor executes exactly the
    * returned action.
+   *
+   * Exit routing (§5.2, run-proven r-0001): ABNORMAL exits arrive here
+   * immediately from any position. Normal `complete` is PHASE-SCOPED — a
+   * non-terminal step's complete (e.g. the test-writer's) is consumed by the
+   * conductor as the next §8.1 step (scripts/consume-exit.mjs: recorded on
+   * the run record via same-state CAS, clearing the pending-exit slot, audit
+   * trail intact); run_signal receives `complete` only at the phase boundary,
+   * where the brain advances the phase or starts the completion sequence.
    */
   runSignal(args: { run_id?: string; exit?: ResolvedExit } = {}): { action: BrainAction; machine_state: string; run_id: string } {
     const run = this.runState(args.run_id);

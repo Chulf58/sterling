@@ -18,12 +18,17 @@ gates. Everything is staged; do not fold this run into a step report.
 - Plugin hooks live via `--plugin-dir` (verified: H10's capture nag fired in
   a probe session — see step-10.5 commit for the bundle bug it surfaced).
 
-## How to run it (morning, interactive)
+## How to run it (interactive)
 
 ```
 cd C:\Users\cuj\sterling-milestone
-claude --plugin-dir C:\Users\cuj\Sterling
+.\sterling-claude.cmd
 ```
+
+(The wrapper exists because launching plain `claude` here loses the plugin:
+`/sterling:*` then fails with "Unknown command" — reproduced and verified
+2026-06-11 on CLI 2.1.173. Accept the folder-trust dialog on first
+interactive launch.)
 
 Then `/sterling:feature <a small real feature>` and drive:
 intake → grill-intent → planning → grill-plan → ★ GATE (human) →

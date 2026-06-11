@@ -177,6 +177,9 @@ export const briefSchema = base
       interfaces: z.array(z.object({ name: z.string(), contract: z.string() })),
       shared_structures: z.array(z.string()),
     }),
+    // §7.1/§7.6: proposed at planning, human-confirmed at the gate, frozen into
+    // data before the run — reviewer-selection's first signal source.
+    risk_flags: z.array(z.enum(['security_relevant', 'perf_sensitive'])).optional(),
     blast_radius: z.object({
       files: z.array(z.object({ path: repoPath, owning_articles: z.array(z.string().uuid()) })),
       reconcile_list: z.array(z.string().uuid()),
@@ -196,11 +199,30 @@ export const briefSchema = base
         // (raised as a spec gap); prep falls back to blast_radius files.
         files: z.array(repoPath).optional(),
         rank_terms: z.array(z.string().regex(/^\S{1,64}$/)).optional(),
+        // §8.1: the phase's interface slice (names into technical_design.
+        // interfaces) — the test-writer's REQUIRED input; a phase without
+        // declared interfaces gives it nothing to write against (spawn check).
+        interfaces: z.array(z.string().min(1)).optional(),
       })
     ),
     decisions_made: z.array(z.string().uuid()),
   })
-  .superRefine(refineSupersession);
+  .superRefine((rec, ctx) => {
+    refineSupersession(rec, ctx);
+    // a phase's interface slice must reference declared design interfaces —
+    // a dangling name would hand the test-writer a contract that doesn't exist
+    const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
+    for (const phase of rec.phases) {
+      for (const name of phase.interfaces ?? []) {
+        if (!declared.has(name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `phase '${phase.phase_id}' references undeclared interface '${name}' (§8.1 interface slice must come from technical_design.interfaces)`,
+          });
+        }
+      }
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Record-type registry (invariant 3, spec §15): the single source of truth for

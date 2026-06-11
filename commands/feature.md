@@ -8,4 +8,4 @@ Run the pipeline front half in order: intake conversation on the user's request,
 node "${CLAUDE_PLUGIN_ROOT}/scripts/prep.mjs" --run <id> --phase <id>
 ```
 
-From there the brain governs: every agent exit → `run_signal` → execute exactly the returned action.
+From there the brain governs (§5.2 routing): abnormal exits → `run_signal` immediately; a non-terminal step's `complete` → consume and proceed (`node "${CLAUDE_PLUGIN_ROOT}/scripts/consume-exit.mjs" --run <id> --step <label>`); the phase-boundary `complete` → `run_signal` → execute exactly the returned action.
