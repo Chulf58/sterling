@@ -7,8 +7,8 @@ export function verifyPromotionConditions({ store, config, run }) {
   const refusals = [];
   const refuse = (condition, detail) => refusals.push(`${condition}: ${detail}`);
 
-  if (!config.backup_path) {
-    refuse('backup_path_missing', 'no backup_path in .sterling/config.json — snapshots are a promotion condition (§2.3)');
+  if (!config.backup_path && !config.backup_opt_out) {
+    refuse('backup_path_missing', 'no backup_path and no recorded opt-out in .sterling/config.json — snapshots are a promotion condition (§2.3)');
   }
   if (run.machine_state !== 'completing') {
     refuse('wrong_state', `run '${run.id}' is '${run.machine_state}', not 'completing' — disposal runs only inside the completion sequence (H9)`);

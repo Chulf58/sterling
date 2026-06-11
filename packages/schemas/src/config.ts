@@ -25,6 +25,14 @@ export const configSchema = z.object({
     )
     .default([]),
   backup_path: z.string().optional(),
+  // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
+  // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
+  backup_opt_out: z.boolean().default(false),
+  // §3.3: declared at init — the mount manifest for domain stores
+  stack_tags: z.array(z.string()).default([]),
+  domains: z.array(z.string()).default([]),
+  // §11 launcher split ratio
+  tui_split_ratio: z.number().positive().max(1).default(0.35),
   prep_cap: z.number().int().positive().default(20),
   // §5.1: caps that convert loops into signals
   caps: z
