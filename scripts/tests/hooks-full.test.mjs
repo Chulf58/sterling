@@ -338,6 +338,101 @@ test('H10: capture nag once with reviewer selection, then capture_owed and relea
   }
 });
 
+function touchRegister(dir, paths) {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify(paths.map((path) => ({ path, at: NOW }))));
+}
+
+function captureNote(store) {
+  store.create({ ...envelope('note', '2026-06-10T13:00:00.000Z'), raw_text: 'learned things', captured_at: NOW, capture_source: 'conductor', derived: [] });
+}
+
+test('H10 article demand (§6): capture alone does not satisfy unowned territory at threshold; article_missing survives the session', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    touchRegister(dir, ['src/x.mjs', 'src/y.mjs', 'src/z.mjs']);
+    captureNote(store);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'capture alone does not satisfy the article demand');
+    assert.match(nag.stderr, /article demand/);
+    assert.match(nag.stderr, /no owning feature_article/);
+    assert.doesNotMatch(nag.stderr, /nothing was captured/, 'the capture duty itself is satisfied');
+
+    const release = stop();
+    assert.equal(release.code, 0, 'second stop releases the session (P1)');
+    const missing = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing');
+    assert.equal(missing.length, 1, 'the owed article survives as a durable item');
+    assert.deepEqual([...missing[0].file_keys].sort(), ['src/x.mjs', 'src/y.mjs', 'src/z.mjs']);
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), false, 'register cleared (P4)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 article demand: creating the owning article clears the demand mechanically; under-threshold stays note-level', () => {
+  const owned = makeProject();
+  try {
+    touchRegister(owned.dir, ['src/x.mjs', 'src/y.mjs', 'src/z.mjs']);
+    captureNote(owned.store);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(owned.dir, { hook_event_name: 'Stop' }), owned.dir);
+    assert.equal(stop().code, 2, 'demand raised');
+    article(owned.store, 'feat-x', ['src/x.mjs', 'src/y.mjs', 'src/z.mjs']);
+    assert.equal(stop().code, 0, 'ownership satisfies the demand');
+    assert.equal(owned.store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing').length, 0, 'no item once owned');
+  } finally {
+    owned.cleanup();
+  }
+  const small = makeProject();
+  try {
+    touchRegister(small.dir, ['src/x.mjs', 'src/y.mjs']);
+    captureNote(small.store);
+    const r = runHook('h10-direct-capture.mjs', hookInput(small.dir, { hook_event_name: 'Stop' }), small.dir);
+    assert.equal(r.code, 0, 'two unowned files are under the default threshold of 3');
+    assert.equal(small.store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing').length, 0);
+  } finally {
+    small.cleanup();
+  }
+});
+
+test('H10 article demand: an open article_missing item with overlapping file keys is not duplicated', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    touchRegister(dir, ['src/x.mjs', 'src/y.mjs', 'src/z.mjs']);
+    captureNote(store);
+    store.create({
+      ...envelope('todo'),
+      text: 'article missing: earlier session',
+      source: 'system',
+      system_reason: 'article_missing',
+      file_keys: ['src/x.mjs'],
+      author: 'system',
+    });
+    // a non-overlapping article_missing item (other territory) must NOT suppress —
+    // pins overlap-scoped dedup against a reason-wide-dedup mutant
+    store.create({
+      ...envelope('todo'),
+      text: 'article missing: unrelated territory',
+      source: 'system',
+      system_reason: 'article_missing',
+      file_keys: ['lib/unrelated.mjs'],
+      author: 'system',
+    });
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(stop().code, 2);
+    assert.equal(stop().code, 0);
+    const items = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing');
+    assert.equal(items.length, 2, 'overlapping item dedupes; non-overlapping item does not suppress');
+    assert.ok(
+      items.every((t) => !t.text.includes('direct-mode work touched')),
+      'no NEW item was enqueued — the overlapping seed suppressed it'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- H11 ---------------------------
 
 test('H11: extraction lands as derived_unconfirmed citing the note; failure degrades loudly', () => {

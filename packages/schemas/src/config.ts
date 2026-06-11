@@ -93,6 +93,13 @@ export const configSchema = z.object({
       thin_knowledge_retrieval_threshold: z.number().int().nonnegative().default(2),
     })
     .default({}),
+  // §6 H10 article demand: direct-mode touches in unowned territory at this
+  // threshold (or any new unowned file vs git HEAD) demand the owning article
+  article_demand: z
+    .object({
+      min_unowned_files: z.number().int().positive().default(3),
+    })
+    .default({}),
   // §3.4 stale-at-read thresholds (days)
   staleness: z
     .object({

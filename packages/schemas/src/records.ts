@@ -138,6 +138,7 @@ export const SYSTEM_REASONS = [
   'promotion_review',
   'wire_in_dormant',
   'refresh_reference', // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
+  'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
 ] as const;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:
