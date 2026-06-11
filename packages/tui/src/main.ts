@@ -31,8 +31,12 @@ if (smoke) {
 const store = new SterlingStore(args[storeIdx + 1]);
 let ui: UiState = initialUi;
 
+// One ScreenBuffer for the process lifetime: draw({delta:true}) diffs each
+// frame against the previous one and writes only the changed cells.
+let screen = new termkit.default.ScreenBuffer({ dst: term });
+
 function redraw(): void {
-  draw(term as never, buildDashboardState(store, ui));
+  draw(screen, buildDashboardState(store, ui));
 }
 
 function handle(event: ReturnType<typeof keyToEvent>): void {
@@ -41,6 +45,7 @@ function handle(event: ReturnType<typeof keyToEvent>): void {
   ui = result.ui;
   if (runEffects(store, result.effects)) {
     term.grabInput(false);
+    term.hideCursor(false);
     term.fullscreen(false); // leave the alternate screen buffer, restoring the shell
     store.close();
     process.exit(0);
@@ -49,10 +54,17 @@ function handle(event: ReturnType<typeof keyToEvent>): void {
 }
 
 // Alternate screen buffer (§11 dashboard): no scrollback, so the 1 Hz redraw
-// can never grow the scrollbar or push the view down.
+// can never grow the scrollbar or push the view down. The cursor stays hidden
+// while the dashboard runs — a visible cursor hopping between cells flickers.
 term.fullscreen(true);
+term.hideCursor();
 term.grabInput({ mouse: 'button' });
 term.on('key', (name: string) => handle(keyToEvent(name)));
 term.on('mouse', (name: string, data: { x: number; y: number }) => handle(mouseToEvent(name, data)));
+term.on('resize', () => {
+  // fresh buffer at the new size; its empty delta state forces a full repaint
+  screen = new termkit.default.ScreenBuffer({ dst: term });
+  redraw();
+});
 setInterval(redraw, 1000); // live view over the durable store
 redraw();

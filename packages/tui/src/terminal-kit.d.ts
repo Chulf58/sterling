@@ -4,18 +4,26 @@ declare module 'terminal-kit' {
     width: number;
     height: number;
     fullscreen(on: boolean): void;
-    moveTo(x: number, y: number): Terminal;
-    (s: string): Terminal;
-    inverse(s: string): Terminal;
-    bold(s: string): Terminal;
-    dim(s: string): Terminal;
-    yellow(s: string): Terminal;
-    eraseLineAfter(): Terminal;
-    eraseDisplayBelow(): Terminal;
+    hideCursor(hide?: boolean): void;
     grabInput(options: { mouse?: string } | false): void;
     on(event: 'key', cb: (name: string) => void): void;
     on(event: 'mouse', cb: (name: string, data: { x: number; y: number }) => void): void;
+    on(event: 'resize', cb: (width: number, height: number) => void): void;
   }
-  const termkit: { terminal: Terminal };
+  interface ScreenBufferAttr {
+    bold?: boolean;
+    dim?: boolean;
+    inverse?: boolean;
+    color?: string;
+  }
+  class ScreenBuffer {
+    constructor(options: { dst: Terminal; width?: number; height?: number });
+    width: number;
+    height: number;
+    fill(options: { attr: ScreenBufferAttr }): void;
+    put(options: { x: number; y: number; attr: ScreenBufferAttr }, str: string): void;
+    draw(options: { delta: boolean }): void;
+  }
+  const termkit: { terminal: Terminal; ScreenBuffer: typeof ScreenBuffer };
   export default termkit;
 }

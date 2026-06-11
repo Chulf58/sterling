@@ -3,73 +3,67 @@
 // state layer's UiEvent vocabulary and fed to reduce().
 import type { DashboardState, UiEvent } from './state.js';
 
-// minimal structural type for the slice of terminal-kit we use
-export interface TermLike {
+// minimal structural types for the slice of terminal-kit we use
+export interface AttrLike {
+  bold?: boolean;
+  dim?: boolean;
+  inverse?: boolean;
+  color?: string;
+}
+export interface ScreenLike {
   width: number;
   height: number;
-  moveTo(x: number, y: number): TermLike;
-  (s: string): TermLike;
-  inverse(s: string): TermLike;
-  bold(s: string): TermLike;
-  dim(s: string): TermLike;
-  yellow(s: string): TermLike;
-  eraseLineAfter(): TermLike;
-  eraseDisplayBelow(): TermLike;
+  fill(options: { attr: AttrLike }): void;
+  put(options: { x: number; y: number; attr: AttrLike }, str: string): void;
+  draw(options: { delta: boolean }): void;
 }
 
-export function draw(term: TermLike, state: DashboardState): void {
-  // No full-screen clear: ESC[2J scrolls the viewport into scrollback on
-  // Windows Terminal and blanks the frame mid-redraw (flicker). Instead each
-  // line is overwritten in place + eraseLineAfter, and the remainder of the
-  // screen is erased once at the end. Text is clipped to the pane width — a
-  // wrapped line on the bottom row would force a real scroll.
-  const fit = (s: string, used = 0): string => s.slice(0, Math.max(0, term.width - used));
-  const lastBodyLine = term.height - 2; // reserve the blank line + footer
-  term.moveTo(1, 1);
+export function draw(screen: ScreenLike, state: DashboardState): void {
+  // The frame is composed off-screen into a ScreenBuffer and delta-drawn:
+  // only cells that changed since the previous frame reach the terminal, so
+  // an unchanged dashboard writes nothing — no flicker. put() coordinates
+  // are 0-based and clip at the buffer edge (no wrap), so a long line can
+  // never push the pane into a real scroll.
+  screen.fill({ attr: {} });
   let x = 0;
   for (const tab of state.tabs) {
     const label = ` ${tab.label} `; // x extents must stay in sync with the click mapping in state.ts
-    const clipped = fit(label, x);
-    if (tab.active) term.inverse(clipped);
-    else term(clipped);
+    screen.put({ x, y: 0, attr: tab.active ? { inverse: true } : {} }, label);
     x += label.length;
   }
-  term.eraseLineAfter();
-  let line = state.bodyTop + 1; // 1-based terminal lines
-  if (state.emptyMessage && line <= lastBodyLine) {
-    term.moveTo(1, line).dim(fit(state.emptyMessage)).eraseLineAfter();
-    line += 1;
+  const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
+  let y = state.bodyTop; // 0-based rows: tab bar 0, blank 1, body from bodyTop
+  if (state.emptyMessage && y <= lastBodyLine) {
+    screen.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
+    y += 1;
   }
   for (const row of state.rows) {
-    if (line > lastBodyLine) break;
-    term.moveTo(1, line);
+    if (y > lastBodyLine) break;
     const text = `${row.selected ? '› ' : '  '}${row.text}`;
-    if (row.selected) term.inverse(fit(text));
-    else term(fit(text));
-    term.eraseLineAfter();
-    line += 1;
-    if (row.detail && line <= lastBodyLine) {
-      term.moveTo(1, line).dim(fit(`    ${row.detail}`)).eraseLineAfter();
-      line += 1;
+    screen.put({ x: 0, y, attr: row.selected ? { inverse: true } : {} }, text);
+    y += 1;
+    if (row.detail && y <= lastBodyLine) {
+      screen.put({ x: 0, y, attr: { dim: true } }, `    ${row.detail}`);
+      y += 1;
     }
   }
-  if (state.run && line <= lastBodyLine) {
-    term.moveTo(1, line);
+  if (state.run && y <= lastBodyLine) {
     const head = `run ${state.run.id} — `;
-    term(fit(head)).bold(fit(state.run.machine_state, head.length));
-    term(fit(` · ${state.run.phaseLabel}`, head.length + state.run.machine_state.length)).eraseLineAfter();
-    line += 1;
-    if (line <= lastBodyLine) {
-      term.moveTo(1, line)(fit(`last signal: ${state.run.lastSignal} · context warns: ${state.run.warnFlags}`)).eraseLineAfter();
-      line += 1;
+    screen.put({ x: 0, y, attr: {} }, head);
+    screen.put({ x: head.length, y, attr: { bold: true } }, state.run.machine_state);
+    screen.put({ x: head.length + state.run.machine_state.length, y, attr: {} }, ` · ${state.run.phaseLabel}`);
+    y += 1;
+    if (y <= lastBodyLine) {
+      screen.put({ x: 0, y, attr: {} }, `last signal: ${state.run.lastSignal} · context warns: ${state.run.warnFlags}`);
+      y += 1;
     }
-    if (state.run.pendingJudgment && line <= lastBodyLine) {
-      term.moveTo(1, line).yellow(fit(`pending judgment: ${state.run.pendingJudgment}`)).eraseLineAfter();
-      line += 1;
+    if (state.run.pendingJudgment && y <= lastBodyLine) {
+      screen.put({ x: 0, y, attr: { color: 'yellow' } }, `pending judgment: ${state.run.pendingJudgment}`);
+      y += 1;
     }
   }
-  term.moveTo(1, line).eraseDisplayBelow();
-  term.moveTo(1, Math.min(line + 1, term.height)).dim(fit(state.footer));
+  screen.put({ x: 0, y: Math.min(y + 1, screen.height - 1), attr: { dim: true } }, state.footer);
+  screen.draw({ delta: true });
 }
 
 /** Translate terminal-kit key names to state-layer events. */
