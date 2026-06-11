@@ -14,11 +14,6 @@
   "dependencies": {
     "@sterling/schemas": "0.1.0",
     "@sterling/store": "0.1.0",
-    "ink": "^7.0.5",
-    "react": "^19.2.0"
-  },
-  "devDependencies": {
-    "@types/react": "^19.2.0",
-    "ink-testing-library": "^4.0.0"
+    "terminal-kit": "^3.1.2"
   }
 }

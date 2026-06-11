@@ -157,6 +157,74 @@ test('test-integrity [direct]: vs git HEAD — modified/deleted test files flagg
   }
 });
 
+test('subtask-evidence (§17 structure-first): uncited subtask, missing citation target, failing cited test all block', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-cite-'));
+  let store;
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] }));
+    store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const brief = store.create({
+      id: randomUUID(), type: 'brief', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      slug: 'f', title: 'F', problem: 'p', feature: 'f',
+      user_stated: { criteria: [], constraints: [] }, conductor_proposals: [],
+      acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+      blast_radius: { files: [{ path: 'src/a.mjs', owning_articles: [] }, { path: 'tests/a.test.mjs', owning_articles: [] }], reconcile_list: [] },
+      incidental_scope: [], out_of_scope: [],
+      phases: [{ phase_id: 'p1', goal: 'g', subtasks: ['build a', 'wire a'], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+      decisions_made: [],
+    });
+    store.createRun({ id: 'r-c', brief_ref: brief.id, branch: 'b', machine_state: 'running', phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW });
+    let handoffSeq = 0;
+    const handoff = (evidence) =>
+      store.writeHandoff(
+        'r-c',
+        { phase_id: 'p1', agent_role: 'coder', what_changed: [{ path: 'src/a.mjs', change_role: 'built' }], wired: [], deferred: [], decisions_made: [], tests_produced: ['tests/a.test.mjs'], subtask_evidence: evidence, exit_signal: 'complete', unresolved: [] },
+        `2026-06-10T12:00:0${handoffSeq++}.000Z` // later handoffs supersede earlier citations
+      );
+
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'export const a = 1;');
+    writeFileSync(join(dir, 'tests', 'a.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert'; test('a', () => assert.equal(1, 1));");
+    const comp = () => spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-c', '--phase', 'p1', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 120_000 });
+
+    // only one of two subtasks cited
+    handoff([{ subtask: 'build a', files: ['src/a.mjs'], tests: ['tests/a.test.mjs'] }]);
+    let r = comp();
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /no citation for subtask 'wire a'/);
+
+    // both cited, but one citation points at a missing file
+    handoff([
+      { subtask: 'build a', files: ['src/a.mjs'], tests: ['tests/a.test.mjs'] },
+      { subtask: 'wire a', files: ['src/ghost.mjs'], tests: [] },
+    ]);
+    r = comp();
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /'wire a' cites 'src\/ghost.mjs' which does not exist/);
+
+    // fully cited and existing, but the cited test fails
+    writeFileSync(join(dir, 'tests', 'a.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert'; test('a', () => assert.equal(1, 2));");
+    handoff([
+      { subtask: 'build a', files: ['src/a.mjs'], tests: ['tests/a.test.mjs'] },
+      { subtask: 'wire a', files: ['src/a.mjs'], tests: ['tests/a.test.mjs'] },
+    ]);
+    r = comp();
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /cited tests are assertion_fail/);
+
+    // green citation passes
+    writeFileSync(join(dir, 'tests', 'a.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert'; test('a', () => assert.equal(1, 1));");
+    r = comp();
+    assert.equal(r.status, 0, r.stderr);
+  } finally {
+    store?.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test('completeness blocks when a frozen test was weakened during the loop', () => {
   // minimal project: store + config + run + brief + handoff + tampered baseline
   const dir = mkdtempSync(join(tmpdir(), 'sterling-weaken-'));

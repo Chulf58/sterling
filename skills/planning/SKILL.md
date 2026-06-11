@@ -5,10 +5,8 @@ description: Plan-mode-shaped conductor phase SOP — read-only discipline; desi
 
 # Planning SOP (§7.6)
 
-<!-- STERLING-DEFERRED(plan-mode): plan-mode-SHAPED chosen over native plan mode
-     (native is read-only with per-call MCP prompts and no programmatic plan
-     artifact — see DECISIONS-NEEDED.md #3). -->
-Read-only discipline throughout (plan-mode-shaped). Iterable steps; each output is a required brief section:
+Read-only discipline throughout (plan-mode-shaped — adjudicated; native plan
+mode is not load-bearing, §16.2 step 8). Iterable steps; each output is a required brief section:
 
 1. **Technical design.** Pre-dispatch the implementation-architect when complexity is visible at intake (the common case). Dispatch explorer/researcher for heavy reads. Small bounded questions: inline lookups (web + knowledge tools) are licensed — capture findings; big unknowns → researcher. Output: `technical_design` (approach, interfaces with contracts, shared structures).
 2. **Decomposition into phases**, informed by the design. Re-read blast radius if the design widened scope. Each phase spec declares its `files` + `rank_terms` — prep's staging inputs are planning outputs, never improvised at staging time. Every phase's interfaces must be declared (the test-writer's spawn fails loud otherwise).

@@ -5,7 +5,9 @@
 // debug-scope mode: registered explorer map bounds direct-mode edits.
 // direct mode: read-before-edit via the conductor ledger (H7 registers touches).
 import { existsSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { matchesGlob } from '@sterling/schemas';
 import { readStdin, deny, allow, openStore, repoRel } from './lib/common.mjs';
 import { ledgerPath, hasRead } from './lib/ledger.mjs';
 import { scopeCheck, readDebugScope } from './lib/contract.mjs';
@@ -14,6 +16,23 @@ const input = readStdin();
 const cwd = input.cwd;
 const toolPath = input.tool_input?.file_path;
 const rel = repoRel(toolPath, cwd);
+
+// Enforcement self-protection (§6 H3, build-proven — a blocked session
+// attempted disableAllHooks self-repair): for SPAWNED AGENTS, edits to the
+// enforcement surface are denied unconditionally in every mode, regardless of
+// scope, store presence, or registered maps. The conductor (human-attended)
+// is exempt and goes through the normal contract rules below.
+const ENFORCEMENT_SURFACE = ['.claude/settings*.json', '.claude/agents/**', '.sterling/config.json'];
+if (input.agent_id && toolPath) {
+  const fwd = String(toolPath).replace(/\\/g, '/');
+  const hooksDir = dirname(fileURLToPath(import.meta.url)).replace(/\\/g, '/'); // bundled: <plugin>/hooks
+  if (fwd === hooksDir || fwd.startsWith(hooksDir + '/')) {
+    deny(`H3 [self-protection]: '${toolPath}' is inside the bundled hooks directory — the enforcement surface is never agent-editable, in any mode (§6 H3)`);
+  }
+  if (rel && ENFORCEMENT_SURFACE.some((g) => matchesGlob(rel, g))) {
+    deny(`H3 [self-protection]: '${rel}' is enforcement surface (${ENFORCEMENT_SURFACE.join(', ')}) — never agent-editable, in any mode (§6 H3); if enforcement is misbehaving, exit blocked and report it`);
+  }
+}
 
 const store = openStore(cwd);
 if (!store) deny('H3: no Sterling store at .sterling/ — the contract gate cannot evaluate scope; failing closed (P5)');

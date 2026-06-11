@@ -301,6 +301,44 @@ test('H3 [direct mode]: read-before-edit via conductor ledger (file-touch regist
   }
 });
 
+test('H3 [self-protection]: spawned-agent edits to the enforcement surface deny in EVERY mode; conductor exempt', () => {
+  const agentEdit = (dir, file, extra = {}) =>
+    runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, file) }, agent_id: 'a1', ...extra }), dir);
+
+  // storeless project (the strongest "every mode" case: even fail-closed paths come after)
+  const bare = mkdtempSync(join(tmpdir(), 'sterling-selfprot-'));
+  try {
+    for (const target of ['.claude/settings.json', '.claude/settings.local.json', '.claude/agents/coder.md', '.sterling/config.json']) {
+      const r = agentEdit(bare, target);
+      assert.equal(r.code, 2, `${target} must deny`);
+      assert.match(r.stderr, /self-protection/, target);
+    }
+    // bundled hooks dir, by absolute path (here: the source hooks dir the script runs from)
+    const hooksDirFile = join(root, 'scripts', 'hooks', 'h6-context-watch.mjs');
+    const hd = runHook('h3-contract-gate.mjs', hookInput(bare, { tool_name: 'Edit', tool_input: { file_path: hooksDirFile }, agent_id: 'a1' }), bare);
+    assert.equal(hd.code, 2);
+    assert.match(hd.stderr, /bundled hooks directory|self-protection/);
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+
+  // run mode: unconditional denial precedes scope evaluation
+  const { dir, cleanup } = makeProject({ withRun: true });
+  try {
+    const r = agentEdit(dir, '.claude/settings.json');
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /self-protection/, 'run mode does not soften the deny');
+
+    // conductor (no agent_id) is exempt: falls through to the normal rules
+    const conductor = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, '.claude', 'settings.json') } }), dir);
+    assert.equal(conductor.code, 2, 'still denied — but by the brief contract, not self-protection');
+    assert.match(conductor.stderr, /outside the brief/);
+    assert.ok(!/self-protection/.test(conductor.stderr), 'conductor is exempt from the unconditional list');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H3: fails closed without a Sterling store (P5)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-nostore-'));
   try {

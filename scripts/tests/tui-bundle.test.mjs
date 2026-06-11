@@ -18,4 +18,16 @@ test('TUI bundle: single file, no workspace resolution, exits politely on non-TT
   const run = spawnSync(process.execPath, [bundle], { encoding: 'utf8', cwd: root, timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stderr, /exiting politely/);
+
+  // smoke mode proves the bundled terminal-kit stack (termconfig glob, static
+  // entry rewrite) resolves at runtime — the lazy-require trap regresses here
+  const smoke = spawnSync(process.execPath, [bundle, '--store', join(root, 'packages', 'tui', 'bundle', 'smoke.db')], {
+    encoding: 'utf8',
+    cwd: root,
+    timeout: 60_000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, STERLING_TUI_SMOKE: '1' },
+  });
+  assert.equal(smoke.status, 0, smoke.stderr);
+  assert.match(smoke.stderr, /terminal stack loaded/);
 });

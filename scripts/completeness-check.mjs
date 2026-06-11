@@ -5,6 +5,7 @@
 // and test-integrity are not built — each is skipped LOUDLY where it would run.
 //   node scripts/completeness-check.mjs --run <id> --phase <id> [--final] [--target <dir>]
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { arg, fail, openProject, requireRun, requireBrief, runDir } from './lib/project.mjs';
 import { loadAdapter } from './adapters/resolve.mjs';
 import { runWiringCheck } from './lib/wiring-check.mjs';
@@ -38,7 +39,43 @@ const skip = (check, reason) => {
   store.recordCheckSkipped(check, reason, run.id, now);
   skipped.push({ check, reason });
 };
-for (const check of ['completeness-judgment', 'reviewer-dispatch']) skip(check, 'not_built');
+skip('reviewer-dispatch', 'not_built');
+
+// Per-subtask evidence (§17 decision order, structure-first half): every phase
+// subtask must carry a citation in a handoff; cited files and tests must exist;
+// cited tests must pass. The honesty classifier is deferred by decision (§17).
+const phase = brief.phases.find((p) => p.phase_id === phaseId);
+if (phase) {
+  // evidence reads from the LATEST handoff per role: fixer iterations supersede
+  // their earlier attempts' citations (handoffs are ordered by created_at)
+  const latestByRole = new Map();
+  for (const h of handoffs) latestByRole.set(h.agent_role, h);
+  const citations = [...latestByRole.values()].flatMap((h) => h.subtask_evidence ?? []);
+  const citedTests = new Set();
+  for (const subtask of phase.subtasks) {
+    const cited = citations.filter((c) => c.subtask === subtask);
+    if (cited.length === 0) {
+      problems.push(`subtask-evidence: no citation for subtask '${subtask}' — every subtask is evidenced or the phase is not complete (§17)`);
+      continue;
+    }
+    for (const c of cited) {
+      for (const f of [...c.files, ...c.tests]) {
+        if (!existsSync(join(target, f))) problems.push(`subtask-evidence: '${subtask}' cites '${f}' which does not exist`);
+      }
+      c.tests.forEach((t) => citedTests.add(t));
+    }
+  }
+  if (citedTests.size) {
+    const adapterName = config.toolchains?.[0]?.adapter;
+    const mod = adapterName ? await loadAdapter(adapterName) : undefined;
+    if (mod?.runTests) {
+      const cited = mod.runTests({ cwd: target, scope: [...citedTests] });
+      if (cited.overall !== 'pass') {
+        problems.push(`subtask-evidence: cited tests are ${cited.overall}, not green — citations must point at passing evidence`);
+      }
+    }
+  }
+}
 
 // test-integrity (§9.2): the phase's frozen baseline written at the red check
 const integrity = compareBaseline({ cwd: target, runDir: runDir(target, run.id), phaseId });

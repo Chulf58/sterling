@@ -158,6 +158,7 @@ function writeHandoffs(tools, { decisions = ['kept add minimal'] } = {}) {
       deferred: [],
       decisions_made: decisions,
       tests_produced: [],
+      subtask_evidence: [{ subtask: 'write add', files: ['src/calc.mjs', 'src/main.mjs'], tests: ['tests/calc.test.mjs'] }],
       exit_signal: 'complete',
       unresolved: [],
     },
@@ -342,10 +343,10 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     assert.equal(comp.code, 0, comp.stderr);
     const compOut = JSON.parse(comp.stdout);
     assert.deepEqual(compOut.check_skipped, [
-      { check: 'completeness-judgment', reason: 'not_built' },
       { check: 'reviewer-dispatch', reason: 'not_built' },
       { check: 'whole-run-diff', reason: 'no_base_branch' },
     ]);
+    assert.ok(!compOut.problems.some((p) => /subtask-evidence/.test(p)), 'every subtask cited with existing, passing evidence (§17 structure-first)');
     assert.deepEqual(compOut.wiring.violations, [], 'add is wired via src/main.mjs — H12 live and clean');
     assert.ok(!compOut.problems.some((p) => /test-integrity/.test(p)), 'frozen baseline intact — integrity ran clean');
 
@@ -373,7 +374,6 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
       'dedup-merge',
       'board-remove-artifact-binding',
       'mutation-check',
-      'completeness-judgment',
       'reviewer-dispatch',
       'whole-run-diff',
       'objection-triage',
@@ -394,7 +394,7 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     const gate = runScript('merge-gate.mjs', ['--run', 'r-loop', '--target', dir], dir);
     assert.equal(gate.code, 0, gate.stderr);
     const gateSummary = JSON.parse(gate.stdout);
-    assert.ok(gateSummary.summaries.check_skipped.length >= 8, 'the merge-gate summary lists every skip (§9.1)');
+    assert.ok(gateSummary.summaries.check_skipped.length >= 7, 'the merge-gate summary lists every skip (§9.1)');
 
     const merged = runScript('merge-gate.mjs', ['--run', 'r-loop', '--decision', 'merge', '--target', dir], dir);
     assert.equal(merged.code, 0, merged.stderr);

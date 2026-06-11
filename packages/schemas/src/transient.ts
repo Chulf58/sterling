@@ -65,6 +65,13 @@ export const handoffSchema = z.object({
   deferred: z.array(z.string()),
   decisions_made: z.array(z.string()),
   tests_produced: z.array(repoPath),
+  // §17 completeness decision order, structure-first half: per-subtask
+  // evidence citations (subtask → diff files + tests). The completeness
+  // script verifies cited evidence exists and passes; the honesty classifier
+  // is deferred until real runs show dishonest citations slipping by.
+  subtask_evidence: z
+    .array(z.object({ subtask: z.string().min(1), files: z.array(repoPath), tests: z.array(repoPath) }))
+    .optional(),
   exit_signal: signalSchema,
   unresolved: z.array(z.string()),
 });
