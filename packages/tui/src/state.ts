@@ -49,6 +49,7 @@ export type Effect = SelectEffect | QuitEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' }
+  | { kind: 'tab'; index: number } // digit hotkey 1..N → 0-based tab index; out-of-range ignored here
   | { kind: 'click'; x: number; y: number }
   | { kind: 'rightclick' }
   | { kind: 'wheel'; dy: number };
@@ -97,7 +98,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState): Dashboar
     run,
     runSelected: ui.tab === 2,
     emptyMessage: ui.tab === 2 ? (run ? undefined : 'no active run') : cards.length === 0 ? '(empty)' : undefined,
-    footer: '←/→ tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit',
+    footer: `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit`,
     bodyTop: BODY_TOP,
   };
 }
@@ -153,6 +154,9 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, maxBod
           return { ui: activate(clamp(ui.cursor)), effects };
       }
       break;
+    case 'tab':
+      if (event.index < 0 || event.index >= TABS.length) return { ui, effects };
+      return { ui: { ...ui, tab: event.index, cursor: 0 }, effects };
     case 'wheel':
       return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
     case 'click': {

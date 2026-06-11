@@ -94,6 +94,9 @@ export function keyToEvent(name: string): UiEvent | undefined {
     case 'CTRL_C':
       return { kind: 'key', name: 'QUIT' };
     default:
+      // digit hotkeys: '1'..'9' select a tab directly; reduce() ignores
+      // indexes past the registered tab count, so this scales with TABS
+      if (/^[1-9]$/.test(name)) return { kind: 'tab', index: Number(name) - 1 };
       return undefined;
   }
 }

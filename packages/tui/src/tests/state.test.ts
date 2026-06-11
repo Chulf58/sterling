@@ -164,6 +164,25 @@ test('reduce: keys — tab cycling, cursor clamp, enter selects + toggles expand
   }
 });
 
+test('reduce: digit hotkeys select tabs directly; out-of-range digits are a no-op', () => {
+  const { store, cleanup } = fixture();
+  try {
+    let ui: UiState = { tab: 0, cursor: 1, expanded: [] };
+    ({ ui } = reduce(store, ui, { kind: 'tab', index: TABS.length - 1 }));
+    assert.equal(ui.tab, TABS.length - 1, 'last tab reachable by its digit');
+    assert.equal(ui.cursor, 0, 'tab switch resets the cursor');
+
+    ({ ui } = reduce(store, ui, { kind: 'tab', index: 0 }));
+    assert.equal(ui.tab, 0);
+
+    const before = ui;
+    ({ ui } = reduce(store, ui, { kind: 'tab', index: TABS.length }));
+    assert.deepEqual(ui, before, 'digit past the registered tab count is ignored');
+  } finally {
+    cleanup();
+  }
+});
+
 test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar click switches, right-click collapses', () => {
   const { store, t1, t2, cleanup } = fixture();
   try {
@@ -229,6 +248,9 @@ test('renderer translation tables: terminal-kit names map to the state vocabular
   assert.deepEqual(keyToEvent('UP'), { kind: 'key', name: 'UP' });
   assert.deepEqual(keyToEvent('q'), { kind: 'key', name: 'QUIT' });
   assert.deepEqual(keyToEvent('CTRL_C'), { kind: 'key', name: 'QUIT' });
+  assert.deepEqual(keyToEvent('1'), { kind: 'tab', index: 0 }, 'digit hotkeys map to 0-based tab index');
+  assert.deepEqual(keyToEvent('9'), { kind: 'tab', index: 8 }, 'translation is tab-count agnostic; reduce validates');
+  assert.equal(keyToEvent('0'), undefined);
   assert.equal(keyToEvent('F5'), undefined);
   assert.deepEqual(mouseToEvent('MOUSE_LEFT_BUTTON_PRESSED', { x: 3, y: 4 }), { kind: 'click', x: 3, y: 4 });
   assert.deepEqual(mouseToEvent('MOUSE_RIGHT_BUTTON_PRESSED', { x: 1, y: 1 }), { kind: 'rightclick' });
