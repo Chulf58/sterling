@@ -5,7 +5,11 @@ import type { SterlingStore } from '@sterling/store';
 export interface Card {
   id: string;
   type: string;
+  /** one-line summary shown collapsed (clipped by the state layer) */
   title: string;
+  /** full text shown expanded, wrapped by the state layer */
+  body: string;
+  /** metadata line shown under the expanded body */
   detail: string;
 }
 
@@ -18,7 +22,8 @@ export function todoCards(store: SterlingStore): Card[] {
       return {
         id: todo.id,
         type: 'todo',
-        title: todo.text,
+        title: todo.text.split('\n')[0],
+        body: todo.text,
         detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
           .filter(Boolean)
           .join(' · '),
@@ -33,6 +38,7 @@ export function noteCards(store: SterlingStore): Card[] {
       id: note.id,
       type: 'note',
       title: note.raw_text.split('\n')[0].slice(0, 80),
+      body: note.raw_text,
       detail: `captured ${note.captured_at}${note.derived.length ? ` · ${note.derived.length} extraction(s)` : ''}`,
     };
   });

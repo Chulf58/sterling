@@ -15,15 +15,31 @@ export interface UiState {
 
 export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [] };
 
+export interface RowLine {
+  text: string;
+  /** title: the card's first line (inverse when selected); body: wrapped
+   *  continuation of the expanded text; meta: the dim metadata line */
+  kind: 'title' | 'body' | 'meta';
+}
+
 export interface Row {
   id: string;
   type: string;
-  text: string;
   selected: boolean;
   expanded: boolean;
-  detail?: string;
+  /** exact display lines, pre-clipped/wrapped — the renderer prints them
+   *  verbatim, so row heights and the click hit-test agree by construction */
+  lines: RowLine[];
   /** 0-based screen line offset of this row within the body block */
   screenRow: number;
+}
+
+/** Pane geometry threaded in from the renderer side; Infinity = unbounded. */
+export interface Viewport {
+  /** columns available — wraps expanded bodies, clips collapsed titles */
+  width?: number;
+  /** body lines visible — the click hit-test bound (visibleBodyLines) */
+  maxBodyLines?: number;
 }
 
 export interface DashboardState {
@@ -72,7 +88,38 @@ export function visibleBodyLines(height: number): number {
   return Math.max(0, height - BODY_TOP - 2);
 }
 
-export function buildDashboardState(store: SterlingStore, ui: UiState): DashboardState {
+/** Word-wrap to width columns, preserving explicit newlines; words longer
+ *  than the width are hard-broken. Infinity width → split on newlines only. */
+export function wrapText(text: string, width: number): string[] {
+  if (!Number.isFinite(width) || width < 1) return text.split('\n');
+  const out: string[] = [];
+  for (const para of text.split('\n')) {
+    let line = '';
+    for (let word of para.split(' ')) {
+      while (word.length > width) {
+        if (line) {
+          out.push(line);
+          line = '';
+        }
+        out.push(word.slice(0, width));
+        word = word.slice(width);
+      }
+      if (!line) line = word;
+      else if (line.length + 1 + word.length <= width) line += ' ' + word;
+      else {
+        out.push(line);
+        line = word;
+      }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+const clipEllipsis = (s: string, width: number): string =>
+  Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
+
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity): DashboardState {
   const cards = cardsFor(store, ui.tab);
   const cursor = Math.min(ui.cursor, Math.max(0, cards.length - 1));
   const rows: Row[] = [];
@@ -80,16 +127,22 @@ export function buildDashboardState(store: SterlingStore, ui: UiState): Dashboar
   for (let i = 0; i < cards.length; i++) {
     const card = cards[i];
     const expanded = ui.expanded.includes(card.id);
-    rows.push({
-      id: card.id,
-      type: card.type,
-      text: card.title,
-      selected: i === cursor,
-      expanded,
-      detail: expanded && card.detail ? card.detail : undefined,
-      screenRow,
-    });
-    screenRow += expanded && card.detail ? 2 : 1;
+    const selected = i === cursor;
+    const marker = selected ? '› ' : '  ';
+    let lines: RowLine[];
+    if (expanded) {
+      // full body, wrapped under a 2-column content indent; metadata last
+      const wrapWidth = Number.isFinite(width) ? Math.max(1, width - 2) : width;
+      lines = wrapText(card.body, wrapWidth).map((text, j) => ({
+        text: (j === 0 ? marker : '  ') + text,
+        kind: j === 0 ? ('title' as const) : ('body' as const),
+      }));
+      if (card.detail) lines.push({ text: `    ${card.detail}`, kind: 'meta' });
+    } else {
+      lines = [{ text: clipEllipsis(marker + card.title, width), kind: 'title' }];
+    }
+    rows.push({ id: card.id, type: card.type, selected, expanded, lines, screenRow });
+    screenRow += lines.length;
   }
   const run = ui.tab === 2 ? runView(store) : undefined;
   return {
@@ -110,13 +163,13 @@ export function screenLineToRow(state: DashboardState, line1: number, maxBodyLin
   if (bodyLine < 0 || bodyLine >= maxBodyLines) return -1;
   for (let i = 0; i < state.rows.length; i++) {
     const r = state.rows[i];
-    const height = r.detail ? 2 : 1;
-    if (bodyLine >= r.screenRow && bodyLine < r.screenRow + height) return i;
+    if (bodyLine >= r.screenRow && bodyLine < r.screenRow + r.lines.length) return i;
   }
   return -1;
 }
 
-export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, maxBodyLines = Infinity): { ui: UiState; effects: Effect[] } {
+export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}): { ui: UiState; effects: Effect[] } {
+  const maxBodyLines = viewport.maxBodyLines ?? Infinity;
   const cards = cardsFor(store, ui.tab);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, cards.length - 1)));
   const effects: Effect[] = [];
@@ -170,7 +223,9 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, maxBod
         }
         return { ui, effects };
       }
-      const state = buildDashboardState(store, ui);
+      // hit-test against the same width the renderer wrapped with — wrapped
+      // heights must match what is on screen
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity);
       const row = screenLineToRow(state, event.y, maxBodyLines);
       if (row !== -1) return { ui: activate(row), effects };
       return { ui, effects };

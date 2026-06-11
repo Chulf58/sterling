@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { todoCards, noteCards, runView } from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, TABS, type UiState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, TABS, type UiState } from '../state.js';
 import { keyToEvent, mouseToEvent } from '../render.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -76,11 +76,13 @@ test('buildDashboardState: rows with screen offsets; expansion adds detail lines
     assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false]);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 1]);
     assert.equal(s.rows[0].selected, true);
-    assert.equal(s.rows[0].detail, undefined, 'collapsed by default');
+    assert.equal(s.rows[0].lines.length, 1, 'collapsed by default: one title line');
 
     s = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [t1.id] });
-    assert.match(s.rows[0].detail!, /priority: high/);
-    assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 2], 'expanded row occupies two lines');
+    const meta = s.rows[0].lines.at(-1)!;
+    assert.equal(meta.kind, 'meta');
+    assert.match(meta.text, /priority: high/);
+    assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 2], 'expanded row occupies body + meta lines');
 
     s = buildDashboardState(store, { tab: 2, cursor: 0, expanded: [] });
     assert.equal(s.emptyMessage, 'no active run');
@@ -123,9 +125,60 @@ test('viewport clamp: rows the renderer clips are not clickable (off-screen clic
     assert.equal(screenLineToRow(sx, 4, 1), -1, 'hidden detail line must not map');
 
     // through reduce: a click below the viewport is a no-op (no selection effect, no expand)
-    const clipped = reduce(store, initialUi, { kind: 'click', x: 1, y: 4 }, 1);
+    const clipped = reduce(store, initialUi, { kind: 'click', x: 1, y: 4 }, { maxBodyLines: 1 });
     assert.deepEqual(clipped.effects, []);
     assert.deepEqual(clipped.ui, initialUi);
+  } finally {
+    cleanup();
+  }
+});
+
+test('wrapText: word boundaries, hard-broken long words, preserved newlines', () => {
+  assert.deepEqual(wrapText('a bb ccc', 5), ['a bb', 'ccc']);
+  assert.deepEqual(wrapText('abcdefgh', 3), ['abc', 'def', 'gh']);
+  assert.deepEqual(wrapText('line one\nline two', 8), ['line one', 'line two']);
+  assert.deepEqual(wrapText('a\n\nb', 5), ['a', '', 'b'], 'blank lines survive');
+  assert.deepEqual(wrapText('a bb ccc', Infinity), ['a bb ccc'], 'Infinity width: newline split only');
+});
+
+test('expanded cards wrap the full body at the pane width; collapsed titles clip with ellipsis', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const long = store.create({
+      ...envelope('todo'),
+      text: 'a very long todo text that cannot possibly fit on one narrow pane line',
+      source: 'user',
+      priority: 'low',
+    }) as { id: string };
+    const width = 24;
+
+    // collapsed: one line, clipped with an ellipsis affordance
+    let s = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [] }, width);
+    const collapsed = s.rows.find((r) => r.id === long.id)!;
+    assert.equal(collapsed.lines.length, 1);
+    assert.equal(collapsed.lines[0].text.length, width);
+    assert.match(collapsed.lines[0].text, /…$/);
+
+    // expanded: full body wrapped (every line within width), then the meta line
+    s = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [long.id] }, width);
+    const expanded = s.rows.find((r) => r.id === long.id)!;
+    assert.ok(expanded.lines.length > 3, 'body wraps over multiple lines');
+    assert.equal(expanded.lines[0].kind, 'title');
+    assert.equal(expanded.lines.at(-1)!.kind, 'meta');
+    for (const line of expanded.lines.slice(0, -1)) assert.ok(line.text.length <= width, `fits: "${line.text}"`);
+    const joined = expanded.lines
+      .slice(0, -1)
+      .map((l) => l.text.trim())
+      .join(' ');
+    assert.equal(joined.replace(/\s+/g, ' ').replace(/^› /, ''), 'a very long todo text that cannot possibly fit on one narrow pane line');
+
+    // hit-test: a click on a middle wrapped body line maps to the card, and the
+    // rows below shift by the wrapped height
+    const idx = s.rows.findIndex((r) => r.id === long.id);
+    const mid = 3 + s.rows[idx].screenRow + 2; // terminal line of the card's 3rd display line
+    assert.equal(screenLineToRow(s, mid), idx);
+    const { ui } = reduce(store, { tab: 0, cursor: 0, expanded: [long.id] }, { kind: 'click', x: 1, y: mid }, { width });
+    assert.deepEqual(ui.expanded, [], 'clicking the wrapped body collapses the card');
   } finally {
     cleanup();
   }

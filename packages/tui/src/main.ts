@@ -36,12 +36,12 @@ let ui: UiState = initialUi;
 let screen = new termkit.default.ScreenBuffer({ dst: term });
 
 function redraw(): void {
-  draw(screen, buildDashboardState(store, ui));
+  draw(screen, buildDashboardState(store, ui, term.width));
 }
 
 function handle(event: ReturnType<typeof keyToEvent>): void {
   if (!event) return;
-  const result = reduce(store, ui, event, visibleBodyLines(term.height));
+  const result = reduce(store, ui, event, { width: term.width, maxBodyLines: visibleBodyLines(term.height) });
   ui = result.ui;
   if (runEffects(store, result.effects)) {
     term.grabInput(false);
