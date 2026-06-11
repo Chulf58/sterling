@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { envelopeFields, refineSupersession } from './envelope.js';
-import { repoPath } from './paths.js';
+import { normalizeRepoPath, repoPath } from './paths.js';
 
 // Durable record schemas — MVP-spine set (spec §16.1 item 2): decision,
 // feature_article, note, todo, brief. Remaining §3.2 types arrive at full-build
@@ -137,6 +137,7 @@ export const SYSTEM_REASONS = [
   'capture_owed',
   'promotion_review',
   'wire_in_dormant',
+  'refresh_reference', // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
 ] as const;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:
@@ -264,7 +265,17 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     schema: referenceMaterialSchema,
     immutable: false,
     fts: (r) => [s(r.title), s(r.summary)].join('\n'),
-    fileKeys: () => [],
+    // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
+    // repo-relative location doubles as a file_key (H7 pressure applies);
+    // pdf/url locations are external and carry none.
+    fileKeys: (r) => {
+      if (r.kind !== 'doc') return [];
+      try {
+        return [normalizeRepoPath(r.location as string)];
+      } catch {
+        return []; // absolute/escaping location: not repo-located
+      }
+    },
   },
   disconfirmed_hypothesis: {
     schema: disconfirmedHypothesisSchema,

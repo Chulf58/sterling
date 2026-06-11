@@ -292,3 +292,11 @@ test('the signal enum is closed at the full nine §5.1 members', () => {
     ['complete', 'research-needed', 'review-unresolved', 'blocked', 'tests-invalid', 'contract-violated', 'bug-found', 'phase-overflow', 'agent-died']
   );
 });
+
+test('§3.2.5: reference_material fileKeys — repo-located docs only', () => {
+  const fk = RECORD_TYPES.reference_material.fileKeys;
+  assert.deepEqual(fk({ kind: 'doc', location: 'docs\\spec.md' }), ['docs/spec.md'], 'doc location normalizes and doubles as a file_key');
+  assert.deepEqual(fk({ kind: 'url', location: 'https://example.com/x' }), [], 'external locations carry no file_keys');
+  assert.deepEqual(fk({ kind: 'pdf', location: 'C:/refs/spec.pdf' }), []);
+  assert.deepEqual(fk({ kind: 'doc', location: 'C:/abs/spec.md' }), [], 'absolute doc location is not repo-located');
+});

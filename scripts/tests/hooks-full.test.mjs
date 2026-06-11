@@ -211,6 +211,49 @@ test('H7 [direct]: maintenance queue item (deduped) + transient touch register f
   }
 });
 
+function referenceDoc(store, title, kind, location) {
+  return store.create({
+    ...envelope('reference_material'),
+    title,
+    kind,
+    location,
+    summary: 'section map',
+    source_date: NOW,
+    capture_date: NOW,
+    basis: 'codebase',
+  });
+}
+
+test('H7 [§3.2.5 direct]: repo-located reference doc trips reconcile_needed (deduped); url-kind trips nothing', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const doc = referenceDoc(store, 'Build Spec', 'doc', 'docs/spec.md');
+    referenceDoc(store, 'External', 'url', 'https://example.com/spec');
+    const edit = () =>
+      runHook('h7-file-touch.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'docs', 'spec.md') } }), dir);
+    assert.equal(edit().code, 0);
+    assert.equal(edit().code, 0);
+    const queue = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'reconcile_needed');
+    assert.equal(queue.length, 1, 'doc reference marked once (deduped); the url reference never');
+    assert.equal(queue[0].feature_link, doc.id);
+    assert.match(queue[0].text, /refresh summary \+ source_date/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H7 [§3.2.5 pipeline]: a Sterling-governed touch lands the reference doc on run.reconcile_needed', () => {
+  const { dir, store, cleanup } = makeProject({ withRun: true });
+  try {
+    const doc = referenceDoc(store, 'Build Spec', 'doc', 'docs/spec.md');
+    const r = runHook('h7-file-touch.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'docs', 'spec.md') } }), dir);
+    assert.equal(r.code, 0);
+    assert.deepEqual(store.getRun('r-h5').reconcile_needed, [doc.id]);
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- H8 ---------------------------
 
 test('H8: dispatch cap — probe-verified blocking PreToolUse on the Agent tool', () => {

@@ -3,7 +3,9 @@
 // safe because schemas are exact: every write revalidates at the store.
 
 import { randomUUID } from 'node:crypto';
-import { signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import type { QueryOptions, RecordedExit, SterlingStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -17,6 +19,8 @@ export interface ToolDeps {
   config?: SterlingConfig;
   now?: () => string;
   newId?: () => string;
+  /** project root for §3.2.5 repo-located doc mtime checks; absent → check inert */
+  repoRoot?: string;
 }
 
 const DAY_MS = 86_400_000;
@@ -26,12 +30,14 @@ export class SterlingTools {
   private config: SterlingConfig;
   private now: () => string;
   private newId: () => string;
+  private repoRoot?: string;
 
   constructor(deps: ToolDeps) {
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => new Date().toISOString());
     this.newId = deps.newId ?? randomUUID;
+    this.repoRoot = deps.repoRoot;
   }
 
   /** §16.1.9: unbuilt checks emit check_skipped where they would have run — never silent success. */
@@ -134,6 +140,69 @@ export class SterlingTools {
             ...(stale ? { note: 'stale — re-verify before use; re-verification supersedes this finding' } : {}),
           },
         };
+      }
+      // §3.2.5: repo-located docs — out-of-band edits caught at read time.
+      // File mtime newer than source_date → verify_before_use + ONE deduplicated
+      // refresh_reference maintenance item (a hundred stale reads, one queue entry).
+      if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot) {
+        const r = record as unknown as { id: string; title: string; location: string; source_date: string };
+        let rel: string | undefined;
+        try {
+          rel = normalizeRepoPath(r.location);
+        } catch {
+          rel = undefined; // absolute/escaping location: not repo-located
+        }
+        if (rel) {
+          const stat = statSync(join(this.repoRoot, rel), { throwIfNoEntry: false });
+          if (stat && stat.mtimeMs > Date.parse(r.source_date)) {
+            const open = this.maintenanceQuery({ system_reason: 'refresh_reference', file_keys: [rel], cap: 1000 });
+            if (open.length === 0) {
+              this.maintenanceEnqueue({
+                reason: 'refresh_reference',
+                text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
+                file_keys: [rel],
+                feature_link: r.id,
+              });
+            }
+            return { ...record, verify_before_use: true };
+          }
+        }
+      }
+      // §3.2.3: feature-article drift caught at read — H7 covers governed
+      // touches; this catches out-of-band edits. Any owned file newer than the
+      // article's updated_at, or missing from disk (deletion is drift), flags
+      // the article and enqueues ONE reconcile_needed item (same feature_link
+      // dedup as H7 — one drain surface regardless of trigger).
+      if (record.type === 'feature_article' && this.repoRoot) {
+        const a = record as unknown as { id: string; slug: string; files?: { path: string }[] };
+        let drift: { path: string; missing: boolean } | undefined;
+        for (const f of a.files ?? []) {
+          const stat = statSync(join(this.repoRoot, f.path), { throwIfNoEntry: false });
+          if (!stat) {
+            drift = { path: f.path, missing: true };
+            break;
+          }
+          if (stat.mtimeMs > Date.parse(record.updated_at)) {
+            drift = { path: f.path, missing: false };
+            break;
+          }
+        }
+        if (drift) {
+          const open = this.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).some(
+            (t) => (t as { feature_link?: string }).feature_link === a.id
+          );
+          if (!open) {
+            this.maintenanceEnqueue({
+              reason: 'reconcile_needed',
+              text: drift.missing
+                ? `reconcile article '${a.slug}' — owned file ${drift.path} no longer exists (out-of-band deletion)`
+                : `reconcile article '${a.slug}' — owned file ${drift.path} changed on disk after the article's last update (out-of-band edit)`,
+              file_keys: [drift.path],
+              feature_link: a.id,
+            });
+          }
+          return { ...record, verify_before_use: true };
+        }
       }
       const basis = (record as unknown as { basis?: string }).basis;
       if ((basis === 'platform' || basis === 'external') && ageDays(record.updated_at) > this.config.staleness.platform_external_days) {

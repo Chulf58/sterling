@@ -15,13 +15,15 @@ const store = openStore(input.cwd);
 if (!store) allow();
 
 try {
-  const owners = store.query({ types: ['feature_article'], file_keys: [rel], cap: 100 });
+  // §3.2.5: repo-located reference docs (kind: doc) join the reconcile economy —
+  // their location doubles as a file_key, so the same join finds them here.
+  const owners = store.query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 });
   const run = store.getRun();
 
   if (run) {
     for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
   } else {
-    // direct mode: maintenance queue (deduped per article) + transient touch register for H10
+    // direct mode: maintenance queue (deduped per record) + transient touch register for H10
     const now = new Date().toISOString();
     for (const article of owners) {
       const open = store
@@ -39,7 +41,10 @@ try {
           links: [],
           scope: 'project',
           stack_tags: [],
-          text: `reconcile article '${article.slug}' — files it owns were touched in direct mode`,
+          text:
+            article.type === 'reference_material'
+              ? `reconcile reference '${article.title}' — its document was touched in direct mode; refresh summary + source_date (§3.2.5)`
+              : `reconcile article '${article.slug}' — files it owns were touched in direct mode`,
           source: 'system',
           system_reason: 'reconcile_needed',
           file_keys: [rel],

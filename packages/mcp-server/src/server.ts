@@ -17,7 +17,9 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   // config.json sits beside the store in .sterling/ (§12); malformed fails loud
   const configPath = join(dirname(storePath), 'config.json');
   const config = parseConfig(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {});
-  const tools = new SterlingTools({ store, config });
+  // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
+  // §3.2.5 repo-located doc mtime checks resolve against it
+  const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)) });
   const server = new McpServer({ name: 'sterling', version: '0.1.0' });
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
