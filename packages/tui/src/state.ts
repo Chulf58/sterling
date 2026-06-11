@@ -61,6 +61,16 @@ export function cardsFor(store: SterlingStore, tab: number): Card[] {
 
 const BODY_TOP = 2; // line 0: tab bar; line 1: blank
 
+/**
+ * Body lines visible at a given terminal height: the body spans screen lines
+ * bodyTop+1 .. height-2 (bottom two reserved for the blank spacer + footer).
+ * Must stay in sync with the draw() clamp in render.ts — rows the renderer
+ * clips must not be clickable.
+ */
+export function visibleBodyLines(height: number): number {
+  return Math.max(0, height - BODY_TOP - 2);
+}
+
 export function buildDashboardState(store: SterlingStore, ui: UiState): DashboardState {
   const cards = cardsFor(store, ui.tab);
   const cursor = Math.min(ui.cursor, Math.max(0, cards.length - 1));
@@ -92,10 +102,11 @@ export function buildDashboardState(store: SterlingStore, ui: UiState): Dashboar
   };
 }
 
-/** Map an absolute screen line (1-based, terminal convention) to a row index, or -1. */
-export function screenLineToRow(state: DashboardState, line1: number): number {
+/** Map an absolute screen line (1-based, terminal convention) to a row index, or -1.
+ *  maxBodyLines bounds the hit-test to the rendered viewport (visibleBodyLines). */
+export function screenLineToRow(state: DashboardState, line1: number, maxBodyLines = Infinity): number {
   const bodyLine = line1 - 1 - state.bodyTop; // to 0-based body offset
-  if (bodyLine < 0) return -1;
+  if (bodyLine < 0 || bodyLine >= maxBodyLines) return -1;
   for (let i = 0; i < state.rows.length; i++) {
     const r = state.rows[i];
     const height = r.detail ? 2 : 1;
@@ -104,7 +115,7 @@ export function screenLineToRow(state: DashboardState, line1: number): number {
   return -1;
 }
 
-export function reduce(store: SterlingStore, ui: UiState, event: UiEvent): { ui: UiState; effects: Effect[] } {
+export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, maxBodyLines = Infinity): { ui: UiState; effects: Effect[] } {
   const cards = cardsFor(store, ui.tab);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, cards.length - 1)));
   const effects: Effect[] = [];
@@ -156,7 +167,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent): { ui:
         return { ui, effects };
       }
       const state = buildDashboardState(store, ui);
-      const row = screenLineToRow(state, event.y);
+      const row = screenLineToRow(state, event.y, maxBodyLines);
       if (row !== -1) return { ui: activate(row), effects };
       return { ui, effects };
     }

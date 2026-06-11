@@ -3,7 +3,7 @@
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
 import { SterlingStore } from '@sterling/store';
-import { buildDashboardState, initialUi, reduce, runEffects, type UiState } from './state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, type UiState } from './state.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
 const smoke = process.env.STERLING_TUI_SMOKE === '1';
@@ -37,17 +37,20 @@ function redraw(): void {
 
 function handle(event: ReturnType<typeof keyToEvent>): void {
   if (!event) return;
-  const result = reduce(store, ui, event);
+  const result = reduce(store, ui, event, visibleBodyLines(term.height));
   ui = result.ui;
   if (runEffects(store, result.effects)) {
     term.grabInput(false);
-    term.clear();
+    term.fullscreen(false); // leave the alternate screen buffer, restoring the shell
     store.close();
     process.exit(0);
   }
   redraw();
 }
 
+// Alternate screen buffer (§11 dashboard): no scrollback, so the 1 Hz redraw
+// can never grow the scrollbar or push the view down.
+term.fullscreen(true);
 term.grabInput({ mouse: 'button' });
 term.on('key', (name: string) => handle(keyToEvent(name)));
 term.on('mouse', (name: string, data: { x: number; y: number }) => handle(mouseToEvent(name, data)));

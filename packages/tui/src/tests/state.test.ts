@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { todoCards, noteCards, runView } from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, TABS, type UiState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, TABS, type UiState } from '../state.js';
 import { keyToEvent, mouseToEvent } from '../render.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -100,6 +100,32 @@ test('screenLineToRow: maps clicks through bodyTop and expanded heights', () => 
     assert.equal(screenLineToRow(s, 5), 1, 'second todo shifted down by the expansion');
     assert.equal(screenLineToRow(s, 1), -1, 'tab bar is not a row');
     assert.equal(screenLineToRow(s, 99), -1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('viewport clamp: rows the renderer clips are not clickable (off-screen click regression)', () => {
+  const { store, t1, cleanup } = fixture();
+  try {
+    // visibleBodyLines mirrors the draw() clamp: body spans lines bodyTop+1 .. height-2
+    assert.equal(visibleBodyLines(8), 4);
+    assert.equal(visibleBodyLines(4), 0);
+    assert.equal(visibleBodyLines(2), 0, 'degenerate pane: nothing clickable');
+
+    // one visible body line: the first todo (line 3) hits, the second (line 4) is clipped
+    const s = buildDashboardState(store, initialUi);
+    assert.equal(screenLineToRow(s, 3, 1), 0);
+    assert.equal(screenLineToRow(s, 4, 1), -1, 'clipped row must not map');
+
+    // an expanded row's detail line beyond the viewport is not a hit either
+    const sx = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [t1.id] });
+    assert.equal(screenLineToRow(sx, 4, 1), -1, 'hidden detail line must not map');
+
+    // through reduce: a click below the viewport is a no-op (no selection effect, no expand)
+    const clipped = reduce(store, initialUi, { kind: 'click', x: 1, y: 4 }, 1);
+    assert.deepEqual(clipped.effects, []);
+    assert.deepEqual(clipped.ui, initialUi);
   } finally {
     cleanup();
   }

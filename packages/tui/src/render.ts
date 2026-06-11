@@ -5,51 +5,71 @@ import type { DashboardState, UiEvent } from './state.js';
 
 // minimal structural type for the slice of terminal-kit we use
 export interface TermLike {
-  clear(): void;
+  width: number;
+  height: number;
   moveTo(x: number, y: number): TermLike;
   (s: string): TermLike;
   inverse(s: string): TermLike;
   bold(s: string): TermLike;
   dim(s: string): TermLike;
   yellow(s: string): TermLike;
+  eraseLineAfter(): TermLike;
+  eraseDisplayBelow(): TermLike;
 }
 
 export function draw(term: TermLike, state: DashboardState): void {
-  term.clear();
+  // No full-screen clear: ESC[2J scrolls the viewport into scrollback on
+  // Windows Terminal and blanks the frame mid-redraw (flicker). Instead each
+  // line is overwritten in place + eraseLineAfter, and the remainder of the
+  // screen is erased once at the end. Text is clipped to the pane width — a
+  // wrapped line on the bottom row would force a real scroll.
+  const fit = (s: string, used = 0): string => s.slice(0, Math.max(0, term.width - used));
+  const lastBodyLine = term.height - 2; // reserve the blank line + footer
   term.moveTo(1, 1);
+  let x = 0;
   for (const tab of state.tabs) {
-    const label = ` ${tab.label} `;
-    if (tab.active) term.inverse(label);
-    else term(label);
+    const label = ` ${tab.label} `; // x extents must stay in sync with the click mapping in state.ts
+    const clipped = fit(label, x);
+    if (tab.active) term.inverse(clipped);
+    else term(clipped);
+    x += label.length;
   }
+  term.eraseLineAfter();
   let line = state.bodyTop + 1; // 1-based terminal lines
-  if (state.emptyMessage) {
-    term.moveTo(1, line).dim(state.emptyMessage);
+  if (state.emptyMessage && line <= lastBodyLine) {
+    term.moveTo(1, line).dim(fit(state.emptyMessage)).eraseLineAfter();
     line += 1;
   }
   for (const row of state.rows) {
+    if (line > lastBodyLine) break;
     term.moveTo(1, line);
     const text = `${row.selected ? '› ' : '  '}${row.text}`;
-    if (row.selected) term.inverse(text);
-    else term(text);
+    if (row.selected) term.inverse(fit(text));
+    else term(fit(text));
+    term.eraseLineAfter();
     line += 1;
-    if (row.detail) {
-      term.moveTo(1, line).dim(`    ${row.detail}`);
+    if (row.detail && line <= lastBodyLine) {
+      term.moveTo(1, line).dim(fit(`    ${row.detail}`)).eraseLineAfter();
       line += 1;
     }
   }
-  if (state.run) {
+  if (state.run && line <= lastBodyLine) {
     term.moveTo(1, line);
-    term(`run ${state.run.id} — `).bold(state.run.machine_state)(` · ${state.run.phaseLabel}`);
+    const head = `run ${state.run.id} — `;
+    term(fit(head)).bold(fit(state.run.machine_state, head.length));
+    term(fit(` · ${state.run.phaseLabel}`, head.length + state.run.machine_state.length)).eraseLineAfter();
     line += 1;
-    term.moveTo(1, line)(`last signal: ${state.run.lastSignal} · context warns: ${state.run.warnFlags}`);
-    line += 1;
-    if (state.run.pendingJudgment) {
-      term.moveTo(1, line).yellow(`pending judgment: ${state.run.pendingJudgment}`);
+    if (line <= lastBodyLine) {
+      term.moveTo(1, line)(fit(`last signal: ${state.run.lastSignal} · context warns: ${state.run.warnFlags}`)).eraseLineAfter();
+      line += 1;
+    }
+    if (state.run.pendingJudgment && line <= lastBodyLine) {
+      term.moveTo(1, line).yellow(fit(`pending judgment: ${state.run.pendingJudgment}`)).eraseLineAfter();
       line += 1;
     }
   }
-  term.moveTo(1, line + 1).dim(state.footer);
+  term.moveTo(1, line).eraseDisplayBelow();
+  term.moveTo(1, Math.min(line + 1, term.height)).dim(fit(state.footer));
 }
 
 /** Translate terminal-kit key names to state-layer events. */
