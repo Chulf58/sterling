@@ -206,6 +206,17 @@ test('H7 [direct]: maintenance queue item (deduped) + transient touch register f
     const touches = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'touches.json'), 'utf8'));
     assert.equal(touches.length, 2);
     assert.equal(touches[0].path, 'src/a.mjs');
+
+    // .git/** is machinery, never governed work (live incident 2026-06-12:
+    // a commit-message temp file fed H10 a junk article demand)
+    const gitWrite = runHook(
+      'h7-file-touch.mjs',
+      hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: join(dir, '.git', 'COMMIT_MSG_TMP.txt') } }),
+      dir
+    );
+    assert.equal(gitWrite.code, 0);
+    const after = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'touches.json'), 'utf8'));
+    assert.equal(after.length, 2, '.git/** paths never enter the touch register');
   } finally {
     cleanup();
   }

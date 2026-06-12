@@ -10,6 +10,10 @@ import { readStdin, allow, warnNonBlocking, openStore, repoRel } from './lib/com
 const input = readStdin();
 const rel = repoRel(input.tool_input?.file_path, input.cwd);
 if (!rel) allow();
+// machinery internals are never governed work: a commit-message temp file
+// under .git/ tripped the register live (2026-06-12) and fed H10 a junk
+// article demand — the tree is excluded, not pattern-matched per file
+if (rel === '.git' || rel.startsWith('.git/')) allow();
 
 const store = openStore(input.cwd);
 if (!store) allow();
