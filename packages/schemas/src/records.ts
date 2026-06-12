@@ -141,6 +141,20 @@ export const SYSTEM_REASONS = [
   'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
 ] as const;
 
+// §11 queue drain verbs: draining means the fulfilling artifact was written,
+// so the reason implies the deed. `satisfies` keeps this total — a new
+// maintenance lane cannot ship without its completed-section verb.
+export const DRAIN_VERBS = {
+  reconcile_needed: 'updated',
+  stale_research: 're-verified',
+  deletion_candidate: 'deleted',
+  capture_owed: 'captured',
+  promotion_review: 'reviewed',
+  wire_in_dormant: 'wired',
+  refresh_reference: 'refreshed',
+  article_missing: 'created',
+} as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
+
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:
 // done = removed by the artifact-writing event (P4).
 export const todoSchema = base

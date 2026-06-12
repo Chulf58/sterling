@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS selection (
   record_id TEXT NOT NULL,
   at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS queue_drain_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL
+);
 `;
 
 /** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
@@ -176,7 +183,11 @@ export class SterlingStore {
     if (opts.rank_terms !== undefined) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        const match = terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+        // a trailing '*' marks an FTS5 prefix query ("stor*" matches "store") —
+        // the star must sit OUTSIDE the quoted token to act as the prefix operator
+        const match = terms
+          .map((t) => (t.endsWith('*') && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`))
+          .join(' OR ');
         const sql = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(' AND ')} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
@@ -237,15 +248,35 @@ export class SterlingStore {
   /**
    * Hard removal — the P4 path for todos (done = removed by the artifact-write
    * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
+   * Removing a SYSTEM-source todo appends to the capped queue drain log
+   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
    */
-  remove(id: string): void {
+  remove(id: string, drainedAt?: string): void {
     this.tx(() => {
+      const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[] }) | undefined;
+      if (record && record.type === 'todo' && record.source === 'system') {
+        this.db
+          .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)')
+          .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []));
+        // cap: completed items must never build up (adjudicated 2026-06-12)
+        this.db
+          .prepare('DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)')
+          .run();
+      }
       this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
       this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
       this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
       this.db.prepare('DELETE FROM record_links WHERE source_id = ?').run(id);
       this.db.prepare('DELETE FROM records_fts WHERE record_id = ?').run(id);
     });
+  }
+
+  /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
+  listQueueDrain(limit = 15): { drained_at: string; system_reason: string; text: string; file_keys: string[] }[] {
+    const rows = this.db
+      .prepare('SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?')
+      .all(limit) as { drained_at: string; system_reason: string; text: string; file_keys: string }[];
+    return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) as string[] }));
   }
 
   /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */

@@ -259,7 +259,7 @@ export class SterlingTools {
     if (!record) throw new Error(`board_remove: no record '${id}'`);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a todo`);
     const skipped = [this.skip('board-remove-artifact-binding', this.activeRunId())];
-    this.store.remove(id);
+    this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: id, check_skipped: skipped };
   }
 

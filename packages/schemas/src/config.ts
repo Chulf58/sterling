@@ -100,6 +100,16 @@ export const configSchema = z.object({
       min_unowned_files: z.number().int().positive().default(3),
     })
     .default({}),
+  // §6 H15 store write-path guard: shell commands referencing the store are
+  // denied unless they invoke one of these sanctioned scripts/launchers —
+  // tunable, grows incident-by-incident (the reviewer-selection precedent)
+  store_guard: z
+    .object({
+      allow_scripts: z
+        .array(z.string())
+        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'sterling-tui.mjs']),
+    })
+    .default({}),
   // §3.4 stale-at-read thresholds (days)
   staleness: z
     .object({

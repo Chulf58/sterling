@@ -5,11 +5,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
-import { todoCards, noteCards, runView } from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, TABS, type UiState } from '../state.js';
+import { todoCards, noteCards, articleCards, runView } from '../viewmodel.js';
+import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, ARTICLES_TAB, QUEUE_TAB, TABS, type UiState } from '../state.js';
 import { keyToEvent, mouseToEvent } from '../render.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
+
+/** UiState literal helper — defaults from initialUi, overrides on top. */
+const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 
 function envelope(type: string) {
   return {
@@ -38,6 +41,23 @@ function fixture() {
     rmSync(dir, { recursive: true, force: true });
   };
   return { store, t1, t2, cleanup };
+}
+
+function article(store: SterlingStore, slug: string, title: string, what: string, files: string[]) {
+  return store.create({
+    ...envelope('feature_article'),
+    slug,
+    title,
+    what_it_does: what,
+    intended_behavior: 'works as designed',
+    files: files.map((path) => ({ path, role: 'impl' })),
+    current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'seeded' }],
+    live_test_refs: [],
+  }) as { id: string };
 }
 
 test('view models: board filters source=user; note first line; run view summarizes (§11)', () => {
@@ -69,24 +89,209 @@ test('view models: board filters source=user; note first line; run view summariz
   }
 });
 
+test('articleCards: groups derive from owned paths; body carries intended behavior', () => {
+  const { store, cleanup } = fixture();
+  try {
+    article(store, 'alpha-store', 'Alpha store layer', 'persists widgets in sqlite', [
+      'packages/store/src/index.ts',
+      'packages/schemas/src/records.ts',
+      'scripts/dispose-run.mjs',
+      'STERLING-SPEC.md',
+    ]);
+    const [card] = articleCards(store);
+    assert.deepEqual(card.groups, ['packages/store', 'packages/schemas', 'scripts', '(root)']);
+    assert.match(card.body, /persists widgets in sqlite/);
+    assert.match(card.body, /→ intended: works as designed/);
+    assert.match(card.detail, /alpha-store · active · v1 · 4 file\(s\) · relies on 0/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('buildDashboardState: rows with screen offsets; expansion adds detail lines; empty + run tabs', () => {
   const { store, t1, cleanup } = fixture();
   try {
     let s = buildDashboardState(store, initialUi);
-    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false]);
+    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false, false, false]);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 1]);
     assert.equal(s.rows[0].selected, true);
     assert.equal(s.rows[0].lines.length, 1, 'collapsed by default: one title line');
 
-    s = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [t1.id] });
+    s = buildDashboardState(store, st({ expanded: [t1.id] }));
     const meta = s.rows[0].lines.at(-1)!;
     assert.equal(meta.kind, 'meta');
     assert.match(meta.text, /priority: high/);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 2], 'expanded row occupies body + meta lines');
 
-    s = buildDashboardState(store, { tab: 2, cursor: 0, expanded: [] });
+    s = buildDashboardState(store, st({ tab: RUN_TAB }));
     assert.equal(s.emptyMessage, 'no active run');
     assert.equal(s.runSelected, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('queue tab (§3.2.7/§11): system items only, fixed half divider with truncation, completed drain-log lines never clickable', () => {
+  const { store, t1, cleanup } = fixture();
+  try {
+    // pending: ONLY system-source todos (the fixture has one + 2 user todos)
+    let ui = st({ tab: QUEUE_TAB });
+    let s = buildDashboardState(store, ui);
+    assert.equal(s.rows.length, 1, 'user todos never appear on the queue tab');
+    assert.match(s.rows[0].lines[0].text, /hidden maintenance/);
+    assert.match(s.rows[0].id, /.+/);
+    assert.notEqual(s.rows[0].id, t1.id);
+
+    // completed section exists with the fixed divider; empty state is loud
+    assert.ok(s.queueCompleted, 'completed section always present on the queue tab');
+    assert.deepEqual(s.queueCompleted!.lines, ['(nothing completed yet)']);
+
+    // drain a system item through the store → `HH:mm <verb> · <target>` (§11):
+    // no quoted name + no file keys → the text itself is the target
+    const extra = store.create({ ...envelope('todo'), text: 'refresh ref y', source: 'system', system_reason: 'refresh_reference' }) as { id: string };
+    store.remove(extra.id, '2026-06-10T12:34:00.000Z');
+    s = buildDashboardState(store, ui);
+    assert.equal(s.queueCompleted!.lines.length, 1);
+    assert.match(s.queueCompleted!.lines[0], /^(\d{2}-\d{2} )?\d{2}:\d{2} refreshed · refresh ref y$/, 'left stamp + DRAIN_VERBS verb + target');
+
+    // quoted-name target extraction + file-key fallback with (+N)
+    const named = store.create({
+      ...envelope('todo'),
+      text: "reconcile article 'tui-dashboard' — files it owns were touched in direct mode",
+      source: 'system',
+      system_reason: 'reconcile_needed',
+      file_keys: ['packages/tui/src/state.ts'],
+    }) as { id: string };
+    store.remove(named.id, '2026-06-10T12:35:00.000Z');
+    const keyed = store.create({
+      ...envelope('todo'),
+      text: 'article missing: direct-mode work touched 3 file(s) no feature_article owns',
+      source: 'system',
+      system_reason: 'article_missing',
+      file_keys: ['src/a.mjs', 'src/b.mjs', 'src/c.mjs'],
+    }) as { id: string };
+    store.remove(keyed.id, '2026-06-10T12:30:00.000Z'); // OLDEST stamp drained LAST, on purpose
+    s = buildDashboardState(store, ui);
+    assert.equal(s.queueCompleted!.lines.length, 3);
+    assert.match(s.queueCompleted!.lines[1], / updated · tui-dashboard$/, "quoted 'name' wins as the target");
+    // ordering is the drain SEQUENCE (newest drain first), never the displayed
+    // stamp — the last-drained item carries the oldest stamp yet sits on top
+    assert.match(s.queueCompleted!.lines[0], / created · src\/a\.mjs \(\+2\)$/, 'file-key fallback with (+N); seq beats stamp');
+
+    // fixed half split: maxBodyLines 6 → divider at body offset 3; pending
+    // truncated in the STATE layer so clicks can never hit clipped rows
+    for (let i = 0; i < 5; i++) store.create({ ...envelope('todo'), text: `q-item ${i}`, source: 'system', system_reason: 'capture_owed' });
+    s = buildDashboardState(store, ui, Infinity, 6);
+    assert.equal(s.queueCompleted!.startRow, 3);
+    const pendingLines = s.rows.length ? s.rows.at(-1)!.screenRow + s.rows.at(-1)!.lines.length : 0;
+    assert.ok(pendingLines <= 2, 'pending clipped above the divider (one line reserved for the overflow note)');
+    assert.match(s.queueCompleted!.overflow!, /… \d+ more pending/);
+
+    // a click in the completed region maps to no row — log lines are not records
+    const lineInCompleted = 3 + s.queueCompleted!.startRow + 1; // 1-based terminal line of the first completed entry
+    assert.equal(screenLineToRow(s, lineInCompleted, 6), -1);
+    const clicked = reduce(store, ui, { kind: 'click', x: 1, y: lineInCompleted }, { maxBodyLines: 6 });
+    assert.deepEqual(clicked.effects, [], 'completed entries cannot be selected');
+    assert.deepEqual(clicked.ui, ui);
+
+    // pending items ARE selectable as usual
+    const sel = reduce(store, ui, { kind: 'key', name: 'ENTER' });
+    assert.equal(sel.effects.length, 1);
+    assert.equal((sel.effects[0] as { recordType: string }).recordType, 'todo');
+  } finally {
+    cleanup();
+  }
+});
+
+test('articles tab: folder tree from owned files — groups fold/unfold, articles select+expand', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const a = article(store, 'alpha-store', 'Alpha store layer', 'persists widgets in sqlite', [
+      'packages/store/src/index.ts',
+      'packages/schemas/src/records.ts',
+    ]);
+    article(store, 'beta-tui', 'Beta dashboard', 'renders the dashboard pane', ['packages/tui/src/main.ts', 'scripts/build-tui.mjs']);
+
+    // default: collapsed folder list, sorted, with counts
+    let ui = st({ tab: ARTICLES_TAB });
+    let s = buildDashboardState(store, ui);
+    assert.deepEqual(
+      s.rows.map((r) => r.id),
+      ['group:packages/schemas', 'group:packages/store', 'group:packages/tui', 'group:scripts']
+    );
+    assert.match(s.rows[0].lines[0].text, /▸ packages\/schemas \(1\)/);
+
+    // enter on a folder unfolds it — no selection effect
+    const open = reduce(store, ui, { kind: 'key', name: 'ENTER' });
+    assert.deepEqual(open.effects, [], 'folding is navigation, not selection');
+    ui = open.ui;
+    s = buildDashboardState(store, ui);
+    assert.deepEqual(s.rows.map((r) => r.id).slice(0, 2), ['group:packages/schemas', a.id]);
+    assert.match(s.rows[0].lines[0].text, /▾/);
+    assert.match(s.rows[1].lines[0].text, /^\s{4}Alpha store layer/, 'article row is indented under its folder');
+
+    // activating the article selects + expands it (body + meta)
+    ui = { ...ui, cursor: 1 };
+    const sel = reduce(store, ui, { kind: 'key', name: 'ENTER' });
+    assert.deepEqual(sel.effects, [{ type: 'select', recordType: 'feature_article', id: a.id }]);
+    s = buildDashboardState(store, sel.ui);
+    const row = s.rows.find((r) => r.id === a.id)!;
+    assert.ok(row.lines.length > 1, 'expanded article shows its body');
+    assert.match(row.lines.at(-1)!.text, /alpha-store · active/);
+
+    // the same article appears under every folder it owns files in
+    const both = reduce(store, st({ tab: ARTICLES_TAB, cursor: 1, expanded: ['group:packages/schemas', 'group:packages/store'] }), {
+      kind: 'key',
+      name: 'DOWN',
+    });
+    const rows = buildDashboardState(store, both.ui).rows.map((r) => r.id);
+    assert.equal(rows.filter((id) => id === a.id).length, 2, 'multi-group ownership lists the card twice');
+  } finally {
+    cleanup();
+  }
+});
+
+test('articles search: / edits, chars (digits, q) append instead of acting, FTS prefix filters, enter keeps, esc clears', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const a = article(store, 'alpha-store', 'Alpha store layer', 'persists widgets in sqlite', ['packages/store/src/index.ts']);
+    article(store, 'beta-tui', 'Beta dashboard', 'renders the dashboard pane', ['packages/tui/src/main.ts']);
+
+    let ui = st({ tab: ARTICLES_TAB });
+    ({ ui } = reduce(store, ui, { kind: 'char', ch: '/' }));
+    assert.equal(ui.searchEditing, true);
+
+    for (const ch of ['w', 'i', 'd', '1', 'q']) ({ ui } = reduce(store, ui, { kind: 'char', ch }));
+    assert.equal(ui.searchQuery, 'wid1q', 'digits and q are input while editing — no tab switch, no quit');
+    assert.equal(ui.tab, ARTICLES_TAB);
+
+    ({ ui } = reduce(store, ui, { kind: 'key', name: 'BACKSPACE' }));
+    ({ ui } = reduce(store, ui, { kind: 'key', name: 'BACKSPACE' }));
+    assert.equal(ui.searchQuery, 'wid');
+
+    // FTS prefix: 'wid*' matches 'widgets' — flat ranked result list, no folders
+    let s = buildDashboardState(store, ui);
+    assert.deepEqual(s.rows.map((r) => r.id), [a.id], 'prefix search filters to the matching article');
+    assert.equal(s.searchLine, 'search: wid▌');
+
+    // enter leaves input mode but keeps the filter; esc clears back to the tree
+    ({ ui } = reduce(store, ui, { kind: 'key', name: 'ENTER' }));
+    assert.equal(ui.searchEditing, false);
+    assert.equal(ui.searchQuery, 'wid');
+    assert.equal(buildDashboardState(store, ui).searchLine, 'search: wid');
+    const quits = reduce(store, ui, { kind: 'char', ch: 'q' });
+    assert.deepEqual(quits.effects, [{ type: 'quit' }], 'q quits again once not editing');
+
+    ({ ui } = reduce(store, ui, { kind: 'key', name: 'ESCAPE' }));
+    assert.equal(ui.searchQuery, '');
+    s = buildDashboardState(store, ui);
+    assert.equal(s.searchLine, undefined);
+    assert.ok(s.rows.every((r) => r.type === 'group'), 'tree is back after esc');
+
+    // no matches → loud empty state
+    ({ ui } = reduce(store, ui, { kind: 'char', ch: '/' }));
+    for (const ch of ['z', 'z', 'z']) ({ ui } = reduce(store, ui, { kind: 'char', ch }));
+    assert.equal(buildDashboardState(store, ui).emptyMessage, '(no matches)');
   } finally {
     cleanup();
   }
@@ -95,7 +300,7 @@ test('buildDashboardState: rows with screen offsets; expansion adds detail lines
 test('screenLineToRow: maps clicks through bodyTop and expanded heights', () => {
   const { store, t1, cleanup } = fixture();
   try {
-    const s = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [t1.id] });
+    const s = buildDashboardState(store, st({ expanded: [t1.id] }));
     // terminal lines are 1-based; body starts after tab bar + blank (bodyTop=2) → line 3
     assert.equal(screenLineToRow(s, 3), 0, 'first row');
     assert.equal(screenLineToRow(s, 4), 0, 'its expanded detail line still maps to row 0');
@@ -121,7 +326,7 @@ test('viewport clamp: rows the renderer clips are not clickable (off-screen clic
     assert.equal(screenLineToRow(s, 4, 1), -1, 'clipped row must not map');
 
     // an expanded row's detail line beyond the viewport is not a hit either
-    const sx = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [t1.id] });
+    const sx = buildDashboardState(store, st({ expanded: [t1.id] }));
     assert.equal(screenLineToRow(sx, 4, 1), -1, 'hidden detail line must not map');
 
     // through reduce: a click below the viewport is a no-op (no selection effect, no expand)
@@ -153,14 +358,14 @@ test('expanded cards wrap the full body at the pane width; collapsed titles clip
     const width = 24;
 
     // collapsed: one line, clipped with an ellipsis affordance
-    let s = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [] }, width);
+    let s = buildDashboardState(store, st(), width);
     const collapsed = s.rows.find((r) => r.id === long.id)!;
     assert.equal(collapsed.lines.length, 1);
     assert.equal(collapsed.lines[0].text.length, width);
     assert.match(collapsed.lines[0].text, /…$/);
 
     // expanded: full body wrapped (every line within width), then the meta line
-    s = buildDashboardState(store, { tab: 0, cursor: 0, expanded: [long.id] }, width);
+    s = buildDashboardState(store, st({ expanded: [long.id] }), width);
     const expanded = s.rows.find((r) => r.id === long.id)!;
     assert.ok(expanded.lines.length > 3, 'body wraps over multiple lines');
     assert.equal(expanded.lines[0].kind, 'title');
@@ -177,7 +382,7 @@ test('expanded cards wrap the full body at the pane width; collapsed titles clip
     const idx = s.rows.findIndex((r) => r.id === long.id);
     const mid = 3 + s.rows[idx].screenRow + 2; // terminal line of the card's 3rd display line
     assert.equal(screenLineToRow(s, mid), idx);
-    const { ui } = reduce(store, { tab: 0, cursor: 0, expanded: [long.id] }, { kind: 'click', x: 1, y: mid }, { width });
+    const { ui } = reduce(store, st({ expanded: [long.id] }), { kind: 'click', x: 1, y: mid }, { width });
     assert.deepEqual(ui.expanded, [], 'clicking the wrapped body collapses the card');
   } finally {
     cleanup();
@@ -212,6 +417,8 @@ test('reduce: keys — tab cycling, cursor clamp, enter selects + toggles expand
 
     const quit = reduce(store, ui, { kind: 'key', name: 'QUIT' });
     assert.deepEqual(quit.effects, [{ type: 'quit' }]);
+    const charQuit = reduce(store, ui, { kind: 'char', ch: 'q' });
+    assert.deepEqual(charQuit.effects, [{ type: 'quit' }], "the 'q' char quits outside search input");
   } finally {
     cleanup();
   }
@@ -220,7 +427,7 @@ test('reduce: keys — tab cycling, cursor clamp, enter selects + toggles expand
 test('reduce: digit hotkeys select tabs directly; out-of-range digits are a no-op', () => {
   const { store, cleanup } = fixture();
   try {
-    let ui: UiState = { tab: 0, cursor: 1, expanded: [] };
+    let ui: UiState = st({ cursor: 1 });
     ({ ui } = reduce(store, ui, { kind: 'tab', index: TABS.length - 1 }));
     assert.equal(ui.tab, TABS.length - 1, 'last tab reachable by its digit');
     assert.equal(ui.cursor, 0, 'tab switch resets the cursor');
@@ -228,9 +435,14 @@ test('reduce: digit hotkeys select tabs directly; out-of-range digits are a no-o
     ({ ui } = reduce(store, ui, { kind: 'tab', index: 0 }));
     assert.equal(ui.tab, 0);
 
+    ({ ui } = reduce(store, ui, { kind: 'char', ch: String(TABS.length) }));
+    assert.equal(ui.tab, TABS.length - 1, 'digit chars switch tabs outside search input');
+
     const before = ui;
     ({ ui } = reduce(store, ui, { kind: 'tab', index: TABS.length }));
     assert.deepEqual(ui, before, 'digit past the registered tab count is ignored');
+    ({ ui } = reduce(store, ui, { kind: 'char', ch: '9' }));
+    assert.deepEqual(ui, before, 'out-of-range digit char is ignored too');
   } finally {
     cleanup();
   }
@@ -256,7 +468,7 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
     assert.equal(clickFirst.effects[0]!.type, 'select');
     assert.equal((clickFirst.effects[0] as { id: string }).id, t1.id);
 
-    // tab bar: ' Todos  Notes  Live-run ' — Notes starts after ' Todos ' (7 cols)
+    // tab bar: ' Todos  Notes  Articles  Live-run ' — Notes starts after ' Todos ' (7 cols)
     const tabClick = reduce(store, ui, { kind: 'click', x: 9, y: 1 });
     assert.equal(tabClick.ui.tab, 1, 'clicked Notes');
 
@@ -284,7 +496,7 @@ test('reduce + runEffects: run-tab activation selects the run; effects write the
       escalations: [],
       started_at: NOW,
     });
-    const ui: UiState = { tab: 2, cursor: 0, expanded: [] };
+    const ui: UiState = st({ tab: RUN_TAB });
     const { effects } = reduce(store, ui, { kind: 'key', name: 'ENTER' });
     assert.deepEqual(effects, [{ type: 'select', recordType: 'run', id: 'r-sel' }]);
     const quit = runEffects(store, effects, () => NOW);
@@ -299,12 +511,15 @@ test('reduce + runEffects: run-tab activation selects the run; effects write the
 
 test('renderer translation tables: terminal-kit names map to the state vocabulary', () => {
   assert.deepEqual(keyToEvent('UP'), { kind: 'key', name: 'UP' });
-  assert.deepEqual(keyToEvent('q'), { kind: 'key', name: 'QUIT' });
   assert.deepEqual(keyToEvent('CTRL_C'), { kind: 'key', name: 'QUIT' });
-  assert.deepEqual(keyToEvent('1'), { kind: 'tab', index: 0 }, 'digit hotkeys map to 0-based tab index');
-  assert.deepEqual(keyToEvent('9'), { kind: 'tab', index: 8 }, 'translation is tab-count agnostic; reduce validates');
-  assert.equal(keyToEvent('0'), undefined);
-  assert.equal(keyToEvent('F5'), undefined);
+  assert.deepEqual(keyToEvent('ESCAPE'), { kind: 'key', name: 'ESCAPE' });
+  assert.deepEqual(keyToEvent('BACKSPACE'), { kind: 'key', name: 'BACKSPACE' });
+  // printable keys travel as chars — the state layer decides by mode
+  assert.deepEqual(keyToEvent('q'), { kind: 'char', ch: 'q' });
+  assert.deepEqual(keyToEvent('1'), { kind: 'char', ch: '1' });
+  assert.deepEqual(keyToEvent('/'), { kind: 'char', ch: '/' });
+  assert.deepEqual(keyToEvent(' '), { kind: 'char', ch: ' ' });
+  assert.equal(keyToEvent('F5'), undefined, 'unmapped named keys stay inert');
   assert.deepEqual(mouseToEvent('MOUSE_LEFT_BUTTON_PRESSED', { x: 3, y: 4 }), { kind: 'click', x: 3, y: 4 });
   assert.deepEqual(mouseToEvent('MOUSE_RIGHT_BUTTON_PRESSED', { x: 1, y: 1 }), { kind: 'rightclick' });
   assert.deepEqual(mouseToEvent('MOUSE_WHEEL_DOWN', { x: 0, y: 0 }), { kind: 'wheel', dy: 1 });

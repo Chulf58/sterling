@@ -129,6 +129,13 @@ test('rank: bm25 over rank_terms orders matching records first; freeform questio
     assert.equal(ranked.length, 1, 'bm25 path returns only MATCHing records');
     assert.equal((ranked[0] as { slug: string }).slug, 'csv-export');
     assert.throws(() => store.query({ rank_terms: ['what is the best way to export?'] }), /single keywords/);
+
+    // trailing '*' = FTS5 prefix query (the star sits outside the quoted token)
+    const prefixed = store.query({ types: ['feature_article'], rank_terms: ['authent*'] });
+    assert.equal(prefixed.length, 1, "'authent*' prefix-matches 'Authenticates'");
+    assert.equal((prefixed[0] as { slug: string }).slug, 'auth-login');
+    assert.equal(store.query({ types: ['feature_article'], rank_terms: ['authent'] }).length, 0, 'without the star the same stem is an exact token — no match');
+    assert.equal(store.query({ types: ['feature_article'], rank_terms: ['*'] }).length, 0, "a bare '*' is a quoted literal, matching nothing rather than throwing");
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -231,6 +238,49 @@ test('remove deletes the record and all index rows (P4 todo path)', () => {
     assert.equal(store.query({ types: ['todo'] }).length, 0);
     assert.equal(store.query({ file_keys: ['src/a.ts'] }).length, 0);
     assert.equal(store.query({ rank_terms: ['reconcile'] }).length, 0, 'fts row removed');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('queue drain log (§3.2.7): system removals logged + capped; user removals never logged', () => {
+  const { dir, store } = tempStore();
+  try {
+    // user todo: removed, NOT logged
+    const u = store.create({ ...envelope('todo'), text: 'a user todo', source: 'user' });
+    store.remove(u.id, '2026-06-12T08:00:00.000Z');
+    assert.equal(store.listQueueDrain().length, 0, 'user-source todos never enter the drain log');
+
+    // system todo: removed AND logged, record still hard-deleted
+    const s = store.create({
+      ...envelope('todo'),
+      text: 'reconcile article x',
+      source: 'system',
+      system_reason: 'reconcile_needed',
+      file_keys: ['src/x.ts'],
+    });
+    store.remove(s.id, '2026-06-12T09:00:00.000Z');
+    assert.equal(store.get(s.id), undefined, 'the record itself is gone — no done status (P4)');
+    const drained = store.listQueueDrain();
+    assert.equal(drained.length, 1);
+    assert.deepEqual(drained[0], {
+      drained_at: '2026-06-12T09:00:00.000Z',
+      system_reason: 'reconcile_needed',
+      text: 'reconcile article x',
+      file_keys: ['src/x.ts'],
+    });
+
+    // cap: completed items never build up — 50 max, oldest pruned in the same tx
+    for (let i = 0; i < 60; i++) {
+      const item = store.create({ ...envelope('todo'), text: `item ${i}`, source: 'system', system_reason: 'capture_owed' });
+      store.remove(item.id, `2026-06-12T10:${String(i).padStart(2, '0')}:00.000Z`);
+    }
+    const all = store.listQueueDrain(100);
+    assert.equal(all.length, 50, 'log is capped at 50');
+    assert.equal(all[0].text, 'item 59', 'newest first');
+    assert.ok(!all.some((e) => e.text === 'reconcile article x'), 'oldest entries pruned');
+    assert.equal(store.listQueueDrain(15).length, 15, 'reader limit');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

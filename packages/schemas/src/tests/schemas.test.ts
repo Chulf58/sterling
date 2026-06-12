@@ -15,6 +15,8 @@ import {
   RECORD_TYPES,
   validateRecord,
   SPINE_SIGNALS,
+  SYSTEM_REASONS,
+  DRAIN_VERBS,
 } from '../index.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -299,4 +301,13 @@ test('§3.2.5: reference_material fileKeys — repo-located docs only', () => {
   assert.deepEqual(fk({ kind: 'url', location: 'https://example.com/x' }), [], 'external locations carry no file_keys');
   assert.deepEqual(fk({ kind: 'pdf', location: 'C:/refs/spec.pdf' }), []);
   assert.deepEqual(fk({ kind: 'doc', location: 'C:/abs/spec.md' }), [], 'absolute doc location is not repo-located');
+});
+
+test('§11 drain verbs: every maintenance lane has its completed-section verb (totality)', () => {
+  for (const reason of SYSTEM_REASONS) {
+    const verb = DRAIN_VERBS[reason];
+    assert.equal(typeof verb, 'string', `SYSTEM_REASON '${reason}' is missing a DRAIN_VERBS entry`);
+    assert.ok(verb.length > 0, `verb for '${reason}' must not be blank`);
+  }
+  assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...SYSTEM_REASONS].sort(), 'no orphan verbs for unregistered reasons');
 });

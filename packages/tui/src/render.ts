@@ -31,8 +31,12 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
     screen.put({ x, y: 0, attr: tab.active ? { inverse: true } : {} }, label);
     x += label.length;
   }
+  if (state.searchLine) {
+    // the spacer line doubles as the search bar while a query/input is live
+    screen.put({ x: 0, y: 1, attr: { dim: true } }, state.searchLine);
+  }
   const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
-  let y = state.bodyTop; // 0-based rows: tab bar 0, blank 1, body from bodyTop
+  let y = state.bodyTop; // 0-based rows: tab bar 0, blank/search 1, body from bodyTop
   if (state.emptyMessage && y <= lastBodyLine) {
     screen.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
     y += 1;
@@ -45,6 +49,22 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
         line.kind === 'title' ? (row.selected ? { inverse: true } : {}) : line.kind === 'meta' ? { dim: true } : {};
       screen.put({ x: 0, y, attr }, line.text);
       y += 1;
+    }
+  }
+  if (state.queueCompleted) {
+    // lower-half completed section (§11): drain-log lines, dim, never selectable.
+    // The state layer already truncated pending above the fixed divider.
+    const qc = state.queueCompleted;
+    if (qc.overflow) screen.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: { dim: true } }, qc.overflow);
+    let cy = state.bodyTop + qc.startRow;
+    if (cy <= lastBodyLine) {
+      screen.put({ x: 0, y: cy, attr: { dim: true } }, qc.header);
+      cy += 1;
+    }
+    for (const line of qc.lines) {
+      if (cy > lastBodyLine) break;
+      screen.put({ x: 0, y: cy, attr: { dim: true } }, line);
+      cy += 1;
     }
   }
   if (state.run && y <= lastBodyLine) {
@@ -66,7 +86,9 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
   screen.draw({ delta: true });
 }
 
-/** Translate terminal-kit key names to state-layer events. */
+/** Translate terminal-kit key names to state-layer events. Printable keys
+ *  travel as chars — the state layer decides per mode (search input vs 'q'
+ *  quit vs digit hotkeys vs '/'); named keys cover navigation/control. */
 export function keyToEvent(name: string): UiEvent | undefined {
   switch (name) {
     case 'LEFT':
@@ -82,15 +104,14 @@ export function keyToEvent(name: string): UiEvent | undefined {
     case 'ENTER':
     case 'KP_ENTER':
       return { kind: 'key', name: 'ENTER' };
-    case ' ':
-      return { kind: 'key', name: 'SPACE' };
-    case 'q':
+    case 'ESCAPE':
+      return { kind: 'key', name: 'ESCAPE' };
+    case 'BACKSPACE':
+      return { kind: 'key', name: 'BACKSPACE' };
     case 'CTRL_C':
       return { kind: 'key', name: 'QUIT' };
     default:
-      // digit hotkeys: '1'..'9' select a tab directly; reduce() ignores
-      // indexes past the registered tab count, so this scales with TABS
-      if (/^[1-9]$/.test(name)) return { kind: 'tab', index: Number(name) - 1 };
+      if (name.length === 1 && name >= ' ') return { kind: 'char', ch: name };
       return undefined;
   }
 }

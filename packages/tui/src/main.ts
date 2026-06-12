@@ -2,7 +2,9 @@
 // Exits politely on non-TTY stdout (§11). terminal-kit loads only after the
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
+import { dirname, join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
+import { acquireTuiLock, releaseTuiLock } from './lock.js';
 import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, type UiState } from './state.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
@@ -18,6 +20,7 @@ if (storeIdx === -1 || !args[storeIdx + 1]) {
   console.error('usage: sterling-tui --store <path-to-sterling.db>');
   process.exit(2);
 }
+const storePath = args[storeIdx + 1];
 
 const termkit = await import('terminal-kit');
 const term = termkit.default.terminal;
@@ -28,7 +31,15 @@ if (smoke) {
   process.exit(0);
 }
 
-const store = new SterlingStore(args[storeIdx + 1]);
+// single instance per store (§11): a live owner turns this launch away politely
+const lockPath = join(dirname(storePath), 'transient', 'tui.lock');
+const owner = acquireTuiLock(lockPath, process.pid);
+if (owner !== null) {
+  console.error(`sterling-tui: already running (pid ${owner}) for this store — exiting politely (§11)`);
+  process.exit(0);
+}
+
+const store = new SterlingStore(storePath);
 let ui: UiState = initialUi;
 
 // One ScreenBuffer for the process lifetime: draw({delta:true}) diffs each
@@ -36,7 +47,7 @@ let ui: UiState = initialUi;
 let screen = new termkit.default.ScreenBuffer({ dst: term });
 
 function redraw(): void {
-  draw(screen, buildDashboardState(store, ui, term.width));
+  draw(screen, buildDashboardState(store, ui, term.width, visibleBodyLines(term.height)));
 }
 
 function handle(event: ReturnType<typeof keyToEvent>): void {
@@ -48,6 +59,7 @@ function handle(event: ReturnType<typeof keyToEvent>): void {
     term.hideCursor(false);
     term.fullscreen(false); // leave the alternate screen buffer, restoring the shell
     store.close();
+    releaseTuiLock(lockPath, process.pid);
     process.exit(0);
   }
   redraw();
