@@ -433,6 +433,50 @@ test('H10 article demand: an open article_missing item with overlapping file key
   }
 });
 
+// --------------------------- H15 ---------------------------
+
+test('H15 store guard: shell references to the store are denied naming the §10 tools; sanctioned scripts and unrelated commands pass', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const run = (command) =>
+      runHook('h15-store-guard.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'PowerShell', tool_input: { command } }), dir);
+
+    const nodeWrite = run(`node -e "import('.../store/dist/index.js').then(s => new s.SterlingStore('.sterling/sterling.db'))"`);
+    assert.equal(nodeWrite.code, 2, 'ad-hoc node script against the store is denied');
+    assert.match(nodeWrite.stderr, /§10 MCP tool surface/);
+    assert.match(nodeWrite.stderr, /RESTART THE SESSION/);
+
+    assert.equal(run('sqlite3 .sterling/sterling.db "SELECT * FROM records"').code, 2, 'reads are denied too — use knowledge_query');
+    assert.equal(run('Get-Content .sterling\\config.json').code, 2, 'backslash store paths are caught');
+
+    assert.equal(run('node scripts/dispose-run.mjs r-0001 --store .sterling/sterling.db').code, 0, 'sanctioned script passes');
+    assert.equal(run('node scripts/init.mjs --backup-path .sterling/backups').code, 0, 'init passes');
+    assert.equal(run('node packages/tui/bundle/sterling-tui.mjs --store .sterling/sterling.db').code, 0, 'TUI launcher passes');
+    assert.equal(run('npm test').code, 0, 'unrelated commands untouched');
+    assert.equal(run('git status').code, 0);
+
+    // malformed config: the gate FAILS CLOSED on the protected branch (review finding)
+    writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
+    const broken = run('sqlite3 .sterling/sterling.db ".tables"');
+    assert.equal(broken.code, 2, 'unreadable config denies rather than voiding the gate');
+    assert.match(broken.stderr, /fails closed/);
+  } finally {
+    cleanup();
+  }
+  // outside a Sterling project: silent pass-through (P1)
+  const bare = mkdtempSync(join(tmpdir(), 'sterling-bare-'));
+  try {
+    const r = runHook(
+      'h15-store-guard.mjs',
+      hookInput(bare, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'sqlite3 .sterling/sterling.db ".tables"' } }),
+      bare
+    );
+    assert.equal(r.code, 0, 'no ceremony outside Sterling projects');
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
 // --------------------------- H11 ---------------------------
 
 test('H11: extraction lands as derived_unconfirmed citing the note; failure degrades loudly', () => {

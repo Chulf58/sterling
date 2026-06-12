@@ -11,6 +11,7 @@
 - **Minimal change:** no drive-by refactors, no "while I'm here" improvements. One concern per change.
 - **Ask, don't guess.** One question at a time.
 - **Canonical naming:** one name per concept. The canonical names for this project are in the registries; do not coin synonyms.
+- **Store writes go through the MCP tool surface (§10)** — never shell scripts against `.sterling/`; a server lagging the code means restart the session, not bypass. (Enforced: H15.)
 
 ## Conductor contract (summary — SOPs live in skills, not here)
 

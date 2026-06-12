@@ -50,6 +50,7 @@ npm workspaces monorepo. TypeScript everywhere except `scripts/` (standalone `.m
 - **Minimal change:** no drive-by refactors, no "while I'm here" improvements. One concern per change.
 - **Ask, don't guess.** One question at a time.
 - **Canonical naming:** one name per concept, taken from the spec and registries. Run the dead-term check: no "Forge", "Quatermain", "wave", or "brainstormer" residue in any scaffolded or generated content.
+- **Store writes go through the MCP tool surface (§10)** — never shell scripts against `.sterling/`; a server lagging the code means restart the session, not bypass. (Enforced: H15.)
 - **No hand-maintained architecture documents.** Generated projections only, clearly marked.
 
 ## When the platform disagrees with the spec
