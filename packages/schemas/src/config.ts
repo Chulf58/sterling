@@ -107,7 +107,7 @@ export const configSchema = z.object({
     .object({
       allow_scripts: z
         .array(z.string())
-        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'sterling-tui.mjs']),
+        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'sterling-tui.mjs']),
     })
     .default({}),
   // §3.4 stale-at-read thresholds (days)

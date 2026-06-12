@@ -554,7 +554,7 @@ Creates, exactly: `.sterling/` (store per the storage choice — internals follo
 
 ## 15. Architecture & extension document (a required deliverable alongside the code)
 
-For each extensible set (signals, record types, agents, hooks, tools, toolchain adapters): the **registry** (single source of truth), the **checks** that guard it (and when they run), and an **"extending this"** section listing the coupled parts touching it obligates and the check that catches a miss. Sterling documents and extends itself by the same registry+checked-contract+fail-loud discipline it imposes (Section 6 checks). The design rationale behind this spec is captured as decision records during the build (P2 applied to Sterling itself).
+For each extensible set (signals, record types, agents, hooks, tools, toolchain adapters): the **registry** (single source of truth), the **checks** that guard it (and when they run), and an **"extending this"** section listing the coupled parts touching it obligates and the check that catches a miss. Sterling documents and extends itself by the same registry+checked-contract+fail-loud discipline it imposes (Section 6 checks). *(Built, adjudicated 2026-06-12: `scripts/architecture-projection.mjs` generates `architecture.md` as a read-only projection over the registries and the sets' owning feature articles — per the §12 rule that no hand-maintained architecture file may exist; article gaps render loud, never omitted.)* The design rationale behind this spec is captured as decision records during the build (P2 applied to Sterling itself).
 
 ## 16. Build order (probes → spine → full build)
 
