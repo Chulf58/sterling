@@ -1,7 +1,12 @@
 // H1 — conventions + banner (spec §6 H1). SessionStart, non-blocking.
-// Conventions go to Claude as additionalContext; the banner + board/
-// maintenance counts go to the human as systemMessage — the queue is
-// event-drained and otherwise invisible; this is its visibility pressure.
+// Conventions go to Claude as additionalContext; board/maintenance counts go
+// to the human as systemMessage — the queue is event-drained and otherwise
+// invisible; this is its visibility pressure. Banner art goes to stderr
+// (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
+// state, so suppression is env-only (STERLING_NO_BANNER=1).
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore } from './lib/common.mjs';
 
 const CONVENTIONS = [
@@ -11,8 +16,61 @@ const CONVENTIONS = [
   '- Canonical naming: one name per concept, from the registries; phase execution, intake, steps — kill synonyms on sight.',
 ].join('\n');
 
-// swappable art slot (§6 H1); width-aware fallback is the plain name
-const BANNER_ART = 'STERLING';
+// swappable art slot (§6 H1): fixed-width ≤40 cols, fits the 35% split pane
+const BANNER_ROWS = [
+  '▄▀▀ ▀█▀ █▀▀ █▀▄ █   ▀█▀ █▄ █ ▄▀▀▄',
+  '▀▀▄  █  █▀▀ █▀▄ █    █  █ ▀█ █ ▄▄',
+  '▀▀▀  ▀  ▀▀▀ ▀ ▀ ▀▀▀ ▀▀▀ ▀  ▀ ▀▀▀▀',
+];
+
+// sterling-silver gradient, lerped per column: white → silver → steel blue
+const GRADIENT = [
+  [255, 255, 255],
+  [192, 192, 200],
+  [70, 100, 130],
+];
+
+function colorAt(t) {
+  const [from, to, u] = t <= 0.5 ? [GRADIENT[0], GRADIENT[1], t * 2] : [GRADIENT[1], GRADIENT[2], (t - 0.5) * 2];
+  return from.map((v, i) => Math.round(v + (to[i] - v) * u));
+}
+
+function paint(rows) {
+  if (process.env.NO_COLOR) return rows.join('\n');
+  const width = Math.max(...rows.map((r) => r.length));
+  return rows
+    .map(
+      (row) =>
+        [...row]
+          .map((ch, x) => {
+            if (ch === ' ') return ch;
+            const [r, g, b] = colorAt(width <= 1 ? 0 : x / (width - 1));
+            return `\x1b[38;2;${r};${g};${b}m${ch}`;
+          })
+          .join('') + '\x1b[0m'
+    )
+    .join('\n');
+}
+
+/** Plugin version, fail-open (no version, no line): the bounded walk-up finds
+ *  .claude-plugin/plugin.json from scripts/hooks/ (source, tests) and hooks/
+ *  (bundle) alike. */
+function pluginVersion() {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 4; i++) {
+      const p = join(dir, '.claude-plugin', 'plugin.json');
+      if (existsSync(p)) {
+        const v = JSON.parse(readFileSync(p, 'utf8')).version;
+        return typeof v === 'string' && v.length ? v : null;
+      }
+      dir = dirname(dir);
+    }
+  } catch {
+    // fail-open — the banner prints without a version line
+  }
+  return null;
+}
 
 const input = readStdin();
 const store = openStore(input.cwd);
@@ -27,10 +85,15 @@ try {
   store.close();
 }
 
-const suppressBanner = process.env.STERLING_NO_BANNER === '1';
-const banner = suppressBanner ? '' : `${BANNER_ART} — `;
+if (process.env.STERLING_NO_BANNER !== '1') {
+  const width = Math.max(...BANNER_ROWS.map((r) => r.length));
+  const version = pluginVersion();
+  const versionLine = version ? `v${version}`.padStart(width) + '\n' : '';
+  process.stderr.write(`${paint(BANNER_ROWS)}\n${versionLine}`);
+}
+
 const output = {
-  systemMessage: `${banner}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS },
 };
 process.stdout.write(JSON.stringify(output));

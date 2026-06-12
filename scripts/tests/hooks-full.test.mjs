@@ -115,19 +115,27 @@ function article(store, slug, files) {
 
 // --------------------------- H1 ---------------------------
 
-test('H1: banner counts to the human, conventions to Claude; quiet outside Sterling projects', () => {
+test('H1: banner art to stderr (env-only suppression), counts to the human, conventions to Claude; quiet outside Sterling projects', () => {
+  const ART_ROW = '▀▀▀  ▀  ▀▀▀ ▀ ▀ ▀▀▀ ▀▀▀ ▀  ▀ ▀▀▀▀'; // letterform row 3
   const { dir, store, cleanup } = makeProject();
   try {
     store.create({ ...envelope('todo'), text: 'a', source: 'user' });
     store.create({ ...envelope('todo'), text: 'b', source: 'user' });
     store.create({ ...envelope('todo'), text: 'm', source: 'system', system_reason: 'reconcile_needed' });
-    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir);
+    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' });
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
-    assert.match(out.systemMessage, /STERLING — 2 todos · 1 maintenance item pending/);
+    assert.match(out.systemMessage, /^2 todos · 1 maintenance item pending/);
     assert.match(out.hookSpecificOutput.additionalContext, /Anti-speculation/);
+    assert.ok(r.stderr.includes(ART_ROW), 'banner art on stderr');
+    assert.ok(!r.stderr.includes('\x1b['), 'NO_COLOR strips ANSI');
+    assert.match(r.stderr, /v\d+\.\d+\.\d+/, 'plugin version read live (fail-open contract)');
+    const colored = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '' });
+    assert.ok(colored.stderr.includes('\x1b[38;2;'), 'truecolor gradient by default');
     const suppressed = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { STERLING_NO_BANNER: '1' });
-    assert.match(JSON.parse(suppressed.stdout).systemMessage, /^2 todos/);
+    assert.equal(suppressed.code, 0);
+    assert.ok(!suppressed.stderr.includes('▀'), 'STERLING_NO_BANNER=1 silences the art');
+    assert.match(JSON.parse(suppressed.stdout).systemMessage, /^2 todos/, 'counts line survives suppression');
   } finally {
     cleanup();
   }
@@ -136,6 +144,7 @@ test('H1: banner counts to the human, conventions to Claude; quiet outside Sterl
     const r = runHook('h1-session-start.mjs', hookInput(bare, { hook_event_name: 'SessionStart' }), bare);
     assert.equal(r.code, 0);
     assert.equal(r.stdout, '', 'no ceremony outside Sterling projects (P1)');
+    assert.ok(!r.stderr.includes('▀'), 'no banner art outside Sterling projects (P1)');
   } finally {
     rmSync(bare, { recursive: true, force: true });
   }
