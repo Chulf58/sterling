@@ -21,7 +21,7 @@ function init(dir, args = []) {
 }
 
 const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'];
-const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', '.mcp.json', '.gitignore'];
+const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'tui.bat', '.mcp.json', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
 test('ensure outcome 1 — create absent: fresh init creates every manifest item and records declarations', () => {

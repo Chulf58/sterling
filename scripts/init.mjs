@@ -191,12 +191,17 @@ const where = (exe) => {
 };
 const claudePath = process.env.CLAUDE_CODE_EXECPATH ?? where('claude') ?? join(process.env.USERPROFILE ?? '~', '.local', 'bin', 'claude.exe');
 const wtPath = where('wt') ?? join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WindowsApps', 'wt.exe');
-const expectedLauncher = readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
-  .replaceAll('{{WT}}', `"${wtPath}"`)
-  .replaceAll('{{CLAUDE}}', `"${claudePath}" --plugin-dir "${fwd(pluginRoot)}"`)
-  .replaceAll('{{NODE}}', `"${process.execPath}"`)
-  .replaceAll('{{TUI_BUNDLE}}', join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'))
-  .replaceAll('{{SPLIT_RATIO}}', String(eff.splitRatio));
+// cmd.exe misparses LF-only batch files (commands split mid-word) — .bat
+// artifacts are always rendered CRLF, independent of the checkout's eol config
+const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
+const expectedLauncher = crlf(
+  readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
+    .replaceAll('{{WT}}', `"${wtPath}"`)
+    .replaceAll('{{CLAUDE}}', `"${claudePath}" --plugin-dir "${fwd(pluginRoot)}"`)
+    .replaceAll('{{NODE}}', `"${process.execPath}"`)
+    .replaceAll('{{TUI_BUNDLE}}', join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'))
+    .replaceAll('{{SPLIT_RATIO}}', String(eff.splitRatio))
+);
 const launcherPath = join(target, 'sterling.bat');
 if (!existsSync(launcherPath)) {
   writeFileSync(launcherPath, expectedLauncher);
@@ -205,6 +210,25 @@ if (!existsSync(launcherPath)) {
   items.push({ item: 'sterling.bat', status: 'matches', detail: 'machine-detected paths unchanged' });
 } else {
   items.push({ item: 'sterling.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+}
+
+// TUI pane launcher (§11, the §13 dashboard command): reopens the dashboard
+// split in the CURRENT terminal window after the human closes it with q
+const expectedTuiLauncher = crlf(
+  readFileSync(join(pluginRoot, 'templates', 'tui-win.bat'), 'utf8')
+    .replaceAll('{{WT}}', `"${wtPath}"`)
+    .replaceAll('{{NODE}}', `"${process.execPath}"`)
+    .replaceAll('{{TUI_BUNDLE}}', join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'))
+    .replaceAll('{{SPLIT_RATIO}}', String(eff.splitRatio))
+);
+const tuiLauncherPath = join(target, 'tui.bat');
+if (!existsSync(tuiLauncherPath)) {
+  writeFileSync(tuiLauncherPath, expectedTuiLauncher);
+  items.push({ item: 'tui.bat', status: 'created', detail: `wt: ${wtPath}` });
+} else if (normalize(readFileSync(tuiLauncherPath, 'utf8')) === normalize(expectedTuiLauncher)) {
+  items.push({ item: 'tui.bat', status: 'matches', detail: 'machine-detected paths unchanged' });
+} else {
+  items.push({ item: 'tui.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
 }
 
 // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
@@ -273,7 +297,7 @@ items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the
 // gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');
 const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
-const entries = ['.sterling/', 'sterling.bat', '.claude/agents/'];
+const entries = ['.sterling/', 'sterling.bat', 'tui.bat', '.claude/agents/'];
 if (eff.backupPath) {
   const root = fwd(target);
   if (eff.backupPath === root || eff.backupPath.startsWith(root + '/')) {
@@ -290,7 +314,7 @@ if (missing.length) {
 
 // dead-term check over the GENERATED content (§12) — rendered expected content
 // every run (catches template rot), never the human's own files
-for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling.bat', expectedLauncher]]) {
+for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling.bat', expectedLauncher], ['tui.bat', expectedTuiLauncher]]) {
   const hits = findDeadTerms(content);
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(', ')}`, 1);
 }

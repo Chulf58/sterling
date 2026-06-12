@@ -6,3 +6,4 @@ hooks/*.mjs
 .sterling/
 sterling.bat
 .claude/agents/
+tui.bat
