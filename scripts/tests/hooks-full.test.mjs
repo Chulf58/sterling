@@ -368,7 +368,7 @@ test('H10 article demand (§6): capture alone does not satisfy unowned territory
     const nag = stop();
     assert.equal(nag.code, 2, 'capture alone does not satisfy the article demand');
     assert.match(nag.stderr, /article demand/);
-    assert.match(nag.stderr, /no owning feature_article/);
+    assert.match(nag.stderr, /no owner \(feature_article or repo-located reference doc\)/);
     assert.doesNotMatch(nag.stderr, /nothing was captured/, 'the capture duty itself is satisfied');
 
     const release = stop();
@@ -404,6 +404,23 @@ test('H10 article demand: creating the owning article clears the demand mechanic
     assert.equal(small.store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing').length, 0);
   } finally {
     small.cleanup();
+  }
+  // a governing document's owner is its repo-located reference_material record
+  // (§3.2.5) — the demand join matches H7's (adjudicated 2026-06-12 after the
+  // spec itself was demanded a feature article); 3 docs = at threshold, so this
+  // passes ONLY through the reference_material side of the join
+  const docs = makeProject();
+  try {
+    touchRegister(docs.dir, ['docs/a.md', 'docs/b.md', 'docs/c.md']);
+    captureNote(docs.store);
+    referenceDoc(docs.store, 'Doc A', 'doc', 'docs/a.md');
+    referenceDoc(docs.store, 'Doc B', 'doc', 'docs/b.md');
+    referenceDoc(docs.store, 'Doc C', 'doc', 'docs/c.md');
+    const r = runHook('h10-direct-capture.mjs', hookInput(docs.dir, { hook_event_name: 'Stop' }), docs.dir);
+    assert.equal(r.code, 0, 'reference-doc ownership satisfies the article demand');
+    assert.equal(docs.store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing').length, 0);
+  } finally {
+    docs.cleanup();
   }
 });
 

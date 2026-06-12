@@ -42,9 +42,14 @@ try {
     .query({ types: ['decision', 'anti_pattern', 'note', 'feature_article'], cap: 1000, include_unconfirmed: true })
     .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
 
-  // §6 H10 article demand: touched files no feature_article owns, at threshold
-  // or any new unowned file (vs git HEAD; no-git degrades loud to threshold-only)
-  const unowned = paths.filter((p) => store.query({ types: ['feature_article'], file_keys: [p], cap: 1 }).length === 0);
+  // §6 H10 article demand: touched files nothing owns, at threshold or any new
+  // unowned file (vs git HEAD; no-git degrades loud to threshold-only).
+  // Ownership joins feature_article AND repo-located reference docs (§3.2.5) —
+  // same join as H7; a governing document's owner is its reference_material
+  // record, never a forced feature article (adjudicated 2026-06-12).
+  const unowned = paths.filter(
+    (p) => store.query({ types: ['feature_article', 'reference_material'], file_keys: [p], cap: 1 }).length === 0
+  );
   let newUnowned = [];
   if (unowned.length) {
     const head = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only', '--', ...unowned], {
@@ -94,9 +99,9 @@ try {
     }
     if (articleDemand) {
       parts.push(
-        `H10 article demand (§6): ${unowned.length} touched file(s) have no owning feature_article` +
+        `H10 article demand (§6): ${unowned.length} touched file(s) have no owner (feature_article or repo-located reference doc)` +
           `${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''}: ${JSON.stringify(unowned.slice(0, 20))}.\n` +
-          `Create or extend the owning article(s) NOW (knowledge_create type feature_article) — the knowledge is freshest before this session ends; general capture does not satisfy this.`
+          `Create or extend the owning article(s) NOW (knowledge_create type feature_article; for a governing document, reference_material kind doc) — the knowledge is freshest before this session ends; general capture does not satisfy this.`
       );
     }
     deny(parts.join('\n\n'));
@@ -142,7 +147,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `article missing: direct-mode work touched ${unowned.length} file(s) no feature_article owns${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
+        text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
         source: 'system',
         system_reason: 'article_missing',
         file_keys: unowned.slice(0, 20),
