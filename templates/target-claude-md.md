@@ -20,6 +20,7 @@
 - **Two gates only:** intake→implementation and merge-to-main. Everything else flows, live-observed.
 - **One active run at a time; the run owns the working tree.** No direct edits during a run. Urgent unrelated work: finish or reject the run.
 - **Knowledge duties:** stage retrieval before work (`knowledge_query`); capture decisions when made, not later; reconcile touched feature articles before any run completes (the disposal script will refuse otherwise); todos are removed only by the artifact-write that fulfills them.
+- **Notes are the user's surface.** Conductor knowledge is born structured (`decision` / `anti_pattern` / `research_finding` / article reconciliation) — never parked in a note; a `note` you create only relays a user statement verbatim. Misfiled or spent notes leave via `note_remove`, on the user's word.
 - **Briefs:** the store object is authoritative; `docs/briefs/*.md` are generated projections. Attribute faithfully — `user_stated` is verbatim-faithful; your ideas go in `conductor_proposals`.
 
 ## Project facts (generated)

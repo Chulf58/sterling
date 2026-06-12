@@ -444,6 +444,7 @@ test('H15 store guard: shell references to the store are denied naming the §10 
     const nodeWrite = run(`node -e "import('.../store/dist/index.js').then(s => new s.SterlingStore('.sterling/sterling.db'))"`);
     assert.equal(nodeWrite.code, 2, 'ad-hoc node script against the store is denied');
     assert.match(nodeWrite.stderr, /§10 MCP tool surface/);
+    assert.match(nodeWrite.stderr, /note_remove/, 'the deny message teaches the full write surface, note_remove included');
     assert.match(nodeWrite.stderr, /RESTART THE SESSION/);
 
     assert.equal(run('sqlite3 .sterling/sterling.db "SELECT * FROM records"').code, 2, 'reads are denied too — use knowledge_query');

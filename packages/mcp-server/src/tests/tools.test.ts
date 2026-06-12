@@ -54,6 +54,46 @@ test('knowledge_create assembles the envelope server-side and emits check_skippe
   }
 });
 
+test('note_remove deletes a note outright and refuses non-notes; inbound cites survive (§3.2.6)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: note } = tools.knowledgeCreate('note', {
+      raw_text: 'a user note, later spent',
+      captured_at: NOW,
+      capture_source: 'tui',
+      derived: [],
+    });
+    const { record: extraction } = tools.knowledgeCreate('decision', {
+      title: 'extracted',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+      links: [{ rel: 'cites', target_id: note.id }],
+    });
+    const { record: keeper } = tools.knowledgeCreate('note', {
+      raw_text: 'another note that stays',
+      captured_at: NOW,
+      capture_source: 'command',
+      derived: [],
+    });
+
+    assert.throws(() => tools.noteRemove(extraction.id), /not a note/);
+    assert.throws(() => tools.noteRemove(randomUUID()), /no record/);
+
+    assert.deepEqual(tools.noteRemove(note.id), { removed: note.id });
+    assert.throws(() => tools.knowledgeGet(note.id), /no record/, 'the note is gone, not superseded');
+    assert.deepEqual(
+      tools.knowledgeQuery({ types: ['note'] }).map((r) => r.id),
+      [keeper.id],
+      'only the removed note left the Notes surface'
+    );
+    const survivor = tools.knowledgeGet(extraction.id);
+    assert.ok(survivor.links.some((l) => l.rel === 'cites' && l.target_id === note.id), 'extraction stands alone with its cite intact');
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_update writes a new version and supersedes the prior; article version auto-bumps', () => {
   const { tools, cleanup } = harness();
   try {

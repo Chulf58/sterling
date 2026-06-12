@@ -30,7 +30,7 @@ if (allowScripts.some((s) => command.includes(s))) allow();
 
 deny(
   'H15: shell access to the Sterling store is denied — the store is read and written through the §10 MCP tool surface ONLY.\n' +
-    'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / maintenance_enqueue / run_signal / agent_exit.\n' +
+    'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / note_remove / maintenance_enqueue / run_signal / agent_exit.\n' +
     `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts).\n` +
     'If the running MCP server predates the current code, RESTART THE SESSION — never write around the surface.'
 );

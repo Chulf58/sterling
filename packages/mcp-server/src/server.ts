@@ -105,6 +105,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'note_remove',
+    {
+      description:
+        "Remove a note outright — notes are the user's capture surface (§3.2.6); misfiled or spent notes leave the Notes tab here. Refuses non-note records.",
+      inputSchema: { id: z.string() },
+    },
+    ({ id }) => json(tools.noteRemove(id))
+  );
+
+  server.registerTool(
     'run_state',
     {
       description: 'Current run record — the conductor source of truth for run state (re-read after compaction; never trust recall).',

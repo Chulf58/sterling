@@ -263,6 +263,21 @@ export class SterlingTools {
     return { removed: id, check_skipped: skipped };
   }
 
+  /**
+   * note_remove — the user-surface mirror of board_remove (§3.2.6, adjudicated
+   * 2026-06-12): notes are the user's capture surface; a misfiled or spent note
+   * leaves outright. Hard removal like todos (P4); raw-text immutability governs
+   * edits, not deletion. Inbound cites/derived extractions survive as
+   * independent records, exactly as fulfills-links survive board_remove.
+   */
+  noteRemove(id: string): { removed: string } {
+    const record = this.store.get(id);
+    if (!record) throw new Error(`note_remove: no record '${id}'`);
+    if (record.type !== 'note') throw new Error(`note_remove: '${id}' is a ${record.type}, not a note`);
+    this.store.remove(id);
+    return { removed: id };
+  }
+
   // -- run protocol (§5.2, §10) -------------------------------------------------
 
   runState(runId?: string): RunRecord {

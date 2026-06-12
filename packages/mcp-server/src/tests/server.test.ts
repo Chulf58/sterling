@@ -19,6 +19,7 @@ const SERVED_TOOLS = [
   'board_add',
   'board_query',
   'board_remove',
+  'note_remove',
   'run_state',
   'run_escalate',
   'agent_exit',
