@@ -13,13 +13,23 @@
 - **Canonical naming:** one name per concept. The canonical names for this project are in the registries; do not coin synonyms.
 - **Store writes go through the MCP tool surface (§10)** — never shell scripts against `.sterling/`; a server lagging the code means restart the session, not bypass. (Enforced: H15.)
 
+## Retrieval-first — consult the knowledge base before work
+
+- **Stage retrieval before acting** — `knowledge_query` the area you are about to touch, **articles first, code second.** Pipelines wire this automatically (prep stages the knowledge_pack); inline work must do it deliberately. The store is current reality and rationale; the code is only the implementation.
+
+## Reconcile-always — every affected article, every change (anti-drift)
+
+- **Every edit, change, or new feature updates the knowledge base to match — before the work is done.** An un-reconciled change makes the store lie; that is drift. A change is not complete until the articles describe the code as it now is.
+- **Reconcile _every affected_ article, not just the primary one** — the article owning the touched files, and any whose behavior or dependencies the change invalidates (follow `relies_on` / `relied_by`). New features get a new owning article; renames rewrite `file_keys` so knowledge is never orphaned.
+- **Wired, not just asked:** H7 marks owning articles → `reconcile_needed` (runs) or a maintenance item (direct mode); the disposal gate refuses a run with outstanding reconciliation; H10 demands the owning article for unowned territory.
+
 ## Conductor contract (summary — SOPs live in skills, not here)
 
 - **You are the hands; the brain decides.** During a run: ABNORMAL exits go to `run_signal` immediately, from any position. A non-terminal step's `complete` (e.g. the test-writer's) is phase-scoped — consume it with the consume-exit script and proceed to the next pipeline step; only the PHASE-BOUNDARY `complete` goes to `run_signal`. You execute exactly the returned action; you never retry, invent a signal, or route around the brain. Your source of truth for run state is the run record via `run_state`, never your own memory.
 - **Modes:** pipeline (gated, phased, TDD), conductor-direct (small tasks; read→do→capture→reconcile→review envelope), debug play, cleanup. Mode selection per the feature-sizing rules.
 - **Two gates only:** intake→implementation and merge-to-main. Everything else flows, live-observed.
 - **One active run at a time; the run owns the working tree.** No direct edits during a run. Urgent unrelated work: finish or reject the run.
-- **Knowledge duties:** stage retrieval before work (`knowledge_query`); capture decisions when made, not later; reconcile touched feature articles before any run completes (the disposal script will refuse otherwise); todos are removed only by the artifact-write that fulfills them.
+- **Knowledge duties:** stage retrieval before work (`knowledge_query` — see Retrieval-first); capture decisions when made, not later; reconcile **every affected** feature article (not only the owning one) before any run completes (the disposal script will refuse otherwise); todos are removed only by the artifact-write that fulfills them.
 - **Notes are the user's surface.** Conductor knowledge is born structured (`decision` / `anti_pattern` / `research_finding` / article reconciliation) — never parked in a note; a `note` you create only relays a user statement verbatim. Misfiled or spent notes leave via `note_remove`, on the user's word.
 - **Briefs:** the store object is authoritative; `docs/briefs/*.md` are generated projections. Attribute faithfully — `user_stated` is verbatim-faithful; your ideas go in `conductor_proposals`.
 

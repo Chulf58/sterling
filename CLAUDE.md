@@ -1,20 +1,31 @@
-# CLAUDE.md — Building Sterling
+# CLAUDE.md — Sterling
 
-You are building Sterling from `STERLING-SPEC.md` (repo root). This file governs the build itself.
+Sterling is built and self-hosted in this repo. The build is complete; this file is the **operating contract** for working in the repo. **The knowledge base is the authority** — not this file, and no longer `STERLING-SPEC.md`.
 
-## Authority
+## Authority — the knowledge base is the source of truth
 
-- **The spec is law.** Where this file and the spec conflict, the spec wins.
-- **Ambiguity → stop and ask.** Never improvise around a spec gap, never "interpret" a missing detail. The spec was reviewed to be precise; a gap is a defect to raise, not a license.
-- Read **§0** (how to read the spec) and **§16** (build order) before writing any code. §16 is three stages: **16.0 platform probes** (hour one, throwaway, existential assumptions), **16.1 MVP spine** (executed in the binding slice order: Layer 0 probes → distribution foundation → data foundation → protocol core → enforcement + adapter → the loop), **16.2 full build**. **Slice 1 does not start until `PROBES.md` exists with explicit findings.** A failed existential probe stops the build for a design conversation.
+- **The knowledge base is king.** The Sterling store holds what is *true now* — current state, design, decisions, SOPs, research, documentation. **Consult it before acting; it supersedes memory, this file's summaries, and any standalone document.**
+- **What lives where** (so "consult the KB" is actionable):
+  - what an area does · its acceptance criteria · which files it owns → **`feature_article`** (`knowledge_query types:["feature_article"]`, filter by `file_keys`)
+  - why it is the way it is · rejected alternatives → **`decision`**
+  - what not to do → **`anti_pattern`** · findings with currency (two clocks + staleness) → **`research_finding`** · external / pointer docs → **`reference_material`**
+  - live run · board · maintenance queue → **`run_state`**, **`board_query`**, the **TUI**
+  - **SOPs** → `skills/` (grill-intent, planning, grill-plan, debug, cleanup)
+  - **generated architecture overview** → `architecture.md` (read-only projection from the articles — never hand-edit)
+- **`STERLING-SPEC.md` is retired.** It was the initial build specification; it now lives in `docs/historical/` and is **not authoritative**. Where it and the knowledge base differ, the **knowledge base wins** — it reflects what was actually built and has since changed. Its still-live forward-looking content was migrated to decisions: `f6283a11` (deferred / optional register), `0956a464` (verify-at-build register), `9950dfff` (inline-retrieval enforcement, deferred).
+- **Ambiguity → query the knowledge base, then ask.** If the store is silent or self-contradictory, **stop and ask** — never improvise around a gap.
 
-## Build order
+## Retrieval-first — consult the knowledge base before work, in both modes
 
-- §16 is **binding and sequential**. Do not skip ahead, do not build later steps "while you're in there".
-- Every ★ verify-at-build item in a step is checked against **current Claude Code documentation** (docs map URL in §0) *before* implementing that step. Record what you verified and what you found in the step's commit message.
-- Do not build anything in the §17 deferred register. It is deferred on purpose.
-- Definition of done per step: implementation + its tests + all consistency checks pass. A step without its tests is not done.
-- **Session resume:** at the start of every session, check `git log` — commit messages record completed steps and their verify findings. Continue from the first incomplete §16 step; never re-do or re-verify completed steps unless a discrepancy is found.
+- **Pipeline:** `prep.mjs` stages the `knowledge_pack` mechanically from each phase's declared files / `rank_terms` (already wired — P3).
+- **Conductor inline (direct mode):** **stage retrieval before acting** — `knowledge_query` the area you are about to touch, **articles first, code second.** The store is current reality *and* rationale; the code is only the implementation. This rule is prose today (the enforcement-hook design and its trigger are recorded in decision `9950dfff`) — it exists because it has been skipped, so don't skip it.
+
+## Reconcile-always — every affected article, every change (anti-drift)
+
+- **Every edit, change, or new feature updates the knowledge base to match — before the work is done.** An un-reconciled change makes the store lie; that is drift, and drift is exactly what breaks "the knowledge base is king." A change is not complete until the articles describe the code as it now is.
+- **Reconcile *every affected* article, not just the primary one.** A change ripples: the article that owns the touched files (its `what_it_does`, acceptance criteria, `files[]`, and history entry) **and** any article whose described behavior or dependencies the change invalidates — follow `relies_on` / `relied_by` to find them all.
+- **New features get a new owning article** (linked to what they depend on); renames and moves rewrite `file_keys` on every owning record so knowledge is never orphaned.
+- **This is wired, not just asked:** H7 marks every owning `feature_article` (and repo-located reference doc) on a governed touch → `reconcile_needed` in runs, a deduped maintenance item in direct mode; `dispose-run` refuses to complete a run with outstanding reconciliation; H10 demands the owning article when work lands in unowned territory. The prose states the intent — the hooks hold the floor.
 
 ## Repo layout (fixed)
 
@@ -22,7 +33,7 @@ You are building Sterling from `STERLING-SPEC.md` (repo root). This file governs
 packages/schemas      zod schemas + path normalization (shared; nothing defines a schema twice)
 packages/store        SQLite access layer (WAL, FTS5) — the one write code path; imported by mcp-server AND tui
 packages/mcp-server   the brain (state machine) + tool surface
-packages/tui          Ink app
+packages/tui          terminal-kit app
 scripts/              hooks, toolchain adapters, fs helpers, dispose-run, reviewer-selection
 agent-templates/      agent templates (markdown + frontmatter) — NOT named agents/, which the platform auto-serves with hooks stripped; init installs into project .claude/agents/
 skills/               SOP skills
@@ -31,37 +42,50 @@ templates/            shipped templates, incl. target-claude-md.md (what init ge
 
 npm workspaces monorepo. TypeScript everywhere except `scripts/` (standalone `.mjs`).
 
-## Invariants — hold from line one, not retrofitted
+## Core principles (P1–P8 — govern every design decision)
+
+- **P1 — Attention-first.** Human attention is the scarcest resource. Every gate, pause, or escalation must change an outcome; if pausing does not alter a decision or prevent a mistake, it is ceremony and must be removed. Gates exist only where the cost of being wrong jumps.
+- **P2 — The knowledge base is the product.** The pipeline is the highest-quality way to write to it. Every run both consumes accumulated knowledge and produces it. The test for any feature: does it improve what we capture or how well we retrieve it?
+- **P3 — Scripts over agents.** Every stage is deterministic code unless it provably needs judgment. Deterministic mechanisms cannot drift, cannot forget, cost nothing, and are testable.
+- **P4 — Lifecycle-bound state.** Every piece of transient state is removed by the mechanical event that ends its life; durable value is promoted before transient state is disposed. Nothing is "cleaned up" by a fallible remembered step. No shared mutable files for queue/transient state, ever.
+- **P5 — Fail loud, never silent.** Unknown signals halt. Missing spawn inputs block. Half-wired extensions fail consistency checks. Maintenance binds to events, not to anyone remembering.
+- **P6 — Maximal *relevant* context.** Every agent operates with all knowledge that bears on its task — retrieved filter-first and capped. Starving an agent and flooding it are both failures; the retrieval discipline (filter → join → rank → cap) delivers the first without the second.
+- **P7 — Prevention over recovery.** Over-scoping symptoms (context overflow, repeated research escalations) route back to planning as decomposition failures. No checkpoint/resume machinery — re-scope and redo.
+- **P8 — Match mechanism to work.** Judgment work gets strong models; mechanical work gets cheap models or scripts; routing is a state machine; conversation belongs to the conductor. Pipeline only the work that is plannable and benefits from staged gating; interactive work stays conductor-direct.
+
+## Invariants — architectural, hold from line one
 
 1. **Shared schemas:** every record/signal/handoff shape is defined once in `packages/schemas` and imported. A schema defined anywhere else fails review.
-2. **POSIX paths:** every path is stored/compared repo-relative with forward slashes, normalized in `packages/schemas` (§3.2 path invariant). No raw path ever enters the store.
-3. **Registries first:** for every extensible set (signals, record types, agents, hooks, tools, toolchain adapters) the registry and its consistency check exist before the first member is added (§15).
+2. **POSIX paths:** every path is stored/compared repo-relative with forward slashes, normalized in `packages/schemas` (path invariant). No raw path ever enters the store.
+3. **Registries first:** for every extensible set (signals, record types, agents, hooks, tools, toolchain adapters) the registry and its consistency check exist before the first member is added.
 4. **Hooks are dependency-light and bundled.** H6 fires on every tool call of every agent. Hook scripts are small standalone `.mjs`, esbuild-bundled, no workspace imports at runtime, minimal startup.
-5. **Brain transitions are CAS** (`UPDATE … WHERE machine_state = <observed>`) from the first implementation (§5.2). The totality test over the full signal enum exists before the brain is "done".
-6. **dispose-run refuses before it deletes.** Its refusal paths are unit-tested with stores missing each promotion condition (§ H9).
+5. **Brain transitions are CAS** (`UPDATE … WHERE machine_state = <observed>`). The totality test over the full signal enum exists before the brain is "done".
+6. **dispose-run refuses before it deletes.** Its refusal paths are unit-tested with stores missing each promotion condition.
 
 ## Conduct rules
 
-(These are the same rules Sterling injects into target projects — `templates/target-claude-md.md`. Keep the two in sync; the template is the source.)
+(Mirror `templates/target-claude-md.md` — the rules Sterling injects into target projects; the template is the source, keep the two in sync.)
 
-- **Anti-speculation:** never invent an API, field, flag, or behavior. Verify in docs or code first. If you cannot verify, say so and ask.
-- **No false action claims:** never report something as done, run, or passing that was not actually done, run, or passing.
-- **Read before edit; grep callers before changing a signature.** (Enforced: H3/H13.)
-- **Minimal change:** no drive-by refactors, no "while I'm here" improvements. One concern per change.
-- **Ask, don't guess.** One question at a time.
-- **Canonical naming:** one name per concept, taken from the spec and registries. Run the dead-term check: no "Forge", "Quatermain", "wave", or "brainstormer" residue in any scaffolded or generated content.
-- **Store writes go through the MCP tool surface (§10)** — never shell scripts against `.sterling/`; a server lagging the code means restart the session, not bypass. (Enforced: H15.)
-- **No hand-maintained architecture documents.** Generated projections only, clearly marked.
+- **Change philosophy:** smallest safe implementation; no speculative abstractions; no unrelated cleanup; prefer existing patterns. Read before edit; grep callers before changing a signature. (Enforced: H3/H13.)
+- **Anti-speculation:** never invent an API, field, flag, or behavior; cite tool-call evidence from this turn, or say "I don't know, checking" and check. No "appears to / likely / seems".
+- **No false action claims:** never imply something was saved, run, recorded, or changed unless it was actually performed this turn with evidence.
+- **Source attribution:** user-stated content and conductor proposals stay structurally distinct in every artifact (brief schema). An unanswered recommendation is not an accepted one.
+- **Verbatim intent capture:** intent-capture surfaces (grill skills, debug Step 0) receive the user's verbatim words — no paraphrase, no pre-stuffing.
+- **Minimal change:** one concern per change; no drive-by refactors, no "while I'm here".
+- **Ask, don't guess. One question at a time** — the single most important question, with options and a recommendation; never batch Q1/Q2/Q3.
+- **Canonical naming:** one name per concept, from the registries. Run the dead-term check: no "Forge", "Quatermain", "wave", or "brainstormer" residue.
+- **Store writes go through the MCP tool surface (§10 tools)** — never shell scripts against `.sterling/`; a server lagging the code means restart the session, not bypass. (Enforced: H15.)
+- **No hand-maintained architecture/design documents.** Generated projections only, clearly marked. Knowledge lives in the store.
 
-## When the platform disagrees with the spec
+## When the platform disagrees with the knowledge base / design
 
-Claude Code's hook/frontmatter/transcript mechanics move between versions. If verified current behavior contradicts a spec assumption: **stop, report the discrepancy with the doc reference AND a proposed degraded-loud fallback, then wait for approval.** Never silently adapt the design — the human approves every deviation, but always has a concrete proposal to approve.
+Claude Code's hook/frontmatter/transcript mechanics move between versions (see the verify-at-build register, decision `0956a464`). If verified current behavior contradicts a design assumption: **stop, report the discrepancy with the doc reference AND a proposed degraded-loud fallback, then wait for approval.** Never silently adapt the design — the human approves every deviation, but always has a concrete proposal to approve.
 
 ---
 
 # Sterling in this repo (self-hosted)
 
-Sterling is initialized in its own repo (`/sterling:init`, §12). The sections below are what init injects into a target project. **While the build continues, the build contract above wins on conflict.**
+Sterling is initialized in its own repo (`/sterling:init`). The sections below are the conductor contract and project facts that init manages.
 
 <!-- Generated by /sterling:init. Durable conventions ONLY — transient state never enters this file.
      Regenerated sections are marked; hand edits outside them survive regeneration. -->
@@ -72,9 +96,9 @@ Sterling is initialized in its own repo (`/sterling:init`, §12). The sections b
 - **Modes:** pipeline (gated, phased, TDD), conductor-direct (small tasks; read→do→capture→reconcile→review envelope), debug play, cleanup. Mode selection per the feature-sizing rules.
 - **Two gates only:** intake→implementation and merge-to-main. Everything else flows, live-observed.
 - **One active run at a time; the run owns the working tree.** No direct edits during a run. Urgent unrelated work: finish or reject the run.
-- **Knowledge duties:** stage retrieval before work (`knowledge_query`); capture decisions when made, not later; reconcile touched feature articles before any run completes (the disposal script will refuse otherwise); todos are removed only by the artifact-write that fulfills them.
+- **Knowledge duties:** stage retrieval before work (`knowledge_query` — see Retrieval-first); capture decisions when made, not later; reconcile **every affected** feature article (not only the owning one) before any run completes — the disposal script refuses otherwise; todos are removed only by the artifact-write that fulfills them.
 - **Notes are the user's surface.** Conductor knowledge is born structured (`decision` / `anti_pattern` / `research_finding` / article reconciliation) — never parked in a note; a `note` you create only relays a user statement verbatim. Misfiled or spent notes leave via `note_remove`, on the user's word.
-- **Briefs:** the store object is authoritative; `docs/briefs/*.md` are generated projections. Attribute faithfully — `user_stated` is verbatim-faithful; your ideas go in `conductor_proposals`.
+- **Briefs:** the store object is authoritative. Attribute faithfully — `user_stated` is verbatim-faithful; your ideas go in `conductor_proposals`. (Generated `docs/briefs/*.md` projections are deferred — disposition pending.)
 
 ## Project facts (generated)
 

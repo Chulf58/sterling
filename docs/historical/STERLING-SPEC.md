@@ -1,3 +1,8 @@
+<!-- RETIRED — historical, not authoritative. -->
+> **⚠ RETIRED — historical, not authoritative.** This was Sterling's initial build specification. The **knowledge base** (feature articles + decisions) is now the source of truth — see `CLAUDE.md` → *Authority*. Its still-live content was migrated to decisions `f6283a11` (deferred / optional register), `0956a464` (verify-at-build register), and `9950dfff` (inline-retrieval enforcement). Kept for provenance only — do not use it to determine current behavior.
+
+---
+
 # STERLING — Build Specification
 
 > **Audience:** Claude Code, building this plugin from scratch in one dependency-ordered pass.
