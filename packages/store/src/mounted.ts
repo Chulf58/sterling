@@ -77,6 +77,66 @@ export class MountedStores {
     return undefined;
   }
 
+  // -- record mutations: route to the store that HOLDS the record --------------
+  // A record's scope decided where it lives at create time; a later change has to
+  // land in that same store, so these route by where the id actually is — never
+  // by the caller. (knowledge_update gets the record first, so supersede always
+  // finds it; addLink/remove route on the source/target id the same way.)
+
+  /** Versioned change in the holding store (a domain record supersedes in its domain store). */
+  supersede(...args: Parameters<SterlingStore['supersede']>): ReturnType<SterlingStore['supersede']> {
+    return this.storeHolding(args[0]).supersede(...args);
+  }
+
+  /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
+  remove(...args: Parameters<SterlingStore['remove']>): ReturnType<SterlingStore['remove']> {
+    return this.storeHolding(args[0]).remove(...args);
+  }
+
+  /** Typed link edge, added on the source record in its holding store. */
+  addLink(...args: Parameters<SterlingStore['addLink']>): ReturnType<SterlingStore['addLink']> {
+    return this.storeHolding(args[0]).addLink(...args);
+  }
+
+  private storeHolding(id: string): SterlingStore {
+    for (const s of this.all()) if (s.get(id)) return s;
+    throw new Error(`no record '${id}' in the project store or any mounted domain`);
+  }
+
+  // -- run/board/transient state: PROJECT-LOCAL, never a domain ----------------
+  // Runs (§7.5 one active run), the board/maintenance queue (§3.2.7), handoffs and
+  // check_skipped are project-scoped by definition — they live in the project
+  // store, so MountedStores forwards them straight through. Knowledge fans across
+  // mounts; run state does not. Signatures mirror SterlingStore exactly.
+
+  createRun(...args: Parameters<SterlingStore['createRun']>): ReturnType<SterlingStore['createRun']> {
+    return this.project.createRun(...args);
+  }
+  getRun(...args: Parameters<SterlingStore['getRun']>): ReturnType<SterlingStore['getRun']> {
+    return this.project.getRun(...args);
+  }
+  casTransition(...args: Parameters<SterlingStore['casTransition']>): ReturnType<SterlingStore['casTransition']> {
+    return this.project.casTransition(...args);
+  }
+  recordPendingExit(...args: Parameters<SterlingStore['recordPendingExit']>): ReturnType<SterlingStore['recordPendingExit']> {
+    return this.project.recordPendingExit(...args);
+  }
+  getPendingExit(...args: Parameters<SterlingStore['getPendingExit']>): ReturnType<SterlingStore['getPendingExit']> {
+    return this.project.getPendingExit(...args);
+  }
+  appendRunEscalation(...args: Parameters<SterlingStore['appendRunEscalation']>): ReturnType<SterlingStore['appendRunEscalation']> {
+    return this.project.appendRunEscalation(...args);
+  }
+  recordCheckSkipped(...args: Parameters<SterlingStore['recordCheckSkipped']>): ReturnType<SterlingStore['recordCheckSkipped']> {
+    return this.project.recordCheckSkipped(...args);
+  }
+  writeHandoff(...args: Parameters<SterlingStore['writeHandoff']>): ReturnType<SterlingStore['writeHandoff']> {
+    return this.project.writeHandoff(...args);
+  }
+  readHandoffs(...args: Parameters<SterlingStore['readHandoffs']>): ReturnType<SterlingStore['readHandoffs']> {
+    return this.project.readHandoffs(...args);
+  }
+
   /** Per-store snapshot (§2.3): each store snapshots independently; the caller
    *  supplies a path per store name ('project' or 'domain-<name>'). */
   snapshotAll(pathFor: (storeName: string) => string): void {

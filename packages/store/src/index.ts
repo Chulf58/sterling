@@ -129,6 +129,28 @@ export interface QueryOptions {
   cap?: number;
 }
 
+// The store surface the §10 tool layer drives — exactly the methods SterlingTools
+// calls, no more. Both SterlingStore (single project store) and MountedStores
+// (project + mounted domains) satisfy it, so the tools are agnostic to whether
+// domain stores are mounted. Derived via Pick so the signatures never drift.
+export type ToolStore = Pick<
+  SterlingStore,
+  | 'create'
+  | 'query'
+  | 'get'
+  | 'supersede'
+  | 'remove'
+  | 'addLink'
+  | 'getRun'
+  | 'casTransition'
+  | 'recordPendingExit'
+  | 'getPendingExit'
+  | 'recordCheckSkipped'
+  | 'appendRunEscalation'
+  | 'writeHandoff'
+  | 'readHandoffs'
+>;
+
 export class SterlingStore {
   private db: DatabaseSync;
 

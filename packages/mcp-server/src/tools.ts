@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
-import type { QueryOptions, RecordedExit, SterlingStore } from '@sterling/store';
+import type { QueryOptions, RecordedExit, ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
 export interface SkippedCheck {
@@ -15,7 +15,7 @@ export interface SkippedCheck {
 }
 
 export interface ToolDeps {
-  store: SterlingStore;
+  store: ToolStore;
   config?: SterlingConfig;
   now?: () => string;
   newId?: () => string;
@@ -26,7 +26,7 @@ export interface ToolDeps {
 const DAY_MS = 86_400_000;
 
 export class SterlingTools {
-  private store: SterlingStore;
+  private store: ToolStore;
   private config: SterlingConfig;
   private now: () => string;
   private newId: () => string;
