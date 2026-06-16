@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parseConfig } from '@sterling/schemas';
 import { MountedStores } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
@@ -15,7 +16,8 @@ function harness() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-domain-'));
   const domainDb = join(dir, 'domains', 'genesys', 'sterling.db');
   const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: domainDb }]);
-  const tools = new SterlingTools({ store, now: () => '2026-06-16T12:00:00.000Z', newId: randomUUID });
+  const config = parseConfig({ domains: ['genesys'] });
+  const tools = new SterlingTools({ store, config, now: () => '2026-06-16T12:00:00.000Z', newId: randomUUID });
   return { dir, domainDb, store, tools, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -101,5 +103,39 @@ test('run protocol stays PROJECT-LOCAL through MountedStores: a run is created/a
     assert.equal(sig.machine_state, 'completing');
   } finally {
     cleanup();
+  }
+});
+
+test('§3.3 project-store-then-promote: a project-scoped reference surfaces ONE promotion_review; domain-scoped and non-candidate types do not', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // project-scoped reference/research → domain-candidate → surfaces a promotion_review
+    const ref = tools.knowledgeCreate('reference_material', refFields('project')).record;
+    const research = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'genesys retry semantics?', answer: 'a', source_urls: ['https://x'], source_date: '2026-06-16', capture_date: '2026-06-16',
+    }).record;
+    // a reference already scoped to the domain is NOT a candidate (it is already shared)
+    tools.knowledgeCreate('reference_material', refFields('domain:genesys'));
+    // a non reference/research type is never a promotion candidate
+    tools.knowledgeCreate('decision', { title: 'd', statement: 's', alternatives_rejected: [], rationale: 'r' });
+
+    const reviews = tools.maintenanceQuery({ system_reason: 'promotion_review', cap: 100 });
+    const links = reviews.map((r) => (r as { feature_link?: string }).feature_link).sort();
+    assert.deepEqual(links, [ref.id, research.id].sort(), 'exactly the two project-scoped candidates surfaced, one item each');
+  } finally {
+    cleanup();
+  }
+});
+
+test('§3.3 no domain mounted → no promotion noise: a project reference surfaces nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-nodomain-'));
+  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), []);
+  const tools = new SterlingTools({ store, config: parseConfig({}), now: () => '2026-06-16T12:00:00.000Z', newId: randomUUID });
+  try {
+    tools.knowledgeCreate('reference_material', refFields('project'));
+    assert.equal(tools.maintenanceQuery({ system_reason: 'promotion_review', cap: 100 }).length, 0, 'nowhere to promote → nothing surfaced');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

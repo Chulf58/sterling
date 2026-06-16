@@ -92,7 +92,29 @@ export class SterlingTools {
 
     const record = this.store.create(candidate);
     if (type === 'note') skipped.push(this.skip('note-structuring-h11', this.activeRunId()));
+    this.surfacePromotionCandidate(record, type);
     return { record, check_skipped: skipped };
+  }
+
+  /**
+   * §3.3 project-store-then-promote: reference/research records are
+   * domain-candidates by default. One born project-scoped, when the project has
+   * a domain mounted to promote into, surfaces a single promotion_review
+   * maintenance item — the human decides at the queue drain, never an automatic
+   * move. No domain mounted → nowhere to promote → nothing surfaced (so a
+   * domain-less project sees no promotion noise). A record the conductor already
+   * scoped to a domain at creation is not a candidate.
+   */
+  private surfacePromotionCandidate(record: DurableRecord, type: string): void {
+    if (type !== 'reference_material' && type !== 'research_finding') return;
+    if (record.scope !== 'project' || this.config.domains.length === 0) return;
+    const label = (record as { title?: string; question?: string }).title ?? (record as { question?: string }).question ?? type;
+    this.maintenanceEnqueue({
+      reason: 'promotion_review',
+      text: `review '${label}' for promotion to a domain store — project-scoped ${type}, a domain-candidate by default (§3.3)`,
+      file_keys: (record as { file_keys?: string[] }).file_keys,
+      feature_link: record.id,
+    });
   }
 
   private findAntiPatternOverlap(candidate: Record<string, unknown>): DurableRecord | undefined {
