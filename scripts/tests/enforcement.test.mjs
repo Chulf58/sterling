@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { runTests, staticWiring } from '../adapters/node.mjs';
+import { runTests as pesterRun } from '../adapters/pester.mjs';
 import { resolveToolchains, checkAdapterRegistry } from '../adapters/resolve.mjs';
 import { findBackslashCommandsInHooksJson } from '../lib/agent-distribution.mjs';
 
@@ -175,11 +176,47 @@ test('adapter: classifies pass | assertion_fail | crash against real node --test
   }
 });
 
+// Pester v5 is host-dependent; skip with a reason where PowerShell/Pester is absent (never false-pass).
+const PS_EXE = (() => {
+  for (const exe of ['pwsh', 'powershell.exe']) {
+    const p = spawnSync(exe, ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' });
+    if (!p.error) return exe;
+  }
+  return null;
+})();
+const PESTER_SKIP = (() => {
+  if (!PS_EXE) return 'no PowerShell on this host';
+  const p = spawnSync(PS_EXE, ['-NoProfile', '-Command', 'exit ([int](-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 })))'], { encoding: 'utf8' });
+  return !p.error && p.status === 0 ? false : 'Pester v5 not available';
+})();
+
+test('pester adapter: classifies pass | assertion_fail | crash against real Invoke-Pester (§9.1)', { skip: PESTER_SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-pester-'));
+  try {
+    writeFileSync(join(dir, 'p.Tests.ps1'), 'Describe "d" { It "ok"   { 1 | Should -Be 1 } }');
+    writeFileSync(join(dir, 'a.Tests.ps1'), 'Describe "d" { It "af"   { 1 | Should -Be 2 } }');
+    writeFileSync(join(dir, 'c.Tests.ps1'), 'Describe "d" { It "boom" { throw "x" } }');
+    writeFileSync(join(dir, 's.Tests.ps1'), 'Describe "d" { It "y" {'); // unterminated -> parse/discovery error
+    assert.equal(pesterRun({ cwd: dir, scope: ['p.Tests.ps1'] }).overall, 'pass');
+    const af = pesterRun({ cwd: dir, scope: ['a.Tests.ps1'] });
+    assert.equal(af.overall, 'assertion_fail', 'a Should failure is a red, not a crash');
+    assert.deepEqual(af.results.map((r) => r.outcome), ['assertion_fail']);
+    assert.equal(pesterRun({ cwd: dir, scope: ['c.Tests.ps1'] }).overall, 'crash', 'a throwing test is a crash, not a red');
+    assert.equal(pesterRun({ cwd: dir, scope: ['s.Tests.ps1'] }).overall, 'crash', 'a parse/discovery error is a crash');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('adapter registry: resolveToolchains bakes declarations; unknown adapter fails loudly (§9.1/§15)', async () => {
   const baked = await resolveToolchains([{ adapter: 'node', path_globs: ['**/*.mjs'] }]);
   assert.deepEqual(baked[0].run_commands, { test: 'node --test' });
   assert.ok(baked[0].test_globs.includes('**/*.test.mjs'));
   assert.deepEqual(baked[0].capabilities, { mutation: false, static_wiring: true }, 'static_wiring live (step 7); mutation deliberately absent');
+  const bakedPester = await resolveToolchains([{ adapter: 'pester', path_globs: ['**/*.Tests.ps1'] }]);
+  assert.deepEqual(bakedPester[0].run_commands, { test: 'Invoke-Pester' });
+  assert.ok(bakedPester[0].test_globs.includes('**/*.Tests.ps1'));
+  assert.deepEqual(bakedPester[0].capabilities, { mutation: false, static_wiring: false });
   await assert.rejects(() => resolveToolchains([{ adapter: 'apex', path_globs: [] }]), /no registered adapter/);
   assert.deepEqual(await checkAdapterRegistry(), []);
 });
