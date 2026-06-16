@@ -106,12 +106,24 @@ export class SterlingTools {
           .filter((w) => w.length > 3)
       );
     const candTokens = tokens(candidate);
+    // Dice coefficient over the significant-token sets (2·|A∩B| / (|A|+|B|)):
+    // merge only on STRONG overlap — a genuine restatement of the same
+    // anti-pattern — not on a couple of shared domain words. The prior
+    // `shared >= 2` absolute gate collapsed distinct same-domain gotchas: any
+    // two "Genesys Cloud …" titles share genesys+cloud, any two Power Automate
+    // gotchas share power+automate. file_key overlap stays a hard merge signal
+    // (two records about the same file are the same finding).
+    const DICE_MERGE_THRESHOLD = 0.5;
     return existing.find((e) => {
       const rec = e as unknown as Record<string, unknown>;
       const keyOverlap = ((rec.file_keys as string[]) ?? []).some((k) => candKeys.has(k));
+      if (keyOverlap) return true;
+      const recTokens = tokens(rec);
+      const denom = candTokens.size + recTokens.size;
+      if (denom === 0) return false;
       let shared = 0;
-      for (const t of tokens(rec)) if (candTokens.has(t)) shared++;
-      return keyOverlap || shared >= 2;
+      for (const t of recTokens) if (candTokens.has(t)) shared++;
+      return (2 * shared) / denom >= DICE_MERGE_THRESHOLD;
     });
   }
 

@@ -220,6 +220,49 @@ test('dedup-merge (§3.2.2): overlapping anti_pattern merges evidence into the e
   }
 });
 
+test('dedup-merge Dice threshold (§3.2.2): strong token overlap merges; shared domain words alone do not', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // no file_keys → matching is purely token-based (Dice coefficient over title+trigger)
+    const base = tools.knowledgeCreate('anti_pattern', {
+      title: 'Power Automate apply-to-each swallows errors',
+      trigger: 'apply to each over a large array without concurrency control',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'r',
+      source_evidence: 'run r-base',
+    });
+    assert.equal(base.merged_into, undefined);
+
+    // a genuine restatement of the SAME gotcha — high token overlap (Dice >= 0.5) → merges
+    const restate = tools.knowledgeCreate('anti_pattern', {
+      title: 'Power Automate apply-to-each swallows errors silently',
+      trigger: 'apply to each over a large array without concurrency',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'r',
+      source_evidence: 'run r-restate',
+    });
+    assert.equal(restate.merged_into, base.record.id, 'a genuine restatement merges on strong token overlap');
+
+    // a DIFFERENT gotcha sharing only domain words ("power","automate") — Dice < 0.5 → distinct.
+    // The prior `shared >= 2` gate wrongly collapsed these same-domain findings.
+    const other = tools.knowledgeCreate('anti_pattern', {
+      title: 'Power Automate connection references expire after tenant migration',
+      trigger: 'reusing exported connection references across environments',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'r',
+      source_evidence: 'run r-other',
+    });
+    assert.equal(other.merged_into, undefined, 'shared domain words alone must not collapse distinct gotchas');
+
+    assert.equal(tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 }).length, 2, 'restatement merged; distinct gotcha stands alone');
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_link, run_escalate, maintenance queue tools (§10)', () => {
   const { store, tools, cleanup } = harness();
   try {
