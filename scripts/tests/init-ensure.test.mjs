@@ -21,7 +21,10 @@ function init(dir, args = []) {
 }
 
 const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'];
-const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'tui.bat', '.mcp.json', '.gitignore'];
+// .mcp.json is NOT a per-project artifact: the plugin declares the sterling
+// server (bound per-project via ${CLAUDE_PROJECT_DIR}), so a consuming project
+// never gets one. Its absence is asserted directly below.
+const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'tui.bat', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
 test('ensure outcome 1 — create absent: fresh init creates every manifest item and records declarations', () => {
@@ -32,6 +35,9 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     for (const a of [...ARTIFACTS, '.sterling/sterling.db', '.sterling/runs', 'docs/briefs', '.claude/agents/coder.md']) {
       assert.ok(existsSync(join(dir, a)), `created ${a}`);
     }
+    // a consuming project gets NO per-project .mcp.json — the plugin declares sterling
+    assert.ok(!existsSync(join(dir, '.mcp.json')), 'no per-project .mcp.json — the plugin declares the sterling server');
+    assert.match(r.stdout, /^\.mcp\.json\s+matches\s+not written — the plugin declares sterling/m);
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m);
     assert.match(r.stdout, /^\.sterling\/config\.json\s+created\b/m);
     assert.match(r.stdout, /RESTART REQUIRED/, 'agents installed → restart instruction');
@@ -100,7 +106,7 @@ test('never-clobber: a pre-existing CLAUDE.md survives the FIRST init byte-for-b
     assert.equal(r.code, 0, `init completes around the existing CLAUDE.md, no refusal: ${r.stderr}`);
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), ownContract, 'NEVER clobbered');
     assert.match(r.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the conductor contract by hand/m);
-    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.mcp.json', '.claude/agents/coder.md']) {
+    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.claude/agents/coder.md']) {
       assert.ok(existsSync(join(dir, a)), `the rest of the manifest still created: ${a}`);
     }
   } finally {
@@ -116,7 +122,7 @@ test('refusal only for destructive actions: a FILE where .sterling/ must be a di
     assert.equal(r.code, 2);
     assert.match(r.stderr, /REFUSED \(destructive\)/);
     assert.ok(!existsSync(join(dir, 'CLAUDE.md')), 'refusal happened before any write');
-    assert.ok(!existsSync(join(dir, '.mcp.json')), 'refusal happened before any write');
+    assert.ok(!existsSync(join(dir, '.sterling', 'config.json')), 'refusal happened before any write');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -127,26 +133,22 @@ test('individually regenerable: deleted artifacts are recreated by a flagless re
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
     const launcherBefore = readFileSync(join(dir, 'sterling.bat'), 'utf8');
-    const mcpBefore = readFileSync(join(dir, '.mcp.json'), 'utf8');
     unlinkSync(join(dir, 'sterling.bat'));
-    unlinkSync(join(dir, '.mcp.json'));
     unlinkSync(join(dir, '.claude', 'agents', 'coder.md'));
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^sterling\.bat\s+created\b/m);
-    assert.match(rerun.stdout, /^\.mcp\.json\s+created\b/m);
     assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+created\b/m);
     assert.match(rerun.stdout, /^CLAUDE\.md\s+matches\b/m, 'untouched items still match');
     assert.match(rerun.stdout, /RESTART REQUIRED/, 'reinstalled agent → restart instruction again');
     assert.equal(readFileSync(join(dir, 'sterling.bat'), 'utf8'), launcherBefore, 'regenerated identically');
-    assert.equal(readFileSync(join(dir, '.mcp.json'), 'utf8'), mcpBefore, 'regenerated identically');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
-test('contradicting flags on a re-run are reported, never applied; foreign .mcp.json servers are preserved on merge', () => {
+test('contradicting flags on a re-run are reported, never applied; consuming .mcp.json is left to the plugin (no sterling added; a stale entry is removed, foreign servers kept)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -156,14 +158,23 @@ test('contradicting flags on a re-run are reported, never applied; foreign .mcp.
     assert.match(rerun.stdout, /note: --stack-tags, --project-name differ\(s\) from the recorded config — NOT applied/);
     assert.equal(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'), configBefore, 'config untouched by contradicting flags');
 
-    // per-entry .mcp.json ensure: a foreign server entry survives the sterling merge
+    // a foreign server is preserved and NO sterling entry is added — the plugin
+    // declares sterling (bound to this project via ${CLAUDE_PROJECT_DIR})
     writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { other: { command: 'x', args: [] } } }, null, 2));
-    const merged = init(dir);
-    assert.equal(merged.code, 0, merged.stderr);
-    assert.match(merged.stdout, /^\.mcp\.json\s+created\s+sterling entry merged/m);
-    const mcp = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'));
+    assert.equal(init(dir).code, 0);
+    let mcp = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'));
     assert.ok(mcp.mcpServers.other, 'foreign server preserved');
-    assert.ok(mcp.mcpServers.sterling, 'sterling entry added');
+    assert.ok(!mcp.mcpServers.sterling, 'no per-project sterling entry added — the plugin declares it');
+
+    // a STALE init-generated sterling entry (legacy per-project form) is removed; foreign kept
+    const stale = { command: process.execPath, args: [join(root, 'packages', 'mcp-server', 'dist', 'main.js').replace(/\\/g, '/'), '--store', join(dir, '.sterling', 'sterling.db').replace(/\\/g, '/')] };
+    writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { other: { command: 'x', args: [] }, sterling: stale } }, null, 2));
+    const cleaned = init(dir);
+    assert.equal(cleaned.code, 0, cleaned.stderr);
+    assert.match(cleaned.stdout, /^\.mcp\.json\s+created\s+removed the redundant per-project sterling entry/m);
+    mcp = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'));
+    assert.ok(mcp.mcpServers.other, 'foreign server preserved through cleanup');
+    assert.ok(!mcp.mcpServers.sterling, 'stale init-generated sterling entry removed');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

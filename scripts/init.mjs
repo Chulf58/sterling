@@ -258,36 +258,68 @@ for (const a of agentReport) {
 }
 const restartNeeded = agentReport.some((a) => a.status === 'installed' || a.status === 'refreshed');
 
-// .mcp.json: the manifest item is the `sterling` server ENTRY — merge-in
-// preserves whatever else lives in the file
+// .mcp.json (MCP packaging fix): the Sterling MCP server is declared ONCE — as
+// the PLUGIN's bundled server (THIS source repo's root .mcp.json, loaded via
+// --plugin-dir). It binds to each consuming project's OWN store through
+// ${CLAUDE_PROJECT_DIR}, so a per-project .mcp.json is never written (that
+// produced a wrong-store `plugin:sterling:sterling` double-registration). The
+// store stays a literal — Claude Code substitutes ${CLAUDE_PROJECT_DIR} at
+// server spawn; the bare form is the plugin-substitution rule (A1: Sterling-self
+// loads sterling via the plugin only, so the project-scope `:-.` rule never
+// applies). command + server entry are absolute (machine-detected), so the file
+// is gitignored + regenerable, never committed.
 const mcpPath = join(target, '.mcp.json');
-const expectedMcpEntry = {
+const pluginMcpEntry = {
   command: process.execPath,
-  args: [fwd(mcpServerEntry), '--store', fwd(join(target, '.sterling', 'sterling.db'))],
+  args: [fwd(mcpServerEntry), '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'],
 };
-if (!existsSync(mcpPath)) {
-  writeFileSync(mcpPath, JSON.stringify({ mcpServers: { sterling: expectedMcpEntry } }, null, 2));
-  items.push({ item: '.mcp.json', status: 'created', detail: 'sterling MCP server wired' });
-} else {
-  let mcp;
+const isOurMcpEntry = (e) =>
+  e && typeof e === 'object' && e.command === process.execPath && Array.isArray(e.args) && e.args[0] === fwd(mcpServerEntry);
+const readMcp = () => {
   try {
-    mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
-    if (mcp === null || typeof mcp !== 'object' || Array.isArray(mcp)) throw new Error('not an object');
+    const m = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    if (m === null || typeof m !== 'object' || Array.isArray(m)) throw new Error('not an object');
+    return m;
   } catch {
-    mcp = undefined;
-    items.push({ item: '.mcp.json', status: 'differs', detail: 'exists but is not a parseable object — cannot verify, left untouched; add the sterling server entry by hand' });
+    return undefined;
   }
-  if (mcp) {
-    const entry = mcp.mcpServers?.sterling;
-    if (!entry) {
-      mcp.mcpServers = { ...(mcp.mcpServers ?? {}), sterling: expectedMcpEntry };
+};
+if (fwd(target) === fwd(pluginRoot)) {
+  // THE source repo: its root .mcp.json IS the plugin declaration.
+  if (!existsSync(mcpPath)) {
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { sterling: pluginMcpEntry } }, null, 2));
+    items.push({ item: '.mcp.json', status: 'created', detail: 'plugin MCP declaration — binds each project to its own store via ${CLAUDE_PROJECT_DIR}' });
+  } else {
+    const mcp = readMcp();
+    if (!mcp) {
+      items.push({ item: '.mcp.json', status: 'differs', detail: 'exists but is not a parseable object — left untouched' });
+    } else if (!mcp.mcpServers?.sterling) {
+      mcp.mcpServers = { ...(mcp.mcpServers ?? {}), sterling: pluginMcpEntry };
       writeFileSync(mcpPath, JSON.stringify(mcp, null, 2));
-      items.push({ item: '.mcp.json', status: 'created', detail: 'sterling entry merged into existing .mcp.json (other servers preserved)' });
-    } else if (canonical(entry) === canonical(expectedMcpEntry)) {
-      items.push({ item: '.mcp.json', status: 'matches', detail: 'sterling entry as generated' });
+      items.push({ item: '.mcp.json', status: 'created', detail: 'plugin sterling entry merged (other servers preserved)' });
+    } else if (canonical(mcp.mcpServers.sterling) === canonical(pluginMcpEntry)) {
+      items.push({ item: '.mcp.json', status: 'matches', detail: 'plugin MCP declaration as generated' });
     } else {
       items.push({ item: '.mcp.json', status: 'differs', detail: 'sterling entry differs from generated — left untouched' });
     }
+  }
+} else {
+  // a consuming project: the plugin already declares sterling, bound to THIS
+  // project's store via ${CLAUDE_PROJECT_DIR}. Never write a per-project entry
+  // (it double-registers); remove a stale init-generated one, keep foreign servers.
+  const mcp = existsSync(mcpPath) ? readMcp() : undefined;
+  if (!existsSync(mcpPath)) {
+    items.push({ item: '.mcp.json', status: 'matches', detail: 'not written — the plugin declares sterling, bound to this project via ${CLAUDE_PROJECT_DIR}' });
+  } else if (!mcp) {
+    items.push({ item: '.mcp.json', status: 'differs', detail: 'exists but is not a parseable object — left untouched' });
+  } else if (isOurMcpEntry(mcp.mcpServers?.sterling)) {
+    delete mcp.mcpServers.sterling;
+    writeFileSync(mcpPath, JSON.stringify(mcp, null, 2));
+    items.push({ item: '.mcp.json', status: 'created', detail: 'removed the redundant per-project sterling entry — the plugin now declares it (other servers preserved)' });
+  } else if (mcp.mcpServers?.sterling) {
+    items.push({ item: '.mcp.json', status: 'differs', detail: 'a hand-edited sterling entry exists — left untouched (the plugin also declares sterling; reconcile by hand)' });
+  } else {
+    items.push({ item: '.mcp.json', status: 'matches', detail: 'no per-project sterling entry — the plugin declares it' });
   }
 }
 
@@ -299,6 +331,9 @@ items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the
 const gitignorePath = join(target, '.gitignore');
 const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
 const entries = ['.sterling/', 'sterling.bat', 'tui.bat', '.claude/agents/'];
+// the SOURCE repo's .mcp.json IS the machine-generated plugin declaration → gitignore it.
+// a consuming project may keep its OWN .mcp.json (foreign servers) → never ignore it there.
+if (fwd(target) === fwd(pluginRoot)) entries.push('.mcp.json');
 if (eff.backupPath) {
   const root = fwd(target);
   if (eff.backupPath === root || eff.backupPath.startsWith(root + '/')) {
