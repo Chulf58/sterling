@@ -24,7 +24,7 @@ import {
   type RunRecord,
 } from '@sterling/schemas';
 
-export { MountedStores, type DomainMount } from './mounted.js';
+export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS records (

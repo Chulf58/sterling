@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
-import { MountedStores } from '@sterling/store';
+import { MountedStores, resolveDomainMounts } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
 // The §10 tool surface over a MountedStores (project + one mounted domain): the
@@ -16,7 +16,7 @@ function harness() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-domain-'));
   const domainDb = join(dir, 'domains', 'genesys', 'sterling.db');
   const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: domainDb }]);
-  const config = parseConfig({ domains: ['genesys'] });
+  const config = parseConfig({ stack_tags: ['genesys'] });
   const tools = new SterlingTools({ store, config, now: () => '2026-06-16T12:00:00.000Z', newId: randomUUID });
   return { dir, domainDb, store, tools, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
@@ -198,4 +198,19 @@ test('knowledge_promote refuses what §3.3 forbids: non-project scope, unpromota
   } finally {
     cleanup();
   }
+});
+
+test('§3.3 resolveDomainMounts: stack_tags ARE the mount manifest; default per-user root + per-tag domain_paths override', () => {
+  // each stack tag mounts one store at the per-user root by default
+  const def = resolveDomainMounts(parseConfig({ stack_tags: ['genesys', 'node'] }));
+  assert.deepEqual(def.map((m) => m.name), ['genesys', 'node'], 'one mount per stack tag, in manifest order');
+  assert.equal(def[0].dbPath, join(homedir(), '.sterling', 'domains', 'genesys', 'sterling.db'), 'default path is the per-user root');
+
+  // config.domain_paths overrides the path for a named tag (spec line 94); others keep the default
+  const ov = resolveDomainMounts(parseConfig({ stack_tags: ['genesys', 'node'], domain_paths: { genesys: 'D:/shared/genesys.db' } }));
+  assert.equal(ov.find((m) => m.name === 'genesys')!.dbPath, 'D:/shared/genesys.db', 'per-tag override redirects the store');
+  assert.equal(ov.find((m) => m.name === 'node')!.dbPath, join(homedir(), '.sterling', 'domains', 'node', 'sterling.db'), 'un-overridden tag keeps the default');
+
+  // no stack tags → no mounts (single-store behaviour)
+  assert.deepEqual(resolveDomainMounts(parseConfig({})), [], 'empty manifest mounts nothing');
 });

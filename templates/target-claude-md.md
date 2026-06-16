@@ -35,9 +35,9 @@
 
 ## Project facts (generated)
 
-- Stack tags: {{STACK_TAGS}}
+- Stack tags (= domain mount manifest, §3.3): {{STACK_TAGS}}
 - Toolchains: {{TOOLCHAINS}}  <!-- path globs → adapter; test-path globs; run commands -->
-- Domain stores mounted: {{DOMAINS}}
+- Domain stores (one shared store per stack tag): {{DOMAINS}}
 - Backup path: {{BACKUP_PATH}}
 
 ## Conventions (lean — grows only via architecture-altering decision records)

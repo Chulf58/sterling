@@ -107,7 +107,7 @@ export class SterlingTools {
    */
   private surfacePromotionCandidate(record: DurableRecord, type: string): void {
     if (type !== 'reference_material' && type !== 'research_finding') return;
-    if (record.scope !== 'project' || this.config.domains.length === 0) return;
+    if (record.scope !== 'project' || this.config.stack_tags.length === 0) return;
     const label = (record as { title?: string; question?: string }).title ?? (record as { question?: string }).question ?? type;
     this.maintenanceEnqueue({
       reason: 'promotion_review',

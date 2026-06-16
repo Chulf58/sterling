@@ -4,25 +4,22 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { z } from 'zod';
 import { parseConfig } from '@sterling/schemas';
-import { MountedStores } from '@sterling/store';
+import { MountedStores, resolveDomainMounts } from '@sterling/store';
 import { SterlingTools } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
 
 export function createSterlingServer(storePath: string): { server: McpServer; store: MountedStores; tools: SterlingTools } {
   // config.json sits beside the store in .sterling/ (§12); malformed fails loud.
-  // Read before opening the store: config.domains is the §3.3 mount manifest.
+  // Read before opening the store: config.stack_tags is the §3.3 mount manifest.
   const configPath = join(dirname(storePath), 'config.json');
   const config = parseConfig(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {});
-  // §3.3: mount the manifest's domain stores from the shared per-user root
-  // (~/.sterling/domains/<name>/sterling.db) — created on mount if absent (§2.3),
-  // shared across every project that declares the same domain.
-  const mounts = config.domains.map((name) => ({ name, dbPath: join(homedir(), '.sterling', 'domains', name, 'sterling.db') }));
-  const store = new MountedStores(storePath, mounts);
+  // §3.3: mount one shared domain store per stack tag (resolveDomainMounts) — the
+  // mounted set equals the §3.4 filter set by construction.
+  const store = new MountedStores(storePath, resolveDomainMounts(config));
   // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
   // §3.2.5 repo-located doc mtime checks resolve against it
   const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)) });

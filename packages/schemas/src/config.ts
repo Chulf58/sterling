@@ -28,9 +28,14 @@ export const configSchema = z.object({
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
   // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
   backup_opt_out: z.boolean().default(false),
-  // §3.3: declared at init — the mount manifest for domain stores
+  // §3.3: the project's stack_tags, declared at init, ARE the domain mount
+  // manifest — the SAME list that filters retrieval (§3.4) mounts the shared
+  // domain stores, so the mounted set and the filter align by construction. Each
+  // tag mounts a store at ~/.sterling/domains/<tag>/sterling.db (lazily created).
   stack_tags: z.array(z.string()).default([]),
-  domains: z.array(z.string()).default([]),
+  // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
+  // override; default is the per-user root above. tag → absolute db path (POSIX).
+  domain_paths: z.record(z.string(), z.string()).default({}),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: z.string().optional(),

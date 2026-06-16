@@ -70,7 +70,7 @@ test('§16.2 step 11 — end-to-end dry run: init → conductor-direct capture �
     }
     const claudeMd = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
     assert.match(claudeMd, /dry-target/);
-    assert.match(claudeMd, /Stack tags: node/);
+    assert.match(claudeMd, /Stack tags.*: node/);
     assert.ok(!claudeMd.includes('{{'), 'no unsubstituted template tokens');
     const gitignore = readFileSync(join(dir, '.gitignore'), 'utf8');
     for (const line of ['.sterling/', 'sterling.bat', '.claude/agents/', 'backups/']) {

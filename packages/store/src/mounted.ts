@@ -1,5 +1,5 @@
 // @sterling/store — MountedStores (spec §3.3): composes the project store with
-// the project's mounted domain stores (the config.domains manifest). The project
+// the project's mounted domain stores (the config.stack_tags manifest). The project
 // store holds project-scoped knowledge + all run/board/transient state; domain
 // stores (at ~/.sterling/domains/<name>/, resolved by the caller) hold shared,
 // cross-project knowledge. One retrieval interface (§3.4) fans across the mounted
@@ -9,14 +9,28 @@
 // per §12): composition over SQLite ATTACH — each store is a self-contained,
 // already-tested SterlingStore; this layer only mounts, routes, and merges.
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { SterlingStore, type QueryOptions } from './index.js';
-import { validateRecord, type DurableRecord } from '@sterling/schemas';
+import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 
 /** A domain store to mount: its manifest name + its already-resolved DB path. */
 export interface DomainMount {
   name: string;
   dbPath: string;
+}
+
+/** §3.3: the project's stack_tags ARE the domain mount manifest — the SAME list
+ *  that filters retrieval (§3.4) mounts the shared domain stores, so the mounted
+ *  set and the filter align by construction. Each tag mounts a store at
+ *  ~/.sterling/domains/<tag>/sterling.db by default; config.domain_paths overrides
+ *  the path per tag (spec line 94). The ONE resolver the MCP server AND dispose-run
+ *  share, so the mounted set and the snapshotted set can never drift apart. */
+export function resolveDomainMounts(config: SterlingConfig): DomainMount[] {
+  return config.stack_tags.map((name) => ({
+    name,
+    dbPath: config.domain_paths[name] ?? join(homedir(), '.sterling', 'domains', name, 'sterling.db'),
+  }));
 }
 
 /** Open (and thereby lazily create — §2.3) a store at dbPath. SterlingStore opens

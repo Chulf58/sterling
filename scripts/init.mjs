@@ -16,7 +16,8 @@
 //
 //   node scripts/init.mjs --target <dir> [--project-name <name>]
 //     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
-//     [--backup-path <p> | --backup-opt-out] [--domains d1,d2]
+//     [--backup-path <p> | --backup-opt-out]
+//   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
 //   (declaration flags are required only when no recorded config exists)
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -31,7 +32,6 @@ const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const target = resolve(arg('--target') ?? process.cwd());
 const projectNameFlag = arg('--project-name');
 const stackTagsFlag = (arg('--stack-tags') ?? '').split(',').filter(Boolean);
-const domainsFlag = (arg('--domains') ?? '').split(',').filter(Boolean);
 const backupPathFlag = arg('--backup-path');
 const backupOptOutFlag = process.argv.includes('--backup-opt-out');
 const declaredToolchains = argAll('--toolchain').map((spec) => {
@@ -83,7 +83,7 @@ const baked = recorded ? recorded.toolchains : await resolveToolchains(declaredT
 const eff = recorded
   ? {
       stackTags: recorded.stack_tags,
-      domains: recorded.domains,
+      domainPaths: recorded.domain_paths, // §3.3 line 94 per-tag path overrides
       backupPath: recorded.backup_path, // stored absolute
       backupOptOut: recorded.backup_opt_out,
       projectName: recorded.project_name ?? projectNameFlag ?? 'project',
@@ -91,7 +91,7 @@ const eff = recorded
     }
   : {
       stackTags: stackTagsFlag,
-      domains: domainsFlag,
+      domainPaths: {}, // default per-user root; overrides are a hand-edited config concern
       // stored ABSOLUTE: disposal must hit the same place regardless of caller cwd
       backupPath: backupPathFlag ? fwd(resolve(target, backupPathFlag)) : undefined,
       backupOptOut: backupOptOutFlag,
@@ -103,7 +103,7 @@ const expectedConfig = parseConfig({
   ...JSON.parse(readFileSync(join(pluginRoot, 'templates', 'default-config.json'), 'utf8')),
   toolchains: baked,
   stack_tags: eff.stackTags,
-  domains: eff.domains,
+  domain_paths: eff.domainPaths,
   // mirror the recorded name on re-runs so a pre-project_name config can still match
   ...((recorded ? recorded.project_name : eff.projectName) !== undefined
     ? { project_name: recorded ? recorded.project_name : eff.projectName }
@@ -118,7 +118,6 @@ const notes = [];
 if (recorded) {
   const flagDiffs = [];
   if (stackTagsFlag.length && canonical(stackTagsFlag) !== canonical(recorded.stack_tags)) flagDiffs.push('--stack-tags');
-  if (domainsFlag.length && canonical(domainsFlag) !== canonical(recorded.domains)) flagDiffs.push('--domains');
   if (declaredToolchains.length && canonical(declaredToolchains) !== canonical(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push('--toolchain');
   if (backupPathFlag && fwd(resolve(target, backupPathFlag)) !== recorded.backup_path) flagDiffs.push('--backup-path');
   if (backupOptOutFlag && !recorded.backup_opt_out) flagDiffs.push('--backup-opt-out');
@@ -171,7 +170,9 @@ const expectedClaudeMd = readFileSync(join(pluginRoot, 'templates', 'target-clau
   .replaceAll('{{PROJECT_NAME}}', eff.projectName)
   .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
   .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.join(', ')})`).join('; '))
-  .replaceAll('{{DOMAINS}}', eff.domains.length ? eff.domains.join(', ') : '(none mounted yet — created lazily on first need)')
+  .replaceAll('{{DOMAINS}}', eff.stackTags.length
+    ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — created lazily on first need (§2.3)'
+    : '(none — declare stack tags to mount domain stores)')
   .replaceAll('{{BACKUP_PATH}}', eff.backupPath ? eff.backupPath : '(opted out — recorded)')
   .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)');
 const claudeMdPath = join(target, 'CLAUDE.md');
