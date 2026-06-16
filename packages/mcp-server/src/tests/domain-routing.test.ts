@@ -139,3 +139,63 @@ test('§3.3 no domain mounted → no promotion noise: a project reference surfac
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('§3.3 knowledge_promote: moves a project record into the domain store as a tombstone, draining its promotion_review', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const ref = tools.knowledgeCreate('reference_material', refFields('project')).record;
+    const review = tools.maintenanceQuery({ system_reason: 'promotion_review', cap: 100 }).find((t) => (t as { feature_link?: string }).feature_link === ref.id);
+    assert.ok(review, 'a project-scoped reference surfaced a promotion_review to drain');
+
+    const out = tools.knowledgePromote(ref.id, 'genesys');
+
+    // the promoted copy lives in the domain store, scoped + linked back to the origin
+    assert.equal(out.promoted.scope, 'domain:genesys');
+    assert.equal(store.project.get(out.promoted.id), undefined, 'the promoted copy is not in the project store');
+    assert.equal(store.get(out.promoted.id)?.scope, 'domain:genesys');
+    assert.ok(
+      (out.promoted.links as { rel: string; target_id: string }[]).some((l) => l.rel === 'informed_by' && l.target_id === ref.id),
+      'promoted copy is informed_by the origin'
+    );
+
+    // the project original is a superseded tombstone pointing forward — provenance survives
+    const tomb = store.project.get(ref.id)!;
+    assert.equal(tomb.status, 'superseded');
+    assert.equal(tomb.superseded_by, out.promoted.id);
+
+    // default retrieval drops the superseded original but serves the domain copy
+    const served = tools.knowledgeQuery({ types: ['reference_material'], cap: 50 }).map((r) => r.id);
+    assert.ok(!served.includes(ref.id), 'superseded project original is no longer served');
+    assert.ok(served.includes(out.promoted.id), 'promoted domain copy is served');
+
+    // promoting was the review outcome — its queue item drained
+    assert.equal(out.drained_review, review.id);
+    assert.equal(tools.maintenanceQuery({ system_reason: 'promotion_review', cap: 100 }).length, 0, 'the promotion_review was drained');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_promote refuses what §3.3 forbids: non-project scope, unpromotable type, unmounted domain (atomic)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // feature_article is always project — never promotes
+    const art = tools.knowledgeCreate('feature_article', {
+      slug: 'x', title: 'x', what_it_does: 'x', intended_behavior: 'x', files: [{ path: 'src/x.ts', role: 'impl' }],
+      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }], dependencies: { relies_on: [], relied_by: [] },
+      state: 'active', version: 1, history: [{ date: '2026-06-16T00:00:00.000Z', event: 'x' }], live_test_refs: [],
+    }).record;
+    assert.throws(() => tools.knowledgePromote(art.id, 'genesys'), /never promotes/);
+
+    // a record already in a domain is not a candidate
+    const dref = tools.knowledgeCreate('reference_material', refFields('domain:genesys')).record;
+    assert.throws(() => tools.knowledgePromote(dref.id, 'genesys'), /only project-scoped/);
+
+    // an unmounted target domain is rejected by store routing — and nothing is written
+    const pref = tools.knowledgeCreate('reference_material', refFields('project')).record;
+    assert.throws(() => tools.knowledgePromote(pref.id, 'fuel-prices'), /unmounted domain/);
+    assert.equal(tools.knowledgeGet(pref.id).status, 'active', 'a failed promote leaves the original active and untouched');
+  } finally {
+    cleanup();
+  }
+});

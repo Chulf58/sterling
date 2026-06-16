@@ -88,6 +88,13 @@ export class MountedStores {
     return this.storeHolding(args[0]).supersede(...args);
   }
 
+  /** Promotion tombstone: retire the original in its (project) store, pointing at
+   *  the cross-store replacement. The replacement already lives in another store
+   *  (the promoted domain copy), so only the original's holding store is touched. */
+  retireInFavorOf(...args: Parameters<SterlingStore['retireInFavorOf']>): ReturnType<SterlingStore['retireInFavorOf']> {
+    return this.storeHolding(args[0]).retireInFavorOf(...args);
+  }
+
   /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
   remove(...args: Parameters<SterlingStore['remove']>): ReturnType<SterlingStore['remove']> {
     return this.storeHolding(args[0]).remove(...args);

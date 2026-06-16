@@ -15,6 +15,7 @@ const SERVED_TOOLS = [
   'knowledge_query',
   'knowledge_get',
   'knowledge_update',
+  'knowledge_promote',
   'knowledge_link',
   'board_add',
   'board_query',

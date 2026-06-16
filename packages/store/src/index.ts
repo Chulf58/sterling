@@ -139,6 +139,7 @@ export type ToolStore = Pick<
   | 'query'
   | 'get'
   | 'supersede'
+  | 'retireInFavorOf'
   | 'remove'
   | 'addLink'
   | 'getRun'
@@ -267,6 +268,27 @@ export class SterlingStore {
         .run('superseded', newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
     });
     return newRecord;
+  }
+
+  /**
+   * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
+   * replacement that lives in ANOTHER store (the promoted copy in a domain
+   * store). supersede can't cross stores and always inserts a same-store
+   * replacement; this sets the existing record to superseded + superseded_by =
+   * the cross-store id with NO new row. Provenance and inbound links survive;
+   * default queries already hide superseded records, so it never double-serves.
+   */
+  retireInFavorOf(id: string, replacementId: string, at: string): DurableRecord {
+    const record = this.get(id);
+    if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
+    if (record.status !== 'active') throw new Error(`retireInFavorOf: record '${id}' is not active`);
+    const retired = { ...record, status: 'superseded' as const, superseded_by: replacementId, updated_at: at };
+    this.tx(() => {
+      this.db
+        .prepare('UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ?')
+        .run('superseded', replacementId, at, JSON.stringify(retired), id);
+    });
+    return retired;
   }
 
   /**

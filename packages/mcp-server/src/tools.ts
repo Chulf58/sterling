@@ -274,6 +274,49 @@ export class SterlingTools {
     return this.store.supersede(id, next);
   }
 
+  /**
+   * knowledge_promote (§3.3 project→domain promotion EXECUTION): move a
+   * project-scoped learning into a mounted domain store so it is shared by every
+   * project that mounts that domain. Copies the record into the domain store (new
+   * id, scope domain:<name>, content + clocks + author preserved, an informed_by
+   * link back to the origin) and retires the project original as a superseded
+   * tombstone pointing at the promoted copy — provenance and inbound links
+   * survive. Promoting IS the review outcome, so a matching promotion_review is
+   * drained (done = removed). feature_article is always project (§3.3); todo/note
+   * are project/user surfaces — none promote. An unmounted target domain is
+   * rejected loudly by the store routing before anything is written.
+   */
+  knowledgePromote(id: string, domain: string): { promoted: DurableRecord; retired: string; drained_review: string | null } {
+    const original = this.store.get(id);
+    if (!original) throw new Error(`knowledge_promote: no record '${id}'`);
+    if (original.status !== 'active') throw new Error(`knowledge_promote: record '${id}' is not active (status ${original.status})`);
+    if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${id}' is ${original.scope} — only project-scoped records promote`);
+    const UNPROMOTABLE = ['feature_article', 'todo', 'note'];
+    if (UNPROMOTABLE.includes(original.type)) {
+      throw new Error(`knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo/note are project/user surfaces`);
+    }
+    const ts = this.now();
+    // copy content; the envelope (id/clocks/status/scope/links) is rebuilt for the domain
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, scope: _sc, links: _l, ...content } = original as unknown as Record<string, unknown>;
+    const promoted = this.store.create({
+      ...content,
+      id: this.newId(),
+      created_at: ts,
+      updated_at: ts,
+      status: 'active',
+      superseded_by: null,
+      scope: `domain:${domain}`,
+      links: [{ rel: 'informed_by', target_id: id }],
+    });
+    // tombstone the project original, pointing forward to the promoted copy
+    this.store.retireInFavorOf(id, promoted.id, ts);
+    const review = this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 }).find(
+      (t) => (t as { feature_link?: string }).feature_link === id
+    );
+    if (review) this.store.remove(review.id, ts);
+    return { promoted, retired: id, drained_review: review?.id ?? null };
+  }
+
   // -- board (§3.2.7) ----------------------------------------------------------
 
   boardAdd(args: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {

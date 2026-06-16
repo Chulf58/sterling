@@ -72,6 +72,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_promote',
+    {
+      description:
+        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo/note never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome.',
+      inputSchema: { id: z.string(), domain: z.string() },
+    },
+    ({ id, domain }) => json(tools.knowledgePromote(id, domain))
+  );
+
+  server.registerTool(
     'board_add',
     {
       description: 'Add a todo to the board (source: user) or the maintenance queue (source: system, requires system_reason).',
