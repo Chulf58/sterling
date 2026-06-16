@@ -35,7 +35,16 @@ try {
 
   const config = parseConfig(loadConfig(input.cwd) ?? {}); // schema defaults apply (reviewer_selection sets etc.)
   const now = new Date().toISOString();
-  const paths = [...new Set(touches.map((t) => t.path))];
+  // §6 H10: only files that STILL EXIST drive a demand — a file created and then
+  // deleted within the session (e.g. a throwaway) leaves a stale H7 touch entry
+  // but needs no owner and no capture. (raw rm doesn't update the register;
+  // fs-remove does — that asymmetry is the gap this guards.)
+  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
+  if (!paths.length) {
+    rmSync(touchesPath, { force: true });
+    rmSync(nagMarker, { force: true });
+    allow();
+  }
 
   const earliest = touches.map((t) => t.at).sort()[0];
   const captured = store
@@ -75,7 +84,7 @@ try {
   // test-touching → test-integrity vs git HEAD (§8.2); non-git degrades loud
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = '';
-  if (!captured && touches.some((t) => testGlobs.some((g) => matchesGlob(t.path, g)))) {
+  if (!captured && paths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
     const ti = gitTestIntegrity({ cwd: input.cwd, testGlobs });
     if (ti.no_git) store.recordCheckSkipped('test-integrity', 'no_git', undefined, now);
     else if (ti.modified.length || ti.deleted.length) {
@@ -91,7 +100,7 @@ try {
       const diff = paths.map((path) => ({ path, added_lines: [] }));
       const selection = selectReviewers({ config, diff });
       parts.push(
-        `H10: direct-mode work touched ${touches.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
+        `H10: direct-mode work touched ${paths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
           `Capture what was learned inline (knowledge_create), or state explicitly that nothing durable was learned.\n` +
           `Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` +
           integrityNote
@@ -124,7 +133,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `capture owed: direct-mode session touched ${touches.length} file(s) and ended without capture`,
+        text: `capture owed: direct-mode session touched ${paths.length} file(s) and ended without capture`,
         source: 'system',
         system_reason: 'capture_owed',
         file_keys: paths.slice(0, 20),

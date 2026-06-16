@@ -327,6 +327,8 @@ test('H9: Stop blocked only while completing, naming outstanding promotion condi
 test('H10: capture nag once with reviewer selection, then capture_owed and release; capture clears it', () => {
   const { dir, store, cleanup } = makeProject();
   try {
+    mkdirSync(join(dir, 'src', 'auth'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'auth', 'login.mjs'), '// x\n');
     mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
     writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'src/auth/login.mjs', at: NOW }]));
     const stop = (over = {}) => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', ...over }), dir);
@@ -347,6 +349,8 @@ test('H10: capture nag once with reviewer selection, then capture_owed and relea
   }
   const captured = makeProject();
   try {
+    mkdirSync(join(captured.dir, 'src'), { recursive: true });
+    writeFileSync(join(captured.dir, 'src', 'a.mjs'), '// x\n');
     mkdirSync(join(captured.dir, '.sterling', 'transient'), { recursive: true });
     writeFileSync(join(captured.dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'src/a.mjs', at: NOW }]));
     captured.store.create({ ...envelope('decision', '2026-06-10T13:00:00.000Z'), title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' });
@@ -360,6 +364,10 @@ test('H10: capture nag once with reviewer selection, then capture_owed and relea
 
 function touchRegister(dir, paths) {
   mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  for (const p of paths) {
+    mkdirSync(dirname(join(dir, p)), { recursive: true });
+    writeFileSync(join(dir, p), '// touched\n'); // H10 acts only on files that still exist
+  }
   writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify(paths.map((path) => ({ path, at: NOW }))));
 }
 
@@ -465,6 +473,27 @@ test('H10 article demand: an open article_missing item with overlapping file key
       items.every((t) => !t.text.includes('direct-mode work touched')),
       'no NEW item was enqueued — the overlapping seed suppressed it'
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10: a touched file deleted before Stop is skipped — no demand, no article_missing (created-then-deleted needs no owner)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // touches registered for paths that do NOT exist on disk (created then rm'd in-session;
+    // raw rm leaves the H7 entry stale). H10 must not demand an owner for a deleted file.
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(
+      join(dir, '.sterling', 'transient', 'touches.json'),
+      JSON.stringify([{ path: 'scripts/_throwaway.mjs', at: NOW }, { path: 'src/also-gone.mjs', at: NOW }])
+    );
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'no demand for files that no longer exist');
+    const items = store.query({ types: ['todo'], cap: 100 });
+    assert.equal(items.filter((t) => t.system_reason === 'article_missing').length, 0, 'no article_missing for a deleted file');
+    assert.equal(items.filter((t) => t.system_reason === 'capture_owed').length, 0, 'no capture_owed — no durable change remained');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), false, 'register cleared (P4)');
   } finally {
     cleanup();
   }
