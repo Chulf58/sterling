@@ -33,3 +33,5 @@ export { configSchema, parseConfig } from './config.js';
 export type { SterlingConfig } from './config.js';
 export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';
+export { BUILD_ID_FILE, runtimeMarkerSchema, buildIdPath, runtimeMarkerPath, stalenessVerdict } from './staleness.js';
+export type { RuntimeMarker, StalenessVerdict } from './staleness.js';

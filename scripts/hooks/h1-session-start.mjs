@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore } from './lib/common.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
+import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 
 const CONVENTIONS = [
   'Sterling conventions (injected by H1):',
@@ -53,20 +54,24 @@ function paint(rows) {
     .join('\n');
 }
 
-/** Plugin version, fail-open (no version, no line): the bounded walk-up finds
- *  .claude-plugin/plugin.json from scripts/hooks/ (source, tests) and hooks/
- *  (bundle) alike. */
+/** The plugin root — the dir holding .claude-plugin/plugin.json — by a bounded
+ *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle). */
+function pluginRoot() {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 4; i++) {
+    if (existsSync(join(dir, '.claude-plugin', 'plugin.json'))) return dir;
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/** Plugin version, fail-open (no version, no line). */
 function pluginVersion() {
   try {
-    let dir = dirname(fileURLToPath(import.meta.url));
-    for (let i = 0; i < 4; i++) {
-      const p = join(dir, '.claude-plugin', 'plugin.json');
-      if (existsSync(p)) {
-        const v = JSON.parse(readFileSync(p, 'utf8')).version;
-        return typeof v === 'string' && v.length ? v : null;
-      }
-      dir = dirname(dir);
-    }
+    const root = pluginRoot();
+    if (!root) return null;
+    const v = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8')).version;
+    return typeof v === 'string' && v.length ? v : null;
   } catch {
     // fail-open — the banner prints without a version line
   }
@@ -111,6 +116,30 @@ if (existsSync(registryPath())) {
   }
 }
 
+// stale-server guard (P5/P7): a running MCP server older than the current built
+// server silently serves OLD behavior (the domain-stores incident). Compare the
+// build-id the server recorded at boot to the current built id; warn the human
+// loudly to restart. Fail-open: a missing marker or build-id is 'unknown', never
+// a false alarm (P1). STERLING_SERVER_DIST overrides the dist lookup for tests.
+let staleWarning = '';
+try {
+  const root = pluginRoot();
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join(root, 'packages', 'mcp-server', 'dist') : null);
+  const currentBuildId = serverDist && existsSync(buildIdPath(serverDist)) ? readFileSync(buildIdPath(serverDist), 'utf8').trim() || null : null;
+  let marker = null;
+  const markerPath = runtimeMarkerPath(join(input.cwd, '.sterling', 'sterling.db'));
+  if (existsSync(markerPath)) {
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync(markerPath, 'utf8')));
+    if (parsed.success) marker = parsed.data;
+  }
+  const verdict = stalenessVerdict(currentBuildId, marker);
+  if (verdict.state === 'stale') {
+    staleWarning = `⚠ Sterling MCP server is STALE — running build ${verdict.running}, current ${verdict.current}. RESTART THE SESSION to load the current server (a stale server silently mis-stores domain writes). `;
+  }
+} catch {
+  // fail-open — the staleness guard must never break SessionStart
+}
+
 if (process.env.STERLING_NO_BANNER !== '1') {
   const width = Math.max(...BANNER_ROWS.map((r) => r.length));
   const version = pluginVersion();
@@ -119,7 +148,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${staleWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext },
 };
 process.stdout.write(JSON.stringify(output));

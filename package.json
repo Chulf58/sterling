@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -p packages/schemas/tsconfig.json && tsc -p packages/store/tsconfig.json && tsc -p packages/mcp-server/tsconfig.json && tsc -p packages/tui/tsconfig.json",
+    "build": "tsc -p packages/schemas/tsconfig.json && tsc -p packages/store/tsconfig.json && tsc -p packages/mcp-server/tsconfig.json && tsc -p packages/tui/tsconfig.json && node scripts/build-stamp.mjs",
     "build:hooks": "node scripts/build-hooks.mjs",
     "build:tui": "node scripts/build-tui.mjs",
     "test": "node --test \"scripts/tests/*.test.mjs\" \"packages/schemas/dist/tests/*.test.js\" \"packages/store/dist/tests/*.test.js\" \"packages/mcp-server/dist/tests/*.test.js\" \"packages/tui/dist/tests/*.test.js\"",

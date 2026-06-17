@@ -192,6 +192,48 @@ test('H1: shared project registry — touches this project last_seen + makes the
   }
 });
 
+test('H1 stale-server guard: a marker build-id differing from the current build warns the human to restart; matching or absent is silent (P1)', () => {
+  const { dir, cleanup } = makeProject();
+  const serverDist = mkdtempSync(join(tmpdir(), 'sterling-dist-'));
+  const markerPath = join(dir, '.sterling', 'transient', 'mcp-runtime.json');
+  const writeMarker = (buildId) => {
+    mkdirSync(dirname(markerPath), { recursive: true });
+    writeFileSync(markerPath, JSON.stringify({ build_id: buildId, pid: 999, booted_at: NOW }));
+  };
+  const run = () =>
+    JSON.parse(
+      runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, {
+        NO_COLOR: '1',
+        STERLING_NO_BANNER: '1',
+        STERLING_SERVER_DIST: serverDist,
+      }).stdout
+    );
+  try {
+    writeFileSync(join(serverDist, '.build-id'), 'BUILD_CURRENT');
+
+    // fresh: the running server's recorded build matches the current build → no warning
+    writeMarker('BUILD_CURRENT');
+    let out = run();
+    assert.doesNotMatch(out.systemMessage, /STALE/, 'matching build-id → no stale warning');
+    assert.match(out.systemMessage, /^0 todos/, 'systemMessage is counts-only when fresh');
+
+    // stale: the running server predates the current build → loud restart warning
+    writeMarker('BUILD_OLD');
+    out = run();
+    assert.match(out.systemMessage, /STALE.*running build BUILD_OLD.*current BUILD_CURRENT/s, 'mismatch → stale warning naming both builds');
+    assert.match(out.systemMessage, /RESTART THE SESSION/);
+    assert.match(out.systemMessage, /pending$/, 'the counts line still follows the warning');
+
+    // absent marker → unknown, never a false alarm (first boot / race / pre-guard server)
+    rmSync(markerPath, { force: true });
+    out = run();
+    assert.doesNotMatch(out.systemMessage, /STALE/, 'no marker → no warning (P1: no false alarm)');
+  } finally {
+    rmSync(serverDist, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
 // --------------------------- H2 ---------------------------
 
 test('H2: selection row consumed one-shot, transactionally, from the store — never a file (P4)', () => {
