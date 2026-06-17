@@ -69,7 +69,11 @@ export interface DashboardState {
     /** present when pending was clipped at the divider: '… N more pending' */
     overflow?: string;
   };
-  /** body starts at this screen line (after the tab bar + blank line) */
+  /** the project's folder name, drawn bold on the top header row so a glance
+   *  tells you which project's session this pane is observing (typing into the
+   *  wrong session is the mistake this row prevents) */
+  projectName: string;
+  /** body starts at this screen line (after the header + tab bar + blank line) */
   bodyTop: number;
 }
 
@@ -142,7 +146,7 @@ export function nodesFor(store: SterlingStore, ui: UiState): Node[] {
   return nodes;
 }
 
-const BODY_TOP = 2; // line 0: tab bar; line 1: blank (doubles as the search bar)
+const BODY_TOP = 3; // line 0: project-name header; line 1: tab bar; line 2: blank (doubles as the search bar)
 
 /**
  * Body lines visible at a given terminal height: the body spans screen lines
@@ -185,7 +189,7 @@ export function wrapText(text: string, width: number): string[] {
 const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity): DashboardState {
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = ''): DashboardState {
   const nodes = nodesFor(store, ui);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
@@ -274,6 +278,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       (ui.tab === ARTICLES_TAB ? ' · / search · esc clears' : ''),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.searchEditing ? '▌' : ''}` : undefined,
     queueCompleted,
+    projectName,
     bodyTop: BODY_TOP,
   };
 }
@@ -377,8 +382,8 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     case 'wheel':
       return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
     case 'click': {
-      // tab bar click (line 1): pick the tab by x extent
-      if (event.y === 1) {
+      // tab bar click (line 2 — the project-name header is line 1): pick the tab by x extent
+      if (event.y === 2) {
         let x = 1;
         for (let i = 0; i < TABS.length; i++) {
           const width = TABS[i].length + 2; // ' label '

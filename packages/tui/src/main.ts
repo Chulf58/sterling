@@ -2,7 +2,7 @@
 // Exits politely on non-TTY stdout (§11). terminal-kit loads only after the
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
 import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, type UiState } from './state.js';
@@ -40,6 +40,9 @@ if (owner !== null) {
 }
 
 const store = new SterlingStore(storePath);
+// the project's folder name (…/<project>/.sterling/sterling.db) — shown bold on
+// the TUI's top row so a glance tells you which project's session this pane is.
+const projectName = basename(dirname(dirname(storePath)));
 let ui: UiState = initialUi;
 
 // One ScreenBuffer for the process lifetime: draw({delta:true}) diffs each
@@ -47,7 +50,7 @@ let ui: UiState = initialUi;
 let screen = new termkit.default.ScreenBuffer({ dst: term });
 
 function redraw(): void {
-  draw(screen, buildDashboardState(store, ui, term.width, visibleBodyLines(term.height)));
+  draw(screen, buildDashboardState(store, ui, term.width, visibleBodyLines(term.height), projectName));
 }
 
 function handle(event: ReturnType<typeof keyToEvent>): void {

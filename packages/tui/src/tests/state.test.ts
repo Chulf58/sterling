@@ -188,7 +188,7 @@ test('queue tab (§3.2.7/§11): system items only, fixed half divider with trunc
     assert.match(s.queueCompleted!.overflow!, /… \d+ more pending/);
 
     // a click in the completed region maps to no row — log lines are not records
-    const lineInCompleted = 3 + s.queueCompleted!.startRow + 1; // 1-based terminal line of the first completed entry
+    const lineInCompleted = 4 + s.queueCompleted!.startRow + 1; // 1-based terminal line of the first completed entry
     assert.equal(screenLineToRow(s, lineInCompleted, 6), -1);
     const clicked = reduce(store, ui, { kind: 'click', x: 1, y: lineInCompleted }, { maxBodyLines: 6 });
     assert.deepEqual(clicked.effects, [], 'completed entries cannot be selected');
@@ -301,12 +301,36 @@ test('screenLineToRow: maps clicks through bodyTop and expanded heights', () => 
   const { store, t1, cleanup } = fixture();
   try {
     const s = buildDashboardState(store, st({ expanded: [t1.id] }));
-    // terminal lines are 1-based; body starts after tab bar + blank (bodyTop=2) → line 3
-    assert.equal(screenLineToRow(s, 3), 0, 'first row');
-    assert.equal(screenLineToRow(s, 4), 0, 'its expanded detail line still maps to row 0');
-    assert.equal(screenLineToRow(s, 5), 1, 'second todo shifted down by the expansion');
-    assert.equal(screenLineToRow(s, 1), -1, 'tab bar is not a row');
+    // terminal lines are 1-based; body starts after header + tab bar + blank (bodyTop=3) → line 4
+    assert.equal(screenLineToRow(s, 4), 0, 'first row');
+    assert.equal(screenLineToRow(s, 5), 0, 'its expanded detail line still maps to row 0');
+    assert.equal(screenLineToRow(s, 6), 1, 'second todo shifted down by the expansion');
+    assert.equal(screenLineToRow(s, 1), -1, 'header row is not a body row');
     assert.equal(screenLineToRow(s, 99), -1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('header row: project folder name rides on the state; tabs shift to the second row (bodyTop=3)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    // no name threaded → empty header, but the body still starts at line 3
+    // (0-based: header, tab bar, blank) so the geometry is stable
+    assert.equal(buildDashboardState(store, initialUi).projectName, '');
+    assert.equal(buildDashboardState(store, initialUi).bodyTop, 3);
+
+    const s = buildDashboardState(store, initialUi, Infinity, Infinity, 'Sterling');
+    assert.equal(s.projectName, 'Sterling', 'the folder name is carried for the renderer to draw on row 0');
+
+    // tab-bar clicks now land on terminal line 2 — the project name owns line 1
+    const tabClick = reduce(store, initialUi, { kind: 'click', x: 9, y: 2 });
+    assert.equal(tabClick.ui.tab, 1, 'Notes selected on the shifted tab row');
+
+    // a click on the header row itself selects nothing
+    const headerClick = reduce(store, initialUi, { kind: 'click', x: 1, y: 1 });
+    assert.deepEqual(headerClick.effects, []);
+    assert.deepEqual(headerClick.ui, initialUi);
   } finally {
     cleanup();
   }
@@ -316,21 +340,21 @@ test('viewport clamp: rows the renderer clips are not clickable (off-screen clic
   const { store, t1, cleanup } = fixture();
   try {
     // visibleBodyLines mirrors the draw() clamp: body spans lines bodyTop+1 .. height-2
-    assert.equal(visibleBodyLines(8), 4);
+    assert.equal(visibleBodyLines(8), 3);
     assert.equal(visibleBodyLines(4), 0);
     assert.equal(visibleBodyLines(2), 0, 'degenerate pane: nothing clickable');
 
-    // one visible body line: the first todo (line 3) hits, the second (line 4) is clipped
+    // one visible body line: the first todo (line 4) hits, the second (line 5) is clipped
     const s = buildDashboardState(store, initialUi);
-    assert.equal(screenLineToRow(s, 3, 1), 0);
-    assert.equal(screenLineToRow(s, 4, 1), -1, 'clipped row must not map');
+    assert.equal(screenLineToRow(s, 4, 1), 0);
+    assert.equal(screenLineToRow(s, 5, 1), -1, 'clipped row must not map');
 
     // an expanded row's detail line beyond the viewport is not a hit either
     const sx = buildDashboardState(store, st({ expanded: [t1.id] }));
-    assert.equal(screenLineToRow(sx, 4, 1), -1, 'hidden detail line must not map');
+    assert.equal(screenLineToRow(sx, 5, 1), -1, 'hidden detail line must not map');
 
     // through reduce: a click below the viewport is a no-op (no selection effect, no expand)
-    const clipped = reduce(store, initialUi, { kind: 'click', x: 1, y: 4 }, { maxBodyLines: 1 });
+    const clipped = reduce(store, initialUi, { kind: 'click', x: 1, y: 5 }, { maxBodyLines: 1 });
     assert.deepEqual(clipped.effects, []);
     assert.deepEqual(clipped.ui, initialUi);
   } finally {
@@ -380,7 +404,7 @@ test('expanded cards wrap the full body at the pane width; collapsed titles clip
     // hit-test: a click on a middle wrapped body line maps to the card, and the
     // rows below shift by the wrapped height
     const idx = s.rows.findIndex((r) => r.id === long.id);
-    const mid = 3 + s.rows[idx].screenRow + 2; // terminal line of the card's 3rd display line
+    const mid = 4 + s.rows[idx].screenRow + 2; // terminal line of the card's 3rd display line
     assert.equal(screenLineToRow(s, mid), idx);
     const { ui } = reduce(store, st({ expanded: [long.id] }), { kind: 'click', x: 1, y: mid }, { width });
     assert.deepEqual(ui.expanded, [], 'clicking the wrapped body collapses the card');
@@ -457,19 +481,19 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
     ({ ui } = reduce(store, ui, { kind: 'wheel', dy: -1 }));
     assert.equal(ui.cursor, 0);
 
-    // click the second todo (body line 4 when nothing is expanded)
-    const click = reduce(store, ui, { kind: 'click', x: 5, y: 4 });
+    // click the second todo (body line 5 when nothing is expanded; bodyTop=3)
+    const click = reduce(store, ui, { kind: 'click', x: 5, y: 5 });
     assert.deepEqual(click.effects, [{ type: 'select', recordType: 'todo', id: t2.id }]);
     assert.deepEqual(click.ui.expanded, [t2.id]);
     assert.equal(click.ui.cursor, 1, 'click moves the cursor');
 
     // with t2 expanded, clicking THROUGH the shifted layout still hits t1's line
-    const clickFirst = reduce(store, click.ui, { kind: 'click', x: 5, y: 3 });
+    const clickFirst = reduce(store, click.ui, { kind: 'click', x: 5, y: 4 });
     assert.equal(clickFirst.effects[0]!.type, 'select');
     assert.equal((clickFirst.effects[0] as { id: string }).id, t1.id);
 
-    // tab bar: ' Todos  Notes  Articles  Live-run ' — Notes starts after ' Todos ' (7 cols)
-    const tabClick = reduce(store, ui, { kind: 'click', x: 9, y: 1 });
+    // tab bar is the SECOND row now (project name is row 1): ' Todos  Notes … ' — Notes after ' Todos ' (7 cols)
+    const tabClick = reduce(store, ui, { kind: 'click', x: 9, y: 2 });
     assert.equal(tabClick.ui.tab, 1, 'clicked Notes');
 
     const rc = reduce(store, click.ui, { kind: 'rightclick' });

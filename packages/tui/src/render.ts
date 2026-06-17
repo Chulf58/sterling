@@ -25,18 +25,22 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
   // are 0-based and clip at the buffer edge (no wrap), so a long line can
   // never push the pane into a real scroll.
   screen.fill({ attr: {} });
+  // row 0: the project folder name (bold) — a glance tells you which project's
+  // session this pane observes, so you never type into the wrong one. Tabs sit
+  // on row 1, the spacer/search bar on row 2 (kept in sync with bodyTop).
+  screen.put({ x: 0, y: 0, attr: { bold: true } }, state.projectName);
   let x = 0;
   for (const tab of state.tabs) {
     const label = ` ${tab.label} `; // x extents must stay in sync with the click mapping in state.ts
-    screen.put({ x, y: 0, attr: tab.active ? { inverse: true } : {} }, label);
+    screen.put({ x, y: 1, attr: tab.active ? { inverse: true } : {} }, label);
     x += label.length;
   }
   if (state.searchLine) {
-    // the spacer line doubles as the search bar while a query/input is live
-    screen.put({ x: 0, y: 1, attr: { dim: true } }, state.searchLine);
+    // the spacer line (row 2) doubles as the search bar while a query/input is live
+    screen.put({ x: 0, y: 2, attr: { dim: true } }, state.searchLine);
   }
   const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
-  let y = state.bodyTop; // 0-based rows: tab bar 0, blank/search 1, body from bodyTop
+  let y = state.bodyTop; // 0-based rows: header 0, tab bar 1, blank/search 2, body from bodyTop
   if (state.emptyMessage && y <= lastBodyLine) {
     screen.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
     y += 1;
