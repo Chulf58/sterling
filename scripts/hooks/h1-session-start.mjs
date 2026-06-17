@@ -8,6 +8,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore } from './lib/common.mjs';
+import { ProjectRegistry, registryPath } from '@sterling/store';
 
 const CONVENTIONS = [
   'Sterling conventions (injected by H1):',
@@ -85,6 +86,26 @@ try {
   store.close();
 }
 
+// shared project registry (decision 8f9e6db2): touch THIS project's last_seen
+// for the session and surface sibling projects (machine-global awareness). Only
+// if the registry exists (init creates it) — H1 never creates it, and
+// touchLastSeen no-ops for a project that was never registered.
+let registryLine = '';
+if (existsSync(registryPath())) {
+  const cwdPosix = input.cwd.replace(/\\/g, '/');
+  const registry = new ProjectRegistry(registryPath());
+  try {
+    registry.touchLastSeen(cwdPosix, new Date().toISOString());
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix);
+    if (siblings.length) {
+      const missing = siblings.filter((p) => !existsSync(p.repo_path)).length;
+      registryLine = ` · ${siblings.length} sibling project${siblings.length === 1 ? '' : 's'}: ${siblings.map((p) => p.name).join(', ')}${missing ? ` (${missing} missing)` : ''}`;
+    }
+  } finally {
+    registry.close();
+  }
+}
+
 if (process.env.STERLING_NO_BANNER !== '1') {
   const width = Math.max(...BANNER_ROWS.map((r) => r.length));
   const version = pluginVersion();
@@ -93,7 +114,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${registryLine}`,
   hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS },
 };
 process.stdout.write(JSON.stringify(output));

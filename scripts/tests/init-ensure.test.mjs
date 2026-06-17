@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, appendFil
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ProjectRegistry } from '@sterling/store';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -16,6 +17,9 @@ function init(dir, args = []) {
     encoding: 'utf8',
     cwd: dir,
     timeout: 180_000,
+    // isolate the machine-global project registry to this test's temp dir, so
+    // init's registration never pollutes the real ~/.sterling/registry.db
+    env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db') },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -175,6 +179,29 @@ test('contradicting flags on a re-run are reported, never applied; consuming .mc
     mcp = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'));
     assert.ok(mcp.mcpServers.other, 'foreign server preserved through cleanup');
     assert.ok(!mcp.mcpServers.sterling, 'stale init-generated sterling entry removed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init notes the project in the shared registry (decision 8f9e6db2)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^project registry\s+created\s+noted 'ensure-target'/m);
+    const reg = new ProjectRegistry(join(dir, 'registry.db'));
+    try {
+      const me = reg.list().find((p) => p.repo_path === dir.replace(/\\/g, '/'));
+      assert.ok(me, 'this project is registered, keyed by its absolute POSIX repo path');
+      assert.equal(me.name, 'ensure-target');
+      assert.deepEqual(me.stack_tags, ['node']);
+      assert.deepEqual(me.toolchains, ['node']);
+      assert.equal(me.first_init_at, me.last_init_at, 'fresh init: first_init_at == last_init_at');
+      assert.equal(me.last_seen_at, null, 'no session-start touch yet');
+    } finally {
+      reg.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

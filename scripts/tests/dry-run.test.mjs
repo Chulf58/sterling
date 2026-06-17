@@ -22,7 +22,8 @@ function sh(script, args, cwd, env = {}) {
     encoding: 'utf8',
     cwd,
     timeout: 180_000,
-    env: { ...process.env, ...env },
+    // isolate the machine-global project registry to the test dir (init registers there)
+    env: { ...process.env, STERLING_REGISTRY_DB: join(cwd, 'registry.db'), ...env },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }

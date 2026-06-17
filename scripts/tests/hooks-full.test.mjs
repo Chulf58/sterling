@@ -14,9 +14,10 @@ const HOOKS = join(root, 'scripts', 'hooks');
 const NOW = '2026-06-10T12:00:00.000Z';
 
 let SterlingStore;
+let ProjectRegistry;
 let parseConfig;
 before(async () => {
-  ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ SterlingStore, ProjectRegistry } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
   ({ parseConfig } = await import(pathToFileURL(join(root, 'packages', 'schemas', 'dist', 'index.js')).href));
 });
 
@@ -147,6 +148,40 @@ test('H1: banner art to stderr (env-only suppression), counts to the human, conv
     assert.ok(!r.stderr.includes('▀'), 'no banner art outside Sterling projects (P1)');
   } finally {
     rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('H1: shared project registry — touches this project last_seen + surfaces siblings, missing flagged (decision 8f9e6db2)', () => {
+  const { dir, cleanup } = makeProject();
+  const regPath = join(dir, 'registry.db');
+  const cwdPosix = dir.replace(/\\/g, '/');
+  try {
+    const seed = new ProjectRegistry(regPath);
+    try {
+      seed.register({ repo_path: cwdPosix, name: 'current', stack_tags: ['node'], toolchains: ['node'], sterling_version: '0.1.0', at: NOW });
+      seed.register({ repo_path: root.replace(/\\/g, '/'), name: 'sib-live', stack_tags: ['node'], toolchains: ['node'], sterling_version: '0.1.0', at: NOW }); // root exists
+      seed.register({ repo_path: 'C:/nope/gone-xyz', name: 'sib-missing', stack_tags: ['genesys'], toolchains: ['node'], sterling_version: '0.1.0', at: NOW });
+    } finally {
+      seed.close();
+    }
+
+    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1', STERLING_REGISTRY_DB: regPath });
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    // siblings are name-ordered, current excluded, missing counted
+    assert.match(out.systemMessage, /· 2 sibling projects: sib-live, sib-missing \(1 missing\)/);
+
+    // last_seen touched for THIS project only
+    const after = new ProjectRegistry(regPath);
+    try {
+      const me = after.list().find((p) => p.repo_path === cwdPosix);
+      assert.ok(me.last_seen_at && /^\d{4}-\d{2}-\d{2}T/.test(me.last_seen_at), 'this project last_seen_at touched at session start');
+      assert.equal(after.list().find((p) => p.repo_path === 'C:/nope/gone-xyz').last_seen_at, null, 'a sibling is NOT touched');
+    } finally {
+      after.close();
+    }
+  } finally {
+    cleanup();
   }
 });
 

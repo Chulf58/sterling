@@ -25,6 +25,7 @@ import {
 } from '@sterling/schemas';
 
 export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
+export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS records (

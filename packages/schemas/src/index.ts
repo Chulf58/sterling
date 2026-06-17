@@ -31,3 +31,5 @@ export {
 export type { Signal, SpineSignal, Handoff, MachineState, RunRecord } from './transient.js';
 export { configSchema, parseConfig } from './config.js';
 export type { SterlingConfig } from './config.js';
+export { projectRegistrationSchema } from './registry.js';
+export type { ProjectRegistration } from './registry.js';

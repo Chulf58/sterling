@@ -24,6 +24,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { parseConfig } from '@sterling/schemas';
+import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
@@ -353,6 +354,37 @@ if (missing.length) {
 for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling.bat', expectedLauncher], ['tui.bat', expectedTuiLauncher]]) {
   const hits = findDeadTerms(content);
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(', ')}`, 1);
+}
+
+// shared project registry (decision 8f9e6db2): note this project in the
+// machine-global registry so the others are aware it exists. Upsert by repo_path,
+// bound to the init event (P4); the H1 hook later touches last_seen_at per session.
+const pluginPkg = (() => {
+  try {
+    return JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8'));
+  } catch {
+    return {};
+  }
+})();
+const registry = new ProjectRegistry(registryPath());
+try {
+  const already = registry.list().some((p) => p.repo_path === fwd(target));
+  registry.register({
+    repo_path: fwd(target),
+    name: eff.projectName,
+    stack_tags: eff.stackTags,
+    toolchains: baked.map((t) => t.adapter),
+    sterling_version: typeof pluginPkg.version === 'string' ? pluginPkg.version : null,
+    at: new Date().toISOString(),
+  });
+  const siblings = registry.list().filter((p) => p.repo_path !== fwd(target)).length;
+  items.push({
+    item: 'project registry',
+    status: already ? 'refreshed' : 'created',
+    detail: `${already ? 'refreshed' : 'noted'} '${eff.projectName}' in the shared registry — ${siblings} sibling project${siblings === 1 ? '' : 's'}`,
+  });
+} finally {
+  registry.close();
 }
 
 // ---- the per-item report table ----
