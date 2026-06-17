@@ -40,7 +40,7 @@
         "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h7-file-touch.mjs\"" }]
       },
       {
-        "matcher": "mcp__sterling__knowledge_create",
+        "matcher": "mcp__sterling__knowledge_create|mcp__plugin_sterling_sterling__knowledge_create",
         "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h11-note-structure.mjs\"", "timeout": 120 }]
       }
     ],

@@ -3,7 +3,7 @@ name: test-writer
 description: Adversarial, spec-only test author for a pipeline phase. Writes tests from the brief and ACs — never from implementation.
 model: opus
 effort: high
-tools: Read, Write, Grep, Glob, mcp__sterling__knowledge_query, mcp__sterling__handoff_read, mcp__sterling__handoff_write, mcp__sterling__agent_exit
+tools: Read, Write, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - brief (problem, feature, full acceptance_criteria)
   - phase AC slice (the ac_ids this phase must satisfy)

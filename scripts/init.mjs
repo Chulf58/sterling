@@ -324,6 +324,44 @@ if (fwd(target) === fwd(pluginRoot)) {
   }
 }
 
+// .claude/settings.local.json (MCP packaging fix, decision 097851ed): the SOURCE
+// repo's root .mcp.json is read BOTH as Sterling-self's project-scope server AND as
+// the plugin declaration. Sterling-self must load sterling via the PLUGIN ONLY — else
+// a second, empty-store project server double-registers (the bare ${CLAUDE_PROJECT_DIR}
+// literal does not substitute in project scope, so it writes a literal-path empty DB).
+// Enforce the two enable keys; every other key (permissions, etc.) is preserved. Source
+// repo only — a consuming project may run foreign project MCP servers, never disabled here.
+if (fwd(target) === fwd(pluginRoot)) {
+  const settingsPath = join(target, '.claude', 'settings.local.json');
+  let settings;
+  let settingsUnparseable = false;
+  if (existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('not an object');
+    } catch {
+      settingsUnparseable = true;
+    }
+  }
+  if (settingsUnparseable) {
+    items.push({ item: '.claude/settings.local.json', status: 'differs', detail: 'not a parseable object — left untouched; set enableAllProjectMcpServers:false + enabledMcpjsonServers:[] by hand' });
+  } else {
+    settings = settings ?? {};
+    const ok =
+      settings.enableAllProjectMcpServers === false &&
+      Array.isArray(settings.enabledMcpjsonServers) &&
+      settings.enabledMcpjsonServers.length === 0;
+    if (ok) {
+      items.push({ item: '.claude/settings.local.json', status: 'matches', detail: 'sterling loads via the plugin only (enableAllProjectMcpServers:false, enabledMcpjsonServers:[])' });
+    } else {
+      settings.enableAllProjectMcpServers = false;
+      settings.enabledMcpjsonServers = [];
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+      items.push({ item: '.claude/settings.local.json', status: 'created', detail: 'enforced enableAllProjectMcpServers:false + enabledMcpjsonServers:[] (other keys preserved) — kills the empty-store double server' });
+    }
+  }
+}
+
 // hook registrations: the project-level §6 set ships in the PLUGIN's
 // hooks.json and activates with the plugin — init does not duplicate it.
 items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the plugin (hooks/hooks.json) — not duplicated into the project' });

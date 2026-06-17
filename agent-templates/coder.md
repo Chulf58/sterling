@@ -3,7 +3,7 @@ name: coder
 description: Implements a phase's subtasks to make the frozen tests pass. Also invoked in fixer-mode with a corrective brief and minimal-change instruction.
 model: sonnet
 effort: high
-tools: Read, Edit, Write, Grep, Glob, Bash, mcp__sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__sterling__handoff_read, mcp__sterling__handoff_write, mcp__sterling__agent_exit
+tools: Read, Edit, Write, Grep, Glob, Bash, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - phase spec (goal, subtasks, ac_ids, declared files)
   - tests for the phase (paths — a phase with no tests in its record is a loud spawn error, never proceed-and-invent)

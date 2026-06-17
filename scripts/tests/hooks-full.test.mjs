@@ -605,7 +605,7 @@ test('H11: extraction lands as derived_unconfirmed citing the note; failure degr
     );
     const input = hookInput(dir, {
       hook_event_name: 'PostToolUse',
-      tool_name: 'mcp__sterling__knowledge_create',
+      tool_name: 'mcp__plugin_sterling_sterling__knowledge_create',
       tool_input: { type: 'note', fields: { raw_text: note.raw_text } },
       tool_response: { content: [{ type: 'text', text: JSON.stringify({ record: { id: note.id } }) }] },
     });
@@ -630,6 +630,22 @@ test('H11: extraction lands as derived_unconfirmed citing the note; failure degr
   } finally {
     cleanup();
   }
+});
+
+test('H11 matcher (hooks.json) fires on the PLUGIN knowledge_create tool name (MCP packaging 097851ed)', () => {
+  // Regression guard: the H11 test above invokes the hook directly, bypassing the
+  // hooks.json matcher — so a matcher that does not cover the plugin tool name would
+  // let note-structuring silently never fire in production. Assert the matcher here.
+  const hooksJson = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8'));
+  const h11Entry = (hooksJson.hooks.PostToolUse ?? []).find((e) =>
+    (e.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes('h11-note-structure.mjs'))
+  );
+  assert.ok(h11Entry, 'hooks.json registers H11 on PostToolUse');
+  const matcher = new RegExp(h11Entry.matcher);
+  assert.ok(
+    matcher.test('mcp__plugin_sterling_sterling__knowledge_create'),
+    'H11 matcher must cover the plugin tool name — else note-structuring silently never fires'
+  );
 });
 
 // --------------------------- reviewer selection + H12 units ---------------------------

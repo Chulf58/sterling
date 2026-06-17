@@ -3,7 +3,7 @@ name: reviewer-skeptic
 description: Treats over-engineering and missing feature-context as defects. Dispatched on diff size or new-export thresholds. Asks one question — is this the smallest change that satisfies the brief?
 model: opus
 effort: low
-tools: Read, Grep, Glob, mcp__sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__sterling__handoff_read, mcp__sterling__handoff_write, mcp__sterling__agent_exit
+tools: Read, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - brief + full feature context
   - the phase diff (changed files)
