@@ -56,13 +56,20 @@ function articleFields(briefId, { traceAC = true, fulfills = [] } = {}) {
   };
 }
 
-function makeLoopProject({ backupPath = true, reconcileGapArticle = false } = {}) {
+function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mountDomain = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-loop-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   const config = {
     toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }],
     prep_cap: 10,
   };
+  // opt-in domain mount (read-side wiring test): stack_tags ARE the mount
+  // manifest (§3.3); domain_paths pins the shared store inside the temp dir so
+  // the test never touches the real ~/.sterling/domains.
+  if (mountDomain) {
+    config.stack_tags = ['node'];
+    config.domain_paths = { node: join(dir, 'domains', 'node', 'sterling.db').replace(/\\/g, '/') };
+  }
   if (backupPath) config.backup_path = join(dir, 'backups').replace(/\\/g, '/');
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
 
@@ -125,11 +132,30 @@ function makeLoopProject({ backupPath = true, reconcileGapArticle = false } = {}
   });
   mkdirSync(join(dir, 'src'), { recursive: true });
   mkdirSync(join(dir, 'tests'), { recursive: true });
+
+  // a DOMAIN-scoped record in the mounted shared store, file-keyed to the phase's
+  // blast file — prep must fan across the mount to stage it (read-side wiring).
+  let domainDecision;
+  if (mountDomain) {
+    mkdirSync(dirname(config.domain_paths.node), { recursive: true });
+    const domainStore = new SterlingStore(config.domain_paths.node);
+    domainDecision = domainStore.create({
+      ...envelope('decision', BEFORE_RUN),
+      scope: 'domain:node',
+      title: 'shared node calc lesson',
+      statement: 'cross-project calc guidance.',
+      alternatives_rejected: [],
+      rationale: 'domain knowledge.',
+      file_keys: ['src/calc.mjs'],
+    });
+    domainStore.close();
+  }
+
   const cleanup = () => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { dir, store, tools, decision, gapArticle, todo, brief, run, cleanup };
+  return { dir, store, tools, decision, gapArticle, todo, brief, run, domainDecision, cleanup };
 }
 
 function writeHandoffs(tools, { decisions = ['kept add minimal'] } = {}) {
@@ -283,6 +309,23 @@ test('dispose-run refuses: fulfilled todo still on the board', () => {
   const fix = makeReadyToDispose({ leaveTodo: true });
   try {
     assertRefused(fix, /fulfilled_todo_still_on_board/);
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('prep [S] fans the knowledge_pack across mounted domain stores (read-side domain wiring)', () => {
+  const fix = makeLoopProject({ mountDomain: true });
+  const { dir, decision, domainDecision } = fix;
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.equal(prep.code, 0, prep.stderr);
+    const pack = JSON.parse(readFileSync(join(dir, '.sterling', 'runs', 'r-loop', 'knowledge_pack-p1.json'), 'utf8'));
+    assert.ok(pack.returned_record_ids.includes(decision.id), 'project-scoped record staged (project-first)');
+    assert.ok(
+      pack.returned_record_ids.includes(domainDecision.id),
+      'DOMAIN-scoped record staged — prep fans the pack across mounted domain stores'
+    );
   } finally {
     fix.cleanup();
   }

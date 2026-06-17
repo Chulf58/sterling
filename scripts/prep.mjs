@@ -6,10 +6,13 @@
 //   node scripts/prep.mjs --run <id> --phase <id> [--role <consumer>] [--target <dir>]
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { arg, fail, openProject, requireRun, requireBrief, runDir } from './lib/project.mjs';
+import { arg, fail, openMounted, requireRun, requireBrief, runDir } from './lib/project.mjs';
 
 const target = arg('--target') ?? process.cwd();
-const { cwd, store, config } = openProject(target);
+// §3.4/P6: stage from the FULL retrieval surface — project knowledge AND the
+// mounted shared-domain stores (stack_tags manifest), project-first. Run/brief/
+// handoff reads and the pack write route project-local through MountedStores.
+const { cwd, store, config } = openMounted(target);
 const run = requireRun(store, arg('--run'));
 const brief = requireBrief(store, run);
 const phaseId = arg('--phase') ?? run.phases.find((p) => p.status === 'in_progress')?.id;

@@ -148,6 +148,9 @@ export class MountedStores {
   appendRunEscalation(...args: Parameters<SterlingStore['appendRunEscalation']>): ReturnType<SterlingStore['appendRunEscalation']> {
     return this.project.appendRunEscalation(...args);
   }
+  appendRunReconcileNeeded(...args: Parameters<SterlingStore['appendRunReconcileNeeded']>): ReturnType<SterlingStore['appendRunReconcileNeeded']> {
+    return this.project.appendRunReconcileNeeded(...args);
+  }
   recordCheckSkipped(...args: Parameters<SterlingStore['recordCheckSkipped']>): ReturnType<SterlingStore['recordCheckSkipped']> {
     return this.project.recordCheckSkipped(...args);
   }

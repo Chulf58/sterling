@@ -87,6 +87,15 @@ test('run protocol stays PROJECT-LOCAL through MountedStores: a run is created/a
     assert.equal(tools.runState().id, 'r-0001');
     assert.ok(store.project.getRun(), 'the run record lives in the project store');
 
+    // run-state forwards land in the project store, never a domain — H7 marks
+    // reconcile_needed on the run through exactly this MountedStores forward.
+    store.appendRunReconcileNeeded('r-0001', 'art-0001');
+    assert.deepEqual(
+      store.project.getRun('r-0001')!.reconcile_needed,
+      ['art-0001'],
+      'appendRunReconcileNeeded routes to the project store'
+    );
+
     // a single-phase complete drives the brain to the completion sequence — all
     // run/transient writes (handoff, pending-exit, CAS) route to the project store
     tools.handoffWrite({
