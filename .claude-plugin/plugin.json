@@ -2,5 +2,6 @@
   "name": "sterling",
   "displayName": "Sterling",
   "version": "0.1.0",
-  "description": "Knowledge-compounding development pipeline suite: staged TDD pipelines, a durable knowledge store, and per-agent enforcement installed into the project by /sterling:init."
+  "description": "Knowledge-compounding development pipeline suite: staged TDD pipelines, a durable knowledge store, and per-agent enforcement installed into the project by /sterling:init.",
+  "mcpServers": "./.claude-plugin/sterling-mcp.json"
 }

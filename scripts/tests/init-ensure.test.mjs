@@ -42,10 +42,10 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     // a consuming project gets NO per-project .mcp.json — the plugin declares sterling
     assert.ok(!existsSync(join(dir, '.mcp.json')), 'no per-project .mcp.json — the plugin declares the sterling server');
     assert.match(r.stdout, /^\.mcp\.json\s+matches\s+not written — the plugin declares sterling/m);
-    // settings.local.json is a SOURCE-REPO-ONLY artifact (decision 097851ed): init enforces the
-    // plugin-only MCP enable flags there, but NEVER in a consuming project — disabling its project
-    // MCP servers would break the user's foreign servers.
-    assert.ok(!existsSync(join(dir, '.claude', 'settings.local.json')), 'consuming project: settings.local.json left to the user (source-repo-only enforcement)');
+    // init never manages .claude/settings.local.json (decision 097851ed, refined): the MCP
+    // dual-role is gone (the plugin declares its server via plugin.json mcpServers, not a root
+    // .mcp.json), so no enable-flag enforcement is needed — a consuming project keeps its own.
+    assert.ok(!existsSync(join(dir, '.claude', 'settings.local.json')), 'consuming project: settings.local.json left to the user (init never writes it)');
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m);
     assert.match(r.stdout, /^\.sterling\/config\.json\s+created\b/m);
     assert.match(r.stdout, /RESTART REQUIRED/, 'agents installed → restart instruction');
