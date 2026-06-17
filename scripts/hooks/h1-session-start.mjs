@@ -87,19 +87,24 @@ try {
 }
 
 // shared project registry (decision 8f9e6db2): touch THIS project's last_seen
-// for the session and surface sibling projects (machine-global awareness). Only
-// if the registry exists (init creates it) — H1 never creates it, and
-// touchLastSeen no-ops for a project that was never registered.
-let registryLine = '';
+// for the session, and make the CONDUCTOR aware of sibling projects via
+// additionalContext (NOT systemMessage — this is conductor awareness, not a
+// human banner). Only if the registry exists (init creates it) — H1 never
+// creates it, and touchLastSeen no-ops for a project that was never registered.
+// Missing (stale) siblings are excluded — irrelevant to the conductor; the
+// /sterling:projects peek surfaces them for human pruning.
+let registryContext = '';
 if (existsSync(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, '/');
   const registry = new ProjectRegistry(registryPath());
   try {
     registry.touchLastSeen(cwdPosix, new Date().toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix);
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync(p.repo_path));
     if (siblings.length) {
-      const missing = siblings.filter((p) => !existsSync(p.repo_path)).length;
-      registryLine = ` · ${siblings.length} sibling project${siblings.length === 1 ? '' : 's'}: ${siblings.map((p) => p.name).join(', ')}${missing ? ` (${missing} missing)` : ''}`;
+      registryContext =
+        '\n\nSibling Sterling projects on this machine (shared project registry) — other initialized projects; ' +
+        'knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n' +
+        siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(', ') || '(no domains)'}`).join('\n');
     }
   } finally {
     registry.close();
@@ -114,8 +119,8 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${registryLine}`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS },
+  systemMessage: `${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

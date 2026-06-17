@@ -151,7 +151,7 @@ test('H1: banner art to stderr (env-only suppression), counts to the human, conv
   }
 });
 
-test('H1: shared project registry — touches this project last_seen + surfaces siblings, missing flagged (decision 8f9e6db2)', () => {
+test('H1: shared project registry — touches this project last_seen + makes the CONDUCTOR aware of live siblings via additionalContext, not systemMessage (decision 8f9e6db2)', () => {
   const { dir, cleanup } = makeProject();
   const regPath = join(dir, 'registry.db');
   const cwdPosix = dir.replace(/\\/g, '/');
@@ -168,8 +168,15 @@ test('H1: shared project registry — touches this project last_seen + surfaces 
     const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1', STERLING_REGISTRY_DB: regPath });
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
-    // siblings are name-ordered, current excluded, missing counted
-    assert.match(out.systemMessage, /· 2 sibling projects: sib-live, sib-missing \(1 missing\)/);
+    // CONDUCTOR awareness goes to additionalContext (Claude's context), with the
+    // live sibling + its domains; the human systemMessage stays counts-only.
+    const ctx = out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /Sibling Sterling projects/);
+    assert.match(ctx, /- sib-live: node/, 'live sibling listed with its domains');
+    assert.match(ctx, /Anti-speculation/, 'conventions still present');
+    assert.doesNotMatch(ctx, /sib-missing/, 'a missing (stale) sibling is excluded from conductor awareness');
+    assert.doesNotMatch(out.systemMessage, /sibling/, 'the human systemMessage is not used for sibling awareness');
+    assert.match(out.systemMessage, /pending$/, 'systemMessage is counts-only');
 
     // last_seen touched for THIS project only
     const after = new ProjectRegistry(regPath);
