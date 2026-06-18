@@ -26,6 +26,7 @@ import { spawnSync } from 'node:child_process';
 import { parseConfig } from '@sterling/schemas';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
+import { pickRunnable } from './lib/detect-exe.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
 
@@ -189,7 +190,10 @@ if (!existsSync(claudeMdPath)) {
 // split launcher from the template, machine-detected paths, gitignored (§11)
 const where = (exe) => {
   const r = spawnSync('where', [exe], { encoding: 'utf8', timeout: 15_000 });
-  return r.status === 0 ? r.stdout.split(/\r?\n/)[0].trim() : undefined;
+  // Prefer a real Windows executable (.exe > .cmd/.bat); NEVER the extensionless
+  // Unix shim or .ps1 a node dist ships beside it — a .bat/wt launcher cannot
+  // spawn those (BAD_EXE_FORMAT 0x800700c1). None runnable → fall back below.
+  return r.status === 0 ? pickRunnable(r.stdout) : undefined;
 };
 const claudePath = process.env.CLAUDE_CODE_EXECPATH ?? where('claude') ?? join(process.env.USERPROFILE ?? '~', '.local', 'bin', 'claude.exe');
 const wtPath = where('wt') ?? join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WindowsApps', 'wt.exe');
