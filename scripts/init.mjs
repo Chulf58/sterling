@@ -101,6 +101,15 @@ const eff = recorded
       splitRatio: undefined, // default from schema below
     };
 
+// Every Sterling-initialized project mounts a universal `sterling` domain so
+// general Sterling-tooling knowledge (gotchas, conventions, anti_patterns about
+// using Sterling itself) is shared across ALL projects (decision 47be4388). It
+// is force-added to the §3.3 mount manifest regardless of what the project
+// declares — deduped, ordered AFTER the project's own tags so project/tech
+// knowledge still ranks ahead of the shared tooling domain.
+const UNIVERSAL_DOMAIN = 'sterling';
+eff.stackTags = [...eff.stackTags.filter((t) => t !== UNIVERSAL_DOMAIN), UNIVERSAL_DOMAIN];
+
 const expectedConfig = parseConfig({
   ...JSON.parse(readFileSync(join(pluginRoot, 'templates', 'default-config.json'), 'utf8')),
   toolchains: baked,
@@ -119,7 +128,9 @@ if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_rati
 const notes = [];
 if (recorded) {
   const flagDiffs = [];
-  if (stackTagsFlag.length && canonical(stackTagsFlag) !== canonical(recorded.stack_tags)) flagDiffs.push('--stack-tags');
+  // ignore the init-managed universal domain on both sides — omitting `sterling` is not a contradiction
+  const stripUniversal = (tags) => tags.filter((t) => t !== UNIVERSAL_DOMAIN);
+  if (stackTagsFlag.length && canonical(stripUniversal(stackTagsFlag)) !== canonical(stripUniversal(recorded.stack_tags))) flagDiffs.push('--stack-tags');
   if (declaredToolchains.length && canonical(declaredToolchains) !== canonical(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push('--toolchain');
   if (backupPathFlag && fwd(resolve(target, backupPathFlag)) !== recorded.backup_path) flagDiffs.push('--backup-path');
   if (backupOptOutFlag && !recorded.backup_opt_out) flagDiffs.push('--backup-opt-out');
@@ -150,6 +161,13 @@ if (!recorded) {
       if (!present) warns.push(`warn: ${tc.adapter}: no ${cap} capability — ${cap} checks will skip loudly (§9.1)`);
     }
   }
+} else if (!recorded.stack_tags.includes(UNIVERSAL_DOMAIN)) {
+  // managed mutation (decision 47be4388): every project mounts the universal
+  // `sterling` domain. Surgically ADD it to the recorded config, preserving every
+  // hand-tuned field — NOT a regenerate-from-defaults (that would clobber tunings).
+  const updated = parseConfig({ ...recorded, stack_tags: eff.stackTags });
+  writeFileSync(configPath, JSON.stringify(updated, null, 2));
+  items.push({ item: '.sterling/config.json', status: 'refreshed', detail: `added the universal '${UNIVERSAL_DOMAIN}' domain to stack tags (now [${updated.stack_tags.join(', ')}])` });
 } else if (canonical(recorded) === canonical(expectedConfig)) {
   items.push({ item: '.sterling/config.json', status: 'matches', detail: 'defaults + recorded declarations' });
 } else {

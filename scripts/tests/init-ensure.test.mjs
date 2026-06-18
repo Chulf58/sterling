@@ -52,6 +52,7 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
     assert.equal(config.project_name, 'ensure-target', 'project name recorded for flagless re-runs');
     assert.ok(config.backup_path.endsWith('/backups'), 'backup path recorded absolute, forward slashes');
+    assert.deepEqual(config.stack_tags, ['node', 'sterling'], 'fresh init gets the universal sterling domain on top of declared tags (decision 47be4388)');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -100,6 +101,28 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
     assert.equal(readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8'), agentBefore, 'modified agent untouched');
     // tuned declarations still drive the run: caps came from the recorded config
     assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).caps.inner_loop_n, 7);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('universal sterling domain: a config lacking it gains it on re-init (refreshed), hand-tunings preserved (decision 47be4388)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const configPath = join(dir, '.sterling', 'config.json');
+    // simulate a project init'd by older code: strip the universal tag, AND tune a field
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
+    cfg.stack_tags = cfg.stack_tags.filter((t) => t !== 'sterling'); // → ['node']
+    cfg.caps.inner_loop_n = 7; // a hand-tuning that MUST survive the managed add
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+
+    const rerun = init(dir); // flagless re-init
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\s+added the universal 'sterling' domain/m);
+    const after = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.deepEqual(after.stack_tags, ['node', 'sterling'], 'sterling appended; declared tag kept');
+    assert.equal(after.caps.inner_loop_n, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -199,7 +222,7 @@ test('init notes the project in the shared registry (decision 8f9e6db2)', () => 
       const me = reg.list().find((p) => p.repo_path === dir.replace(/\\/g, '/'));
       assert.ok(me, 'this project is registered, keyed by its absolute POSIX repo path');
       assert.equal(me.name, 'ensure-target');
-      assert.deepEqual(me.stack_tags, ['node']);
+      assert.deepEqual(me.stack_tags, ['node', 'sterling'], 'declared tag + the auto-injected universal sterling domain (decision 47be4388)');
       assert.deepEqual(me.toolchains, ['node']);
       assert.equal(me.first_init_at, me.last_init_at, 'fresh init: first_init_at == last_init_at');
       assert.equal(me.last_seen_at, null, 'no session-start touch yet');
