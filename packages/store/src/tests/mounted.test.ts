@@ -51,3 +51,32 @@ test('MountedStores: a write to an unmounted domain is rejected loudly', () => {
     cleanup();
   }
 });
+
+test('MountedStores: a domain record written through one project mount is read back through ANOTHER mount of the same shared file (cross-project sharing, §3.3)', () => {
+  // The real cross-project shape: two projects with SEPARATE project stores, both
+  // mounting the SAME shared domain file. domain-routing.test.ts exercises a single
+  // MountedStores; this pins the two-readers/one-file path that actually carries
+  // knowledge between sibling projects (the path the stale-server incident hid).
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-xmount-'));
+  const sharedDomainDb = join(dir, 'shared-domains', 'genesys', 'sterling.db');
+  // both servers open the shared file up front (as concurrent project servers do)
+  const projA = new MountedStores(join(dir, 'projA', '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: sharedDomainDb }]);
+  const projB = new MountedStores(join(dir, 'projB', '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: sharedDomainDb }]);
+  try {
+    // A writes a domain record (the promote/create path) into the shared store...
+    const shared = projA.create(ref('domain:genesys'));
+    const aLocal = projA.create({ ...env('decision'), title: 'A-only', statement: 's', alternatives_rejected: [], rationale: 'r' });
+
+    // ...and B — a SEPARATE project store over the SAME shared file — reads it back
+    assert.equal(projB.get(shared.id)?.scope, 'domain:genesys', 'B reads the domain record A wrote to the shared file');
+    assert.ok(projB.query({ cap: 10 }).some((x) => x.id === shared.id), 'B query surfaces the shared domain record');
+
+    // boundary: A's PROJECT-scoped record never crosses — project stores are separate
+    assert.equal(projB.get(aLocal.id), undefined, "B cannot see A's project-scoped record (project stores are not shared)");
+    assert.equal(projB.project.get(shared.id), undefined, 'the shared record is NOT in B’s project store — it lives in the shared domain file');
+  } finally {
+    projA.close();
+    projB.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
