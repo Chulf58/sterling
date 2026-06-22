@@ -2,13 +2,16 @@
 // derived; owns NOTHING testable. Mouse + key events are translated to the
 // state layer's UiEvent vocabulary and fed to reduce().
 import type { DashboardState, UiEvent } from './state.js';
+import { bannerPaletteIndex } from './banner.js';
 
 // minimal structural types for the slice of terminal-kit we use
 export interface AttrLike {
   bold?: boolean;
   dim?: boolean;
   inverse?: boolean;
-  color?: string;
+  /** a named palette color ('yellow') or a 0–255 256-palette index (banner
+   *  gradient). A regular ScreenBuffer is 256-palette only — no truecolor. */
+  color?: string | number;
 }
 export interface ScreenLike {
   width: number;
@@ -25,19 +28,32 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
   // are 0-based and clip at the buffer edge (no wrap), so a long line can
   // never push the pane into a real scroll.
   screen.fill({ attr: {} });
-  // row 0: the project folder name (bold) — a glance tells you which project's
-  // session this pane observes, so you never type into the wrong one. Tabs sit
-  // on row 1, the spacer/search bar on row 2 (kept in sync with bodyTop).
-  screen.put({ x: 0, y: 0, attr: { bold: true } }, state.projectName);
+  // rows 0..top-1: the banner wordmark, painted with a per-column 256-palette
+  // silver→steel gradient (spaces stay default). Suppressed/too-narrow → no
+  // rows, and everything below shifts up to the prior layout.
+  const top = state.banner.length;
+  const bw = Math.max(1, ...state.banner.map((row) => row.length));
+  state.banner.forEach((row, by) => {
+    for (let cx = 0; cx < row.length; cx++) {
+      if (row[cx] === ' ') continue;
+      const t = bw <= 1 ? 0 : cx / (bw - 1);
+      screen.put({ x: cx, y: by, attr: { color: bannerPaletteIndex(t) } }, row[cx]);
+    }
+  });
+  // row `top`: the project folder name (bold) — a glance tells you which
+  // project's session this pane observes, so you never type into the wrong one.
+  // Tabs sit on the next row, the spacer/search bar below that (in sync with
+  // bodyTop = top + 3).
+  screen.put({ x: 0, y: top, attr: { bold: true } }, state.projectName);
   let x = 0;
   for (const tab of state.tabs) {
     const label = ` ${tab.label} `; // x extents must stay in sync with the click mapping in state.ts
-    screen.put({ x, y: 1, attr: tab.active ? { inverse: true } : {} }, label);
+    screen.put({ x, y: top + 1, attr: tab.active ? { inverse: true } : {} }, label);
     x += label.length;
   }
   if (state.searchLine) {
-    // the spacer line (row 2) doubles as the search bar while a query/input is live
-    screen.put({ x: 0, y: 2, attr: { dim: true } }, state.searchLine);
+    // the spacer line (row top+2) doubles as the search bar while a query/input is live
+    screen.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
   }
   const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
   let y = state.bodyTop; // 0-based rows: header 0, tab bar 1, blank/search 2, body from bodyTop

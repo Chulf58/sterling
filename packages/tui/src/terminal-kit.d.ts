@@ -14,7 +14,9 @@ declare module 'terminal-kit' {
     bold?: boolean;
     dim?: boolean;
     inverse?: boolean;
-    color?: string;
+    /** a named palette color or a 0–255 256-palette index (object2attr accepts
+     *  both); a regular ScreenBuffer has no truecolor path */
+    color?: string | number;
   }
   class ScreenBuffer {
     constructor(options: { dst: Terminal; width?: number; height?: number });

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { todoCards, noteCards, articleCards, runView } from '../viewmodel.js';
 import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, ARTICLES_TAB, QUEUE_TAB, TABS, type UiState } from '../state.js';
+import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
 import { keyToEvent, mouseToEvent } from '../render.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -331,6 +332,61 @@ test('header row: project folder name rides on the state; tabs shift to the seco
     const headerClick = reduce(store, initialUi, { kind: 'click', x: 1, y: 1 });
     assert.deepEqual(headerClick.effects, []);
     assert.deepEqual(headerClick.ui, initialUi);
+  } finally {
+    cleanup();
+  }
+});
+
+test('banner (§11): width-aware rows, suppression, palette gradient endpoints', () => {
+  // full 3-row art at/above its width; the 1-line wordmark below it; clipped narrower
+  assert.deepEqual(bannerLines(ART_WIDTH, true), [...BANNER_ROWS]);
+  assert.deepEqual(bannerLines(Infinity, true), [...BANNER_ROWS], 'unbounded width gets the art');
+  assert.deepEqual(bannerLines(ART_WIDTH - 1, true), [WORDMARK], 'too narrow for art → 1-line wordmark');
+  assert.deepEqual(bannerLines(5, true), [WORDMARK.slice(0, 5)], 'narrower than the wordmark → clipped');
+  assert.deepEqual(bannerLines(0, true), [], 'no room → nothing');
+  assert.deepEqual(bannerLines(ART_WIDTH, false), [], 'suppressed → nothing regardless of width');
+
+  // gradient: light at the left, steel at the right; clamps; always a palette index
+  assert.notEqual(bannerPaletteIndex(0), bannerPaletteIndex(1), 'endpoints differ');
+  for (const t of [-1, 0, 0.5, 1, 2]) {
+    const idx = bannerPaletteIndex(t);
+    assert.ok(Number.isInteger(idx) && idx >= 0 && idx <= 255, `valid 256-palette index at t=${t}`);
+  }
+  assert.equal(bannerPaletteIndex(-1), bannerPaletteIndex(0), 'clamps below 0');
+  assert.equal(bannerPaletteIndex(2), bannerPaletteIndex(1), 'clamps above 1');
+});
+
+test('banner layout: bodyTop follows banner height; suppressed = today\'s layout; geometry ripples', () => {
+  const { store, cleanup } = fixture();
+  try {
+    // suppressed (default): banner empty, bodyTop=3 — the prior fixed layout
+    let s = buildDashboardState(store, initialUi);
+    assert.deepEqual(s.banner, []);
+    assert.equal(s.bodyTop, 3, 'no banner → today\'s layout');
+
+    // shown wide: 3 art rows push bodyTop to 6; body screenRows stay body-relative
+    s = buildDashboardState(store, initialUi, Infinity, Infinity, 'Sterling', true);
+    assert.deepEqual(s.banner, [...BANNER_ROWS]);
+    assert.equal(s.bodyTop, 6, 'banner.length (3) + header + tabs + spacer');
+    assert.equal(s.projectName, 'Sterling');
+    assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 1], 'rows stay body-relative');
+
+    // clicks map through the banner-shifted bodyTop: first body row is line 7
+    assert.equal(screenLineToRow(s, 7), 0, 'first body row under a 3-row banner');
+    assert.equal(screenLineToRow(s, 6), -1, 'the spacer line is not a body row');
+
+    // tab-bar click now lands on terminal line bodyTop-1 (=5), not 2
+    const tabClick = reduce(store, initialUi, { kind: 'click', x: 9, y: 5 }, { showBanner: true });
+    assert.equal(tabClick.ui.tab, 1, 'Notes selected on the banner-shifted tab row');
+    // a click on a banner row selects nothing
+    const bannerClick = reduce(store, initialUi, { kind: 'click', x: 1, y: 2 }, { showBanner: true });
+    assert.deepEqual(bannerClick.effects, []);
+    assert.deepEqual(bannerClick.ui, initialUi);
+
+    // visibleBodyLines shrinks by the banner height (sync with the draw() clamp)
+    assert.equal(visibleBodyLines(12, 0), 7, 'no banner: height - 5');
+    assert.equal(visibleBodyLines(12, 3), 4, '3-row banner steals 3 lines');
+    assert.equal(visibleBodyLines(6, 3), 0, 'degenerate pane under a banner: nothing clickable');
   } finally {
     cleanup();
   }

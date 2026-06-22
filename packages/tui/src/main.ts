@@ -6,6 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
 import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, type UiState } from './state.js';
+import { bannerLines } from './banner.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
 const smoke = process.env.STERLING_TUI_SMOKE === '1';
@@ -43,19 +44,32 @@ const store = new SterlingStore(storePath);
 // the project's folder name (…/<project>/.sterling/sterling.db) — shown bold on
 // the TUI's top row so a glance tells you which project's session this pane is.
 const projectName = basename(dirname(dirname(storePath)));
+// the §11 banner is on by default; STERLING_NO_BANNER=1 suppresses it (the same
+// env var the H1 SessionStart hook honors). It is a pure flag from here down —
+// the state layer stays env-free.
+const showBanner = process.env.STERLING_NO_BANNER !== '1';
 let ui: UiState = initialUi;
 
 // One ScreenBuffer for the process lifetime: draw({delta:true}) diffs each
 // frame against the previous one and writes only the changed cells.
 let screen = new termkit.default.ScreenBuffer({ dst: term });
 
+// One viewport snapshot for both the draw and the click hit-test (the sync
+// constraint: reduce must see the same width/visibleBodyLines the renderer drew
+// with). bodyTop follows the banner height, so it is threaded as showBanner.
+function viewport() {
+  const bannerHeight = bannerLines(term.width, showBanner).length;
+  return { width: term.width, maxBodyLines: visibleBodyLines(term.height, bannerHeight), showBanner };
+}
+
 function redraw(): void {
-  draw(screen, buildDashboardState(store, ui, term.width, visibleBodyLines(term.height), projectName));
+  const vp = viewport();
+  draw(screen, buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner));
 }
 
 function handle(event: ReturnType<typeof keyToEvent>): void {
   if (!event) return;
-  const result = reduce(store, ui, event, { width: term.width, maxBodyLines: visibleBodyLines(term.height) });
+  const result = reduce(store, ui, event, viewport());
   ui = result.ui;
   if (runEffects(store, result.effects)) {
     term.grabInput(false);

@@ -4,6 +4,7 @@
 // effects. The renderer stays thin enough to be boring.
 import type { SterlingStore } from '@sterling/store';
 import { articleCards, articleSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
+import { bannerLines } from './banner.js';
 
 export const TABS = ['Todos', 'Notes', 'Articles', 'Queue', 'Live-run'] as const;
 /** the run tab is always last — every other tab is a card list */
@@ -48,6 +49,9 @@ export interface Viewport {
   width?: number;
   /** body lines visible — the click hit-test bound (visibleBodyLines) */
   maxBodyLines?: number;
+  /** whether the banner is shown (STERLING_NO_BANNER=1 → false) — drives the
+   *  banner height, hence bodyTop and the tab-bar click row */
+  showBanner?: boolean;
 }
 
 export interface DashboardState {
@@ -69,11 +73,17 @@ export interface DashboardState {
     /** present when pending was clipped at the divider: '… N more pending' */
     overflow?: string;
   };
-  /** the project's folder name, drawn bold on the top header row so a glance
-   *  tells you which project's session this pane is observing (typing into the
-   *  wrong session is the mistake this row prevents) */
+  /** banner rows (§11), width-aware: the full 3-row wordmark, a 1-line
+   *  fallback, or [] when suppressed/too narrow — the renderer paints them with
+   *  the gradient; their count drives bodyTop */
+  banner: string[];
+  /** the project's folder name, drawn bold on its own header row (below the
+   *  banner) so a glance tells you which project's session this pane is
+   *  observing (typing into the wrong session is the mistake this row prevents);
+   *  the banner sits ABOVE this row, so suppressing it leaves the header intact */
   projectName: string;
-  /** body starts at this screen line (after the header + tab bar + blank line) */
+  /** body starts at this screen line: banner.length + header + tab bar + blank
+   *  spacer. No banner → 3 (header/tabs/spacer), the prior fixed layout. */
   bodyTop: number;
 }
 
@@ -146,16 +156,19 @@ export function nodesFor(store: SterlingStore, ui: UiState): Node[] {
   return nodes;
 }
 
-const BODY_TOP = 3; // line 0: project-name header; line 1: tab bar; line 2: blank (doubles as the search bar)
+// fixed chrome below the banner: the project-name header, the tab bar, and the
+// blank line (which doubles as the search bar). bodyTop = banner.length + this.
+const CHROME_BELOW_BANNER = 3;
 
 /**
  * Body lines visible at a given terminal height: the body spans screen lines
  * bodyTop+1 .. height-2 (bottom two reserved for the blank spacer + footer).
- * Must stay in sync with the draw() clamp in render.ts — rows the renderer
- * clips must not be clickable.
+ * bannerHeight shrinks the body region by the banner's rows. Must stay in sync
+ * with the draw() clamp in render.ts — rows the renderer clips must not be
+ * clickable.
  */
-export function visibleBodyLines(height: number): number {
-  return Math.max(0, height - BODY_TOP - 2);
+export function visibleBodyLines(height: number, bannerHeight = 0): number {
+  return Math.max(0, height - bannerHeight - CHROME_BELOW_BANNER - 2);
 }
 
 /** Word-wrap to width columns, preserving explicit newlines; words longer
@@ -189,7 +202,9 @@ export function wrapText(text: string, width: number): string[] {
 const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = ''): DashboardState {
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false): DashboardState {
+  const banner = bannerLines(width, showBanner);
+  const bodyTop = banner.length + CHROME_BELOW_BANNER;
   const nodes = nodesFor(store, ui);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
@@ -278,8 +293,9 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       (ui.tab === ARTICLES_TAB ? ' · / search · esc clears' : ''),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.searchEditing ? '▌' : ''}` : undefined,
     queueCompleted,
+    banner,
     projectName,
-    bodyTop: BODY_TOP,
+    bodyTop,
   };
 }
 
@@ -382,8 +398,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     case 'wheel':
       return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
     case 'click': {
-      // tab bar click (line 2 — the project-name header is line 1): pick the tab by x extent
-      if (event.y === 2) {
+      // build the same geometry the renderer drew with — wrapped heights, the
+      // queue tab's pending truncation, AND the banner-driven bodyTop must all
+      // match the screen, so the tab-bar row and body hit-test track the banner
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false);
+      // tab bar sits one line above the body block (its own header row is just
+      // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
+      if (event.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < TABS.length; i++) {
           const width = TABS[i].length + 2; // ' label '
@@ -392,9 +413,6 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         }
         return { ui, effects };
       }
-      // hit-test against the same viewport the renderer drew with — wrapped
-      // heights and the queue tab's pending truncation must match the screen
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines);
       const row = screenLineToRow(state, event.y, maxBodyLines);
       if (row !== -1) return { ui: activate(row), effects };
       return { ui, effects };
