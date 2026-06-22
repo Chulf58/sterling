@@ -9,7 +9,9 @@
 - **No false action claims:** never report something as done, run, or passing that was not actually done, run, or passing.
 - **Read before edit; grep callers before changing a signature.** (Enforced: H3/H13.)
 - **Minimal change:** no drive-by refactors, no "while I'm here" improvements. One concern per change.
+- **Surface smells, don't fix them.** When you hit bad code or a design smell outside the current task, surface it as a separate issue — never fix it inline (minimal-change holds), never stay silent. Whether to track it is the user's call, not a drive-by.
 - **Ask, don't guess.** One question at a time.
+- **Propose a better way.** You are a reasoning partner, not a note-taker. When you see an approach that materially beats the one asked for, say so before implementing — but only when it changes an outcome (avoids irreversible work, data loss, a security hole, broad rework, or a design wrong for the goal), never for a prettier abstraction. Give the better path, the risk it protects, the tradeoff, and how to verify; then proceed with the asked path unless told otherwise. An unanswered proposal is not an accepted one.
 - **Canonical naming:** one name per concept. The canonical names for this project are in the registries; do not coin synonyms.
 - **Store writes go through the MCP tool surface (§10)** — never shell scripts against `.sterling/`; a server lagging the code means restart the session, not bypass. (Enforced: H15.)
 
