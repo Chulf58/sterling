@@ -7,4 +7,5 @@ hooks/*.mjs
 sterling.bat
 .claude/agents/
 tui.bat
+sterling-launch.sh
 .claude-plugin/sterling-mcp.json

@@ -20,13 +20,11 @@
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
 //   (declaration flags are required only when no recorded config exists)
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
 import { parseConfig } from '@sterling/schemas';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
-import { pickRunnable } from './lib/detect-exe.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
 
@@ -205,52 +203,72 @@ if (!existsSync(claudeMdPath)) {
   items.push({ item: 'CLAUDE.md', status: 'differs', detail: 'left untouched — merge the conductor contract by hand (template: templates/target-claude-md.md)' });
 }
 
-// split launcher from the template, machine-detected paths, gitignored (§11)
-const where = (exe) => {
-  const r = spawnSync('where', [exe], { encoding: 'utf8', timeout: 15_000 });
-  // Prefer a real Windows executable (.exe > .cmd/.bat); NEVER the extensionless
-  // Unix shim or .ps1 a node dist ships beside it — a .bat/wt launcher cannot
-  // spawn those (BAD_EXE_FORMAT 0x800700c1). None runnable → fall back below.
-  return r.status === 0 ? pickRunnable(r.stdout) : undefined;
+// WSL/tmux launchers (§11, decision bb5e25cd): all projects are WSL (company
+// policy), so init generates the new-way launchers — a thin Windows .bat that
+// double-clicks into `wt -> wsl --cd <project> -> bash -lic ./sterling-launch.sh`,
+// plus the per-project tmux launcher sterling-launch.sh (claude left, TUI right).
+// node/claude are detected at RUNTIME inside the .sh; the .bat needs no exe paths.
+const toWindowsPath = (p) => {
+  // /mnt/c/Users/cuj/X -> C:\Users\cuj\X (WSL drvfs); else just backslash-ize
+  const m = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
+  return m ? `${m[1].toUpperCase()}:${(m[2] ?? '/').replace(/\//g, '\\')}` : p.replace(/\//g, '\\');
 };
-const claudePath = process.env.CLAUDE_CODE_EXECPATH ?? where('claude') ?? join(process.env.USERPROFILE ?? '~', '.local', 'bin', 'claude.exe');
-const wtPath = where('wt') ?? join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WindowsApps', 'wt.exe');
-// cmd.exe misparses LF-only batch files (commands split mid-word) — .bat
-// artifacts are always rendered CRLF, independent of the checkout's eol config
+// tmux session names forbid '.'/':' and choke on spaces — bake a sanitized,
+// per-project name so multiple projects run at once but never the same one twice
+const sanitizeSession = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+const winProjectDir = toWindowsPath(fwd(target));
+const sessionName = `sterling-${sanitizeSession(basename(target))}`;
+const splitPercent = Math.round(eff.splitRatio * 100);
+const tuiBundle = fwd(join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'));
+// the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
+// are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
+const lf = (s) => s.replace(/\r\n/g, '\n');
 const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
+
+// (1) the tmux launcher — the actual split lives here; both .bat files call it
+const expectedTmuxLauncher = lf(
+  readFileSync(join(pluginRoot, 'templates', 'launcher-tmux.sh'), 'utf8')
+    .replaceAll('{{SESSION}}', sessionName)
+    .replaceAll('{{PLUGIN_DIR}}', fwd(pluginRoot))
+    .replaceAll('{{TUI_BUNDLE}}', tuiBundle)
+    .replaceAll('{{SPLIT_RATIO}}', String(splitPercent))
+);
+const tmuxLauncherPath = join(target, 'sterling-launch.sh');
+if (!existsSync(tmuxLauncherPath)) {
+  writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
+  items.push({ item: 'sterling-launch.sh', status: 'created', detail: `tmux session ${sessionName}, ${splitPercent}% TUI pane` });
+} else if (normalize(readFileSync(tmuxLauncherPath, 'utf8')) === normalize(expectedTmuxLauncher)) {
+  items.push({ item: 'sterling-launch.sh', status: 'matches', detail: 'generated content unchanged' });
+} else {
+  items.push({ item: 'sterling-launch.sh', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+}
+
+// (2) the double-click Windows entry: Windows Terminal -> WSL -> the tmux launcher
 const expectedLauncher = crlf(
   readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
-    .replaceAll('{{WT}}', `"${wtPath}"`)
-    .replaceAll('{{CLAUDE}}', `"${claudePath}" --plugin-dir "${fwd(pluginRoot)}"`)
-    .replaceAll('{{NODE}}', `"${process.execPath}"`)
-    .replaceAll('{{TUI_BUNDLE}}', join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'))
-    .replaceAll('{{SPLIT_RATIO}}', String(eff.splitRatio))
+    .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
 );
 const launcherPath = join(target, 'sterling.bat');
 if (!existsSync(launcherPath)) {
   writeFileSync(launcherPath, expectedLauncher);
-  items.push({ item: 'sterling.bat', status: 'created', detail: `claude: ${claudePath}` });
+  items.push({ item: 'sterling.bat', status: 'created', detail: `double-click -> wsl ${winProjectDir}` });
 } else if (normalize(readFileSync(launcherPath, 'utf8')) === normalize(expectedLauncher)) {
-  items.push({ item: 'sterling.bat', status: 'matches', detail: 'machine-detected paths unchanged' });
+  items.push({ item: 'sterling.bat', status: 'matches', detail: 'unchanged' });
 } else {
   items.push({ item: 'sterling.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
 }
 
-// TUI pane launcher (§11, the §13 dashboard command): reopens the dashboard
-// split in the CURRENT terminal window after the human closes it with q
+// (3) the §13 dashboard re-opener: re-adds the TUI pane to the running session
 const expectedTuiLauncher = crlf(
   readFileSync(join(pluginRoot, 'templates', 'tui-win.bat'), 'utf8')
-    .replaceAll('{{WT}}', `"${wtPath}"`)
-    .replaceAll('{{NODE}}', `"${process.execPath}"`)
-    .replaceAll('{{TUI_BUNDLE}}', join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'))
-    .replaceAll('{{SPLIT_RATIO}}', String(eff.splitRatio))
+    .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
 );
 const tuiLauncherPath = join(target, 'tui.bat');
 if (!existsSync(tuiLauncherPath)) {
   writeFileSync(tuiLauncherPath, expectedTuiLauncher);
-  items.push({ item: 'tui.bat', status: 'created', detail: `wt: ${wtPath}` });
+  items.push({ item: 'tui.bat', status: 'created', detail: 'double-click -> ./sterling-launch.sh tui' });
 } else if (normalize(readFileSync(tuiLauncherPath, 'utf8')) === normalize(expectedTuiLauncher)) {
-  items.push({ item: 'tui.bat', status: 'matches', detail: 'machine-detected paths unchanged' });
+  items.push({ item: 'tui.bat', status: 'matches', detail: 'unchanged' });
 } else {
   items.push({ item: 'tui.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
 }
@@ -364,7 +382,7 @@ items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the
 // gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');
 const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
-const entries = ['.sterling/', 'sterling.bat', 'tui.bat', '.claude/agents/'];
+const entries = ['.sterling/', 'sterling.bat', 'tui.bat', 'sterling-launch.sh', '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
 if (fwd(target) === fwd(pluginRoot)) entries.push('.claude-plugin/sterling-mcp.json');
@@ -384,7 +402,7 @@ if (missing.length) {
 
 // dead-term check over the GENERATED content (§12) — rendered expected content
 // every run (catches template rot), never the human's own files
-for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling.bat', expectedLauncher], ['tui.bat', expectedTuiLauncher]]) {
+for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling-launch.sh', expectedTmuxLauncher], ['sterling.bat', expectedLauncher], ['tui.bat', expectedTuiLauncher]]) {
   const hits = findDeadTerms(content);
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(', ')}`, 1);
 }

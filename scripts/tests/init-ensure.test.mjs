@@ -28,7 +28,7 @@ const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', 
 // .mcp.json is NOT a per-project artifact: the plugin declares the sterling
 // server (bound per-project via ${CLAUDE_PROJECT_DIR}), so a consuming project
 // never gets one. Its absence is asserted directly below.
-const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'tui.bat', '.gitignore'];
+const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'tui.bat', 'sterling-launch.sh', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
 test('ensure outcome 1 — create absent: fresh init creates every manifest item and records declarations', () => {
@@ -65,7 +65,7 @@ test('ensure outcome 2 — skip matching: a flagless re-run reports matches and 
     const before = snapshot(dir);
     const rerun = init(dir); // NO flags: declarations read back from the recorded config
     assert.equal(rerun.code, 0, rerun.stderr);
-    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', '\\.mcp\\.json', '\\.gitignore']) {
+    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', '\\.mcp\\.json', '\\.gitignore']) {
       assert.match(rerun.stdout, new RegExp(`^${item}\\s+matches\\b`, 'm'), `${item} reported as matching`);
     }
     assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+matches\b/m);
