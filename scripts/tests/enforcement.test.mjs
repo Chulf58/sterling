@@ -8,7 +8,7 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { runTests, staticWiring } from '../adapters/node.mjs';
 import { runTests as pesterRun } from '../adapters/pester.mjs';
-import { resolveToolchains, checkAdapterRegistry } from '../adapters/resolve.mjs';
+import { resolveToolchains, checkAdapterRegistry, loadAdapter } from '../adapters/resolve.mjs';
 import { findBackslashCommandsInHooksJson } from '../lib/agent-distribution.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -219,6 +219,16 @@ test('adapter registry: resolveToolchains bakes declarations; unknown adapter fa
   assert.deepEqual(bakedPester[0].capabilities, { mutation: false, static_wiring: false });
   await assert.rejects(() => resolveToolchains([{ adapter: 'apex', path_globs: [] }]), /no registered adapter/);
   assert.deepEqual(await checkAdapterRegistry(), []);
+});
+
+test('none adapter: no-check toolchain — empty declarations, loud-skip runTests, registry-valid (§9.1)', async () => {
+  const baked = await resolveToolchains([{ adapter: 'none', path_globs: ['**/*'] }]);
+  assert.deepEqual(baked[0].capabilities, { mutation: false, static_wiring: false });
+  assert.deepEqual(baked[0].test_globs, [], 'no test files — nothing for H5 to freeze');
+  assert.deepEqual(baked[0].run_commands, {}, 'no test command — nothing for H14 to allowlist');
+  const none = await loadAdapter('none');
+  assert.equal(none.runTests({ cwd: '.', scope: [] }).overall, 'skipped', 'never a silent pass (P5)');
+  assert.deepEqual(await checkAdapterRegistry(), [], 'none is a valid registry member alongside node + pester');
 });
 
 test('node adapter static_wiring: test-only exports flagged; wired and renamed exports pass (§9.1/H12)', () => {
