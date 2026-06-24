@@ -20,6 +20,7 @@
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
 //   (declaration flags are required only when no recorded config exists)
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig } from '@sterling/schemas';
@@ -220,6 +221,23 @@ const winProjectDir = toWindowsPath(fwd(target));
 const sessionName = `sterling-${sanitizeSession(basename(target))}`;
 const splitPercent = Math.round(eff.splitRatio * 100);
 const tuiBundle = fwd(join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'));
+// Native-Windows launcher (decision: revive the native split as a SECOND launcher).
+// init runs under WSL node, so the Windows node path is found via `where.exe node`
+// (interop) — requires the user to have the node dir on the Windows PATH.
+// STERLING_WIN_NODE overrides detection (test isolation; mirrors STERLING_REGISTRY_DB).
+const whereWin = (exe) => {
+  const r = spawnSync('where.exe', [exe], { encoding: 'utf8', timeout: 15_000 });
+  if (r.status !== 0) return undefined;
+  const lines = r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return lines.find((l) => l.toLowerCase().endsWith('.exe')) ?? lines[0];
+};
+// STERLING_WIN_NODE, when DEFINED (even empty), bypasses where.exe detection:
+// a path forces that path; '' forces the skip path. Undefined → auto-detect.
+const winNode = process.env.STERLING_WIN_NODE !== undefined ? process.env.STERLING_WIN_NODE : whereWin('node');
+const winTuiBundle = toWindowsPath(tuiBundle);
+const winPluginDir = toWindowsPath(fwd(pluginRoot));
+const winMcpServerEntry = toWindowsPath(fwd(mcpServerEntry)); // Windows path to dist/main.js for native-claude MCP
+const splitRatio01 = String(eff.splitRatio); // wt split-pane --size wants a 0–1 float
 // the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
 // are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
 const lf = (s) => s.replace(/\r\n/g, '\n');
@@ -271,6 +289,33 @@ if (!existsSync(tuiLauncherPath)) {
   items.push({ item: 'tui.bat', status: 'matches', detail: 'unchanged' });
 } else {
   items.push({ item: 'tui.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+}
+
+// (4) the FULLY-NATIVE Windows entry (decision: a SECOND launcher beside the WSL
+// sterling.bat — partially reverses bb5e25cd): a wt split running native claude.exe
+// (left) + the TUI on native Windows node (right), no WSL. Needs the Windows node
+// path; when init can't resolve it (node not on the Windows PATH), the launcher is
+// SKIPPED loudly (P5) without blocking the rest of init.
+let expectedNativeLauncher;
+const nativeLauncherPath = join(target, 'sterling-windows.bat');
+if (winNode) {
+  expectedNativeLauncher = crlf(
+    readFileSync(join(pluginRoot, 'templates', 'launcher-win-native.bat'), 'utf8')
+      .replaceAll('{{WIN_PLUGIN_DIR}}', winPluginDir)
+      .replaceAll('{{WIN_NODE}}', winNode)
+      .replaceAll('{{WIN_TUI_BUNDLE}}', winTuiBundle)
+      .replaceAll('{{SPLIT_RATIO}}', splitRatio01)
+  );
+  if (!existsSync(nativeLauncherPath)) {
+    writeFileSync(nativeLauncherPath, expectedNativeLauncher);
+    items.push({ item: 'sterling-windows.bat', status: 'created', detail: `native claude.exe + Windows-node TUI, ${splitRatio01} split` });
+  } else if (normalize(readFileSync(nativeLauncherPath, 'utf8')) === normalize(expectedNativeLauncher)) {
+    items.push({ item: 'sterling-windows.bat', status: 'matches', detail: 'unchanged' });
+  } else {
+    items.push({ item: 'sterling-windows.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+  }
+} else {
+  items.push({ item: 'sterling-windows.bat', status: 'skipped', detail: 'Windows node not found via `where.exe node` — add the node dir to the Windows PATH and re-run init to generate the native launcher' });
 }
 
 // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
@@ -343,6 +388,31 @@ if (fwd(target) === fwd(pluginRoot)) {
       items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
     }
   }
+  // ALSO the native-claude Windows MCP config (option B, decision a756e5d9 family):
+  // sterling-windows.bat launches claude.exe with `--mcp-config <this> --strict-mcp-config`
+  // so NATIVE claude runs the MCP server on the WINDOWS node — the plugin's WSL-node
+  // sterling-mcp.json cannot run under native claude (-32000). Generated only here (the
+  // plugin repo), referenced by every project's launcher; store stays ${CLAUDE_PROJECT_DIR}.
+  // Skipped loudly (P5) when no Windows node resolved.
+  const winMcpConfigPath = join(target, '.claude-plugin', 'sterling-mcp-win.json');
+  if (winNode) {
+    const desiredWin = { mcpServers: { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'] } } };
+    if (!existsSync(winMcpConfigPath)) {
+      mkdirSync(dirname(winMcpConfigPath), { recursive: true });
+      writeFileSync(winMcpConfigPath, JSON.stringify(desiredWin, null, 2));
+      items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'created', detail: 'native-claude MCP config (Windows node) — referenced by sterling-windows.bat --mcp-config' });
+    } else {
+      let existingWin;
+      try { existingWin = JSON.parse(readFileSync(winMcpConfigPath, 'utf8')); } catch { existingWin = undefined; }
+      if (existingWin && canonical(existingWin) === canonical(desiredWin)) {
+        items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'matches', detail: 'native-claude MCP config as generated' });
+      } else {
+        items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
+      }
+    }
+  } else {
+    items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'skipped', detail: 'Windows node not found via `where.exe node` — native-claude MCP config not generated (add the node dir to Windows PATH and re-init)' });
+  }
   // a root .mcp.json must NOT exist in the plugin repo: it would be auto-discovered by
   // the plugin (double-declaring sterling) AND read as project scope (the empty-store
   // dual-role). Remove our own generated one; report anything else loudly.
@@ -382,10 +452,10 @@ items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the
 // gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');
 const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
-const entries = ['.sterling/', 'sterling.bat', 'tui.bat', 'sterling-launch.sh', '.claude/agents/'];
+const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
-if (fwd(target) === fwd(pluginRoot)) entries.push('.claude-plugin/sterling-mcp.json');
+if (fwd(target) === fwd(pluginRoot)) entries.push('.claude-plugin/sterling-mcp.json', '.claude-plugin/sterling-mcp-win.json');
 if (eff.backupPath) {
   const root = fwd(target);
   if (eff.backupPath === root || eff.backupPath.startsWith(root + '/')) {
@@ -402,7 +472,7 @@ if (missing.length) {
 
 // dead-term check over the GENERATED content (§12) — rendered expected content
 // every run (catches template rot), never the human's own files
-for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling-launch.sh', expectedTmuxLauncher], ['sterling.bat', expectedLauncher], ['tui.bat', expectedTuiLauncher]]) {
+for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling-launch.sh', expectedTmuxLauncher], ['sterling.bat', expectedLauncher], ['tui.bat', expectedTuiLauncher], ...(expectedNativeLauncher ? [['sterling-windows.bat', expectedNativeLauncher]] : [])]) {
   const hits = findDeadTerms(content);
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(', ')}`, 1);
 }

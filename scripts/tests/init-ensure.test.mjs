@@ -12,14 +12,19 @@ import { ProjectRegistry } from '@sterling/store';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-function init(dir, args = []) {
+// fake Windows node path so the native launcher (sterling-windows.bat) generates
+// deterministically without a real Windows node on PATH (mirrors STERLING_REGISTRY_DB).
+const WIN_NODE_FAKE = 'C:\\TestNode\\node-v24-win-x64\\node.exe';
+
+function init(dir, args = [], extraEnv = {}) {
   const r = spawnSync(process.execPath, [join(root, 'scripts', 'init.mjs'), '--target', dir, ...args], {
     encoding: 'utf8',
     cwd: dir,
     timeout: 180_000,
     // isolate the machine-global project registry to this test's temp dir, so
-    // init's registration never pollutes the real ~/.sterling/registry.db
-    env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db') },
+    // init's registration never pollutes the real ~/.sterling/registry.db; pin
+    // STERLING_WIN_NODE so the native launcher generates without a real Windows node.
+    env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db'), STERLING_WIN_NODE: WIN_NODE_FAKE, ...extraEnv },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -28,7 +33,7 @@ const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', 
 // .mcp.json is NOT a per-project artifact: the plugin declares the sterling
 // server (bound per-project via ${CLAUDE_PROJECT_DIR}), so a consuming project
 // never gets one. Its absence is asserted directly below.
-const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'tui.bat', 'sterling-launch.sh', '.gitignore'];
+const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
 test('ensure outcome 1 — create absent: fresh init creates every manifest item and records declarations', () => {
@@ -53,6 +58,34 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     assert.equal(config.project_name, 'ensure-target', 'project name recorded for flagless re-runs');
     assert.ok(config.backup_path.endsWith('/backups'), 'backup path recorded absolute, forward slashes');
     assert.deepEqual(config.stack_tags, ['node', 'sterling'], 'fresh init gets the universal sterling domain on top of declared tags (decision 47be4388)');
+    // native-Windows launcher (sterling-windows.bat): fully native, generated from the fake win-node
+    assert.match(r.stdout, /^sterling-windows\.bat\s+created\b/m);
+    const nat = readFileSync(join(dir, 'sterling-windows.bat'), 'utf8');
+    assert.match(nat, /%LOCALAPPDATA%\\Microsoft\\WindowsApps\\wt\.exe/, 'calls wt by absolute WindowsApps path');
+    assert.match(nat, /%USERPROFILE%\\\.local\\bin\\claude\.exe" --plugin-dir/, 'left pane runs native claude with --plugin-dir');
+    assert.ok(nat.includes(`"${WIN_NODE_FAKE}"`), 'right pane runs the detected Windows node (quoted)');
+    assert.match(nat, /--size 0\.35\b/, 'wt split uses a 0–1 float, not a percent');
+    assert.ok(!/35%/.test(nat), 'native launcher does NOT use the tmux percent unit');
+    assert.ok(!/wsl\.exe/.test(nat), 'native launcher is fully native — no wsl.exe');
+    // option B: native claude loads the Windows MCP config and strictly ignores the plugin's WSL server
+    assert.match(nat, /--mcp-config "[^"]*\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config/, 'native claude loads the Windows MCP config strictly');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('native launcher SKIPPED loudly when no Windows node is resolvable (P5), without blocking init', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    // STERLING_WIN_NODE='' forces the no-node path regardless of the machine's Windows PATH
+    const r = init(dir, FRESH_FLAGS, { STERLING_WIN_NODE: '' });
+    assert.equal(r.code, 0, r.stderr); // the rest of init still completes
+    assert.match(r.stdout, /^sterling-windows\.bat\s+skipped\b/m, 'reports skipped, not silently absent');
+    assert.match(r.stdout, /add the node dir to the Windows PATH/, 'skip reason is actionable');
+    assert.ok(!existsSync(join(dir, 'sterling-windows.bat')), 'no native launcher written when node is unresolved');
+    // the WSL launcher and the rest are unaffected
+    assert.ok(existsSync(join(dir, 'sterling.bat')), 'WSL launcher still generated');
+    assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init completed the rest of the manifest');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -65,7 +98,7 @@ test('ensure outcome 2 — skip matching: a flagless re-run reports matches and 
     const before = snapshot(dir);
     const rerun = init(dir); // NO flags: declarations read back from the recorded config
     assert.equal(rerun.code, 0, rerun.stderr);
-    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', '\\.mcp\\.json', '\\.gitignore']) {
+    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'sterling-windows\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', '\\.mcp\\.json', '\\.gitignore']) {
       assert.match(rerun.stdout, new RegExp(`^${item}\\s+matches\\b`, 'm'), `${item} reported as matching`);
     }
     assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+matches\b/m);
