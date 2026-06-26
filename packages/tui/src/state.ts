@@ -2,8 +2,8 @@
 // never the renderer). buildDashboardState derives everything the renderer
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
-import type { SterlingStore } from '@sterling/store';
-import { KNOWLEDGE_CATEGORIES, toCard, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
+import type { SterlingStore, MountedStores } from '@sterling/store';
+import { KNOWLEDGE_CATEGORIES, toCard, knowledgeBySource, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
 export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run'] as const;
@@ -137,14 +137,16 @@ function rankTermsOf(query: string): string[] {
 
 /**
  * The Knowledge tab is a 3-level collapse/expand tree: knowledge CATEGORY →
- * SOURCE store → record. P3 sources the tree from the PROJECT store alone, so
- * the single source under every non-empty category is named 'project' (the
- * MountedStores cross-store fan-out is P4). Empty categories/sources are hidden;
- * everything is collapsed by default. A non-empty search query REPLACES the tree
- * with a flat, AND-filtered card list (every term prefix-starred). The other
- * card tabs stay flat lists.
+ * SOURCE store → record. When a `knowledge` MountedStores is provided the tree
+ * fans across stores (project FIRST, then each mounted domain in manifest order;
+ * empty sources dropped) via knowledgeBySource/knowledgeSearch. When `knowledge`
+ * is ABSENT the tree is sourced from the PROJECT `store` alone, so the single
+ * source under every non-empty category is named 'project' (the P3 path).
+ * Empty categories/sources are hidden; everything is collapsed by default. A
+ * non-empty search query REPLACES the tree with a flat, AND-filtered card list
+ * (every term prefix-starred). The other card tabs stay flat lists.
  */
-export function nodesFor(store: SterlingStore, ui: UiState): Node[] {
+export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedStores): Node[] {
   if (ui.tab === RUN_TAB) return [];
   if (ui.tab === QUEUE_TAB) return queueCards(store).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
   if (ui.tab !== KNOWLEDGE_TAB) return cardsFor(store, ui.tab).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
@@ -154,6 +156,9 @@ export function nodesFor(store: SterlingStore, ui: UiState): Node[] {
   if (query) {
     const terms = rankTermsOf(query);
     if (terms.length) {
+      if (knowledge) {
+        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: true }));
+      }
       const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
       return store
         .query({ types, rank_terms: terms, match_all: true, cap })
@@ -161,16 +166,33 @@ export function nodesFor(store: SterlingStore, ui: UiState): Node[] {
     }
   }
 
-  // collapsed default tree: only non-empty categories, in registry order; the
-  // single 'project' source appears when its category is expanded; cards appear
-  // when their source is expanded.
+  // collapsed default tree: only non-empty categories, in registry order; each
+  // non-empty source appears when its category is expanded; cards appear when
+  // their source is expanded. With `knowledge`, sources fan across stores
+  // (knowledgeBySource: project first, domains next, empty dropped); without it,
+  // the single 'project' source from the project store.
   const nodes: Node[] = [];
   for (const cat of KNOWLEDGE_CATEGORIES) {
+    if (knowledge) {
+      const groups = knowledgeBySource(knowledge, cat.type);
+      const count = groups.reduce((n, g) => n + g.cards.length, 0);
+      if (count === 0) continue; // empty categories hidden
+      nodes.push({ kind: 'category', type: cat.type, label: cat.label, count });
+      if (!ui.expanded.includes(catId(cat.type))) continue;
+      for (const g of groups) {
+        nodes.push({ kind: 'source', catType: cat.type, source: g.source, count: g.cards.length });
+        if (!ui.expanded.includes(srcId(cat.type, g.source))) continue;
+        for (const card of g.cards) {
+          nodes.push({ kind: 'card', card, depth: 2, knowledge: true });
+        }
+      }
+      continue;
+    }
     const records = store.query({ types: [cat.type], cap });
     if (records.length === 0) continue; // empty categories hidden
     nodes.push({ kind: 'category', type: cat.type, label: cat.label, count: records.length });
     if (!ui.expanded.includes(catId(cat.type))) continue;
-    // P3: the project store is the only source
+    // project-only path: the project store is the only source
     nodes.push({ kind: 'source', catType: cat.type, source: 'project', count: records.length });
     if (!ui.expanded.includes(srcId(cat.type, 'project'))) continue;
     for (const r of records) {
@@ -226,10 +248,10 @@ export function wrapText(text: string, width: number): string[] {
 const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false): DashboardState {
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores): DashboardState {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const nodes = nodesFor(store, ui);
+  const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
   let screenRow = 0;
@@ -352,9 +374,9 @@ export function screenLineToRow(state: DashboardState, line1: number, maxBodyLin
   return -1;
 }
 
-export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}): { ui: UiState; effects: Effect[] } {
+export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}, knowledge?: MountedStores): { ui: UiState; effects: Effect[] } {
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store, ui);
+  const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects: Effect[] = [];
 
@@ -444,7 +466,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // build the same geometry the renderer drew with — wrapped heights, the
       // queue tab's pending truncation, AND the banner-driven bodyTop must all
       // match the screen, so the tab-bar row and body hit-test track the banner
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false);
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge);
       // tab bar sits one line above the body block (its own header row is just
       // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
       if (event.y === state.bodyTop - 1) {

@@ -1,16 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore, MountedStores } from '@sterling/store';
 import { todoCards, noteCards, runView } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, QUEUE_TAB, TABS, type UiState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, QUEUE_TAB, TABS, type UiState, type DashboardState } from '../state.js';
 import * as stateMod from '../state.js';
 import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
-import { keyToEvent, mouseToEvent } from '../render.js';
+import { keyToEvent, mouseToEvent, draw } from '../render.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 
@@ -1172,6 +1172,297 @@ test('P3 AC9: arrows navigate the Knowledge tree (cursor moves, no quit); other 
     assert.deepEqual(qQuit.effects, [{ type: 'quit' }], "'q' keeps quitting on the Todos tab (hotkeys preserved off the Knowledge tab)");
     const digit = reduce(store, onTodos, { kind: 'char', ch: '2' });
     assert.equal(digit.ui.tab, 1, "a digit still switches tabs off the Knowledge tab (TABS index '2' → tab 1)");
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// FROZEN P4 oracle (run r-dd88) — SPEC-ONLY, written before the multi-store
+// Knowledge tab + the render bold exist. These pin phase-P4's contract:
+//   AC1  the Knowledge tree's SOURCE level shows the PROJECT source FIRST, then
+//        each mounted domain as its own source node; a category's count sums
+//        records across ALL its sources; empty sources hidden.
+//   AC2  a record physically in a mounted DOMAIN store appears under that
+//        domain's source node; project records under 'project', project-first.
+//   AC4  an EXPANDED knowledge record's TITLE line is drawn BOLD (the renderer
+//        merges { bold: row.expanded } into the title attr); category/source
+//        toggle rows render through the title kind; a NON-expanded title is not
+//        bold. (The readable title/blank/body/meta STRUCTURE already passes from
+//        P3 — P4 adds only the bold.)
+//   AC7  a skip-missing MountedStores over a domain whose db does NOT exist
+//        skips the missing store (never creates it), shows the REMAINING
+//        sources, and never crashes.
+//
+// THE NEW INTERFACE (ADDITIVE): P4 adds a trailing OPTIONAL `knowledge?:
+// MountedStores` to buildDashboardState / reduce / nodesFor — the signature is
+// NOT otherwise changed. When `knowledge` is provided, the Knowledge tab (tab
+// 2) sources its tree from it (knowledgeBySource → source level, project first
+// then each mounted domain in manifest order, empty sources dropped;
+// knowledgeSearch → the flat AND results). The first param `store` stays the
+// project SterlingStore for the project-local tabs. When `knowledge` is ABSENT
+// (every EXISTING test above), the Knowledge tab is PROJECT-ONLY — unchanged.
+//
+// CLEAN-RED discipline (mirrors the P2/P3 `vm`/`S` casts):
+//   • the committed signatures do NOT have `knowledge`, so calling with it
+//     would be a tsc ARITY error → a build CRASH = refused. The new-arity entry
+//     points are reached through a NARROW cast on the state module namespace
+//     (`S4`) so the file COMPILES under tsc strict before the param is added.
+//   • the FIRST positional arg is ALWAYS a REAL SterlingStore (stores.project),
+//     and `knowledge` is the MountedStores — so today's committed code (which
+//     ignores the extra arg) runs the PROJECT-ONLY path WITHOUT throwing
+//     (`.query` exists on the project store). At RED the domain record lives
+//     ONLY in the domain store, so the project-only path shows no domain source
+//     → the AC1/AC2 multi-source assertions fail RED on AssertionError. CLEAN.
+//   • the render test passes a FAKE ScreenLike that never throws; at the
+//     committed render the title attr has no `bold`, so the bold assertion
+//     fails RED on AssertionError, never a throw.
+// ===========================================================================
+
+/** The new-arity state surface (brief: trailing optional `knowledge?:
+ *  MountedStores`). Cast lets tsc accept the extra arg before the coder adds
+ *  it; the FIRST arg is always a real SterlingStore so today's code never
+ *  throws on the ignored extra arg. */
+interface KnowledgeArityStateMod {
+  buildDashboardState: (
+    store: SterlingStore,
+    ui: UiState,
+    width?: number,
+    maxBodyLines?: number,
+    projectName?: string,
+    showBanner?: boolean,
+    knowledge?: MountedStores
+  ) => DashboardState;
+  reduce: (
+    store: SterlingStore,
+    ui: UiState,
+    event: unknown,
+    viewport?: unknown,
+    knowledge?: MountedStores
+  ) => { ui: UiState; effects: { type: string }[] };
+}
+const S4 = stateMod as unknown as KnowledgeArityStateMod;
+
+/** A fake ScreenLike (brief render contract) that records every put() so the
+ *  render test can inspect the title-line attr. It NEVER throws — fill/draw are
+ *  no-ops — so a RED render test fails on an assertion, not a crash. */
+interface PutCapture {
+  x?: number;
+  y?: number;
+  attr?: { bold?: boolean; inverse?: boolean; dim?: boolean } | Record<string, unknown>;
+  str: string;
+  [k: string]: unknown;
+}
+function fakeScreen(width = 80, height = 40) {
+  const captured: PutCapture[] = [];
+  const screen = {
+    width,
+    height,
+    fill() {},
+    put(opts: Record<string, unknown>, str: string) {
+      captured.push({ ...(opts as object), str } as PutCapture);
+    },
+    draw() {},
+  };
+  return { screen, captured };
+}
+
+/** A skip-missing MountedStores over a domain whose db does NOT exist on disk.
+ *  The 3rd ctor arg `{ skipMissing: true }` is the already-shipped P1 surface. */
+function skipMissingFixture(domainName = 'absent') {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-p4-skip-'));
+  const missingDb = join(dir, 'domains', domainName, 'sterling.db');
+  const projectDb = join(dir, '.sterling', 'sterling.db');
+  const stores = new MountedStores(projectDb, [{ name: domainName, dbPath: missingDb }], { skipMissing: true });
+  return { dir, stores, missingDb, cleanup: () => { stores.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+test('P4 AC1/AC2: with the `knowledge` arg, the SOURCE level shows project FIRST then each domain; a domain record sits under its domain source; the category count sums across sources', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    assert.strictEqual(typeof vm.knowledgeBySource, 'function', 'the P2 knowledgeBySource viewmodel must exist (P4 sources the tree from it)');
+
+    // one decision PHYSICALLY in the project store, one PHYSICALLY in the 'node' domain store
+    const projDec = stores.create(decisionRec({ title: 'project decision' })) as { id: string };
+    const domDec = stores.create(decisionRec({ ...kenv('decision', 'domain:node'), title: 'domain decision' })) as { id: string };
+
+    // expand the decision CATEGORY (the knowledge arg makes the tab multi-store)
+    let s = S4.buildDashboardState(
+      stores.project,
+      st({ tab: KNOW_TAB, expanded: ['cat:decision'] }),
+      undefined,
+      undefined,
+      '',
+      false,
+      stores
+    );
+
+    // AC1: project source FIRST, then the 'node' domain — exactly two source rows
+    const srcIds = s.rows.filter((r) => r.id.startsWith('src:decision:')).map((r) => r.id);
+    assert.deepEqual(
+      srcIds,
+      ['src:decision:project', 'src:decision:node'],
+      'two sources: project FIRST, then the mounted node domain (manifest order)'
+    );
+
+    // AC1: the CATEGORY count sums BOTH sources (one project + one domain = 2)
+    const catRow = s.rows.find((r) => r.id === 'cat:decision')!;
+    assert.ok(catRow, 'the decision category row is present');
+    assert.match(catRow.lines[0].text, /2/, "the category count sums records across ALL its sources (1 project + 1 domain)");
+
+    // AC2: expand BOTH sources → the project decision sits under project, the
+    // domain decision under node; neither leaks into the other source
+    s = S4.buildDashboardState(
+      stores.project,
+      st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project', 'src:decision:node'] }),
+      undefined,
+      undefined,
+      '',
+      false,
+      stores
+    );
+    const rowIds = s.rows.map((r) => r.id);
+    const projSrcIdx = rowIds.indexOf('src:decision:project');
+    const nodeSrcIdx = rowIds.indexOf('src:decision:node');
+    const projCardIdx = rowIds.indexOf(projDec.id);
+    const domCardIdx = rowIds.indexOf(domDec.id);
+    assert.ok(projSrcIdx >= 0 && nodeSrcIdx >= 0, 'both source rows are present when expanded');
+    assert.ok(projCardIdx >= 0, 'the project decision card is rendered');
+    assert.ok(domCardIdx >= 0, 'the DOMAIN decision card is rendered (it lives only in the node store — proves the knowledge arg fanned out)');
+    // the project card sits between the project source and the node source;
+    // the domain card sits after the node source — each under its own source node
+    assert.ok(projCardIdx > projSrcIdx && projCardIdx < nodeSrcIdx, 'the project decision is nested under the project source');
+    assert.ok(domCardIdx > nodeSrcIdx, 'the domain decision is nested under the node source, not under project');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P4 AC2: a record physically in the node DOMAIN store NEVER appears under the project source (cross-store isolation through the knowledge arg)', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    const projDec = stores.create(decisionRec({ title: 'project decision' })) as { id: string };
+    const domDec = stores.create(decisionRec({ ...kenv('decision', 'domain:node'), title: 'domain decision' })) as { id: string };
+
+    const s = S4.buildDashboardState(
+      stores.project,
+      st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project'] }),
+      undefined,
+      undefined,
+      '',
+      false,
+      stores
+    );
+    // the project source is expanded, the node source is collapsed: the project
+    // card is visible, the domain card is NOT (it belongs under the node source)
+    assert.ok(s.rows.some((r) => r.id === projDec.id), 'the project decision is visible under the expanded project source');
+    assert.ok(!s.rows.some((r) => r.id === domDec.id), 'the domain decision never appears under the project source (it lives under the node source)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P4 AC7: skip-missing — the absent domain db is NEVER created; buildDashboardState with that MountedStores renders only the existing source(s) and never throws', () => {
+  const { stores, missingDb, cleanup } = skipMissingFixture('absent');
+  try {
+    // the missing store was SKIPPED, never created (the P1 skip-missing contract)
+    assert.equal(existsSync(missingDb), false, 'the absent domain db file was NOT created (skip-missing never touches it)');
+
+    // a decision lives in the project store; the absent domain has no store at all
+    const projDec = stores.create(decisionRec({ title: 'project only' })) as { id: string };
+
+    // expanding the category must NOT throw, and must show ONLY the project source
+    // (the absent domain was skipped, so there is no 'absent' source node)
+    let s: DashboardState | undefined;
+    assert.doesNotThrow(() => {
+      s = S4.buildDashboardState(
+        stores.project,
+        st({ tab: KNOW_TAB, expanded: ['cat:decision'] }),
+        undefined,
+        undefined,
+        '',
+        false,
+        stores
+      );
+    }, 'a skip-missing MountedStores with a skipped domain renders without throwing (AC7)');
+
+    const srcIds = s!.rows.filter((r) => r.id.startsWith('src:decision:')).map((r) => r.id);
+    // the knowledge-fan assertion that depends on the param: ONLY the existing
+    // source surfaces, and there is NO node for the skipped domain. (At RED the
+    // project-only path also shows just 'project' — but this is the AC7 oracle's
+    // non-crash + remaining-source guarantee; the multi-source RED is pinned by
+    // the AC1/AC2 test above, which the project-only path fails on assertion.)
+    assert.deepEqual(srcIds, ['src:decision:project'], 'only the existing (project) source remains; the skipped domain has no source node');
+    assert.ok(!srcIds.some((id) => id.endsWith(':absent')), 'no source node for the skipped, never-created domain');
+    assert.ok(s!.rows.some((r) => r.id === 'cat:decision'), 'the decision category still renders from the surviving project source');
+    void projDec;
+  } finally {
+    cleanup();
+  }
+});
+
+test('P4 AC4 (render): an EXPANDED knowledge record draws its TITLE line BOLD; a non-expanded title is NOT bold', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const dec = store.create(decisionRec()) as { id: string };
+
+    // EXPANDED: build a DashboardState with the decision category + source + the
+    // card itself expanded, then draw to a fake screen and inspect the title put.
+    const expandedUi = st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project', dec.id] });
+    const sExp = buildDashboardState(store, expandedUi, 60);
+    const expCard = sExp.rows.find((r) => r.id === dec.id)!;
+    assert.ok(expCard, 'the expanded decision card row is present');
+    assert.equal(expCard.lines[0].kind, 'title', "the card's first line is the title (P3 structure)");
+    const titleText = expCard.lines[0].text;
+    assert.ok(titleText.length > 0, 'the title line has text to match the captured put against');
+
+    const { screen, captured } = fakeScreen(60, 40);
+    draw(screen, sExp);
+    // find the captured put for the EXPANDED card's title line (by its text)
+    const titlePut = captured.find((p) => typeof p.str === 'string' && p.str.includes(titleText.trim()) && p.str.trim().length > 0);
+    assert.ok(titlePut, 'the expanded title line was drawn (a put captured its text)');
+    assert.equal((titlePut!.attr as { bold?: boolean }).bold, true, "an EXPANDED record's title line is drawn BOLD (attr merges { bold: row.expanded })");
+
+    // NON-expanded: the same card collapsed → its single title line is NOT bold
+    const collapsedUi = st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project'] });
+    const sCol = buildDashboardState(store, collapsedUi, 60);
+    const colCard = sCol.rows.find((r) => r.id === dec.id)!;
+    assert.ok(colCard, 'the collapsed decision card row is present');
+    const colTitleText = colCard.lines[0].text;
+    const { screen: screen2, captured: captured2 } = fakeScreen(60, 40);
+    draw(screen2, sCol);
+    const colTitlePut = captured2.find((p) => typeof p.str === 'string' && p.str.includes(colTitleText.trim()) && p.str.trim().length > 0);
+    assert.ok(colTitlePut, 'the collapsed title line was drawn');
+    assert.notEqual((colTitlePut!.attr as { bold?: boolean }).bold, true, 'a NON-expanded title line is NOT bold (bold is row.expanded only)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P4 AC2 (search): with the `knowledge` arg, a query yields a FLAT source-tagged list spanning BOTH stores (project + domain matches)', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    assert.strictEqual(typeof vm.knowledgeSearch, 'function', 'the P2 knowledgeSearch viewmodel must exist (P4 sources flat search from it)');
+
+    // a matching decision in the project store and one in the node domain store
+    const projDec = stores.create(decisionRec({ statement: 'sterling project match', rationale: 'r' })) as { id: string };
+    const domDec = stores.create(decisionRec({ ...kenv('decision', 'domain:node'), statement: 'sterling domain match', rationale: 'r' })) as { id: string };
+
+    // type 'sterling' into the always-visible field, then build with the knowledge arg
+    let ui = st({ tab: KNOW_TAB });
+    for (const ch of 'sterling'.split('')) {
+      const r = S4.reduce(stores.project, ui, { kind: 'char', ch }, undefined, stores);
+      ui = r.ui;
+    }
+    assert.equal(ui.searchQuery, 'sterling', 'the query is built char by char on the Knowledge tab');
+
+    const s = S4.buildDashboardState(stores.project, ui, undefined, undefined, '', false, stores);
+    const ids = new Set(s.rows.map((r) => r.id));
+    // flat list: no tree nodes
+    assert.ok(!s.rows.some((r) => r.id.startsWith('cat:') || r.id.startsWith('src:')), 'a query replaces the tree with a flat card list');
+    // BOTH the project and the DOMAIN match surface (the fan-out spans stores)
+    assert.ok(ids.has(projDec.id), 'the project decision matches and is listed');
+    assert.ok(ids.has(domDec.id), 'the DOMAIN decision matches and is listed (search fans across the mounted stores via the knowledge arg)');
   } finally {
     cleanup();
   }
