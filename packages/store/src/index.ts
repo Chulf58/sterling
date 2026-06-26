@@ -128,6 +128,7 @@ export interface QueryOptions {
   rank_terms?: string[];
   include_unconfirmed?: boolean;
   cap?: number;
+  match_all?: boolean;
 }
 
 // The store surface the §10 tool layer drives — exactly the methods SterlingTools
@@ -211,9 +212,10 @@ export class SterlingStore {
       if (terms.length) {
         // a trailing '*' marks an FTS5 prefix query ("stor*" matches "store") —
         // the star must sit OUTSIDE the quoted token to act as the prefix operator
+        const joiner = opts.match_all ? ' AND ' : ' OR ';
         const match = terms
           .map((t) => (t.endsWith('*') && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`))
-          .join(' OR ');
+          .join(joiner);
         const sql = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(' AND ')} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
