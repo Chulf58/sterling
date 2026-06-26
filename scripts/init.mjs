@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { parseConfig } from '@sterling/schemas';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
+import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
 
@@ -93,8 +94,11 @@ const eff = recorded
   : {
       stackTags: stackTagsFlag,
       domainPaths: {}, // default per-user root; overrides are a hand-edited config concern
-      // stored ABSOLUTE: disposal must hit the same place regardless of caller cwd
-      backupPath: backupPathFlag ? fwd(resolve(target, backupPathFlag)) : undefined,
+      // stored ABSOLUTE: disposal must hit the same place regardless of caller cwd.
+      // backupPathForRuntime first rewrites a Windows drive path (C:\.../C:/...)
+      // to /mnt form under WSL, so resolve() treats it as absolute instead of as
+      // a relative path that lands inside the repo (the r-dd88 junk-dir bug).
+      backupPath: backupPathFlag ? fwd(resolve(target, backupPathForRuntime(backupPathFlag))) : undefined,
       backupOptOut: backupOptOutFlag,
       projectName: projectNameFlag ?? 'project',
       splitRatio: undefined, // default from schema below
@@ -131,7 +135,7 @@ if (recorded) {
   const stripUniversal = (tags) => tags.filter((t) => t !== UNIVERSAL_DOMAIN);
   if (stackTagsFlag.length && canonical(stripUniversal(stackTagsFlag)) !== canonical(stripUniversal(recorded.stack_tags))) flagDiffs.push('--stack-tags');
   if (declaredToolchains.length && canonical(declaredToolchains) !== canonical(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push('--toolchain');
-  if (backupPathFlag && fwd(resolve(target, backupPathFlag)) !== recorded.backup_path) flagDiffs.push('--backup-path');
+  if (backupPathFlag && fwd(resolve(target, backupPathForRuntime(backupPathFlag))) !== recorded.backup_path) flagDiffs.push('--backup-path');
   if (backupOptOutFlag && !recorded.backup_opt_out) flagDiffs.push('--backup-opt-out');
   if (projectNameFlag && recorded.project_name && projectNameFlag !== recorded.project_name) flagDiffs.push('--project-name');
   if (flagDiffs.length) {
