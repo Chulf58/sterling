@@ -4,8 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore } from '@sterling/store';
+import { SterlingStore, MountedStores } from '@sterling/store';
 import { todoCards, noteCards, articleCards, runView } from '../viewmodel.js';
+import * as viewmodel from '../viewmodel.js';
 import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, ARTICLES_TAB, QUEUE_TAB, TABS, type UiState } from '../state.js';
 import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
 import { keyToEvent, mouseToEvent } from '../render.js';
@@ -605,4 +606,348 @@ test('renderer translation tables: terminal-kit names map to the state vocabular
   assert.deepEqual(mouseToEvent('MOUSE_WHEEL_DOWN', { x: 0, y: 0 }), { kind: 'wheel', dy: 1 });
   assert.deepEqual(mouseToEvent('MOUSE_WHEEL_UP', { x: 0, y: 0 }), { kind: 'wheel', dy: -1 });
   assert.equal(mouseToEvent('MOUSE_MOTION', { x: 0, y: 0 }), undefined);
+});
+
+// ===========================================================================
+// FROZEN P2 oracle (run r-dd88) — SPEC-ONLY, written before the viewmodel
+// knowledge surface exists. These pin the brief's phase-P2 interfaces
+// (viewmodel.KNOWLEDGE_CATEGORIES / toCard / knowledgeBySource / knowledgeSearch
+// + Card.source) against ACs AC3 (all five categories mapped), AC4 (readable
+// multi-section bodies, title never replaced by body) and AC5 (flat, source-
+// tagged, bm25 AND search). They MUST fail RED on AssertionError, never by
+// throwing, until the coder implements the surface.
+//
+// CLEAN-RED discipline (mirrors the frozen P1 oracle in mounted.test.ts):
+//   • the not-yet-existent symbols are reached through NARROW casts on the
+//     viewmodel module namespace, so the file COMPILES under tsc strict before
+//     the exports exist (a tsc error would be a build CRASH = refused);
+//   • an EXISTENCE assertion runs FIRST in every test, so an unimplemented
+//     symbol yields a clean AssertionError rather than a TypeError throw.
+// The fixtures use the already-shipped (P1) MountedStores + bySource.
+// ===========================================================================
+
+/** A knowledge category entry as KNOWLEDGE_CATEGORIES exposes it (brief
+ *  interface viewmodel.KNOWLEDGE_CATEGORIES). Narrowed to the two fields the
+ *  oracle reads so tsc compiles before the registry is declared. */
+interface CategoryEntry {
+  type: string;
+  label: string;
+}
+
+/** Card narrowed to exactly what the P2 oracle asserts (the real Card gains an
+ *  optional source? in P2 — not depended on here so tsc compiles regardless). */
+interface CardLike {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  detail: string;
+  source?: string;
+}
+
+/** The viewmodel knowledge surface (brief interfaces) — every member optional so
+ *  the cast is valid before the coder adds them; each test existence-asserts the
+ *  member it uses FIRST. */
+interface KnowledgeViewmodel {
+  KNOWLEDGE_CATEGORIES?: CategoryEntry[];
+  toCard?: (rec: unknown) => CardLike;
+  knowledgeBySource?: (store: MountedStores, type: string) => { source: string; cards: CardLike[] }[];
+  knowledgeSearch?: (store: MountedStores, rankTerms: string[]) => CardLike[];
+}
+const vm = viewmodel as unknown as KnowledgeViewmodel;
+
+// -- record builders (full valid envelopes per @sterling/schemas) ------------
+function kenv(type: string, scope = 'project') {
+  return { id: randomUUID(), type, created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope, stack_tags: [] };
+}
+function decisionRec(over: Record<string, unknown> = {}) {
+  return {
+    ...kenv('decision'),
+    title: 'Compose over ATTACH',
+    statement: 'MountedStores composes self-contained SterlingStores',
+    rationale: 'each store is already tested in isolation',
+    alternatives_rejected: [{ option: 'SQLite ATTACH', reason: 'couples schema lifecycles' }],
+    ...over,
+  };
+}
+function antiPatternRec(over: Record<string, unknown> = {}) {
+  return {
+    ...kenv('anti_pattern'),
+    title: 'Bypassing the store write path',
+    trigger: 'editing .sterling/ with a shell script',
+    guidance: 'route every write through the MCP tool surface',
+    wrong_way: 'sqlite3 .sterling/sterling.db "INSERT ..."',
+    right_way: 'call knowledge_create through the server',
+    source_evidence: 'the stale-server incident 2026-06-16',
+    severity: 'block',
+    basis: 'codebase',
+    ...over,
+  };
+}
+function researchRec(over: Record<string, unknown> = {}) {
+  return {
+    ...kenv('research_finding'),
+    question: 'Can SQLite WAL open over a //wsl.localhost 9p mount?',
+    answer: 'No — the driver reports "database is locked"; use a stale VACUUM-INTO snapshot',
+    source_urls: ['https://example.test/wsl-9p'],
+    source_date: '2026-06-20',
+    capture_date: '2026-06-20',
+    ...over,
+  };
+}
+function referenceRec(over: Record<string, unknown> = {}) {
+  return {
+    ...kenv('reference_material'),
+    title: 'terminal-kit ScreenBuffer reference',
+    kind: 'url',
+    location: 'https://example.test/terminal-kit',
+    summary: 'delta draw + 256-palette attrs',
+    source_date: '2026-06-18',
+    capture_date: '2026-06-18',
+    basis: 'external',
+    ...over,
+  };
+}
+function featureArticleRec(over: Record<string, unknown> = {}) {
+  return {
+    ...kenv('feature_article'),
+    slug: 'tui-knowledge',
+    title: 'TUI knowledge explorer',
+    what_it_does: 'projects every knowledge category across the mounted stores',
+    intended_behavior: 'the observer finally observes all knowledge, not just articles',
+    files: [{ path: 'packages/tui/src/viewmodel.ts', role: 'impl' }],
+    current_ac: [{ ac_id: 'AC3', text: 'all five categories surface', verifiable_at: 'final' }],
+    dependencies: { relies_on: ['sqlite-store'], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'seeded' }],
+    live_test_refs: [],
+    ...over,
+  };
+}
+
+/** MountedStores fixture (mirrors mounted.test.ts's harness): a project store
+ *  plus one mounted domain store, both real on disk. */
+function mountedFixture(domains: string[] = ['node']) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-vm-knowledge-'));
+  const mounts = domains.map((name) => ({ name, dbPath: join(dir, 'domains', name, 'sterling.db') }));
+  const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), mounts);
+  return { dir, stores, cleanup: () => { stores.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+test('P2 AC3: KNOWLEDGE_CATEGORIES is the exact ordered registry — 5 knowledge types, note + disconfirmed_hypothesis EXCLUDED', () => {
+  assert.ok(Array.isArray(vm.KNOWLEDGE_CATEGORIES), 'viewmodel.KNOWLEDGE_CATEGORIES must be an exported array (AC3)');
+  const cats = vm.KNOWLEDGE_CATEGORIES!;
+  // exact set AND order (the tree iterates this registry in order)
+  assert.deepEqual(
+    cats.map((c) => c.type),
+    ['feature_article', 'decision', 'anti_pattern', 'research_finding', 'reference_material'],
+    'the five knowledge categories, in this order'
+  );
+  // explicit exclusions — note has its own tab, disconfirmed_hypothesis is niche
+  assert.ok(!cats.some((c) => c.type === 'note'), 'note is NOT a knowledge category (it has its own tab)');
+  assert.ok(!cats.some((c) => c.type === 'disconfirmed_hypothesis'), 'disconfirmed_hypothesis is excluded');
+  // every entry carries a non-empty human label
+  for (const c of cats) assert.ok(typeof c.label === 'string' && c.label.length > 0, `category '${c.type}' has a label`);
+});
+
+test('P2 AC3+AC4: toCard(feature_article) — title from title field; multi-section body (What it does / Intended behaviour); detail metadata', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist (AC3)');
+  const card = vm.toCard!(featureArticleRec());
+  assert.equal(card.type, 'feature_article');
+  assert.equal(card.title, 'TUI knowledge explorer', 'title comes from the article title field, verbatim');
+  // AC4: the body is MULTI-SECTION (blank-line separated), not one unbroken blob
+  assert.ok(card.body.includes('\n\n'), 'body has at least one blank-line section separator (AC4: never one line)');
+  assert.match(card.body, /What it does:/i, "labeled 'What it does:' section");
+  assert.match(card.body, /Intended behaviour:|Intended behavior:/i, "labeled intended-behaviour section");
+  assert.match(card.body, /projects every knowledge category/, 'what_it_does content present');
+  assert.match(card.body, /the observer finally observes all knowledge/, 'intended_behavior content present');
+  // AC4: the title text must NOT be embedded as the first body line (title never replaced by body)
+  assert.ok(!card.body.startsWith(card.title), 'the body does not begin with the title (title kept separate, AC4)');
+  // detail carries the article's structured metadata
+  assert.match(card.detail, /tui-knowledge/, 'detail names the slug');
+  assert.match(card.detail, /active/, 'detail names the state');
+});
+
+test('P2 AC3+AC4: toCard(decision) — title; body = statement + Why/rationale + rejected alternatives, blank-separated', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist (AC3)');
+  const card = vm.toCard!(decisionRec());
+  assert.equal(card.type, 'decision');
+  assert.equal(card.title, 'Compose over ATTACH', 'title from the decision title field');
+  assert.ok(card.body.includes('\n\n'), 'decision body is multi-section (AC4)');
+  assert.match(card.body, /MountedStores composes self-contained SterlingStores/, 'statement present in the body');
+  assert.match(card.body, /Why:|Rationale:/i, 'a labeled rationale section');
+  assert.match(card.body, /each store is already tested in isolation/, 'rationale content present');
+  // rejected alternatives are surfaced (option AND its reason), not dropped
+  assert.match(card.body, /SQLite ATTACH/, 'rejected option surfaced');
+  assert.match(card.body, /couples schema lifecycles/, "rejected option's reason surfaced");
+});
+
+test('P2 AC3+AC4: toCard(anti_pattern) — title; body = trigger + wrong/right (do/don\'t) + guidance; detail carries severity', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist (AC3)');
+  const card = vm.toCard!(antiPatternRec());
+  assert.equal(card.type, 'anti_pattern');
+  assert.equal(card.title, 'Bypassing the store write path', 'title from the anti_pattern title field');
+  assert.ok(card.body.includes('\n\n'), 'anti_pattern body is multi-section (AC4)');
+  assert.match(card.body, /editing \.sterling\/ with a shell script/, 'trigger present');
+  assert.match(card.body, /sqlite3 \.sterling/, 'wrong_way present');
+  assert.match(card.body, /call knowledge_create through the server/, 'right_way present');
+  assert.match(card.body, /route every write through the MCP tool surface/, 'guidance present');
+  // severity is structured metadata — on the detail line, not buried in prose
+  assert.match(card.detail, /block/, 'detail carries the severity');
+});
+
+test('P2 AC3+AC4: toCard(research_finding) — title from question; body = question + A:/answer; detail carries dates', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist (AC3)');
+  const card = vm.toCard!(researchRec());
+  assert.equal(card.type, 'research_finding');
+  assert.match(card.title, /Can SQLite WAL open over a \/\/wsl\.localhost 9p mount\?/, 'title from the question (the type has no title field)');
+  assert.ok(card.title.length > 0, 'research_finding still gets a non-empty title');
+  assert.ok(card.body.includes('\n\n'), 'research_finding body is multi-section (AC4)');
+  assert.match(card.body, /A:|Answer:/i, 'a labeled answer section');
+  assert.match(card.body, /database is locked/, 'answer content present');
+  // the two clocks are metadata — surfaced on detail
+  assert.match(card.detail, /2026-06-20/, 'detail carries a capture/source date');
+});
+
+test('P2 AC3+AC4: toCard(reference_material) — title; body = summary + location; detail carries kind', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist (AC3)');
+  const card = vm.toCard!(referenceRec());
+  assert.equal(card.type, 'reference_material');
+  assert.equal(card.title, 'terminal-kit ScreenBuffer reference', 'title from the reference title field');
+  assert.match(card.body, /delta draw \+ 256-palette attrs/, 'summary present in the body');
+  assert.match(card.body, /https:\/\/example\.test\/terminal-kit/, 'location surfaced (where to find the material)');
+  // kind is structured metadata
+  assert.match(card.detail, /url/, 'detail carries the kind');
+});
+
+test('P2 AC4: toCard bodies are never a single unbroken line for ANY multi-field type', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist (AC4)');
+  // Every multi-field knowledge type must produce a blank-line-separated body —
+  // the literal defect the brief calls out ('shown as one continuous line').
+  for (const rec of [featureArticleRec(), decisionRec(), antiPatternRec(), researchRec(), referenceRec()]) {
+    const card = vm.toCard!(rec);
+    assert.ok(card.body.length > 0, `${(rec as { type: string }).type}: body is non-empty`);
+    assert.ok(
+      card.body.split('\n').length > 1,
+      `${(rec as { type: string }).type}: body spans multiple lines, never one blob (AC4)`
+    );
+  }
+});
+
+test('P2 AC3: knowledgeBySource — project FIRST then domains; toCard-mapped cards; cards carry source; EMPTY sources dropped', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    assert.strictEqual(typeof vm.knowledgeBySource, 'function', 'viewmodel.knowledgeBySource must exist (AC3)');
+
+    // project: one decision; domain 'node': one decision. Both are 'decision' type.
+    const projDec = stores.create(decisionRec({ title: 'project decision' })) as { id: string };
+    const domDec = stores.create(decisionRec({ ...kenv('decision', 'domain:node'), title: 'domain decision' })) as { id: string };
+
+    const groups = vm.knowledgeBySource!(stores, 'decision');
+    // both sources are non-empty → project first, then the domain (manifest order)
+    assert.deepEqual(groups.map((g) => g.source), ['project', 'node'], 'project source first, then mounted domain');
+
+    const proj = groups.find((g) => g.source === 'project')!;
+    const node = groups.find((g) => g.source === 'node')!;
+    // each source's records mapped via toCard (Card shape, decision type)
+    assert.ok(proj.cards.every((c) => c.type === 'decision'), 'project group holds decision cards');
+    assert.ok(proj.cards.some((c) => c.id === projDec.id), 'the project decision is under project');
+    assert.ok(node.cards.some((c) => c.id === domDec.id), 'the domain decision is under node');
+    assert.ok(!proj.cards.some((c) => c.id === domDec.id), 'a domain record never appears under project');
+    // cards are SOURCE-TAGGED with their physical store
+    assert.equal(proj.cards.find((c) => c.id === projDec.id)!.source, 'project', 'project card tagged source=project');
+    assert.equal(node.cards.find((c) => c.id === domDec.id)!.source, 'node', 'domain card tagged source=node');
+
+    // EMPTY sources dropped: query a type that exists ONLY in the project store
+    const onlyProj = stores.create(referenceRec({ title: 'project-only ref' })) as { id: string };
+    const refGroups = vm.knowledgeBySource!(stores, 'reference_material');
+    assert.deepEqual(refGroups.map((g) => g.source), ['project'], 'the empty domain source is dropped (AC3 — empty sources hidden)');
+    assert.ok(refGroups[0].cards.some((c) => c.id === onlyProj.id));
+  } finally {
+    cleanup();
+  }
+});
+
+test('P2 AC3: knowledgeBySource over a type with NO records anywhere → empty (every source dropped)', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    assert.strictEqual(typeof vm.knowledgeBySource, 'function', 'viewmodel.knowledgeBySource must exist (AC3)');
+    // nothing of this type created anywhere → both sources empty → both dropped
+    const groups = vm.knowledgeBySource!(stores, 'anti_pattern');
+    assert.deepEqual(groups, [], 'no records of the type anywhere → no source groups (all empty dropped)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P2 AC5: knowledgeSearch — flat, source-tagged cards spanning ALL categories; ranked', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    assert.strictEqual(typeof vm.knowledgeSearch, 'function', 'viewmodel.knowledgeSearch must exist (AC5)');
+
+    // one record per category, all sharing the term 'sterling', across both stores
+    const fa = stores.create(featureArticleRec({ what_it_does: 'sterling knowledge explorer projection' })) as { id: string };
+    const dec = stores.create(decisionRec({ statement: 'sterling composes mounted stores' })) as { id: string };
+    const ap = stores.create(antiPatternRec({ guidance: 'sterling writes go through the tool surface' })) as { id: string };
+    const rf = stores.create(researchRec({ answer: 'sterling uses a stale snapshot bridge' })) as { id: string };
+    const rm = stores.create(referenceRec({ summary: 'sterling terminal-kit notes' })) as { id: string };
+    const domFa = stores.create(featureArticleRec({ ...kenv('feature_article', 'domain:node'), slug: 'node-fa', what_it_does: 'sterling node domain article' })) as { id: string };
+
+    const cards = vm.knowledgeSearch!(stores, ['sterling*']);
+    assert.ok(Array.isArray(cards), 'knowledgeSearch returns a flat array of cards');
+    const ids = new Set(cards.map((c) => c.id));
+    // spans ALL FIVE categories (a search is not article-only)
+    for (const [label, id] of [['feature_article', fa.id], ['decision', dec.id], ['anti_pattern', ap.id], ['research_finding', rf.id], ['reference_material', rm.id]] as const) {
+      assert.ok(ids.has(id), `search spans the ${label} category`);
+    }
+    // every returned card is SOURCE-TAGGED (project or a domain name)
+    for (const c of cards) assert.ok(c.source === 'project' || c.source === 'node', `card ${c.id} is source-tagged (got '${c.source}')`);
+    // a domain record surfaces too, tagged to its store
+    assert.equal(cards.find((c) => c.id === domFa.id)?.source, 'node', 'domain match tagged source=node');
+    // flat list — no nesting; each card appears once
+    assert.equal(cards.length, new Set(cards.map((c) => c.id)).size, 'flat de-duplicated list');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P2 AC5: knowledgeSearch uses AND (match_all) — a multi-term query returns only records matching EVERY term', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    assert.strictEqual(typeof vm.knowledgeSearch, 'function', 'viewmodel.knowledgeSearch must exist (AC5)');
+
+    // 'both' has alpha AND beta; 'onlyAlpha' has alpha but not beta; 'onlyBeta' the reverse
+    const both = stores.create(decisionRec({ statement: 'alpha beta together', rationale: 'r' })) as { id: string };
+    const onlyAlpha = stores.create(decisionRec({ statement: 'alpha alone', rationale: 'r' })) as { id: string };
+    const onlyBeta = stores.create(decisionRec({ statement: 'beta alone', rationale: 'r' })) as { id: string };
+
+    const cards = vm.knowledgeSearch!(stores, ['alpha', 'beta']);
+    const ids = new Set(cards.map((c) => c.id));
+    assert.ok(ids.has(both.id), 'AND: the record with BOTH terms matches');
+    assert.ok(!ids.has(onlyAlpha.id), 'AND: a record with only the first term is excluded');
+    assert.ok(!ids.has(onlyBeta.id), 'AND: a record with only the second term is excluded');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P2 regression: project-local readers (todoCards/noteCards) stay project-only — never fanned across domains', () => {
+  const { stores, cleanup } = mountedFixture(['node']);
+  try {
+    // a user todo + a note in the PROJECT store
+    stores.create({ ...kenv('todo'), text: 'project todo', source: 'user', priority: 'high' });
+    stores.create({ ...kenv('note'), raw_text: 'project note\nbody', captured_at: NOW, capture_source: 'tui', derived: [] });
+    // a user todo + a note physically in the DOMAIN store — must NOT surface in the board/notes tabs
+    stores.create({ ...kenv('todo', 'domain:node'), text: 'domain todo', source: 'user' });
+    stores.create({ ...kenv('note', 'domain:node'), raw_text: 'domain note', captured_at: NOW, capture_source: 'tui', derived: [] });
+
+    // the project-local readers take the PROJECT store, not the MountedStores fan-out
+    const todoTitles = todoCards(stores.project).map((c) => c.title);
+    assert.deepEqual(todoTitles, ['project todo'], 'board reads the project store only — no domain todos');
+    const noteTitles = noteCards(stores.project).map((c) => c.title);
+    assert.deepEqual(noteTitles, ['project note'], 'notes read the project store only — no domain notes');
+  } finally {
+    cleanup();
+  }
 });
