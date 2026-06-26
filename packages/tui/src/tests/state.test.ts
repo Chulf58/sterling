@@ -5,9 +5,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore, MountedStores } from '@sterling/store';
-import { todoCards, noteCards, articleCards, runView } from '../viewmodel.js';
+import { todoCards, noteCards, runView } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, ARTICLES_TAB, QUEUE_TAB, TABS, type UiState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, QUEUE_TAB, TABS, type UiState } from '../state.js';
+import * as stateMod from '../state.js';
 import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
 import { keyToEvent, mouseToEvent } from '../render.js';
 
@@ -86,25 +87,6 @@ test('view models: board filters source=user; note first line; run view summariz
     assert.equal(rv.lastSignal, 'complete');
     assert.equal(rv.warnFlags, 1);
     assert.equal(rv.pendingJudgment, 'blocked');
-  } finally {
-    cleanup();
-  }
-});
-
-test('articleCards: groups derive from owned paths; body carries intended behavior', () => {
-  const { store, cleanup } = fixture();
-  try {
-    article(store, 'alpha-store', 'Alpha store layer', 'persists widgets in sqlite', [
-      'packages/store/src/index.ts',
-      'packages/schemas/src/records.ts',
-      'scripts/dispose-run.mjs',
-      'STERLING-SPEC.md',
-    ]);
-    const [card] = articleCards(store);
-    assert.deepEqual(card.groups, ['packages/store', 'packages/schemas', 'scripts', '(root)']);
-    assert.match(card.body, /persists widgets in sqlite/);
-    assert.match(card.body, /→ intended: works as designed/);
-    assert.match(card.detail, /alpha-store · active · v1 · 4 file\(s\) · relies on 0/);
   } finally {
     cleanup();
   }
@@ -200,100 +182,6 @@ test('queue tab (§3.2.7/§11): system items only, fixed half divider with trunc
     const sel = reduce(store, ui, { kind: 'key', name: 'ENTER' });
     assert.equal(sel.effects.length, 1);
     assert.equal((sel.effects[0] as { recordType: string }).recordType, 'todo');
-  } finally {
-    cleanup();
-  }
-});
-
-test('articles tab: folder tree from owned files — groups fold/unfold, articles select+expand', () => {
-  const { store, cleanup } = fixture();
-  try {
-    const a = article(store, 'alpha-store', 'Alpha store layer', 'persists widgets in sqlite', [
-      'packages/store/src/index.ts',
-      'packages/schemas/src/records.ts',
-    ]);
-    article(store, 'beta-tui', 'Beta dashboard', 'renders the dashboard pane', ['packages/tui/src/main.ts', 'scripts/build-tui.mjs']);
-
-    // default: collapsed folder list, sorted, with counts
-    let ui = st({ tab: ARTICLES_TAB });
-    let s = buildDashboardState(store, ui);
-    assert.deepEqual(
-      s.rows.map((r) => r.id),
-      ['group:packages/schemas', 'group:packages/store', 'group:packages/tui', 'group:scripts']
-    );
-    assert.match(s.rows[0].lines[0].text, /▸ packages\/schemas \(1\)/);
-
-    // enter on a folder unfolds it — no selection effect
-    const open = reduce(store, ui, { kind: 'key', name: 'ENTER' });
-    assert.deepEqual(open.effects, [], 'folding is navigation, not selection');
-    ui = open.ui;
-    s = buildDashboardState(store, ui);
-    assert.deepEqual(s.rows.map((r) => r.id).slice(0, 2), ['group:packages/schemas', a.id]);
-    assert.match(s.rows[0].lines[0].text, /▾/);
-    assert.match(s.rows[1].lines[0].text, /^\s{4}Alpha store layer/, 'article row is indented under its folder');
-
-    // activating the article selects + expands it (body + meta)
-    ui = { ...ui, cursor: 1 };
-    const sel = reduce(store, ui, { kind: 'key', name: 'ENTER' });
-    assert.deepEqual(sel.effects, [{ type: 'select', recordType: 'feature_article', id: a.id }]);
-    s = buildDashboardState(store, sel.ui);
-    const row = s.rows.find((r) => r.id === a.id)!;
-    assert.ok(row.lines.length > 1, 'expanded article shows its body');
-    assert.match(row.lines.at(-1)!.text, /alpha-store · active/);
-
-    // the same article appears under every folder it owns files in
-    const both = reduce(store, st({ tab: ARTICLES_TAB, cursor: 1, expanded: ['group:packages/schemas', 'group:packages/store'] }), {
-      kind: 'key',
-      name: 'DOWN',
-    });
-    const rows = buildDashboardState(store, both.ui).rows.map((r) => r.id);
-    assert.equal(rows.filter((id) => id === a.id).length, 2, 'multi-group ownership lists the card twice');
-  } finally {
-    cleanup();
-  }
-});
-
-test('articles search: / edits, chars (digits, q) append instead of acting, FTS prefix filters, enter keeps, esc clears', () => {
-  const { store, cleanup } = fixture();
-  try {
-    const a = article(store, 'alpha-store', 'Alpha store layer', 'persists widgets in sqlite', ['packages/store/src/index.ts']);
-    article(store, 'beta-tui', 'Beta dashboard', 'renders the dashboard pane', ['packages/tui/src/main.ts']);
-
-    let ui = st({ tab: ARTICLES_TAB });
-    ({ ui } = reduce(store, ui, { kind: 'char', ch: '/' }));
-    assert.equal(ui.searchEditing, true);
-
-    for (const ch of ['w', 'i', 'd', '1', 'q']) ({ ui } = reduce(store, ui, { kind: 'char', ch }));
-    assert.equal(ui.searchQuery, 'wid1q', 'digits and q are input while editing — no tab switch, no quit');
-    assert.equal(ui.tab, ARTICLES_TAB);
-
-    ({ ui } = reduce(store, ui, { kind: 'key', name: 'BACKSPACE' }));
-    ({ ui } = reduce(store, ui, { kind: 'key', name: 'BACKSPACE' }));
-    assert.equal(ui.searchQuery, 'wid');
-
-    // FTS prefix: 'wid*' matches 'widgets' — flat ranked result list, no folders
-    let s = buildDashboardState(store, ui);
-    assert.deepEqual(s.rows.map((r) => r.id), [a.id], 'prefix search filters to the matching article');
-    assert.equal(s.searchLine, 'search: wid▌');
-
-    // enter leaves input mode but keeps the filter; esc clears back to the tree
-    ({ ui } = reduce(store, ui, { kind: 'key', name: 'ENTER' }));
-    assert.equal(ui.searchEditing, false);
-    assert.equal(ui.searchQuery, 'wid');
-    assert.equal(buildDashboardState(store, ui).searchLine, 'search: wid');
-    const quits = reduce(store, ui, { kind: 'char', ch: 'q' });
-    assert.deepEqual(quits.effects, [{ type: 'quit' }], 'q quits again once not editing');
-
-    ({ ui } = reduce(store, ui, { kind: 'key', name: 'ESCAPE' }));
-    assert.equal(ui.searchQuery, '');
-    s = buildDashboardState(store, ui);
-    assert.equal(s.searchLine, undefined);
-    assert.ok(s.rows.every((r) => r.type === 'group'), 'tree is back after esc');
-
-    // no matches → loud empty state
-    ({ ui } = reduce(store, ui, { kind: 'char', ch: '/' }));
-    for (const ch of ['z', 'z', 'z']) ({ ui } = reduce(store, ui, { kind: 'char', ch }));
-    assert.equal(buildDashboardState(store, ui).emptyMessage, '(no matches)');
   } finally {
     cleanup();
   }
@@ -947,6 +835,343 @@ test('P2 regression: project-local readers (todoCards/noteCards) stay project-on
     assert.deepEqual(todoTitles, ['project todo'], 'board reads the project store only — no domain todos');
     const noteTitles = noteCards(stores.project).map((c) => c.title);
     assert.deepEqual(noteTitles, ['project note'], 'notes read the project store only — no domain notes');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// FROZEN P3 oracle (run r-dd88) — SPEC-ONLY, written before the state-layer
+// Knowledge explorer exists. These pin the brief's phase-P3 contract at the
+// ENTRY POINTS (buildDashboardState / reduce / screenLineToRow) against ACs:
+//   AC1  3-level collapse/expand tree (category → source → record), collapsed
+//        by default; empty categories/sources hidden.
+//   AC4  an expanded record renders READABLE: a 'title' line, a blank
+//        separator, wrapped 'body' lines (≤ pane width), a dim 'meta' line —
+//        the title is NEVER replaced by the body (the literal defect fixed).
+//   AC5  an always-visible search field: typing → flat, source-tagged,
+//        AND-filtered list; empty query → full tree; Esc clears.
+//   AC9  on the Knowledge tab printable keys (digits, 'q') feed the SEARCH
+//        FIELD; QUIT still quits; arrows navigate; other tabs keep hotkeys.
+//
+// PHASE-BOUNDARY constraint (brief): P3 is the STATE-LAYER phase ONLY. The
+// MountedStores cross-store threading is P4. buildDashboardState / reduce keep
+// taking the PROJECT SterlingStore — the signature does NOT change — so the
+// Knowledge tree is sourced from the project store ALONE and the SOURCE level
+// shows exactly ONE source named 'project'. These tests therefore use the bare
+// fixture() store, NEVER MountedStores, and never expect domain/multi-source
+// nodes.
+//
+// CLEAN-RED discipline (mirrors the P2 oracle's `vm` pattern above):
+//   • KNOWLEDGE_TAB does not exist yet — it is reached through a NARROW cast on
+//     the state module namespace (`S`) so the file COMPILES under tsc strict;
+//     each test that needs it existence-asserts it FIRST (clean AssertionError,
+//     never a TypeError throw).
+//   • the behavioral assertions drive the ALREADY-EXPORTED entry points
+//     (buildDashboardState / reduce / screenLineToRow) with the literal tab
+//     index 2, so they never pass `undefined` as a tab. Today those entry
+//     points return the OLD folder-tree / '/'-search shape, so the new-shape
+//     assertions fail RED on an AssertionError.
+// ===========================================================================
+
+/** State-module surface the P3 oracle reaches for symbols not yet exported.
+ *  Every member optional so the cast is valid before the coder adds them; each
+ *  test existence-asserts the member it uses FIRST. */
+interface KnowledgeStateMod {
+  KNOWLEDGE_TAB?: number;
+}
+const S = stateMod as unknown as KnowledgeStateMod;
+
+/** The Knowledge tab index is unchanged from ARTICLES_TAB (2) — used to drive
+ *  buildDashboardState / reduce without depending on the not-yet-renamed const
+ *  (so we never pass `undefined` as a tab → no throw). */
+const KNOW_TAB = 2;
+
+/** Seed one record of every knowledge category into a bare project store, plus
+ *  a couple of extra decisions so a source/category holds multiple cards. */
+function seedKnowledge(store: SterlingStore) {
+  const dec = store.create(decisionRec()) as { id: string };
+  const dec2 = store.create(decisionRec({ title: 'Compose over inheritance', statement: 'prefer composition' })) as { id: string };
+  const ap = store.create(antiPatternRec()) as { id: string };
+  const rf = store.create(researchRec()) as { id: string };
+  const rm = store.create(referenceRec()) as { id: string };
+  const fa = store.create(featureArticleRec()) as { id: string };
+  return { dec, dec2, ap, rf, rm, fa };
+}
+
+test('P3 AC9-prereq: the Articles tab is renamed Knowledge — KNOWLEDGE_TAB === 2 and TABS[2] === "Knowledge"', () => {
+  assert.strictEqual(typeof S.KNOWLEDGE_TAB, 'number', 'state.KNOWLEDGE_TAB must be an exported number (replaces ARTICLES_TAB)');
+  assert.equal(S.KNOWLEDGE_TAB, 2, 'the knowledge tab keeps index 2');
+  assert.equal(TABS[2], 'Knowledge', 'TABS[2] is the renamed "Knowledge" label');
+});
+
+test('P3 AC1: collapsed by default — the Knowledge tab shows ONLY non-empty category rows, in KNOWLEDGE_CATEGORIES order; empty categories absent', () => {
+  const { store, cleanup } = fixture();
+  try {
+    // seed only THREE of the five categories so the empty ones must be hidden
+    const dec = store.create(decisionRec()) as { id: string };
+    const ap = store.create(antiPatternRec()) as { id: string };
+    const fa = store.create(featureArticleRec()) as { id: string };
+    void dec; void ap; void fa;
+
+    const s = buildDashboardState(store, st({ tab: KNOW_TAB }));
+    // every visible row is a collapsed CATEGORY node (id 'cat:<type>'), one line each
+    assert.ok(s.rows.length > 0, 'the Knowledge tab renders category rows for the seeded categories');
+    assert.ok(s.rows.every((r) => r.id.startsWith('cat:')), 'collapsed default: only category rows are visible (no source/card rows)');
+    assert.ok(s.rows.every((r) => r.lines.length === 1), 'a collapsed category is a single line');
+    // exactly the THREE non-empty categories, in registry order; the two empty ones absent
+    assert.deepEqual(
+      s.rows.map((r) => r.id),
+      ['cat:feature_article', 'cat:decision', 'cat:anti_pattern'],
+      'non-empty categories only, in KNOWLEDGE_CATEGORIES order; empty research/reference hidden'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC1: drill-down — expanding a category reveals one src:<type>:project source row; expanding that reveals the card rows; same affordance per level', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const { dec, dec2 } = seedKnowledge(store);
+
+    // expand the decision CATEGORY → its single project source row appears, with a count
+    let s = buildDashboardState(store, st({ tab: KNOW_TAB, expanded: ['cat:decision'] }));
+    const catRow = s.rows.find((r) => r.id === 'cat:decision')!;
+    assert.ok(catRow, 'the decision category row is present');
+    const srcRow = s.rows.find((r) => r.id === 'src:decision:project');
+    assert.ok(srcRow, 'expanding a category reveals exactly one source row, named project (P3: project store only)');
+    // P3 phase-boundary: there is NO domain source — only the single 'project' source
+    assert.deepEqual(
+      s.rows.filter((r) => r.id.startsWith('src:decision:')).map((r) => r.id),
+      ['src:decision:project'],
+      'a single project source under the category (no MountedStores fan-out in P3)'
+    );
+    assert.match(srcRow!.lines[0].text, /2/, 'the source row carries its record count (two decisions seeded)');
+    // the decision CARD rows are NOT yet visible — the source is still collapsed
+    assert.ok(!s.rows.some((r) => r.id === dec.id), 'card rows stay hidden until the source is expanded');
+
+    // expand the source too → the decision card rows appear, under the source
+    s = buildDashboardState(store, st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project'] }));
+    const cardIds = s.rows.filter((r) => r.type === 'feature_article' || r.id === dec.id || r.id === dec2.id).map((r) => r.id);
+    assert.ok(s.rows.some((r) => r.id === dec.id), 'first decision card visible under the expanded source');
+    assert.ok(s.rows.some((r) => r.id === dec2.id), 'second decision card visible under the expanded source');
+    void cardIds;
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC1: activate() is navigation on category/source (NO select effect) and select+expand on a card (a select effect)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const { dec } = seedKnowledge(store);
+
+    // cursor on the first (category) row → ENTER toggles expansion, emits NO select effect
+    const onCat = reduce(store, st({ tab: KNOW_TAB, cursor: 0 }), { kind: 'key', name: 'ENTER' });
+    assert.deepEqual(onCat.effects, [], 'activating a category is navigation — no select effect');
+    assert.notDeepEqual(onCat.ui.expanded, st().expanded, 'activating a category toggled its expansion');
+
+    // with the decision category + source expanded, put the cursor on a decision CARD row and ENTER
+    const expandedUi = st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project'] });
+    const sExpanded = buildDashboardState(store, expandedUi);
+    const cardIdx = sExpanded.rows.findIndex((r) => r.id === dec.id);
+    assert.ok(cardIdx >= 0, 'the decision card row is reachable when its category + source are expanded');
+
+    // activating a SOURCE row emits no select effect either
+    const srcIdx = sExpanded.rows.findIndex((r) => r.id === 'src:decision:project');
+    const onSrc = reduce(store, { ...expandedUi, cursor: srcIdx }, { kind: 'key', name: 'ENTER' });
+    assert.deepEqual(onSrc.effects, [], 'activating a source is navigation — no select effect');
+
+    // activating the CARD selects + expands it, exactly like today's cards
+    const onCard = reduce(store, { ...expandedUi, cursor: cardIdx }, { kind: 'key', name: 'ENTER' });
+    assert.deepEqual(onCard.effects, [{ type: 'select', recordType: 'decision', id: dec.id }], 'activating a card selects it (select effect with its type+id)');
+    assert.ok(onCard.ui.expanded.includes(dec.id), 'activating a card also expands it');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC4: an expanded card renders READABLE — title line first, blank separator, wrapped body lines (≤ width), dim meta last; title NEVER replaced by body', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const { dec } = seedKnowledge(store);
+    const width = 32;
+    const expandedUi = st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project', dec.id] });
+    const s = buildDashboardState(store, expandedUi, width);
+
+    const card = s.rows.find((r) => r.id === dec.id)!;
+    assert.ok(card, 'the expanded decision card row is present');
+    assert.ok(card.lines.length >= 3, 'an expanded card has title + body + meta lines');
+
+    // first line is the TITLE, kind 'title', carrying the record's title verbatim —
+    // this is the literal defect: today the first line is the wrapped BODY mis-styled.
+    assert.equal(card.lines[0].kind, 'title', 'the FIRST line is the title (never the body)');
+    assert.match(card.lines[0].text, /Compose over ATTACH/, 'the title text is the record title, proving the title is not replaced by body text');
+    assert.ok(!/MountedStores composes/.test(card.lines[0].text), 'the first line is NOT the decision statement (body must not occupy the title line)');
+
+    // a BLANK separator line exists between title and body
+    assert.ok(card.lines.some((l) => l.text.trim() === ''), 'a blank separator line is present');
+
+    // the last line is the dim META line
+    assert.equal(card.lines.at(-1)!.kind, 'meta', 'the LAST line is the dim meta line');
+
+    // the body is rendered as 'body' lines, EACH wrapped to ≤ the pane width
+    // (never one unbroken line). The seeded decision body is long enough to wrap.
+    const bodyLines = card.lines.filter((l) => l.kind === 'body');
+    assert.ok(bodyLines.length >= 1, 'the body is present as body-kind lines');
+    for (const l of card.lines) assert.ok(l.text.length <= width, `every line fits the pane width: "${l.text}"`);
+    assert.ok(bodyLines.some((l) => /MountedStores composes/.test(l.text) || /composition/.test(l.text) || /tested in isolation/.test(l.text)), 'the body content surfaces in body lines');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC4: screenRow accounting stays exact across the 3 depths + a multi-line expansion (deep body click maps to its card)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const { dec } = seedKnowledge(store);
+    const width = 32;
+    const expandedUi = st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project', dec.id] });
+    const s = buildDashboardState(store, expandedUi, width);
+
+    // screenRows are contiguous: each row begins exactly where the previous ended
+    let expected = 0;
+    for (const r of s.rows) {
+      assert.equal(r.screenRow, expected, `row ${r.id} starts at the running offset`);
+      expected += r.lines.length;
+    }
+
+    // a click on a DEEP line of the expanded card body maps back to that card row
+    const cardIdx = s.rows.findIndex((r) => r.id === dec.id);
+    assert.ok(cardIdx >= 0, 'the expanded card is in the row list');
+    const card = s.rows[cardIdx];
+    assert.ok(card.lines.length >= 3, 'the card is multi-line');
+    // bodyTop=3 (no banner) → terminal lines are 1-based at 4 + screenRow + lineOffset.
+    // hit a middle (body) line of the card, not its first/last:
+    const midOffset = Math.min(2, card.lines.length - 1);
+    const termLine = 4 + card.screenRow + midOffset;
+    assert.equal(screenLineToRow(s, termLine), cardIdx, 'a click on a deep expanded-body line maps to the card row');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC5: typing on the Knowledge tab (no "/") builds searchQuery; the tree is REPLACED by a flat source-tagged card list; searchLine reflects the live query', () => {
+  const { store, cleanup } = fixture();
+  try {
+    seedKnowledge(store);
+    let ui = st({ tab: KNOW_TAB });
+
+    // an always-visible field: a printable char feeds the query directly — no '/' first
+    for (const ch of ['c', 'o', 'm', 'p', 'o', 's', 'e']) ({ ui } = reduce(store, ui, { kind: 'char', ch }));
+    assert.equal(ui.searchQuery, 'compose', 'printable chars build the query on the Knowledge tab (always-visible field, no "/" toggle)');
+    assert.equal(ui.tab, KNOW_TAB, 'typing never switches tabs on the Knowledge tab');
+
+    const s = buildDashboardState(store, ui);
+    // the tree is REPLACED by a flat card list — no category/source nodes remain
+    assert.ok(!s.rows.some((r) => r.id.startsWith('cat:')), 'a non-empty query replaces the category tree (no category rows)');
+    assert.ok(!s.rows.some((r) => r.id.startsWith('src:')), 'no source rows in the flat search result');
+    assert.ok(s.rows.length > 0, 'the flat result lists the matching cards');
+    // the live query is reflected on searchLine (always-visible field)
+    assert.ok(typeof s.searchLine === 'string' && /compose/.test(s.searchLine!), 'searchLine reflects the live query');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC5: a TWO-term query is AND — only records matching BOTH terms survive; single-term matches are excluded', () => {
+  const { store, cleanup } = fixture();
+  try {
+    // 'both' has alpha AND beta; the others have only one of the terms
+    const both = store.create(decisionRec({ statement: 'alpha beta together', rationale: 'r' })) as { id: string };
+    const onlyAlpha = store.create(decisionRec({ title: 'A', statement: 'alpha alone', rationale: 'r' })) as { id: string };
+    const onlyBeta = store.create(decisionRec({ title: 'B', statement: 'beta alone', rationale: 'r' })) as { id: string };
+
+    let ui = st({ tab: KNOW_TAB });
+    // type 'alpha beta' (the space is a printable char that separates terms)
+    for (const ch of 'alpha beta'.split('')) ({ ui } = reduce(store, ui, { kind: 'char', ch }));
+    assert.equal(ui.searchQuery, 'alpha beta', 'the two-term query is built char by char, space included');
+
+    const s = buildDashboardState(store, ui);
+    const ids = new Set(s.rows.map((r) => r.id));
+    assert.ok(ids.has(both.id), 'AND: the record with BOTH terms is in the flat result');
+    assert.ok(!ids.has(onlyAlpha.id), 'AND: a single-term (alpha only) record is excluded');
+    assert.ok(!ids.has(onlyBeta.id), 'AND: a single-term (beta only) record is excluded');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC5: an empty query restores the full category tree; Esc clears the query and resets the cursor to 0', () => {
+  const { store, cleanup } = fixture();
+  try {
+    seedKnowledge(store);
+    let ui = st({ tab: KNOW_TAB });
+    for (const ch of ['c', 'o', 'm', 'p', 'o', 's', 'e']) ({ ui } = reduce(store, ui, { kind: 'char', ch }));
+
+    // backspacing to empty restores the tree (empty field → full tree)
+    let cleared = ui;
+    for (let i = 0; i < 'compose'.length; i++) ({ ui: cleared } = reduce(store, cleared, { kind: 'key', name: 'BACKSPACE' }));
+    assert.equal(cleared.searchQuery, '', 'backspacing empties the query');
+    const treeBack = buildDashboardState(store, cleared);
+    assert.ok(treeBack.rows.some((r) => r.id.startsWith('cat:')), 'an empty query restores the category tree');
+
+    // Esc clears the query AND resets the cursor to 0
+    const moved = { ...ui, cursor: 3 };
+    const esc = reduce(store, moved, { kind: 'key', name: 'ESCAPE' });
+    assert.equal(esc.ui.searchQuery, '', 'Esc clears the query');
+    assert.equal(esc.ui.cursor, 0, 'Esc resets the cursor to 0');
+    const afterEsc = buildDashboardState(store, esc.ui);
+    assert.ok(afterEsc.rows.some((r) => r.id.startsWith('cat:')), 'the category tree is back after Esc');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC9: on the Knowledge tab printable keys feed the SEARCH FIELD — "q" and digits do NOT quit or switch tabs', () => {
+  const { store, cleanup } = fixture();
+  try {
+    seedKnowledge(store);
+    let ui = st({ tab: KNOW_TAB });
+
+    // 'q' is part of the query, not a quit
+    const qPress = reduce(store, ui, { kind: 'char', ch: 'q' });
+    assert.deepEqual(qPress.effects, [], "'q' does not quit on the Knowledge tab (it feeds the search field)");
+    assert.equal(qPress.ui.searchQuery, 'q', "'q' is appended to the query");
+    ui = qPress.ui;
+
+    // digits append too — no tab switch
+    const onePress = reduce(store, ui, { kind: 'char', ch: '1' });
+    assert.deepEqual(onePress.effects, [], 'a digit does not switch tabs on the Knowledge tab');
+    assert.equal(onePress.ui.tab, KNOW_TAB, 'still on the Knowledge tab');
+    assert.equal(onePress.ui.searchQuery, 'q1', 'the digit is appended to the query');
+
+    // the QUIT key event still quits (Ctrl-C → name 'QUIT')
+    const quit = reduce(store, ui, { kind: 'key', name: 'QUIT' });
+    assert.deepEqual(quit.effects, [{ type: 'quit' }], 'the QUIT key still quits on the Knowledge tab');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 AC9: arrows navigate the Knowledge tree (cursor moves, no quit); other tabs keep their digit/q hotkeys (regression guard)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    seedKnowledge(store);
+
+    // UP/DOWN move the cursor over the Knowledge rows
+    const down = reduce(store, st({ tab: KNOW_TAB, cursor: 0 }), { kind: 'key', name: 'DOWN' });
+    assert.equal(down.ui.cursor, 1, 'DOWN advances the cursor on the Knowledge tab');
+    const up = reduce(store, down.ui, { kind: 'key', name: 'UP' });
+    assert.equal(up.ui.cursor, 0, 'UP retreats the cursor on the Knowledge tab');
+
+    // cross-check: on a NON-Knowledge tab, 'q' still quits and a digit still switches tabs
+    const onTodos = st({ tab: 0 });
+    const qQuit = reduce(store, onTodos, { kind: 'char', ch: 'q' });
+    assert.deepEqual(qQuit.effects, [{ type: 'quit' }], "'q' keeps quitting on the Todos tab (hotkeys preserved off the Knowledge tab)");
+    const digit = reduce(store, onTodos, { kind: 'char', ch: '2' });
+    assert.equal(digit.ui.tab, 1, "a digit still switches tabs off the Knowledge tab (TABS index '2' → tab 1)");
   } finally {
     cleanup();
   }

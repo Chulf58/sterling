@@ -12,8 +12,6 @@ export interface Card {
   body: string;
   /** metadata line shown under the expanded body */
   detail: string;
-  /** folder keys this card files under (articles: derived from owned paths) */
-  groups?: string[];
   /** physical store this card came from: 'project' or a domain name */
   source?: string;
 }
@@ -73,7 +71,6 @@ export function toCard(rec: unknown): Card {
         title: a.title,
         body: `What it does:\n${a.what_it_does}\n\nIntended behaviour:\n${a.intended_behavior}`,
         detail: `${a.slug} · ${a.state} · v${a.version} · ${a.files.length} file(s) · relies on ${a.dependencies.relies_on.length}`,
-        groups: [...new Set(a.files.map((f) => groupOf(f.path)))],
       };
     }
     case 'decision': {
@@ -233,48 +230,6 @@ export function noteCards(store: SterlingStore): Card[] {
       detail: `captured ${note.captured_at}${note.derived.length ? ` · ${note.derived.length} extraction(s)` : ''}`,
     };
   });
-}
-
-/** Folder key for an owned path: two segments deep where the tree has them
- *  (packages/store, scripts/hooks), one otherwise; root files group as (root). */
-const groupOf = (path: string): string => {
-  const seg = path.split('/');
-  if (seg.length >= 3) return seg.slice(0, 2).join('/');
-  if (seg.length === 2) return seg[0];
-  return '(root)';
-};
-
-interface ArticleRecord {
-  id: string;
-  slug: string;
-  title: string;
-  state: string;
-  what_it_does: string;
-  intended_behavior: string;
-  files: { path: string }[];
-  dependencies: { relies_on: string[] };
-  version: number;
-}
-
-const toArticleCard = (a: unknown): Card => {
-  const art = a as ArticleRecord;
-  return {
-    id: art.id,
-    type: 'feature_article',
-    title: art.title,
-    body: `${art.what_it_does}\n\n→ intended: ${art.intended_behavior}`,
-    detail: `${art.slug} · ${art.state} · v${art.version} · ${art.files.length} file(s) · relies on ${art.dependencies.relies_on.length}`,
-    groups: [...new Set(art.files.map((f) => groupOf(f.path)))],
-  };
-};
-
-export function articleCards(store: SterlingStore): Card[] {
-  return store.query({ types: ['feature_article'], cap: 200 }).map(toArticleCard);
-}
-
-/** FTS search over articles via the same §3.4 rank machinery agents use. */
-export function articleSearch(store: SterlingStore, rankTerms: string[]): Card[] {
-  return store.query({ types: ['feature_article'], rank_terms: rankTerms, cap: 200 }).map(toArticleCard);
 }
 
 export interface RunView {
