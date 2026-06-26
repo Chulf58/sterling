@@ -7,9 +7,14 @@
 //   not ok + code 'ERR_ASSERTION'  -> assertion_fail
 //   not ok + anything else         -> crash (throws, syntax errors, file-level failures)
 //   spawn failure / no TAP results -> crash
+//
+// TS-source scope (packages/<pkg>/src/**.test.ts) is BUILT and run from dist:
+// the package tsconfig is Node16, so tests import siblings via `.js` specifiers
+// that only resolve under dist — running the .ts directly fails to LOAD (a false
+// crash). We compile each owning package once, then run its dist .test.js.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { join, relative, dirname } from 'node:path';
 import { matchesGlob } from '@sterling/schemas';
 
 export const name = 'node';
@@ -28,7 +33,14 @@ export const testPathGlobs = ['**/*.test.mjs', '**/*.test.js', '**/*.test.ts', '
 export const runCommands = { test: 'node --test' };
 
 export function runTests({ cwd, scope = [] }) {
-  const args = ['--test', '--test-reporter', 'tap', ...scope];
+  // TS-source test files (src/**.test.ts) must be built and run from dist (see
+  // header); .mjs / compiled .js pass through unchanged. A build failure is a
+  // legitimate crash — fail loud (P5), don't run against stale dist.
+  const remapped = buildAndRemapTsScope(cwd, scope);
+  if (remapped.buildOutput != null) {
+    return { overall: 'crash', results: [], raw: remapped.buildOutput };
+  }
+  const args = ['--test', '--test-reporter', 'tap', ...remapped.scope];
   // Sanitize: if the adapter itself runs under a node test runner (checks do),
   // NODE_TEST_CONTEXT leaks into the child and silently switches its output
   // protocol — classification would misread every result.
@@ -50,6 +62,65 @@ export function runTests({ cwd, scope = [] }) {
       ? 'assertion_fail'
       : 'pass';
   return { overall, results, raw };
+}
+
+/**
+ * Build every package owning a TS-source test in `scope`, then remap those
+ * paths to their dist equivalents (the owning package's leading `src/` ->
+ * `dist/`, trailing `.ts` -> `.js`). Non-TS / non-src paths pass through
+ * untouched. Returns the rewritten scope; on a compile failure returns
+ * `buildOutput` (non-null) so the caller surfaces a crash (P5). A TS path with
+ * no owning tsconfig falls through unbuilt — it runs directly and fails
+ * naturally.
+ */
+function buildAndRemapTsScope(cwd, scope) {
+  const isTsSource = (p) => /(?:^|\/)src\//.test(p) && p.endsWith('.ts');
+  const tsScope = scope.filter(isTsSource);
+  if (tsScope.length === 0) return { scope };
+
+  // Distinct owning package dirs (nearest ancestor with a tsconfig.json),
+  // built once each.
+  const pkgDirs = new Set();
+  const ownerOf = new Map();
+  for (const p of tsScope) {
+    const pkgDir = findPackageDir(cwd, p);
+    ownerOf.set(p, pkgDir);
+    if (pkgDir) pkgDirs.add(pkgDir);
+  }
+  for (const pkgDir of pkgDirs) {
+    // Run the compiler's JS entry through node — NOT the extensionless .bin/tsc
+    // shim, which ENOENTs on native Windows (needs tsc.cmd). This form is
+    // inherently cross-platform: no shell, no shim, no platform branch.
+    const tsc = join(cwd, 'node_modules', 'typescript', 'bin', 'tsc');
+    const build = spawnSync(process.execPath, [tsc, '-p', join(pkgDir, 'tsconfig.json')], { cwd, encoding: 'utf8', timeout: 120_000 });
+    if (build.error) return { scope, buildOutput: String(build.error) };
+    if (build.status !== 0) return { scope, buildOutput: `${build.stdout ?? ''}\n${build.stderr ?? ''}` };
+  }
+
+  // Anchor the remap to the OWNING pkgDir, not the first `/src/` in the path: a
+  // `src` segment ABOVE the package (app/src/feature/src/x.test.ts owned by the
+  // inner tsconfig) would otherwise rewrite the wrong segment. Strip only the
+  // leading `src/` of the pkgDir-relative portion.
+  const remapped = scope.map((p) => {
+    const pkgDir = isTsSource(p) ? ownerOf.get(p) : null;
+    if (!pkgDir) return p;
+    const rel = (pkgDir === '.' ? p : p.slice(pkgDir.length + 1)).replace(/^src\//, 'dist/').replace(/\.ts$/, '.js');
+    return pkgDir === '.' ? rel : `${pkgDir}/${rel}`;
+  });
+  return { scope: remapped };
+}
+
+// Nearest ancestor directory of `file` (under cwd) containing a tsconfig.json,
+// returned cwd-relative POSIX; null if none.
+function findPackageDir(cwd, file) {
+  let dir = dirname(file);
+  while (dir && dir !== '.' && dir !== '/') {
+    if (existsSync(join(cwd, dir, 'tsconfig.json'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return existsSync(join(cwd, 'tsconfig.json')) ? '.' : null;
 }
 
 /**
