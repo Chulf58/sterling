@@ -20,9 +20,14 @@ export interface UiState {
   /** Knowledge-tab FTS filter; an always-visible field — printable keys feed it
    *  directly (no '/' toggle). Persists across tab switches until ESC clears it. */
   searchQuery: string;
+  /** body scroll offset in display LINES (0-based) for the scrollable card tabs
+   *  (Todos/Notes/Knowledge). Absent → 0. buildDashboardState clamps it to the
+   *  content height each frame; the queue/run tabs have fixed layouts and never
+   *  scroll. Wheel moves it; ↑/↓ adjust it to keep the selected row in view. */
+  scroll?: number;
 }
 
-export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery: '' };
+export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery: '', scroll: 0 };
 
 export interface RowLine {
   text: string;
@@ -85,6 +90,11 @@ export interface DashboardState {
   /** body starts at this screen line: banner.length + header + tab bar + blank
    *  spacer. No banner → 3 (header/tabs/spacer), the prior fixed layout. */
   bodyTop: number;
+  /** body scroll offset in display lines, clamped to [0, total − maxBodyLines].
+   *  The render draws the body window starting at this line and screenLineToRow
+   *  adds it back, so screen and clicks agree. 0 on the queue/run tabs and
+   *  whenever the body fits (maxBodyLines ≥ content, e.g. an unbounded viewport). */
+  scroll: number;
 }
 
 export interface SelectEffect {
@@ -330,6 +340,15 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       ...(overflow ? { overflow } : {}),
     };
   }
+  // body scroll (scrollable card tabs only): clamp the persisted offset to the
+  // content height so the render window and the click hit-test agree. The
+  // queue/run tabs have fixed layouts and never scroll; an unbounded viewport
+  // (maxBodyLines = Infinity, e.g. tests) yields maxScroll 0 → scroll 0, so all
+  // pre-scroll behaviour is unchanged.
+  const scrollable = ui.tab !== QUEUE_TAB && ui.tab !== RUN_TAB;
+  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
+  const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
   const run = ui.tab === RUN_TAB ? runView(store) : undefined;
   // the Knowledge search field is ALWAYS visible (no '/' toggle) — its line
   // shows on the spacer row on the Knowledge tab regardless of the query.
@@ -359,17 +378,22 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
     banner,
     projectName,
     bodyTop,
+    scroll,
   };
 }
 
 /** Map an absolute screen line (1-based, terminal convention) to a row index, or -1.
  *  maxBodyLines bounds the hit-test to the rendered viewport (visibleBodyLines). */
 export function screenLineToRow(state: DashboardState, line1: number, maxBodyLines = Infinity): number {
-  const bodyLine = line1 - 1 - state.bodyTop; // to 0-based body offset
-  if (bodyLine < 0 || bodyLine >= maxBodyLines) return -1;
+  const scroll = state.scroll ?? 0;
+  // render draws absolute body line `abs` at bodyTop + (abs - scroll); invert
+  // with + scroll. Visible window is [scroll, scroll + maxBodyLines). With
+  // scroll 0 this is identical to the prior bodyLine math.
+  const abs = line1 - 1 - state.bodyTop + scroll;
+  if (abs < scroll || abs >= scroll + maxBodyLines) return -1;
   for (let i = 0; i < state.rows.length; i++) {
     const r = state.rows[i];
-    if (bodyLine >= r.screenRow && bodyLine < r.screenRow + r.lines.length) return i;
+    if (abs >= r.screenRow && abs < r.screenRow + r.lines.length) return i;
   }
   return -1;
 }
@@ -380,7 +404,33 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects: Effect[] = [];
 
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0 });
+  // a tab switch resets both the cursor and the scroll offset
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0 });
+
+  // the queue/run tabs have fixed layouts; only the card tabs scroll
+  const scrollable = ui.tab !== QUEUE_TAB && ui.tab !== RUN_TAB;
+  const buildSelf = (uiNext: UiState): DashboardState =>
+    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge);
+
+  // move the selection by `delta` and keep it inside the scroll window so the
+  // viewport follows the cursor. An unbounded viewport or a non-scrolling tab
+  // just moves the cursor (scroll stays 0) — the prior behaviour.
+  const moveCursor = (delta: number): UiState => {
+    const cursor = clamp(ui.cursor + delta);
+    if (!scrollable || !Number.isFinite(maxBodyLines)) return { ...ui, cursor };
+    const st = buildSelf({ ...ui, cursor });
+    const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
+    const max = Math.max(0, total - maxBodyLines);
+    let scroll = ui.scroll ?? 0;
+    const row = st.rows[cursor];
+    if (row) {
+      const top = row.screenRow;
+      const bottom = row.screenRow + row.lines.length;
+      if (top < scroll) scroll = top; // selection above the window → scroll up to its top
+      else if (bottom > scroll + maxBodyLines) scroll = Math.min(top, bottom - maxBodyLines); // below → reveal it
+    }
+    return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
+  };
 
   const toggle = (id: string): string[] =>
     ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
@@ -415,12 +465,12 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         case 'ESCAPE':
           // the Knowledge field is always live: Esc clears the query + cursor
           if (ui.tab === KNOWLEDGE_TAB) {
-            return { ui: { ...ui, searchQuery: '', cursor: 0 }, effects };
+            return { ui: { ...ui, searchQuery: '', cursor: 0, scroll: 0 }, effects };
           }
           return { ui, effects };
         case 'BACKSPACE':
           if (ui.tab === KNOWLEDGE_TAB) {
-            return { ui: { ...ui, searchQuery: ui.searchQuery.slice(0, -1), cursor: 0 }, effects };
+            return { ui: { ...ui, searchQuery: ui.searchQuery.slice(0, -1), cursor: 0, scroll: 0 }, effects };
           }
           return { ui, effects };
         case 'LEFT':
@@ -429,9 +479,9 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         case 'TAB':
           return { ui: switchTab((ui.tab + 1) % TABS.length), effects };
         case 'UP':
-          return { ui: { ...ui, cursor: clamp(ui.cursor - 1) }, effects };
+          return { ui: moveCursor(-1), effects };
         case 'DOWN':
-          return { ui: { ...ui, cursor: clamp(ui.cursor + 1) }, effects };
+          return { ui: moveCursor(1), effects };
         case 'ENTER':
           return { ui: activate(clamp(ui.cursor)), effects };
         case 'SPACE':
@@ -444,7 +494,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // the Knowledge tab is an always-visible search field: EVERY printable key
       // feeds the query — 'q' and digits included (they are not hotkeys here).
       if (ui.tab === KNOWLEDGE_TAB) {
-        return { ui: { ...ui, searchQuery: ui.searchQuery + ch, cursor: 0 }, effects };
+        return { ui: { ...ui, searchQuery: ui.searchQuery + ch, cursor: 0, scroll: 0 }, effects };
       }
       if (ch === 'q') {
         effects.push({ type: 'quit' });
@@ -460,8 +510,14 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     case 'tab':
       if (event.index < 0 || event.index >= TABS.length) return { ui, effects };
       return { ui: switchTab(event.index), effects };
-    case 'wheel':
-      return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
+    case 'wheel': {
+      // wheel scrolls the viewport by lines (so you can read a tall expanded
+      // record); on the fixed queue/run tabs it keeps moving the cursor.
+      if (!scrollable) return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
+      const desired = (ui.scroll ?? 0) + (event.dy > 0 ? 3 : -3);
+      const st = buildSelf({ ...ui, scroll: desired });
+      return { ui: { ...ui, scroll: st.scroll }, effects };
+    }
     case 'click': {
       // build the same geometry the renderer drew with — wrapped heights, the
       // queue tab's pending truncation, AND the banner-driven bodyTop must all
@@ -484,7 +540,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     }
     case 'rightclick':
       // collapse everything — the quick "back to overview" gesture
-      return { ui: { ...ui, expanded: [] }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0 }, effects };
   }
   return { ui, effects };
 }

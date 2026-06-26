@@ -421,10 +421,12 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
   const { store, t1, t2, cleanup } = fixture();
   try {
     let ui: UiState = initialUi;
+    // wheel scrolls the viewport now (not the cursor); with content that fits the
+    // pane (unbounded viewport here) it is a clamped no-op. The dedicated 'scroll:'
+    // test pins the real scroll behaviour.
     ({ ui } = reduce(store, ui, { kind: 'wheel', dy: 1 }));
-    assert.equal(ui.cursor, 1);
-    ({ ui } = reduce(store, ui, { kind: 'wheel', dy: -1 }));
-    assert.equal(ui.cursor, 0);
+    assert.equal(ui.cursor, 0, 'wheel no longer moves the cursor');
+    assert.equal(ui.scroll ?? 0, 0, 'nothing to scroll when the body fits');
 
     // click the second todo (body line 5 when nothing is expanded; bodyTop=3)
     const click = reduce(store, ui, { kind: 'click', x: 5, y: 5 });
@@ -447,6 +449,55 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
     // click in dead space: no-op
     const dead = reduce(store, ui, { kind: 'click', x: 1, y: 50 });
     assert.deepEqual(dead.effects, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('scroll: wheel scrolls the viewport, arrows follow the cursor, hit-test tracks the offset, resets on tab switch', () => {
+  const { store, cleanup } = fixture(); // 2 user todos already
+  try {
+    for (let i = 0; i < 8; i++) store.create({ ...envelope('todo'), text: `todo ${i}`, source: 'user' });
+    // 10 user todos, 1 collapsed line each → 10 body lines; the pane shows 3
+    const vp = { maxBodyLines: 3, width: 80 };
+
+    // the rendered state exposes the clamped scroll (maxScroll = 10 − 3 = 7)
+    let s = buildDashboardState(store, st(), 80, 3);
+    assert.equal(s.rows.length, 10);
+    assert.equal(s.scroll, 0, 'collapsed default starts at the top');
+
+    // wheel scrolls the viewport by lines, clamped to maxScroll
+    let ui = st();
+    ({ ui } = reduce(store, ui, { kind: 'wheel', dy: 1 }, vp));
+    assert.equal(ui.scroll, 3, 'wheel down scrolls 3 lines');
+    ({ ui } = reduce(store, ui, { kind: 'wheel', dy: 1 }, vp));
+    ({ ui } = reduce(store, ui, { kind: 'wheel', dy: 1 }, vp));
+    assert.equal(ui.scroll, 7, 'wheel clamps at maxScroll (10 rows − 3 visible)');
+    ({ ui } = reduce(store, ui, { kind: 'wheel', dy: -1 }, vp));
+    assert.equal(ui.scroll, 4, 'wheel up scrolls back');
+
+    // the click hit-test tracks the offset: at scroll 4 the first visible body
+    // line (terminal line bodyTop+1 = 4) maps to row 4, not row 0
+    s = buildDashboardState(store, st({ scroll: 4 }), 80, 3);
+    assert.equal(s.scroll, 4);
+    assert.equal(screenLineToRow(s, 4, 3), 4, 'first visible line maps through the scroll offset');
+    assert.equal(screenLineToRow(s, 6, 3), 6, 'last visible line');
+    assert.equal(screenLineToRow(s, 7, 3), -1, 'beyond the 3-line window is not clickable');
+
+    // arrows move the selection and the viewport FOLLOWS it
+    let r = reduce(store, st({ cursor: 2, scroll: 5 }), { kind: 'key', name: 'UP' }, vp);
+    assert.equal(r.ui.cursor, 1);
+    assert.equal(r.ui.scroll, 1, 'a cursor above the window pulls the viewport up to it');
+    r = reduce(store, st({ cursor: 8, scroll: 7 }), { kind: 'key', name: 'UP' }, vp);
+    assert.equal(r.ui.cursor, 7);
+    assert.equal(r.ui.scroll, 7, 'a cursor already in view leaves the viewport put');
+
+    // a tab switch resets the scroll
+    r = reduce(store, st({ scroll: 5 }), { kind: 'key', name: 'TAB' }, vp);
+    assert.equal(r.ui.scroll, 0, 'tab switch resets scroll');
+
+    // back-compat: an unbounded viewport never scrolls (wheel is a clamped no-op)
+    assert.equal(reduce(store, st(), { kind: 'wheel', dy: 1 }).ui.scroll ?? 0, 0);
   } finally {
     cleanup();
   }

@@ -61,9 +61,14 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
     screen.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
     y += 1;
   }
+  // draw the body window: skip the first state.scroll body lines (scrolled
+  // past), then print until the viewport fills. screenLineToRow inverts the
+  // same offset, so the screen and the click hit-test agree by construction.
+  let bodyIdx = 0;
   for (const row of state.rows) {
     if (y > lastBodyLine) break;
     for (const line of row.lines) {
+      if (bodyIdx++ < state.scroll) continue;
       if (y > lastBodyLine) break;
       const attr =
         line.kind === 'title' ? { inverse: row.selected, bold: row.expanded } : line.kind === 'meta' ? { dim: true } : {};
