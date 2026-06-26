@@ -2,10 +2,10 @@
 // the logic is unit-testable; server.ts wires them to MCP. Coarse tools are
 // safe because schemas are exact: every write revalidates at the store.
 
-import { randomUUID } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import type { QueryOptions, RecordedExit, ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -51,6 +51,56 @@ export class SterlingTools {
     return this.store.getRun()?.id;
   }
 
+  /**
+   * §3.2.3/§3.2.5 drift baseline: sha256 of each owned file currently on disk,
+   * keyed by the registry's file-key extractor (feature_article files[].path;
+   * reference_material kind:doc location). Computed at create/reconcile so the
+   * read-time drift check can distinguish a real content change from a mere
+   * mtime reset (a git merge/checkout touches every file's mtime without
+   * changing content). No repoRoot, or a file absent at write time, → no entry
+   * (the read-time deletion check still covers a vanished owned file).
+   */
+  private computeBaselines(record: Record<string, unknown>): Record<string, string> | undefined {
+    if (!this.repoRoot) return undefined;
+    const type = record.type as string;
+    if (type !== 'feature_article' && type !== 'reference_material') return undefined;
+    const baselines: Record<string, string> = {};
+    for (const rel of RECORD_TYPES[type].fileKeys(record)) {
+      const hash = this.hashFile(rel);
+      if (hash !== undefined) baselines[rel] = hash;
+    }
+    return Object.keys(baselines).length ? baselines : undefined;
+  }
+
+  /** sha256 of a repo-relative file's bytes, or undefined if it cannot be read. */
+  private hashFile(rel: string): string | undefined {
+    if (!this.repoRoot) return undefined;
+    try {
+      return createHash('sha256').update(readFileSync(join(this.repoRoot, rel))).digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Has the file at `rel` actually changed since its recorded baseline? mtime
+   * has already said "maybe" (the cheap pre-filter); this is the authoritative
+   * content check that suppresses the false positives a git merge/checkout
+   * produces by resetting mtimes without changing content. No baseline for the
+   * file (a record written before this wire, or a file absent at write time) →
+   * returns FALSE: mtime alone is a proven-unreliable signal, so the check
+   * ABSTAINS rather than raise a flag it cannot stand behind. The baseline is
+   * established on the next create/reconcile; H7 covers every governed edit
+   * meanwhile. An unreadable file also abstains (no fabricated flag).
+   */
+  private contentChanged(rel: string, baselines: Record<string, string> | undefined): boolean {
+    const baseline = baselines?.[rel];
+    if (baseline === undefined) return false;
+    const current = this.hashFile(rel);
+    if (current === undefined) return false;
+    return current !== baseline;
+  }
+
   // -- knowledge CRUD ---------------------------------------------------------
 
   knowledgeCreate(
@@ -58,7 +108,7 @@ export class SterlingTools {
     fields: Record<string, unknown>
   ): { record: DurableRecord; check_skipped: SkippedCheck[]; merged_into?: string } {
     const ts = this.now();
-    const candidate = {
+    const candidate: Record<string, unknown> = {
       id: this.newId(),
       type,
       created_at: ts,
@@ -71,6 +121,11 @@ export class SterlingTools {
       stack_tags: fields.stack_tags ?? [],
       ...fields,
     };
+    // record the owned-file content baseline at birth (server-computed, never
+    // author-supplied) so the read-time drift check is content-aware (§3.2.3)
+    if (type === 'feature_article' || type === 'reference_material') {
+      candidate.file_baselines = this.computeBaselines(candidate);
+    }
     const skipped: SkippedCheck[] = [];
 
     if (type === 'anti_pattern') {
@@ -179,7 +234,7 @@ export class SterlingTools {
       // File mtime newer than source_date → verify_before_use + ONE deduplicated
       // refresh_reference maintenance item (a hundred stale reads, one queue entry).
       if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot) {
-        const r = record as unknown as { id: string; title: string; location: string; source_date: string };
+        const r = record as unknown as { id: string; title: string; location: string; source_date: string; file_baselines?: Record<string, string> };
         let rel: string | undefined;
         try {
           rel = normalizeRepoPath(r.location);
@@ -188,7 +243,10 @@ export class SterlingTools {
         }
         if (rel) {
           const stat = statSync(join(this.repoRoot, rel), { throwIfNoEntry: false });
-          if (stat && stat.mtimeMs > Date.parse(r.source_date)) {
+          // mtime > source_date is the cheap pre-filter; confirm a real content
+          // change against the baseline before flagging (an mtime-only bump from
+          // a merge is not an out-of-band edit). No baseline → abstain.
+          if (stat && stat.mtimeMs > Date.parse(r.source_date) && this.contentChanged(rel, r.file_baselines)) {
             const open = this.maintenanceQuery({ system_reason: 'refresh_reference', file_keys: [rel], cap: 1000 });
             if (open.length === 0) {
               this.maintenanceEnqueue({
@@ -208,7 +266,7 @@ export class SterlingTools {
       // the article and enqueues ONE reconcile_needed item (same feature_link
       // dedup as H7 — one drain surface regardless of trigger).
       if (record.type === 'feature_article' && this.repoRoot) {
-        const a = record as unknown as { id: string; slug: string; files?: { path: string }[] };
+        const a = record as unknown as { id: string; slug: string; files?: { path: string }[]; file_baselines?: Record<string, string> };
         let drift: { path: string; missing: boolean } | undefined;
         for (const f of a.files ?? []) {
           const stat = statSync(join(this.repoRoot, f.path), { throwIfNoEntry: false });
@@ -216,7 +274,10 @@ export class SterlingTools {
             drift = { path: f.path, missing: true };
             break;
           }
-          if (stat.mtimeMs > Date.parse(record.updated_at)) {
+          // mtime newer than updated_at is the cheap pre-filter; confirm a real
+          // content change against the baseline before flagging, so a git
+          // merge/checkout's mtime reset is not mistaken for an out-of-band edit.
+          if (stat.mtimeMs > Date.parse(record.updated_at) && this.contentChanged(f.path, a.file_baselines)) {
             drift = { path: f.path, missing: false };
             break;
           }
@@ -270,6 +331,13 @@ export class SterlingTools {
     };
     if (old.type === 'feature_article' && body.version === undefined) {
       next.version = (old as { version: number }).version + 1;
+    }
+    // re-baseline on every reconcile: the new version's owned-file hashes become
+    // the truth the next read-time drift check compares against, so reconciling
+    // an article both clears its current flag and immunizes it against the next
+    // merge's mtime reset (§3.2.3). Overwrites any stale baseline carried from old.
+    if (next.type === 'feature_article' || next.type === 'reference_material') {
+      next.file_baselines = this.computeBaselines(next);
     }
     return this.store.supersede(id, next);
   }
