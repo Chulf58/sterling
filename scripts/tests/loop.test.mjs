@@ -24,6 +24,12 @@ function runScript(script, args, cwd) {
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
+function git(cwd, args) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  return (r.stdout ?? '').trim();
+}
+
 function envelope(type, at = NOW) {
   return {
     id: randomUUID(),
@@ -457,6 +463,97 @@ test('dispose-run success is reachable from the ready fixture (control for the r
     const r = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.equal(fix.store.getRun('r-loop').machine_state, 'awaiting_merge_gate');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// dispose-run --abort: sanctioned pre-green teardown (run blocked before green)
+// ---------------------------------------------------------------------------
+
+test('dispose-run --abort: a pre-green run normal-disposal REFUSES is torn down to rejected', () => {
+  // r-loop is the pre-green fixture: machine_state 'running', phase p1 in_progress,
+  // no capture done — exactly a run that cannot reach the merge gate.
+  const fix = makeLoopProject();
+  try {
+    const runBefore = fix.store.getRun('r-loop');
+    assert.equal(runBefore.machine_state, 'running');
+    assert.equal(runBefore.phases[0].status, 'in_progress');
+
+    // a left-over run-scoped artifact, to prove the dir is torn down
+    mkdirSync(join(fix.dir, '.sterling', 'runs', 'r-loop'), { recursive: true });
+    writeFileSync(join(fix.dir, '.sterling', 'runs', 'r-loop', 'knowledge_pack-p1.json'), '{}');
+
+    // NORMAL dispose-run refuses a pre-green run (wrong_state) and changes nothing
+    const refused = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /wrong_state/);
+    assert.equal(fix.store.getRun('r-loop').machine_state, 'running', 'refusal leaves the run untouched');
+
+    // --abort drives it to 'rejected' and tears down the transient state + dir
+    const aborted = runScript('dispose-run.mjs', ['--abort', '--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);
+    // LOUD summary printed before acting
+    assert.match(aborted.stderr, /tearing down run 'r-loop'/);
+    assert.match(aborted.stderr, /machine_state : running/);
+    assert.match(aborted.stderr, /p1=in_progress/);
+    const out = JSON.parse(aborted.stdout);
+    assert.deepEqual(
+      { run_id: out.run_id, aborted: out.aborted, machine_state: out.machine_state },
+      { run_id: 'r-loop', aborted: true, machine_state: 'rejected' }
+    );
+    // no git in this fixture + no base_branch → branch discard skipped LOUDLY, never a crash
+    assert.deepEqual(out.branch, { skipped: 'branch-discard', reason: 'no_base_branch' });
+
+    // 'rejected' is non-active → getRun() (no id) stops returning it
+    assert.equal(fix.store.getRun(), undefined, 'no active run after abort');
+    assert.equal(fix.store.getRun('r-loop').machine_state, 'rejected', 'the run record persists, terminal');
+    // runs/<id>/ is gone
+    assert.equal(existsSync(join(fix.dir, '.sterling', 'runs', 'r-loop')), false, 'run dir torn down');
+
+    // durable knowledge captured during the run is NOT touched by abort
+    assert.ok(fix.store.get(fix.decision.id), 'seeded decision survives abort');
+
+    // abort refuses a second time — the run is now terminal
+    const again = runScript('dispose-run.mjs', ['--abort', '--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(again.code, 1);
+    assert.match(again.stderr, /already terminal \('rejected'\)/);
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('dispose-run --abort: discards the run branch (real git), leaving the base untouched', () => {
+  const fix = makeLoopProject();
+  try {
+    const { dir, store } = fix;
+    // a real git project with the run checked out on its branch, base recorded
+    git(dir, ['init', '-b', 'main']);
+    git(dir, ['config', 'user.email', 'abort@sterling.local']);
+    git(dir, ['config', 'user.name', 'Abort Test']);
+    writeFileSync(join(dir, 'base.txt'), 'on main\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'base', '--no-verify']);
+    git(dir, ['checkout', '-b', 'sterling/run-r-loop']);
+    writeFileSync(join(dir, 'wip.txt'), 'abandoned run work\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'wip', '--no-verify']);
+    // record the base_branch the way startRunBranch would
+    store.casTransition('running', { ...store.getRun('r-loop'), base_branch: 'main' });
+    store.casTransition('running', { ...store.getRun('r-loop'), machine_state: 'halted' });
+
+    const aborted = runScript('dispose-run.mjs', ['--abort', '--run', 'r-loop', '--target', dir], dir);
+    assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);
+    const out = JSON.parse(aborted.stdout);
+    assert.equal(out.machine_state, 'rejected');
+    assert.deepEqual(out.branch, { base_untouched: 'main' });
+
+    // back on the base branch, the run branch deleted, the abandoned commit gone from main
+    assert.equal(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main', 'checked out base after abort');
+    assert.equal(git(dir, ['branch', '--list', 'sterling/run-r-loop']), '', 'run branch deleted');
+    assert.equal(existsSync(join(dir, 'wip.txt')), false, 'abandoned run work is not on the base branch');
+    assert.equal(store.getRun(), undefined, 'no active run after abort');
   } finally {
     fix.cleanup();
   }
