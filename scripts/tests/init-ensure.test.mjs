@@ -4,11 +4,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, appendFileSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, appendFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ProjectRegistry } from '@sterling/store';
+import { randomUUID } from 'node:crypto';
+import { ProjectRegistry, SterlingStore } from '@sterling/store';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -66,9 +67,56 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     assert.ok(nat.includes(`"${WIN_NODE_FAKE}"`), 'right pane runs the detected Windows node (quoted)');
     assert.match(nat, /--size 0\.35\b/, 'wt split uses a 0–1 float, not a percent');
     assert.ok(!/35%/.test(nat), 'native launcher does NOT use the tmux percent unit');
-    assert.ok(!/wsl\.exe/.test(nat), 'native launcher is fully native — no wsl.exe');
     // option B: native claude loads the Windows MCP config and strictly ignores the plugin's WSL server
     assert.match(nat, /--mcp-config "[^"]*\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config/, 'native claude loads the Windows MCP config strictly');
+
+    // --- P5: the domain-knowledge snapshot bridge (AC8) -------------------
+    // A native-Windows process cannot live-read the WSL-resident WAL domain
+    // stores (research_finding 5c6437d8: WAL-over-9p `database is locked`). The
+    // native launcher first refreshes a VACUUM-INTO snapshot of each WSL domain
+    // store into the Windows-local default path via a WSL-side run of
+    // `node snapshot-domains-for-windows.mjs`, THEN launches the native panes
+    // that open those snapshots read-only.
+    //
+    // P5 REWORK: the prior assertion `assert.ok(!/wsl\.exe/.test(nat), …)` is
+    // intentionally REPLACED — P5 introduces EXACTLY ONE wsl.exe usage (the
+    // snapshot step). The assertions below pin that the only wsl.exe IS the
+    // snapshot step and that the claude / TUI panes themselves remain native.
+    const crlfLines = nat.split('\r\n'); // CRLF split — every .bat statement line
+    const wslLines = crlfLines.filter((l) => /wsl\.exe/.test(l));
+    assert.equal(wslLines.length, 1, 'P5 introduces EXACTLY ONE wsl.exe usage — the snapshot step, and no more');
+    const snapLine = wslLines[0];
+    // CRLF preserved: the wsl.exe step was found by splitting on \r\n, proving
+    // the snapshot line is CRLF-terminated like the rest of the .bat.
+    assert.ok(nat.includes('\r\n'), 'native launcher keeps CRLF line endings');
+    assert.ok(!/[^\r]\n/.test(nat), 'no bare LF — every line ending is CRLF');
+
+    // wsl.exe is called BARE — it lives in System32, reliably on PATH
+    // (anti_pattern e7a46e35); unlike wt.exe it must NOT be given an absolute path.
+    assert.match(snapLine, /(^|[^\\\w])wsl\.exe\b/, 'wsl.exe is invoked BARE (relies on PATH)');
+    assert.ok(!/[A-Za-z]:\\[^\n]*wsl\.exe/.test(snapLine), 'wsl.exe is NOT given a drive-absolute path');
+    assert.ok(!/%[^%\n]+%\\[^\n]*wsl\.exe/.test(snapLine), 'wsl.exe is NOT given an env-var-rooted absolute path (cf. wt.exe via %LOCALAPPDATA%)');
+
+    // the snapshot step runs node on the snapshot script (resolved on the WSL side)
+    assert.match(snapLine, /\bnode\b/, 'the snapshot step runs node inside WSL');
+    assert.match(snapLine, /snapshot-domains-for-windows\.mjs/, 'the wsl.exe step runs the snapshot script');
+
+    // positioned BEFORE the wt.exe native launch
+    const snapIdx = crlfLines.findIndex((l) => /wsl\.exe/.test(l));
+    const wtIdx = crlfLines.findIndex((l) => /wt\.exe/.test(l));
+    assert.ok(snapIdx >= 0 && wtIdx >= 0, 'both the snapshot step and the wt launch are present');
+    assert.ok(snapIdx < wtIdx, 'snapshot refresh runs BEFORE the wt.exe native launch');
+
+    // the panes themselves remain NATIVE — wsl.exe never wraps claude.exe nor the
+    // Windows-node TUI (the single wsl.exe line is the snapshot step, nothing more).
+    assert.ok(!/wsl\.exe[^\r\n]*claude\.exe/.test(nat), 'claude pane is native — never wrapped by wsl.exe');
+    const winNodeRe = new RegExp('wsl\\.exe[^\\r\\n]*' + WIN_NODE_FAKE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    assert.ok(!winNodeRe.test(nat), 'the Windows-node TUI pane is native — never wrapped by wsl.exe');
+
+    // FAIL-SOFT: a snapshot failure must NOT prevent the native panes launching.
+    // The snapshot is a SEPARATE statement, not a hard `&&` gate onto the launch.
+    assert.ok(!/wsl\.exe[^\r\n]*&&[^\r\n]*wt\.exe/.test(nat), 'snapshot+launch are not chained with && on one line (fail-soft)');
+    assert.ok(!/&&\s*$/.test(snapLine), 'the snapshot line does not && the launch onto its own success (fail-soft)');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -261,6 +309,199 @@ test('init notes the project in the shared registry (decision 8f9e6db2)', () => 
       assert.equal(me.last_seen_at, null, 'no session-start touch yet');
     } finally {
       reg.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// =============================================================================
+// P5 — domain-knowledge snapshot bridge: scripts/snapshot-domains-for-windows.mjs
+//
+// AC8: the native-Windows launcher refreshes a VACUUM-INTO snapshot of each WSL
+// domain store into the Windows-local default path at startup; the native TUI
+// opens those read-only and shows their records (stale-as-of-launch). The WSL
+// side of that bridge is this script. A native process cannot live-read the
+// WSL-resident WAL stores (research_finding 5c6437d8) — so the source domain
+// stores are snapshotted (VACUUM INTO, reusing SterlingStore.snapshot /
+// MountedStores.snapshotAll) into the Windows-local default path read-only.
+//
+// CONTRACT pinned here (behavioral, via spawnSync — NEVER import: a missing
+// script must yield a non-zero EXIT we assert on, never a thrown import error):
+//   node scripts/snapshot-domains-for-windows.mjs \
+//        --target <projectDir> --win-domains-root <destDir>
+//   • reads <projectDir>/.sterling/config.json, resolves the project's mounted
+//     domain stores (honoring config.domain_paths via resolveDomainMounts),
+//   • for each domain store that EXISTS on disk, VACUUM-INTOs it to
+//     <destDir>/<tag>/sterling.db,
+//   • a domain whose SOURCE store does not exist is SKIPPED LOUDLY (reported,
+//     never created, never crashes),
+//   • prints a summary INCLUDING the snapshot time (staleness surfaced honestly),
+//   • exits 0 on success.
+// --win-domains-root is an override that exists FOR TESTABILITY; in production
+// it defaults to the /mnt/c translation of the Windows homedir's ~/.sterling/domains.
+// =============================================================================
+
+const SNAPSHOT_SCRIPT = join(root, 'scripts', 'snapshot-domains-for-windows.mjs');
+
+// envelope/record-builder mirroring packages/store/src/tests/store.test.ts so a
+// seeded domain record is schema-valid and provably round-trips through the snapshot.
+function envelope(type, over = {}) {
+  const at = '2026-06-26T12:00:00.000Z';
+  return {
+    id: randomUUID(),
+    type,
+    created_at: at,
+    updated_at: at,
+    author: 'conductor',
+    status: 'active',
+    superseded_by: null,
+    links: [],
+    scope: 'domain:node', // a DOMAIN-scoped record, so it lives in the domain store
+    stack_tags: ['node'],
+    ...over,
+  };
+}
+
+function domainDecision(over = {}) {
+  return {
+    ...envelope('decision'),
+    title: 'Domain-shared decision',
+    statement: 'A cross-project decision that lives in the node domain store.',
+    alternatives_rejected: [{ option: 'project-only', reason: 'not shareable' }],
+    rationale: 'Shared across every node project.',
+    file_keys: ['packages/store/src/index.ts'],
+    ...over,
+  };
+}
+
+// Write a minimal, schema-valid .sterling/config.json whose `node` domain is
+// path-overridden to our temp source store (all other config fields default).
+function writeProject(dir, domainPaths) {
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const config = { project_name: 'snapshot-fixture', stack_tags: Object.keys(domainPaths), domain_paths: domainPaths };
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config, null, 2));
+}
+
+function runSnapshot(projectDir, destDir) {
+  const r = spawnSync(process.execPath, [SNAPSHOT_SCRIPT, '--target', projectDir, '--win-domains-root', destDir], {
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: { ...process.env, STERLING_REGISTRY_DB: join(projectDir, 'registry.db') },
+  });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+test('P5 snapshot script: VACUUM-INTOs each EXISTING domain store to <win-root>/<tag>/sterling.db; the snapshot opens read-only and returns the seeded record (AC8)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-snap-'));
+  try {
+    // a REAL source domain store with a seeded domain-scoped record
+    const srcDb = join(dir, 'src-domains', 'node', 'sterling.db');
+    mkdirSync(dirname(srcDb), { recursive: true });
+    const src = new SterlingStore(srcDb);
+    let seededId;
+    try {
+      seededId = src.create(domainDecision()).id;
+    } finally {
+      src.close();
+    }
+    writeProject(dir, { node: srcDb });
+
+    const dest = join(dir, 'win-domains');
+    const r = runSnapshot(dir, dest);
+    assert.equal(r.code, 0, `snapshot script exits 0: ${r.stderr}`);
+
+    // the snapshot landed at the Windows-local default layout <root>/<tag>/sterling.db
+    const snapDb = join(dest, 'node', 'sterling.db');
+    assert.ok(existsSync(snapDb), 'VACUUM-INTO snapshot written at <win-root>/node/sterling.db');
+
+    // opening the snapshot returns the seeded domain record (provably the SAME data)
+    const snap = new SterlingStore(snapDb);
+    try {
+      const got = snap.get(seededId);
+      assert.ok(got, 'seeded domain record present in the snapshot');
+      assert.equal(got.id, seededId, 'snapshot round-trips the exact record');
+      assert.equal(got.type, 'decision');
+    } finally {
+      snap.close();
+    }
+
+    // staleness is surfaced honestly: the summary names the node domain and a time
+    assert.match(r.stdout, /node/, 'summary reports the node domain that was snapshotted');
+    assert.match(r.stdout, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, 'summary includes the snapshot time (ISO-ish) — staleness surfaced');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('P5 snapshot script: a configured domain whose SOURCE db is ABSENT is SKIPPED LOUDLY — still exits 0, reports the skip, never creates that tag\'s snapshot dir (AC8)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-snap-'));
+  try {
+    // 'node' has a real source store; 'ghost' is configured but its source db is absent
+    const srcDb = join(dir, 'src-domains', 'node', 'sterling.db');
+    mkdirSync(dirname(srcDb), { recursive: true });
+    const src = new SterlingStore(srcDb);
+    try {
+      src.create(domainDecision());
+    } finally {
+      src.close();
+    }
+    const ghostDb = join(dir, 'src-domains', 'ghost', 'sterling.db'); // intentionally NOT created
+    assert.ok(!existsSync(ghostDb), 'precondition: the ghost source store does not exist');
+    writeProject(dir, { node: srcDb, ghost: ghostDb });
+
+    const dest = join(dir, 'win-domains');
+    const r = runSnapshot(dir, dest);
+
+    // a missing source is non-fatal: the script still completes
+    assert.equal(r.code, 0, `missing source is non-fatal — still exits 0: ${r.stderr}`);
+    // the present domain WAS snapshotted
+    assert.ok(existsSync(join(dest, 'node', 'sterling.db')), 'the present node domain is still snapshotted');
+    // the absent domain is SKIPPED LOUDLY: reported, and its snapshot dir never created
+    assert.match(r.stdout + r.stderr, /ghost/, 'the skipped ghost domain is reported by name (loud, not silent)');
+    assert.match(r.stdout + r.stderr, /skip/i, 'the report uses skip wording');
+    assert.ok(!existsSync(join(dest, 'ghost')), 'no snapshot dir created for the absent source domain');
+    assert.ok(!existsSync(join(dest, 'ghost', 'sterling.db')), 'no snapshot db fabricated for the absent source');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('P5 snapshot script: refreshes over an existing snapshot — a second run reflects the LATEST source and still exits 0 (startup refresh, AC8)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-snap-'));
+  try {
+    const srcDb = join(dir, 'src-domains', 'node', 'sterling.db');
+    mkdirSync(dirname(srcDb), { recursive: true });
+    const src = new SterlingStore(srcDb);
+    let firstId, secondId;
+    try {
+      firstId = src.create(domainDecision({ title: 'first' })).id;
+    } finally {
+      src.close();
+    }
+    writeProject(dir, { node: srcDb });
+    const dest = join(dir, 'win-domains');
+
+    // first refresh
+    assert.equal(runSnapshot(dir, dest).code, 0, 'first snapshot succeeds');
+
+    // the source grows, then we refresh AGAIN at the next "startup"
+    const src2 = new SterlingStore(srcDb);
+    try {
+      secondId = src2.create(domainDecision({ title: 'second' })).id;
+    } finally {
+      src2.close();
+    }
+    const r2 = runSnapshot(dir, dest);
+    assert.equal(r2.code, 0, `re-running over an existing snapshot still succeeds (startup refresh): ${r2.stderr}`);
+
+    // the refreshed snapshot reflects the LATEST source (both records present)
+    const snap = new SterlingStore(join(dest, 'node', 'sterling.db'));
+    try {
+      assert.ok(snap.get(firstId), 'original record still present after refresh');
+      assert.ok(snap.get(secondId), 'the record added before the second run is present — snapshot was refreshed, not stale-kept');
+    } finally {
+      snap.close();
     }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

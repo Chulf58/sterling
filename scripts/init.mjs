@@ -299,12 +299,18 @@ if (!existsSync(tuiLauncherPath)) {
 let expectedNativeLauncher;
 const nativeLauncherPath = join(target, 'sterling-windows.bat');
 if (winNode) {
+  // P5 (AC8) snapshot bridge: the native launcher's wsl.exe step runs this script
+  // on the WSL side (POSIX paths — it executes inside WSL bash). --win-domains-root
+  // is computed AT RUNTIME from %USERPROFILE% via wslpath (no home baked in here).
+  const snapshotScriptPosix = fwd(join(pluginRoot, 'scripts', 'snapshot-domains-for-windows.mjs'));
   expectedNativeLauncher = crlf(
     readFileSync(join(pluginRoot, 'templates', 'launcher-win-native.bat'), 'utf8')
       .replaceAll('{{WIN_PLUGIN_DIR}}', winPluginDir)
       .replaceAll('{{WIN_NODE}}', winNode)
       .replaceAll('{{WIN_TUI_BUNDLE}}', winTuiBundle)
       .replaceAll('{{SPLIT_RATIO}}', splitRatio01)
+      .replaceAll('{{SNAPSHOT_SCRIPT}}', snapshotScriptPosix)
+      .replaceAll('{{PROJECT_DIR_POSIX}}', fwd(target))
   );
   if (!existsSync(nativeLauncherPath)) {
     writeFileSync(nativeLauncherPath, expectedNativeLauncher);
