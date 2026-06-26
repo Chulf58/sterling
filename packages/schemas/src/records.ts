@@ -33,6 +33,12 @@ export const featureArticleSchema = base
     what_it_does: z.string().min(1),
     intended_behavior: z.string().min(1),
     files: z.array(z.object({ path: repoPath, role: z.string().min(1) })),
+    // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
+    // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
+    // drift check confirms a content change against this before flagging, so a
+    // git merge/checkout that only resets mtimes no longer raises false
+    // reconcile_needed items (decision 65222971 → its baseline successor).
+    file_baselines: z.record(z.string(), z.string()).optional(),
     current_ac: z.array(z.object({ ac_id: z.string().min(1), text: z.string().min(1), verifiable_at: verifiableAt })),
     dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }),
     steps_runbook: z.string().optional(),
@@ -104,6 +110,12 @@ export const referenceMaterialSchema = base
     source_date: isoDate,
     capture_date: isoDate,
     basis: z.enum(['codebase', 'platform', 'external']).default('codebase'),
+    // §3.2.5 drift baseline for a repo-located kind:doc (normalized location →
+    // sha256 of its bytes), computed server-side at create/refresh. Same role as
+    // feature_article.file_baselines: the read-time check confirms a real content
+    // change before raising refresh_reference, so an mtime-only bump (a merge) is
+    // not mistaken for an out-of-band edit. url/pdf locations carry none.
+    file_baselines: z.record(z.string(), z.string()).optional(),
   })
   .superRefine(refineSupersession);
 

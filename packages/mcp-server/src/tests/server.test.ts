@@ -133,7 +133,7 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
   }
 });
 
-test('§3.2.5 repo-located docs: out-of-band mtime bump → verify_before_use + exactly one refresh_reference item; url-kind inert', () => {
+test('§3.2.5 repo-located docs: only a real content change (not an mtime-only bump) → verify_before_use + exactly one refresh_reference item; url-kind inert', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ref-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   mkdirSync(join(dir, 'docs'), { recursive: true });
@@ -143,6 +143,7 @@ test('§3.2.5 repo-located docs: out-of-band mtime bump → verify_before_use + 
     const docPath = join(dir, 'docs', 'spec.md');
     writeFileSync(docPath, 'v1');
     utimesSync(docPath, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+    // created with content 'v1' on disk → baseline = sha256('v1')
     const { record: doc } = tools.knowledgeCreate('reference_material', {
       title: 'Build Spec',
       kind: 'doc',
@@ -151,6 +152,7 @@ test('§3.2.5 repo-located docs: out-of-band mtime bump → verify_before_use + 
       source_date: '2026-06-01T00:00:00.000Z',
       capture_date: '2026-06-01T00:00:00.000Z',
     });
+    assert.ok((doc as unknown as { file_baselines?: Record<string, string> }).file_baselines?.['docs/spec.md'], 'doc records a content baseline at create');
     tools.knowledgeCreate('reference_material', {
       title: 'External',
       kind: 'url',
@@ -165,12 +167,23 @@ test('§3.2.5 repo-located docs: out-of-band mtime bump → verify_before_use + 
     assert.equal(refs.find((r) => r.id === doc.id)?.verify_before_use, undefined, 'in-date doc is not flagged');
     assert.equal(tools.maintenanceQuery({ system_reason: 'refresh_reference' }).length, 0);
 
-    // out-of-band edit: mtime bumped past source_date — flagged on EVERY read,
-    // but a hundred stale reads make one queue entry
+    // mtime-only bump (a git merge/checkout resets mtimes), content STILL 'v1':
+    // mtime is now past source_date but the content baseline matches — NOT an
+    // out-of-band edit, so no flag and nothing enqueued (the false-positive fix)
     utimesSync(docPath, new Date('2026-06-10T00:00:00Z'), new Date('2026-06-10T00:00:00Z'));
     for (let i = 0; i < 3; i++) {
       refs = tools.knowledgeQuery({ types: ['reference_material'] });
-      assert.equal(refs.find((r) => r.id === doc.id)?.verify_before_use, true, `flagged at read ${i + 1}`);
+      assert.equal(refs.find((r) => r.id === doc.id)?.verify_before_use, undefined, `mtime-only bump not flagged (read ${i + 1})`);
+    }
+    assert.equal(tools.maintenanceQuery({ system_reason: 'refresh_reference' }).length, 0, 'mtime-only bump enqueues nothing');
+
+    // genuine out-of-band edit: content changes AND mtime is past source_date —
+    // flagged on EVERY read, but a hundred stale reads make one queue entry
+    writeFileSync(docPath, 'v2');
+    utimesSync(docPath, new Date('2026-06-10T00:00:00Z'), new Date('2026-06-10T00:00:00Z'));
+    for (let i = 0; i < 3; i++) {
+      refs = tools.knowledgeQuery({ types: ['reference_material'] });
+      assert.equal(refs.find((r) => r.id === doc.id)?.verify_before_use, true, `content edit flagged at read ${i + 1}`);
     }
     const queue = tools.maintenanceQuery({ system_reason: 'refresh_reference' });
     assert.equal(queue.length, 1, 'deduplicated across repeated reads');
@@ -186,7 +199,7 @@ test('§3.2.5 repo-located docs: out-of-band mtime bump → verify_before_use + 
   }
 });
 
-test('§3.2.3 article drift: out-of-band edit/deletion → verify_before_use + one reconcile_needed item; reconciliation clears; H7 items dedup', () => {
+test('§3.2.3 article drift: only a real content change (not an mtime-only merge bump) or deletion flags; no baseline → abstain; reconciliation clears; H7 items dedup', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-art-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   mkdirSync(join(dir, 'src'), { recursive: true });
@@ -210,34 +223,63 @@ test('§3.2.3 article drift: out-of-band edit/deletion → verify_before_use + o
   const reconciled = (slug: string) =>
     tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter((t) => new RegExp(`'${slug}'`).test((t as { text: string }).text));
   try {
+    const future = new Date(Date.now() + 3_600_000);
     const aPath = join(dir, 'src', 'a.mjs');
     writeFileSync(aPath, 'v1');
     utimesSync(aPath, old, old);
-    const a = article('feat-a', 'src/a.mjs');
+    const a = article('feat-a', 'src/a.mjs'); // baseline = sha256('v1')
+    assert.ok((a as unknown as { file_baselines?: Record<string, string> }).file_baselines?.['src/a.mjs'], 'article records a content baseline at create');
 
     // owned file older than updated_at: clean read, nothing enqueued
     let arts = tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(arts.find((r) => r.id === a.id)?.verify_before_use, undefined, 'fresh article not flagged');
     assert.equal(reconciled('feat-a').length, 0);
 
-    // out-of-band edit: mtime past updated_at — flagged every read, ONE item
-    const future = new Date(Date.now() + 3_600_000);
+    // mtime-only bump past updated_at, content STILL 'v1' (the git merge/checkout
+    // case): the content baseline matches, so NOT drift — no flag, nothing enqueued.
+    // This is the false-positive the baseline wire exists to kill.
     utimesSync(aPath, future, future);
     for (let i = 0; i < 3; i++) {
       arts = tools.knowledgeQuery({ types: ['feature_article'] });
-      assert.equal(arts.find((r) => r.id === a.id)?.verify_before_use, true, `flagged at read ${i + 1}`);
+      assert.equal(arts.find((r) => r.id === a.id)?.verify_before_use, undefined, `mtime-only bump not flagged (read ${i + 1})`);
+    }
+    assert.equal(reconciled('feat-a').length, 0, 'mtime-only bump enqueues nothing');
+
+    // genuine out-of-band edit: content changes AND mtime is past updated_at —
+    // flagged every read, ONE item
+    writeFileSync(aPath, 'v2');
+    utimesSync(aPath, future, future);
+    for (let i = 0; i < 3; i++) {
+      arts = tools.knowledgeQuery({ types: ['feature_article'] });
+      assert.equal(arts.find((r) => r.id === a.id)?.verify_before_use, true, `content edit flagged at read ${i + 1}`);
     }
     assert.equal(reconciled('feat-a').length, 1, 'deduplicated across repeated reads');
     assert.match((reconciled('feat-a')[0] as { text: string }).text, /out-of-band edit/);
 
-    // reconciliation clears mechanically: mtime back in the past (the real-world
-    // ordering — edit happened, THEN the article was trued up), update bumps updated_at
-    utimesSync(aPath, old, old);
+    // reconciliation clears mechanically: knowledge_update re-baselines to the
+    // current content ('v2') AND bumps updated_at, so the article reads clean
     const v2 = tools.knowledgeUpdate(a.id, { what_it_does: 'trued up' });
     arts = tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(arts.find((r) => r.id === v2.id)?.verify_before_use, undefined, 'reconciled article reads clean');
+    // and the re-baseline immunizes against the next merge: bump mtime, same content
+    utimesSync(aPath, future, future);
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === v2.id)?.verify_before_use, undefined, 'post-reconcile mtime bump stays clean');
 
-    // deletion is drift: missing owned file flags + names the file
+    // no baseline → abstain: an article created while its owned file was absent
+    // carries no baseline; a later mtime past updated_at cannot be confirmed as a
+    // content change, so the check abstains (mtime alone is not trusted) rather
+    // than raise a false flag — the legacy/migration path
+    const dPath = join(dir, 'src', 'd.mjs');
+    const d = article('feat-d', 'src/d.mjs'); // d.mjs absent at create → no baseline
+    assert.equal((d as unknown as { file_baselines?: unknown }).file_baselines, undefined, 'no baseline when the owned file is absent at create');
+    writeFileSync(dPath, 'v1');
+    utimesSync(dPath, future, future);
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === d.id)?.verify_before_use, undefined, 'no baseline → mtime alone does not flag');
+    assert.equal(reconciled('feat-d').length, 0, 'no baseline → nothing enqueued');
+
+    // deletion is drift: missing owned file flags + names the file (baseline-independent)
     const bPath = join(dir, 'src', 'b.mjs');
     writeFileSync(bPath, 'v1');
     utimesSync(bPath, old, old);
@@ -249,12 +291,14 @@ test('§3.2.3 article drift: out-of-band edit/deletion → verify_before_use + o
 
     // an open H7-style reconcile_needed item (same feature_link) suppresses a
     // second enqueue — seeded with a DIFFERENT file key so this pins that the
-    // dedup is feature_link-based, not file_keys-based
+    // dedup is feature_link-based, not file_keys-based. A REAL content edit
+    // triggers the drift wire so the dedup path is actually exercised.
     const cPath = join(dir, 'src', 'c.mjs');
     writeFileSync(cPath, 'v1');
     utimesSync(cPath, old, old);
     const c = article('feat-c', 'src/c.mjs');
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: "reconcile article 'feat-c' — files it owns were touched in direct mode", file_keys: ['src/other.mjs'], feature_link: c.id });
+    writeFileSync(cPath, 'v2');
     utimesSync(cPath, future, future);
     tools.knowledgeQuery({ types: ['feature_article'] });
     const cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter((t) => (t as { feature_link?: string }).feature_link === c.id);
