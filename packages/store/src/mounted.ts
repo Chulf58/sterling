@@ -8,7 +8,7 @@
 // Mechanism (decision 2026-06-16, store-internals are the implementor's choice
 // per §12): composition over SQLite ATTACH — each store is a self-contained,
 // already-tested SterlingStore; this layer only mounts, routes, and merges.
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { SterlingStore, type QueryOptions } from './index.js';
@@ -47,10 +47,17 @@ export class MountedStores {
   private readonly domains = new Map<string, SterlingStore>();
 
   /** Opening a store creates its file + schema (§2.3 lazy creation): a domain
-   *  store comes into being the first time a project's manifest mounts it. */
-  constructor(projectDbPath: string, mounts: DomainMount[] = []) {
+   *  store comes into being the first time a project's manifest mounts it.
+   *  When options.skipMissing is true, domain mounts whose db file does NOT
+   *  already exist on disk are SKIPPED — never created. Existing siblings that
+   *  DO exist are still mounted. The default (no options / skipMissing false)
+   *  always lazily creates missing stores (§2.3 backward-compatible default). */
+  constructor(projectDbPath: string, mounts: DomainMount[] = [], options?: { skipMissing?: boolean }) {
     this.project = open(projectDbPath);
-    for (const m of mounts) this.domains.set(m.name, open(m.dbPath));
+    for (const m of mounts) {
+      if (options?.skipMissing && !existsSync(m.dbPath)) continue;
+      this.domains.set(m.name, open(m.dbPath));
+    }
   }
 
   /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
@@ -80,6 +87,21 @@ export class MountedStores {
     const cap = opts.cap ?? 20;
     const merged = this.all().flatMap((s) => s.query(opts));
     return merged.slice(0, cap);
+  }
+
+  /** Per-source projection (AC2): project store FIRST, then each mounted domain
+   *  in manifest order. Each store runs the full query independently — type
+   *  filter, file-key join, cap, and match_all are all PER-STORE (never a
+   *  global slice across the merged result). Zero domains → exactly one entry.
+   *  The source name is 'project' for the project store and the domain manifest
+   *  name (DomainMount.name) for each domain store. */
+  bySource(opts?: QueryOptions): { source: string; records: DurableRecord[] }[] {
+    const result: { source: string; records: DurableRecord[] }[] = [];
+    result.push({ source: 'project', records: this.project.query(opts) });
+    for (const [name, store] of this.domains) {
+      result.push({ source: name, records: store.query(opts) });
+    }
+    return result;
   }
 
   /** Cross-store fetch by id: project first, then domains. */

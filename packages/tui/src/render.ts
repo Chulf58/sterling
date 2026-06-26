@@ -66,7 +66,7 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
     for (const line of row.lines) {
       if (y > lastBodyLine) break;
       const attr =
-        line.kind === 'title' ? (row.selected ? { inverse: true } : {}) : line.kind === 'meta' ? { dim: true } : {};
+        line.kind === 'title' ? { inverse: row.selected, bold: row.expanded } : line.kind === 'meta' ? { dim: true } : {};
       screen.put({ x: 0, y, attr }, line.text);
       y += 1;
     }

@@ -2,27 +2,27 @@
 // never the renderer). buildDashboardState derives everything the renderer
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
-import type { SterlingStore } from '@sterling/store';
-import { articleCards, articleSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
+import type { SterlingStore, MountedStores } from '@sterling/store';
+import { KNOWLEDGE_CATEGORIES, toCard, knowledgeBySource, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
-export const TABS = ['Todos', 'Notes', 'Articles', 'Queue', 'Live-run'] as const;
+export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run'] as const;
 /** the run tab is always last — every other tab is a card list */
 export const RUN_TAB = TABS.length - 1;
-export const ARTICLES_TAB = 2;
+/** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
+export const KNOWLEDGE_TAB = 2;
 export const QUEUE_TAB = 3;
 
 export interface UiState {
   tab: number;
   cursor: number;
   expanded: string[];
-  /** articles-tab FTS filter; persists across tab switches until ESC clears it */
+  /** Knowledge-tab FTS filter; an always-visible field — printable keys feed it
+   *  directly (no '/' toggle). Persists across tab switches until ESC clears it. */
   searchQuery: string;
-  /** '/' input mode on the articles tab: printable keys append to the query */
-  searchEditing: boolean;
 }
 
-export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery: '', searchEditing: false };
+export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery: '' };
 
 export interface RowLine {
   text: string;
@@ -61,7 +61,7 @@ export interface DashboardState {
   runSelected: boolean;
   emptyMessage?: string;
   footer: string;
-  /** articles-tab search bar, shown on the spacer line when a query/input is live */
+  /** Knowledge-tab search bar (always-visible field), shown on the spacer line */
   searchLine?: string;
   /** queue tab only: the completed (drain log) section in the lower half —
    *  log lines, not records; never selectable (§3.2.7/§11) */
@@ -111,46 +111,92 @@ export function cardsFor(store: SterlingStore, tab: number): Card[] {
   return [];
 }
 
-/** A navigable line-owning entry: a folder group header or a card. */
-export type Node = { kind: 'group'; key: string; count: number } | { kind: 'card'; card: Card; indent: boolean };
+/**
+ * A navigable line-owning entry. On the Knowledge tab the tree has three node
+ * kinds (category → source → record), each carrying its depth for indentation;
+ * card nodes also flag whether they are knowledge-tab cards (readable layout) or
+ * plain cards (todos/notes/queue, the legacy expansion). Every other tab is a
+ * flat list of plain card nodes at depth 0.
+ */
+export type Node =
+  | { kind: 'category'; type: string; label: string; count: number }
+  | { kind: 'source'; catType: string; source: string; count: number }
+  | { kind: 'card'; card: Card; depth: number; knowledge: boolean };
 
-const groupId = (key: string) => `group:${key}`;
+const catId = (type: string) => `cat:${type}`;
+const srcId = (type: string, source: string) => `src:${type}:${source}`;
+
+/** Prefix-star a query into AND-joinable rank terms (mid-word matching). */
+function rankTermsOf(query: string): string[] {
+  return query
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t.length > 0 && t.length < 64)
+    .map((t) => `${t.replace(/\*+$/, '')}*`);
+}
 
 /**
- * The articles tab is a folder tree derived from each article's owned file
- * paths (groups default collapsed; an article appears under every area it
- * owns). An active search replaces the tree with the bm25-ranked flat result
- * list — every term is prefix-starred so typing matches mid-word. The other
- * card tabs stay flat lists.
+ * The Knowledge tab is a 3-level collapse/expand tree: knowledge CATEGORY →
+ * SOURCE store → record. When a `knowledge` MountedStores is provided the tree
+ * fans across stores (project FIRST, then each mounted domain in manifest order;
+ * empty sources dropped) via knowledgeBySource/knowledgeSearch. When `knowledge`
+ * is ABSENT the tree is sourced from the PROJECT `store` alone, so the single
+ * source under every non-empty category is named 'project' (the P3 path).
+ * Empty categories/sources are hidden; everything is collapsed by default. A
+ * non-empty search query REPLACES the tree with a flat, AND-filtered card list
+ * (every term prefix-starred). The other card tabs stay flat lists.
  */
-export function nodesFor(store: SterlingStore, ui: UiState): Node[] {
+export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedStores): Node[] {
   if (ui.tab === RUN_TAB) return [];
-  if (ui.tab === QUEUE_TAB) return queueCards(store).map((card) => ({ kind: 'card' as const, card, indent: false }));
-  if (ui.tab !== ARTICLES_TAB) return cardsFor(store, ui.tab).map((card) => ({ kind: 'card' as const, card, indent: false }));
+  if (ui.tab === QUEUE_TAB) return queueCards(store).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
+  if (ui.tab !== KNOWLEDGE_TAB) return cardsFor(store, ui.tab).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
+
+  const cap = 500;
   const query = ui.searchQuery.trim();
   if (query) {
-    const terms = query
-      .split(/\s+/)
-      .filter((t) => t.length > 0 && t.length < 64)
-      .map((t) => `${t.replace(/\*+$/, '')}*`);
-    if (terms.length) return articleSearch(store, terms).map((card) => ({ kind: 'card' as const, card, indent: false }));
-  }
-  const groups = new Map<string, Card[]>();
-  for (const card of articleCards(store)) {
-    for (const g of card.groups ?? []) {
-      const members = groups.get(g);
-      if (members) members.push(card);
-      else groups.set(g, [card]);
+    const terms = rankTermsOf(query);
+    if (terms.length) {
+      if (knowledge) {
+        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: true }));
+      }
+      const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
+      return store
+        .query({ types, rank_terms: terms, match_all: true, cap })
+        .map((r) => ({ kind: 'card' as const, card: { ...toCard(r), source: 'project' }, depth: 0, knowledge: true }));
     }
   }
+
+  // collapsed default tree: only non-empty categories, in registry order; each
+  // non-empty source appears when its category is expanded; cards appear when
+  // their source is expanded. With `knowledge`, sources fan across stores
+  // (knowledgeBySource: project first, domains next, empty dropped); without it,
+  // the single 'project' source from the project store.
   const nodes: Node[] = [];
-  for (const key of [...groups.keys()].sort()) {
-    const members = groups.get(key)!;
-    nodes.push({ kind: 'group', key, count: members.length });
-    if (ui.expanded.includes(groupId(key))) {
-      for (const card of [...members].sort((a, b) => a.title.localeCompare(b.title))) {
-        nodes.push({ kind: 'card', card, indent: true });
+  for (const cat of KNOWLEDGE_CATEGORIES) {
+    if (knowledge) {
+      const groups = knowledgeBySource(knowledge, cat.type);
+      const count = groups.reduce((n, g) => n + g.cards.length, 0);
+      if (count === 0) continue; // empty categories hidden
+      nodes.push({ kind: 'category', type: cat.type, label: cat.label, count });
+      if (!ui.expanded.includes(catId(cat.type))) continue;
+      for (const g of groups) {
+        nodes.push({ kind: 'source', catType: cat.type, source: g.source, count: g.cards.length });
+        if (!ui.expanded.includes(srcId(cat.type, g.source))) continue;
+        for (const card of g.cards) {
+          nodes.push({ kind: 'card', card, depth: 2, knowledge: true });
+        }
       }
+      continue;
+    }
+    const records = store.query({ types: [cat.type], cap });
+    if (records.length === 0) continue; // empty categories hidden
+    nodes.push({ kind: 'category', type: cat.type, label: cat.label, count: records.length });
+    if (!ui.expanded.includes(catId(cat.type))) continue;
+    // project-only path: the project store is the only source
+    nodes.push({ kind: 'source', catType: cat.type, source: 'project', count: records.length });
+    if (!ui.expanded.includes(srcId(cat.type, 'project'))) continue;
+    for (const r of records) {
+      nodes.push({ kind: 'card', card: { ...toCard(r), source: 'project' }, depth: 2, knowledge: true });
     }
   }
   return nodes;
@@ -202,10 +248,10 @@ export function wrapText(text: string, width: number): string[] {
 const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false): DashboardState {
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores): DashboardState {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const nodes = nodesFor(store, ui);
+  const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
   let screenRow = 0;
@@ -217,19 +263,34 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
     let id: string;
     let type: string;
     let expanded: boolean;
-    if (node.kind === 'group') {
-      id = groupId(node.key);
-      type = 'group';
+    if (node.kind === 'category') {
+      id = catId(node.type);
+      type = 'category';
       expanded = ui.expanded.includes(id);
-      lines = [{ text: clipEllipsis(`${marker}${expanded ? '▾' : '▸'} ${node.key} (${node.count})`, width), kind: 'title' }];
+      lines = [{ text: clipEllipsis(`${marker}${expanded ? '▾' : '▸'} ${node.label} (${node.count})`, width), kind: 'title' }];
+    } else if (node.kind === 'source') {
+      id = srcId(node.catType, node.source);
+      type = 'source';
+      expanded = ui.expanded.includes(id);
+      const pad = '  '; // depth 1
+      lines = [{ text: clipEllipsis(`${marker}${pad}${expanded ? '▾' : '▸'} ${node.source} (${node.count})`, width), kind: 'title' }];
     } else {
-      const { card, indent } = node;
+      const { card, depth, knowledge } = node;
       id = card.id;
       type = card.type;
       expanded = ui.expanded.includes(card.id);
-      const pad = indent ? '  ' : '';
-      if (expanded) {
-        // full body, wrapped under the marker + indent columns; metadata last
+      const pad = '  '.repeat(depth);
+      if (expanded && knowledge) {
+        // readable layout (AC4): title line, blank separator, wrapped body
+        // lines, dim meta — the title is NEVER replaced by the body.
+        const indent = ' '.repeat(2 + pad.length);
+        const wrapWidth = Number.isFinite(width) ? Math.max(1, width - indent.length) : width;
+        lines = [{ text: clipEllipsis(marker + pad + card.title, width), kind: 'title' }, { text: '', kind: 'body' }];
+        for (const text of wrapText(card.body, wrapWidth)) lines.push({ text: indent + text, kind: 'body' });
+        lines.push({ text: clipEllipsis(`${indent}${card.detail}`, width), kind: 'meta' });
+      } else if (expanded) {
+        // legacy card expansion (todos/notes/queue): first wrapped body line
+        // carries the 'title' kind, then body lines, then meta.
         const prefix = 2 + pad.length;
         const wrapWidth = Number.isFinite(width) ? Math.max(1, width - prefix) : width;
         lines = wrapText(card.body, wrapWidth).map((text, j) => ({
@@ -270,7 +331,9 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
     };
   }
   const run = ui.tab === RUN_TAB ? runView(store) : undefined;
-  const searchActive = ui.tab === ARTICLES_TAB && (ui.searchEditing || ui.searchQuery.length > 0);
+  // the Knowledge search field is ALWAYS visible (no '/' toggle) — its line
+  // shows on the spacer row on the Knowledge tab regardless of the query.
+  const searchActive = ui.tab === KNOWLEDGE_TAB;
   return {
     tabs: TABS.map((label, i) => ({ label, active: i === ui.tab })),
     rows,
@@ -282,7 +345,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
           ? undefined
           : 'no active run'
         : nodes.length === 0
-          ? ui.tab === ARTICLES_TAB && ui.searchQuery
+          ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery
             ? '(no matches)'
             : ui.tab === QUEUE_TAB
               ? '(queue empty)'
@@ -290,8 +353,8 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
           : undefined,
     footer:
       `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
-      (ui.tab === ARTICLES_TAB ? ' · / search · esc clears' : ''),
-    searchLine: searchActive ? `search: ${ui.searchQuery}${ui.searchEditing ? '▌' : ''}` : undefined,
+      (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : ''),
+    searchLine: searchActive ? `search: ${ui.searchQuery}` : undefined,
     queueCompleted,
     banner,
     projectName,
@@ -311,13 +374,16 @@ export function screenLineToRow(state: DashboardState, line1: number, maxBodyLin
   return -1;
 }
 
-export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}): { ui: UiState; effects: Effect[] } {
+export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}, knowledge?: MountedStores): { ui: UiState; effects: Effect[] } {
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store, ui);
+  const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects: Effect[] = [];
 
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, searchEditing: false });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0 });
+
+  const toggle = (id: string): string[] =>
+    ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
 
   const activate = (index: number): UiState => {
     if (ui.tab === RUN_TAB) {
@@ -327,16 +393,17 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     }
     const node = nodes[index];
     if (!node) return ui;
-    if (node.kind === 'group') {
-      // fold/unfold the folder — navigation, not a selection
-      const id = groupId(node.key);
-      const expanded = ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
-      return { ...ui, cursor: index, expanded };
+    if (node.kind === 'category') {
+      // fold/unfold the category — navigation, not a selection
+      return { ...ui, cursor: index, expanded: toggle(catId(node.type)) };
+    }
+    if (node.kind === 'source') {
+      // fold/unfold the source — navigation, not a selection
+      return { ...ui, cursor: index, expanded: toggle(srcId(node.catType, node.source)) };
     }
     const card = node.card;
     effects.push({ type: 'select', recordType: card.type, id: card.id });
-    const expanded = ui.expanded.includes(card.id) ? ui.expanded.filter((x) => x !== card.id) : [...ui.expanded, card.id];
-    return { ...ui, cursor: index, expanded };
+    return { ...ui, cursor: index, expanded: toggle(card.id) };
   };
 
   switch (event.kind) {
@@ -346,12 +413,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
           effects.push({ type: 'quit' });
           return { ui, effects };
         case 'ESCAPE':
-          if (ui.tab === ARTICLES_TAB && (ui.searchEditing || ui.searchQuery)) {
-            return { ui: { ...ui, searchEditing: false, searchQuery: '', cursor: 0 }, effects };
+          // the Knowledge field is always live: Esc clears the query + cursor
+          if (ui.tab === KNOWLEDGE_TAB) {
+            return { ui: { ...ui, searchQuery: '', cursor: 0 }, effects };
           }
           return { ui, effects };
         case 'BACKSPACE':
-          if (ui.searchEditing && ui.tab === ARTICLES_TAB) {
+          if (ui.tab === KNOWLEDGE_TAB) {
             return { ui: { ...ui, searchQuery: ui.searchQuery.slice(0, -1), cursor: 0 }, effects };
           }
           return { ui, effects };
@@ -365,7 +433,6 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         case 'DOWN':
           return { ui: { ...ui, cursor: clamp(ui.cursor + 1) }, effects };
         case 'ENTER':
-          if (ui.searchEditing) return { ui: { ...ui, searchEditing: false }, effects }; // keep the filter, leave input mode
           return { ui: activate(clamp(ui.cursor)), effects };
         case 'SPACE':
           return { ui: activate(clamp(ui.cursor)), effects };
@@ -374,16 +441,14 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     case 'char': {
       const ch = event.ch;
       if (ch.length !== 1) return { ui, effects };
-      // search input mode swallows every printable key — 'q' and digits included
-      if (ui.searchEditing && ui.tab === ARTICLES_TAB) {
+      // the Knowledge tab is an always-visible search field: EVERY printable key
+      // feeds the query — 'q' and digits included (they are not hotkeys here).
+      if (ui.tab === KNOWLEDGE_TAB) {
         return { ui: { ...ui, searchQuery: ui.searchQuery + ch, cursor: 0 }, effects };
       }
       if (ch === 'q') {
         effects.push({ type: 'quit' });
         return { ui, effects };
-      }
-      if (ch === '/' && ui.tab === ARTICLES_TAB) {
-        return { ui: { ...ui, searchEditing: true, cursor: 0 }, effects };
       }
       if (ch === ' ') return { ui: activate(clamp(ui.cursor)), effects };
       if (/^[1-9]$/.test(ch)) {
@@ -401,7 +466,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // build the same geometry the renderer drew with — wrapped heights, the
       // queue tab's pending truncation, AND the banner-driven bodyTop must all
       // match the screen, so the tab-bar row and body hit-test track the banner
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false);
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge);
       // tab bar sits one line above the body block (its own header row is just
       // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
       if (event.y === state.bodyTop - 1) {
