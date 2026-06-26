@@ -37,6 +37,23 @@ const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', 
 const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
+test('init records a Windows-drive --backup-path in WSL /mnt form (r-dd88 backup_path bug)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-bkp-'));
+  try {
+    // A Windows-form backup path is how pre-WSL-migration configs were recorded.
+    // Under WSL it must be stored as /mnt/<d>/... so dispose-run resolves it
+    // absolute, not as a junk relative dir inside the repo (resolve treats
+    // 'C:/...' as relative on POSIX). On native Windows the drive path is kept.
+    const r = init(dir, ['--project-name', 'bkp', '--stack-tags', 'node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'C:/Users/test/.sterling-backups/bkp']);
+    assert.equal(r.code, 0, r.stderr);
+    const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    const expected = process.platform === 'win32' ? 'C:/Users/test/.sterling-backups/bkp' : '/mnt/c/Users/test/.sterling-backups/bkp';
+    assert.equal(config.backup_path, expected, 'Windows drive backup_path recorded in the runtime-correct form');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('ensure outcome 1 — create absent: fresh init creates every manifest item and records declarations', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
