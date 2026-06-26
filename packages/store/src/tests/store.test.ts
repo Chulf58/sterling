@@ -5,6 +5,7 @@ import { mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '../index.js';
+import type { QueryOptions } from '../index.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 const LATER = '2026-06-10T13:00:00.000Z';
@@ -321,6 +322,109 @@ test('snapshot: VACUUM INTO produces an openable copy; refuses to overwrite (§2
     assert.throws(() => store.snapshot(target), /refusing to overwrite/);
     writeFileSync(join(dir, 'occupied.db'), 'x');
     assert.throws(() => store.snapshot(join(dir, 'occupied.db')), /refusing to overwrite/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FROZEN P1 oracle (run r-dd88) — AC6 QueryOptions.match_all (AND term-join).
+// SPEC-ONLY, written before match_all exists. The AND tests must fail RED on an
+// AssertionError (union vs intersection counts), never by throwing.
+//
+// match_all is not yet on QueryOptions, so the option is supplied through a
+// NARROW cast (QueryOptions & { match_all?: boolean }) — the call compiles under
+// tsc strict and, with match_all ignored by the current OR-only impl, returns
+// the OR superset, which the AND assertions reject cleanly.
+//
+// FTS fixture with CONTROLLED token overlap: three nonsense tokens placed in
+// feature_article.what_it_does (part of the indexed fts text) so OR-superset vs
+// AND-intersection is provable independent of any real vocabulary:
+//   ALPHA token "zappywodget" / BETA token "quibblezorp"
+//   - "both"  carries BOTH tokens
+//   - "onlyA" carries ALPHA only
+//   - "onlyB" carries BETA only
+// ---------------------------------------------------------------------------
+
+const ALPHA = 'zappywodget';
+const BETA = 'quibblezorp';
+
+/** Supply match_all before QueryOptions declares it, without breaking tsc. */
+const withMatchAll = (opts: QueryOptions, matchAll: boolean): QueryOptions =>
+  ({ ...opts, match_all: matchAll }) as QueryOptions & { match_all?: boolean };
+
+function seedTokenFixture(store: SterlingStore) {
+  store.create(article({ slug: 'rec-both', title: 'rec both', what_it_does: `${ALPHA} ${BETA} marker` }));
+  store.create(article({ slug: 'rec-only-a', title: 'rec only a', what_it_does: `${ALPHA} marker` }));
+  store.create(article({ slug: 'rec-only-b', title: 'rec only b', what_it_does: `${BETA} marker` }));
+}
+
+test('AC6 match_all: default/absent preserves the OR term-join — multi-term returns the UNION (regression guard)', () => {
+  const { dir, store } = tempStore();
+  try {
+    seedTokenFixture(store);
+    // No match_all: existing OR semantics — the union of both tokens = all 3 records.
+    const union = store.query({ types: ['feature_article'], rank_terms: [ALPHA, BETA], cap: 50 });
+    assert.equal(union.length, 3, 'absent match_all keeps the OR union: every record matching EITHER token');
+    const slugs = (union as { slug: string }[]).map((r) => r.slug).sort();
+    assert.deepEqual(slugs, ['rec-both', 'rec-only-a', 'rec-only-b'], 'OR union is the full superset');
+    // explicit match_all:false is identical to absent.
+    const unionFalse = store.query(withMatchAll({ types: ['feature_article'], rank_terms: [ALPHA, BETA], cap: 50 }, false));
+    assert.equal(unionFalse.length, 3, 'match_all:false === default OR union');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC6 match_all:true: AND term-join returns ONLY records matching EVERY term (intersection, not union)', () => {
+  const { dir, store } = tempStore();
+  try {
+    seedTokenFixture(store);
+    const intersection = store.query(withMatchAll({ types: ['feature_article'], rank_terms: [ALPHA, BETA], cap: 50 }, true));
+    assert.equal(intersection.length, 1, 'match_all:true AND-joins: only the record carrying BOTH tokens (NOT the OR superset of 3)');
+    assert.equal((intersection[0] as { slug: string }).slug, 'rec-both', 'the single intersection hit is the both-tokens record');
+    // a one-term match is EXCLUDED under AND.
+    const slugs = (intersection as { slug: string }[]).map((r) => r.slug);
+    assert.ok(!slugs.includes('rec-only-a'), 'a record matching only one term is excluded under AND');
+    assert.ok(!slugs.includes('rec-only-b'), 'a record matching only the other term is excluded under AND');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC6 match_all:true: a single term behaves the same as OR (one-term AND === one-term OR)', () => {
+  const { dir, store } = tempStore();
+  try {
+    seedTokenFixture(store);
+    // one ALPHA term: both "rec-both" and "rec-only-a" carry it — under AND or OR alike.
+    const and = store.query(withMatchAll({ types: ['feature_article'], rank_terms: [ALPHA], cap: 50 }, true));
+    const or = store.query({ types: ['feature_article'], rank_terms: [ALPHA], cap: 50 });
+    assert.equal(and.length, 2, 'a single-term AND matches every record carrying that term');
+    assert.deepEqual(
+      (and as { slug: string }[]).map((r) => r.slug).sort(),
+      (or as { slug: string }[]).map((r) => r.slug).sort(),
+      'one-term AND and one-term OR return the same set'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC6 match_all:true: PREFIX terms are AND-joined too (zap*/quib* → intersection only)', () => {
+  const { dir, store } = tempStore();
+  try {
+    seedTokenFixture(store);
+    // prefixes that match the same tokens: 'zap*' → zappywodget, 'quib*' → quibblezorp.
+    const orPrefix = store.query({ types: ['feature_article'], rank_terms: ['zap*', 'quib*'], cap: 50 });
+    assert.equal(orPrefix.length, 3, 'prefix OR union is still the full superset (default behaviour preserved)');
+
+    const andPrefix = store.query(withMatchAll({ types: ['feature_article'], rank_terms: ['zap*', 'quib*'], cap: 50 }, true));
+    assert.equal(andPrefix.length, 1, 'match_all:true AND-joins PREFIX terms — only the record matching both prefixes');
+    assert.equal((andPrefix[0] as { slug: string }).slug, 'rec-both', 'the both-tokens record is the sole prefix-AND hit');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

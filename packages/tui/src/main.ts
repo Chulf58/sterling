@@ -2,8 +2,10 @@
 // Exits politely on non-TTY stdout (§11). terminal-kit loads only after the
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
+import { readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { SterlingStore } from '@sterling/store';
+import { MountedStores, resolveDomainMounts, type DomainMount } from '@sterling/store';
+import { parseConfig } from '@sterling/schemas';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
 import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, type UiState } from './state.js';
 import { bannerLines } from './banner.js';
@@ -40,10 +42,29 @@ if (owner !== null) {
   process.exit(0);
 }
 
-const store = new SterlingStore(storePath);
+// Open the project store PLUS its mounted domain stores so the Knowledge tab
+// can fan across them. The config lives next to the project store
+// (<.sterling>/config.json); resolveDomainMounts turns its stack_tags into the
+// per-domain db paths. skipMissing → a domain whose db does not yet exist is
+// skipped, never created (the observer is read-only). Any failure to read/parse
+// the config DEGRADES LOUD: project-only + a one-line header indicator, never a
+// crash.
+let mounts: DomainMount[] = [];
+let domainsAvailable = true;
+try {
+  const configPath = join(dirname(storePath), 'config.json');
+  const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+  mounts = resolveDomainMounts(config);
+} catch {
+  mounts = [];
+  domainsAvailable = false;
+}
+const stores = new MountedStores(storePath, mounts, { skipMissing: true });
+const store = stores.project;
 // the project's folder name (…/<project>/.sterling/sterling.db) — shown bold on
 // the TUI's top row so a glance tells you which project's session this pane is.
-const projectName = basename(dirname(dirname(storePath)));
+// When domains could not be loaded the header says so (loud, not buried).
+const projectName = basename(dirname(dirname(storePath))) + (domainsAvailable ? '' : ' — domains unavailable (project-only)');
 // the §11 banner is on by default; STERLING_NO_BANNER=1 suppresses it (the same
 // env var the H1 SessionStart hook honors). It is a pure flag from here down —
 // the state layer stays env-free.
@@ -64,18 +85,18 @@ function viewport() {
 
 function redraw(): void {
   const vp = viewport();
-  draw(screen, buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner));
+  draw(screen, buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores));
 }
 
 function handle(event: ReturnType<typeof keyToEvent>): void {
   if (!event) return;
-  const result = reduce(store, ui, event, viewport());
+  const result = reduce(store, ui, event, viewport(), stores);
   ui = result.ui;
   if (runEffects(store, result.effects)) {
     term.grabInput(false);
     term.hideCursor(false);
     term.fullscreen(false); // leave the alternate screen buffer, restoring the shell
-    store.close();
+    stores.close();
     releaseTuiLock(lockPath, process.pid);
     process.exit(0);
   }

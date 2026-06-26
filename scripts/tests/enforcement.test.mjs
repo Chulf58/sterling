@@ -2,7 +2,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -171,6 +171,82 @@ test('adapter: classifies pass | assertion_fail | crash against real node --test
     const mixed = runTests({ cwd: dir, scope: ['p.test.mjs', 'a.test.mjs'] });
     assert.equal(mixed.overall, 'assertion_fail');
     assert.equal(mixed.results.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('adapter: TS-source package tests are built + run from dist (Node16 .js imports), classified per-test not crash', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tsadapter-'));
+  try {
+    // mimic the package layout: Node16 ESM tsconfig, rootDir src -> outDir dist.
+    // package.json `type: module` keys tsc's ESM emit; `types: ['node']` lets
+    // the test source reference node:test/node:assert.
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fix', version: '0.0.0', private: true, type: 'module' }));
+    writeFileSync(
+      join(dir, 'tsconfig.json'),
+      JSON.stringify({
+        compilerOptions: { target: 'ES2022', module: 'Node16', moduleResolution: 'Node16', rootDir: 'src', outDir: 'dist', strict: true, types: ['node'] },
+        include: ['src/**/*'],
+      })
+    );
+    mkdirSync(join(dir, 'src', 'tests'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'index.ts'), 'export const x = 1;\n');
+    // imports the sibling via `.js` — only resolves under dist, so running the
+    // .ts directly would fail to LOAD (the false crash this fix removes)
+    writeFileSync(
+      join(dir, 'src', 'tests', 'foo.test.ts'),
+      "import {test} from 'node:test'; import assert from 'node:assert'; import {x} from '../index.js';\n" +
+        "test('ok', () => assert.equal(x, 1));\n" +
+        "test('af', () => assert.equal(x, 2));\n"
+    );
+    // tsc resolves from the fixture's node_modules; symlink it to the repo's so
+    // the compiler JS entry + lib are reachable (the fix runs typescript/bin/tsc
+    // through node, cross-platform).
+    symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'), 'junction');
+
+    const r = runTests({ cwd: dir, scope: ['src/tests/foo.test.ts'] });
+    assert.equal(r.overall, 'assertion_fail', 'built + run from dist, the failing assertion classifies red — not crash');
+    assert.deepEqual(r.results.map((x) => x.outcome).sort(), ['assertion_fail', 'pass']);
+
+    // a passing-only TS test -> pass
+    writeFileSync(
+      join(dir, 'src', 'tests', 'pass.test.ts'),
+      "import {test} from 'node:test'; import assert from 'node:assert'; import {x} from '../index.js';\n" +
+        "test('ok', () => assert.equal(x, 1));\n"
+    );
+    assert.equal(runTests({ cwd: dir, scope: ['src/tests/pass.test.ts'] }).overall, 'pass');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('adapter: TS-source remap anchors to the OWNING package, not the first src/ (nested-src)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tsnest-'));
+  try {
+    // a `src` segment ABOVE the package: the owning tsconfig is at the INNER
+    // package (app/src/feature). The remap must hit app/src/feature/dist/...,
+    // never app/dist/feature/src/... — the latter would be a false crash.
+    const pkg = join(dir, 'app', 'src', 'feature');
+    mkdirSync(join(pkg, 'src', 'tests'), { recursive: true });
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'inner', version: '0.0.0', private: true, type: 'module' }));
+    writeFileSync(
+      join(pkg, 'tsconfig.json'),
+      JSON.stringify({
+        compilerOptions: { target: 'ES2022', module: 'Node16', moduleResolution: 'Node16', rootDir: 'src', outDir: 'dist', strict: true, types: ['node'] },
+        include: ['src/**/*'],
+      })
+    );
+    writeFileSync(join(pkg, 'src', 'index.ts'), 'export const x = 1;\n');
+    writeFileSync(
+      join(pkg, 'src', 'tests', 'foo.test.ts'),
+      "import {test} from 'node:test'; import assert from 'node:assert'; import {x} from '../index.js';\n" +
+        "test('ok', () => assert.equal(x, 1));\n"
+    );
+    symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'), 'junction');
+
+    const r = runTests({ cwd: dir, scope: ['app/src/feature/src/tests/foo.test.ts'] });
+    assert.equal(r.overall, 'pass', 'remapped to the inner dist, built + run cleanly — not a crash from a misanchored remap');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
