@@ -71,6 +71,56 @@ export function discardRun({ cwd, store, runId }) {
   return { base_untouched: run.base_branch };
 }
 
+// ── Conductor-direct branch hygiene (§8.2) ──────────────────────────────────
+// The direct-mode counterpart to mergeRun/discardRun above. Runs auto-clean
+// their branch on merge; conductor-direct branches had no lifecycle and so
+// accreted. These are run-agnostic and SAFE-delete only — `git branch -d`
+// refuses an unmerged branch, so a sweep can never lose work (unlike the run
+// path's -D, which is sound only because a run branch is fully merged or
+// discarded by construction).
+
+/** The branch currently checked out. */
+export function currentBranch(cwd) {
+  return git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+}
+
+/** The base to merge back into: origin's default if known, else main, else master. Fail loud if none. */
+export function defaultBranch(cwd) {
+  const sym = git(cwd, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { allowFail: true });
+  if (sym) return sym.replace(/^origin\//, '');
+  for (const b of ['main', 'master']) {
+    if (git(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`], { allowFail: true })) return b;
+  }
+  throw new Error('branch-manager: cannot determine the default branch (no origin/HEAD, no main, no master) — pass --into');
+}
+
+/** Conductor-direct merge: --no-ff merge `branch` into `into`, then SAFE-delete `branch`. Requires a clean tree (fail loud, never stash). */
+export function mergeBranchInto({ cwd, branch, into, message }) {
+  const status = git(cwd, ['status', '--porcelain']);
+  if (status) {
+    throw new Error(`branch-manager: working tree is dirty — commit or discard before merging:\n${status}`);
+  }
+  git(cwd, ['checkout', into]);
+  git(cwd, ['merge', '--no-ff', branch, '-m', message ?? `Merge ${branch} into ${into}`]);
+  git(cwd, ['branch', '-d', branch]);
+  return { merged_into: into, branch_merged: branch };
+}
+
+/** Delete every local branch already fully merged into `into` (safe -d; never `into` or the current branch). Returns the deleted names. */
+export function sweepMergedBranches({ cwd, into }) {
+  const cur = currentBranch(cwd);
+  const candidates = git(cwd, ['branch', '--merged', into])
+    .split('\n')
+    .map((l) => l.replace(/^[*+]?\s*/, '').trim())
+    .filter((b) => b && b !== into && b !== cur && !b.startsWith('('));
+  const deleted = [];
+  for (const b of candidates) {
+    git(cwd, ['branch', '-d', b]);
+    deleted.push(b);
+  }
+  return deleted;
+}
+
 /** Final-completeness input (§8.1): the whole-run diff file list vs the base branch. */
 export function wholeRunDiffFiles({ cwd, store, runId }) {
   const run = store.getRun(runId);

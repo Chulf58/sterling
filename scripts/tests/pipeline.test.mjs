@@ -14,6 +14,10 @@ import {
   discardRun,
   wholeRunDiffFiles,
   isGitRepo,
+  currentBranch,
+  defaultBranch,
+  mergeBranchInto,
+  sweepMergedBranches,
 } from '../lib/branch-manager.mjs';
 import { writeBaseline, compareBaseline, gitTestIntegrity } from '../lib/test-integrity.mjs';
 
@@ -108,6 +112,99 @@ test('branch manager: dirty tree refuses run start; discard leaves main untouche
     assert.equal(existsSync(join(dir, 'src', 'rejected.mjs')), false, 'rejection is cheap: branch deleted, main untouched');
   } finally {
     cleanup();
+  }
+});
+
+// A git project with a store but NO active run — the conductor-direct state.
+function makeGitProjectNoRun() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-dm-'));
+  git(dir, ['init', '-b', 'main']);
+  git(dir, ['config', 'user.email', 'test@sterling.local']);
+  git(dir, ['config', 'user.name', 'Sterling Test']);
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n');
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-m', 'base']);
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  new SterlingStore(join(dir, '.sterling', 'sterling.db')).close(); // store present, no active run
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+function runDirectMerge(dir, extra = []) {
+  return spawnSync(process.execPath, [join(root, 'scripts', 'direct-merge.mjs'), '--target', dir, ...extra], {
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+  });
+}
+
+test('direct merge (§8.2): mergeBranchInto --no-ff + safe-delete; sweep clears merged, keeps unmerged; dirty refuses', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    assert.equal(defaultBranch(dir), 'main', 'no origin → main');
+
+    git(dir, ['checkout', '-b', 'fix/one']);
+    writeFileSync(join(dir, 'src', 'one.mjs'), 'export const one = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'one']);
+    git(dir, ['branch', 'stale/merged']); // points at fix/one's tip — fully merged once fix/one lands
+    // an UNMERGED branch (unique commit) the sweep must keep
+    git(dir, ['checkout', '-b', 'fix/keep', 'main']);
+    writeFileSync(join(dir, 'src', 'keep.mjs'), 'export const keep = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'keep']);
+
+    git(dir, ['checkout', 'fix/one']);
+    const merged = mergeBranchInto({ cwd: dir, branch: 'fix/one', into: 'main' });
+    assert.deepEqual(merged, { merged_into: 'main', branch_merged: 'fix/one' });
+    assert.equal(currentBranch(dir), 'main', 'lands on base after merge');
+    assert.ok(existsSync(join(dir, 'src', 'one.mjs')), 'merged work on main');
+    assert.equal(git(dir, ['branch', '--list', 'fix/one']), '', 'merged branch deleted');
+
+    const swept = sweepMergedBranches({ cwd: dir, into: 'main' });
+    assert.deepEqual(swept, ['stale/merged'], 'only the fully-merged branch swept');
+    assert.ok(git(dir, ['branch', '--list', 'fix/keep']).includes('fix/keep'), 'unmerged branch kept');
+
+    // dirty tree refuses (P5: never stash silently)
+    writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 2;\n');
+    assert.throws(() => mergeBranchInto({ cwd: dir, branch: 'fix/keep', into: 'main' }), /dirty/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('direct-merge.mjs: refuses during an active run; merges + sweeps when none (§8.2 gate)', () => {
+  // active run → refuse: a run merges through merge-gate.mjs (keeps the disposal gate)
+  const withRun = makeGitProject();
+  try {
+    const r = runDirectMerge(withRun.dir);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /run 'r-git' is active/);
+  } finally {
+    withRun.cleanup();
+  }
+
+  // no active run → merges the current branch and sweeps the merged sibling
+  const clean = makeGitProjectNoRun();
+  try {
+    git(clean.dir, ['checkout', '-b', 'feat/x']);
+    writeFileSync(join(clean.dir, 'src', 'x.mjs'), 'export const x = 1;\n');
+    git(clean.dir, ['add', '-A']);
+    git(clean.dir, ['commit', '-m', 'x']);
+    git(clean.dir, ['branch', 'old/merged']); // fully merged → swept
+
+    const r = runDirectMerge(clean.dir);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.merged_into, 'main');
+    assert.equal(out.branch_merged, 'feat/x');
+    assert.deepEqual(out.branches_swept, ['old/merged']);
+    assert.equal(currentBranch(clean.dir), 'main');
+    assert.equal(git(clean.dir, ['branch', '--list', 'feat/x']), '', 'merged branch deleted');
+    assert.equal(git(clean.dir, ['branch', '--list', 'old/merged']), '', 'merged sibling swept');
+  } finally {
+    clean.cleanup();
   }
 });
 
