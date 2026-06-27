@@ -46,14 +46,30 @@ export type StalenessVerdict =
   | { state: 'unknown' };
 
 /**
- * STALE iff a present marker's build_id differs from the current build-id (the
- * running server predates the current dist). A missing build-id OR a missing
- * marker is UNKNOWN — never a false alarm (P1): a first boot, a timing race
- * before the server writes its marker, or a server predating this guard must
- * not be asserted stale.
+ * STALE iff a present marker's build_id differs from the current build-id AND the
+ * process that wrote it is still alive (the running server predates the current
+ * dist). A missing build-id OR a missing marker is UNKNOWN — never a false alarm
+ * (P1): a first boot, or a server predating this guard must not be asserted stale.
+ *
+ * markerPidAlive gates the present-marker case (the caller probes the marker's
+ * pid; this module stays PURE — no process calls here). A confirmed-DEAD writer
+ * (false) means the marker is ORPHANED — left by a server we have since replaced —
+ * so it says nothing about the live server → UNKNOWN. This closes the
+ * restart-after-rebuild race: the platform gives NO ordering guarantee between
+ * SessionStart (the H1 reader) and the freshly-spawned server's boot marker write
+ * (verified 2026-06-27: undocumented, no barrier), so H1 can read the PREVIOUS
+ * (now-dead) server's stale marker first and would otherwise cry wolf. An
+ * indeterminate probe (null — the default) keeps the prior fail-LOUD behavior: a
+ * mismatch still warns, because a missed real warning is worse than a rare false
+ * one. A genuinely stale server is still alive (live pid) and still warns.
  */
-export function stalenessVerdict(currentBuildId: string | null, marker: RuntimeMarker | null): StalenessVerdict {
+export function stalenessVerdict(
+  currentBuildId: string | null,
+  marker: RuntimeMarker | null,
+  markerPidAlive: boolean | null = null
+): StalenessVerdict {
   if (!currentBuildId || !marker) return { state: 'unknown' };
+  if (markerPidAlive === false) return { state: 'unknown' }; // orphaned marker (dead writer) — not the live server
   return marker.build_id === currentBuildId
     ? { state: 'fresh', running: marker.build_id, current: currentBuildId }
     : { state: 'stale', running: marker.build_id, current: currentBuildId };

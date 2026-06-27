@@ -192,13 +192,15 @@ test('H1: shared project registry — touches this project last_seen + makes the
   }
 });
 
-test('H1 stale-server guard: a marker build-id differing from the current build warns the human to restart; matching or absent is silent (P1)', () => {
+test('H1 stale-server guard: a marker build-id differing from the current build warns the human to restart; matching, absent, or orphaned (dead writer) is silent (P1)', () => {
   const { dir, cleanup } = makeProject();
   const serverDist = mkdtempSync(join(tmpdir(), 'sterling-dist-'));
   const markerPath = join(dir, '.sterling', 'transient', 'mcp-runtime.json');
-  const writeMarker = (buildId) => {
+  // pid defaults to this (live) test process so the writer-liveness probe sees an
+  // ALIVE writer — the genuinely-stale RUNNING-server case the guard exists for.
+  const writeMarker = (buildId, pid = process.pid) => {
     mkdirSync(dirname(markerPath), { recursive: true });
-    writeFileSync(markerPath, JSON.stringify({ build_id: buildId, pid: 999, booted_at: NOW }));
+    writeFileSync(markerPath, JSON.stringify({ build_id: buildId, pid, booted_at: NOW }));
   };
   const run = () =>
     JSON.parse(
@@ -224,10 +226,20 @@ test('H1 stale-server guard: a marker build-id differing from the current build 
     assert.match(out.systemMessage, /RESTART THE SESSION/);
     assert.match(out.systemMessage, /pending$/, 'the counts line still follows the warning');
 
-    // absent marker → unknown, never a false alarm (first boot / race / pre-guard server)
+    // absent marker → unknown, never a false alarm (first boot / pre-guard server)
     rmSync(markerPath, { force: true });
     out = run();
     assert.doesNotMatch(out.systemMessage, /STALE/, 'no marker → no warning (P1: no false alarm)');
+
+    // orphaned marker: a stale build-id whose WRITER process is DEAD — the server
+    // we just replaced on restart, before the freshly-spawned one overwrote the
+    // marker. There is no SessionStart↔server-boot ordering guarantee, so H1 can
+    // read it first; the pid-liveness gate must NOT cry wolf here (the
+    // restart-after-rebuild false positive this fix closes).
+    const deadPid = spawnSync(process.execPath, ['-e', '0']).pid; // child has exited by the time spawnSync returns
+    writeMarker('BUILD_OLD', deadPid);
+    out = run();
+    assert.doesNotMatch(out.systemMessage, /STALE/, 'stale build-id but DEAD writer pid → orphaned marker → no warning (P1)');
   } finally {
     rmSync(serverDist, { recursive: true, force: true });
     cleanup();
