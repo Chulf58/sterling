@@ -593,7 +593,7 @@ test('H6 [enforce mode]: 95%+ on PreToolUse denies with phase-overflow guidance'
   }
 });
 
-test('H6 self-check at SessionStart: parseable -> quiet; assistant-without-usage -> check_skipped; fresh session -> quiet', () => {
+test('H6 self-check at SessionStart: parseable -> quiet; assistant-without-usage -> check_skipped; fresh session -> quiet; missing transcript -> quiet', () => {
   const { dir, store, cleanup } = makeProject({ withRun: false });
   try {
     const transcript = join(dir, 'transcripts', 's1.jsonl');
@@ -618,6 +618,15 @@ test('H6 self-check at SessionStart: parseable -> quiet; assistant-without-usage
     r = runHook('h6-selfcheck.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir);
     assert.equal(r.code, 0);
     assert.equal(store.listCheckSkipped().length, skipsBefore);
+
+    // missing transcript (fresh startup, before the file is created): NORMAL, not a
+    // failure — nothing to parse says nothing about format drift. Flagging it
+    // produced a false "self-check failed" on every fresh launch.
+    const before = store.listCheckSkipped().length;
+    r = runHook('h6-selfcheck.mjs', hookInput(dir, { hook_event_name: 'SessionStart', transcript_path: join(dir, 'transcripts', 'does-not-exist.jsonl') }), dir);
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stderr, /degraded loudly/);
+    assert.equal(store.listCheckSkipped().length, before, 'a missing transcript records no check_skipped');
   } finally {
     cleanup();
   }
