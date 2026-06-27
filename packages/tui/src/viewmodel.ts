@@ -1,6 +1,6 @@
 // TUI view models (spec §11): pure projections over the durable stores —
 // every tab is a live view; nothing here mutates anything.
-import { DRAIN_VERBS } from '@sterling/schemas';
+import { DRAIN_VERBS, RECORD_TYPES } from '@sterling/schemas';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 
 export interface Card {
@@ -21,7 +21,7 @@ export interface Card {
 // TUI surfaces. note has its own tab; disconfirmed_hypothesis is niche.
 // ---------------------------------------------------------------------------
 export const KNOWLEDGE_CATEGORIES: { type: string; label: string }[] = [
-  { type: 'feature_article',   label: 'Articles' },
+  { type: 'feature_article',   label: 'Features' },
   { type: 'decision',          label: 'Decisions' },
   { type: 'anti_pattern',      label: 'Anti-patterns' },
   { type: 'research_finding',  label: 'Research' },
@@ -152,6 +152,106 @@ export function knowledgeSearch(stores: MountedStores, rankTerms: string[]): Car
     }
   }
   return cards;
+}
+
+// ---------------------------------------------------------------------------
+// Sub-category grouping — the Knowledge tree's 4th level (category → source →
+// SUB-CATEGORY → record). Records under an expanded source are bucketed by code
+// COMPONENT (derived from their file keys) so a long flat list becomes
+// scannable. Pure + testable; computed from the records ALREADY fetched on
+// source-expand (no new query — the COUNT-then-fetch perf model is untouched).
+// SINGLE-BUCKET: each record lands under its DOMINANT component, so a source's
+// COUNT(*) badge equals the sum of its sub-category counts.
+// ---------------------------------------------------------------------------
+
+/** Folder key for an owned path: two segments deep where the tree has them
+ *  (packages/tui, scripts/hooks), one otherwise (scripts), '(root)' for root
+ *  files. Re-implements the pre-P3 groupOf. Grouping AND expand-ids key off this
+ *  RAW folder key — prettifying before grouping could merge distinct components
+ *  and collide expand-ids. */
+export function subgroupKey(path: string): string {
+  const seg = path.split('/');
+  if (seg.length >= 3) return seg.slice(0, 2).join('/');
+  if (seg.length === 2) return seg[0];
+  return '(root)';
+}
+
+/** Records with no file keys (research_finding, note, url/pdf references, empty
+ *  articles) cluster here; the state layer SKIPS the sub-category level when a
+ *  source resolves to only this one bucket (collapse-single-bucket, P1). */
+export const SUBCAT_GENERAL = '(general)';
+
+/** Friendly DISPLAY labels for the common raw folder keys — display only;
+ *  grouping/expand-ids always use the raw key. Unmapped keys fall back to the
+ *  raw key (never a silent 'Other'); '(general)'/'(root)' show verbatim. The
+ *  key order here is also the tree's sub-category display order. */
+const SUBCAT_LABELS: Record<string, string> = {
+  'packages/tui': 'TUI',
+  'packages/store': 'Store',
+  'packages/mcp-server': 'MCP server',
+  'packages/schemas': 'Schemas',
+  'scripts/hooks': 'Hooks',
+  'scripts/adapters': 'Adapters',
+  'scripts/lib': 'Script lib',
+  'scripts/tests': 'Script tests',
+  scripts: 'Scripts',
+  'agent-templates': 'Agent templates',
+  skills: 'Skills',
+  templates: 'Templates',
+  docs: 'Docs',
+};
+
+export function subcatLabel(key: string): string {
+  return SUBCAT_LABELS[key] ?? key;
+}
+
+/** Raw folder key of a record's DOMINANT component: the key owning the most of
+ *  its file paths, ties broken LEXICOGRAPHICALLY on the key (never by the
+ *  author-controlled files[] order, so the tree is stable frame-to-frame). No
+ *  file keys → SUBCAT_GENERAL. */
+export function subcategoryOf(record: unknown): string {
+  const r = record as { type: string };
+  const extract = RECORD_TYPES[r.type]?.fileKeys;
+  const paths = extract ? extract(record as Record<string, unknown>) : [];
+  if (!paths.length) return SUBCAT_GENERAL;
+  const counts = new Map<string, number>();
+  for (const p of paths) {
+    const k = subgroupKey(p);
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  let best = '';
+  let bestN = -1;
+  for (const [k, n] of counts) {
+    if (n > bestN || (n === bestN && k < best)) {
+      best = k;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+/** Group raw records into ordered sub-category buckets (single-bucket: each
+ *  record under its dominant component). Order: SUBCAT_LABELS registry order
+ *  first, then any other raw keys lexicographically, with SUBCAT_GENERAL last.
+ *  Empty buckets are dropped. Cards are mapped via toCard so the state layer
+ *  renders them directly (it adds Card.source). */
+export function knowledgeSubgroups(records: unknown[]): { key: string; label: string; cards: Card[] }[] {
+  const buckets = new Map<string, Card[]>();
+  for (const r of records) {
+    const key = subcategoryOf(r);
+    const list = buckets.get(key) ?? [];
+    list.push(toCard(r));
+    buckets.set(key, list);
+  }
+  const order = Object.keys(SUBCAT_LABELS);
+  const sortKey = (k: string): string => {
+    if (k === SUBCAT_GENERAL) return '2';
+    const i = order.indexOf(k);
+    return i === -1 ? `1${k}` : `0${String(i).padStart(4, '0')}`;
+  };
+  return [...buckets.entries()]
+    .sort((a, b) => (sortKey(a[0]) < sortKey(b[0]) ? -1 : sortKey(a[0]) > sortKey(b[0]) ? 1 : 0))
+    .map(([key, cards]) => ({ key, label: subcatLabel(key), cards }));
 }
 
 export function todoCards(store: SterlingStore): Card[] {
