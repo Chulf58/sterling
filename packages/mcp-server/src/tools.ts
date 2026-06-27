@@ -339,7 +339,35 @@ export class SterlingTools {
     if (next.type === 'feature_article' || next.type === 'reference_material') {
       next.file_baselines = this.computeBaselines(next);
     }
-    return this.store.supersede(id, next);
+    const updated = this.store.supersede(id, next);
+    // P4 lifecycle-bind: reconciling an article/doc IS the fulfilling artifact for
+    // any DRIFT-driven maintenance item about it. Re-baselining (above) already
+    // self-clears the read-time drift flag; this drains the standing queue item in
+    // the SAME event so it can never orphan — closing the gap where an item
+    // outlived the reconcile that should have closed it because board_remove was a
+    // separate, forgotten step (observed 2026-06-27: two already-reconciled
+    // reconcile_needed items left in the queue). Scoped to the two drift reasons H7
+    // and the read-time check raise (reconcile_needed + refresh_reference, both
+    // keyed by feature_link); NEVER promotion_review — promotion stays a human gate
+    // (P1). The item's feature_link points to whatever version was current when it
+    // was raised, which may now be an ancestor, so match the whole supersede chain.
+    if (next.type === 'feature_article' || next.type === 'reference_material') {
+      const chain = new Set<string>([id]);
+      for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
+        if (link.rel === 'supersedes') chain.add(link.target_id);
+      }
+      for (const item of this.maintenanceQuery({ cap: 1000 })) {
+        const it = item as { id: string; feature_link?: string; system_reason?: string };
+        if (
+          (it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference') &&
+          it.feature_link !== undefined &&
+          chain.has(it.feature_link)
+        ) {
+          this.store.remove(it.id, ts);
+        }
+      }
+    }
+    return updated;
   }
 
   /**

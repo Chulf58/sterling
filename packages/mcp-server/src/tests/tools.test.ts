@@ -120,6 +120,63 @@ test('knowledge_update writes a new version and supersedes the prior; article ve
   }
 });
 
+const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
+  tools.knowledgeCreate('feature_article', {
+    slug,
+    title: slug,
+    what_it_does: 'does',
+    intended_behavior: 'b',
+    files: [{ path, role: 'impl' }],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+  }).record;
+
+test('knowledge_update drains the article\'s drift maintenance items (reconcile_needed/refresh_reference) but never promotion_review — P4 lifecycle-bind', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const other = mkArticle(tools, 'other', 'src/other.ts');
+    // drift debt for `thing` the conductor is about to reconcile, a human-gated
+    // promotion review for `thing`, and unrelated drift debt for `other`.
+    tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'thing'`, file_keys: ['src/thing.ts'], feature_link: article.id });
+    tools.maintenanceEnqueue({ reason: 'refresh_reference', text: `refresh 'thing'`, file_keys: ['src/thing.ts'], feature_link: article.id });
+    tools.maintenanceEnqueue({ reason: 'promotion_review', text: `promote 'thing'`, feature_link: article.id });
+    tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'other'`, file_keys: ['src/other.ts'], feature_link: other.id });
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 4);
+
+    tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
+
+    const open = tools.maintenanceQuery({ cap: 1000 });
+    const has = (reason: string, link: string) =>
+      open.some((t) => (t as { system_reason?: string }).system_reason === reason && (t as { feature_link?: string }).feature_link === link);
+    assert.equal(has('reconcile_needed', article.id), false, 'reconcile_needed drained by the reconcile');
+    assert.equal(has('refresh_reference', article.id), false, 'refresh_reference drained by the reconcile');
+    assert.equal(has('promotion_review', article.id), true, 'promotion_review survives — promotion is a human gate (P1)');
+    assert.equal(has('reconcile_needed', other.id), true, "an unrelated article's debt is untouched");
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_update drains a drift item whose feature_link points to an ANCESTOR version (supersede-chain match)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
+    const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'v2' });
+    // an item raised against the now-superseded v1 (a flag that lagged a version);
+    // reconciling v2→v3 must still drain it via the supersede chain.
+    tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'thing'`, file_keys: ['src/thing.ts'], feature_link: v1.id });
+    tools.knowledgeUpdate(v2.id, { what_it_does: 'v3' });
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 0, 'ancestor-linked drift item drained via the chain');
+  } finally {
+    cleanup();
+  }
+});
+
 test('board tools: add/query separates board from maintenance queue; remove is todo-only', () => {
   const { tools, cleanup } = harness();
   try {
