@@ -104,6 +104,26 @@ export class MountedStores {
     return result;
   }
 
+  /** Count-only per-source projection — the COUNT(*) twin of bySource (same
+   *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
+   *  tree's collapsed category/source badges use this so the default all-collapsed
+   *  view does not fetch + parse every source's record bodies each frame. */
+  countBySource(opts?: QueryOptions): { source: string; count: number }[] {
+    const result: { source: string; count: number }[] = [{ source: 'project', count: this.project.count(opts) }];
+    for (const [name, store] of this.domains) {
+      result.push({ source: name, count: store.count(opts) });
+    }
+    return result;
+  }
+
+  /** Records from ONE named source ('project' or a mounted domain name) — the
+   *  full §3.4 query against that single store. The TUI fetches bodies only for
+   *  the source the user actually expanded; an unknown source yields []. */
+  querySource(source: string, opts: QueryOptions = {}): DurableRecord[] {
+    const store = source === 'project' ? this.project : this.domains.get(source);
+    return store ? store.query(opts) : [];
+  }
+
   /** Cross-store fetch by id: project first, then domains. */
   get(id: string): DurableRecord | undefined {
     for (const s of this.all()) {
