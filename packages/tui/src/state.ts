@@ -3,7 +3,7 @@
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
 import type { SterlingStore, MountedStores } from '@sterling/store';
-import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
+import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
 export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run'] as const;
@@ -122,19 +122,24 @@ export function cardsFor(store: SterlingStore, tab: number): Card[] {
 }
 
 /**
- * A navigable line-owning entry. On the Knowledge tab the tree has three node
- * kinds (category → source → record), each carrying its depth for indentation;
- * card nodes also flag whether they are knowledge-tab cards (readable layout) or
- * plain cards (todos/notes/queue, the legacy expansion). Every other tab is a
- * flat list of plain card nodes at depth 0.
+ * A navigable line-owning entry. On the Knowledge tab the tree has up to four
+ * node kinds (category → source → sub-category → record), each carrying its
+ * depth for indentation; card nodes also flag whether they are knowledge-tab
+ * cards (readable layout) or plain cards (todos/notes/queue, the legacy
+ * expansion). The sub-category level is OMITTED when a source resolves to a
+ * single bucket (collapse-single-bucket), so its cards sit at depth 2 directly
+ * under the source. Every other tab is a flat list of plain card nodes at
+ * depth 0.
  */
 export type Node =
   | { kind: 'category'; type: string; label: string; count: number }
   | { kind: 'source'; catType: string; source: string; count: number }
+  | { kind: 'subcategory'; catType: string; source: string; key: string; label: string; count: number }
   | { kind: 'card'; card: Card; depth: number; knowledge: boolean };
 
 const catId = (type: string) => `cat:${type}`;
 const srcId = (type: string, source: string) => `src:${type}:${source}`;
+const subId = (type: string, source: string, key: string) => `sub:${type}:${source}:${key}`;
 
 /** Prefix-star a query into AND-joinable rank terms (mid-word matching). */
 function rankTermsOf(query: string): string[] {
@@ -146,11 +151,16 @@ function rankTermsOf(query: string): string[] {
 }
 
 /**
- * The Knowledge tab is a 3-level collapse/expand tree: knowledge CATEGORY →
- * SOURCE store → record. When a `knowledge` MountedStores is provided the tree
- * fans across stores (project FIRST, then each mounted domain in manifest order;
- * empty sources dropped) via knowledgeCountBySource (badges) + querySource (records on expand) / knowledgeSearch. When `knowledge`
- * is ABSENT the tree is sourced from the PROJECT `store` alone, so the single
+ * The Knowledge tab is an up-to-4-level collapse/expand tree: knowledge
+ * CATEGORY → SOURCE store → SUB-CATEGORY (code component) → record. The
+ * sub-category level groups an expanded source's records by component
+ * (knowledgeSubgroups, single-bucket dominant) and is OMITTED when the source
+ * resolves to a single bucket (collapse-single-bucket) — then its records sit
+ * directly under the source as before. When a `knowledge` MountedStores is
+ * provided the tree fans across stores (project FIRST, then each mounted domain
+ * in manifest order; empty sources dropped) via knowledgeCountBySource (badges)
+ * + querySource (records on expand) / knowledgeSearch. When `knowledge` is
+ * ABSENT the tree is sourced from the PROJECT `store` alone, so the single
  * source under every non-empty category is named 'project' (the P3 path).
  * Empty categories/sources are hidden; everything is collapsed by default. A
  * non-empty search query REPLACES the tree with a flat, AND-filtered card list
@@ -196,12 +206,30 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
     for (const sc of sources) {
       nodes.push({ kind: 'source', catType: cat.type, source: sc.source, count: sc.count });
       if (!ui.expanded.includes(srcId(cat.type, sc.source))) continue;
-      // source expanded → NOW fetch this ONE source's record bodies
+      // source expanded → NOW fetch this ONE source's record bodies (perf path)
       const records = knowledge
         ? knowledge.querySource(sc.source, { types: [cat.type], cap })
         : store.query({ types: [cat.type], cap });
-      for (const r of records) {
-        nodes.push({ kind: 'card', card: { ...toCard(r), source: sc.source }, depth: 2, knowledge: true });
+      // 4th level: bucket the fetched records by code COMPONENT (single-bucket,
+      // dominant). A source that resolves to a single bucket SKIPS the
+      // sub-category level (collapse-single-bucket, P1) — its cards sit at
+      // depth 2 directly under the source, exactly as before. Otherwise each
+      // bucket is a foldable sub-category node and its cards sit at depth 3 when
+      // expanded. No new query — we regroup the records already fetched, so the
+      // COUNT-then-fetch perf model is untouched.
+      const groups = knowledgeSubgroups(records);
+      if (groups.length <= 1) {
+        for (const card of groups[0]?.cards ?? []) {
+          nodes.push({ kind: 'card', card: { ...card, source: sc.source }, depth: 2, knowledge: true });
+        }
+        continue;
+      }
+      for (const g of groups) {
+        nodes.push({ kind: 'subcategory', catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
+        if (!ui.expanded.includes(subId(cat.type, sc.source, g.key))) continue;
+        for (const card of g.cards) {
+          nodes.push({ kind: 'card', card: { ...card, source: sc.source }, depth: 3, knowledge: true });
+        }
       }
     }
   }
@@ -280,6 +308,12 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       expanded = ui.expanded.includes(id);
       const pad = '  '; // depth 1
       lines = [{ text: clipEllipsis(`${marker}${pad}${expanded ? '▾' : '▸'} ${node.source} (${node.count})`, width), kind: 'title' }];
+    } else if (node.kind === 'subcategory') {
+      id = subId(node.catType, node.source, node.key);
+      type = 'subcategory';
+      expanded = ui.expanded.includes(id);
+      const pad = '    '; // depth 2
+      lines = [{ text: clipEllipsis(`${marker}${pad}${expanded ? '▾' : '▸'} ${node.label} (${node.count})`, width), kind: 'title' }];
     } else {
       const { card, depth, knowledge } = node;
       id = card.id;
@@ -446,6 +480,10 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     if (node.kind === 'source') {
       // fold/unfold the source — navigation, not a selection
       return { ...ui, cursor: index, expanded: toggle(srcId(node.catType, node.source)) };
+    }
+    if (node.kind === 'subcategory') {
+      // fold/unfold the sub-category — navigation, not a selection
+      return { ...ui, cursor: index, expanded: toggle(subId(node.catType, node.source, node.key)) };
     }
     const card = node.card;
     effects.push({ type: 'select', recordType: card.type, id: card.id });

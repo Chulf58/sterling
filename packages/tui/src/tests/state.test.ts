@@ -1540,3 +1540,174 @@ test('P4 AC2 (search): with the `knowledge` arg, a query yields a FLAT source-ta
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Sub-category level (4th tree level) + the Articles→Features rename. The
+// Knowledge tree groups an expanded source's records by code COMPONENT derived
+// from their file keys (single-bucket dominant), collapsing the level when a
+// source resolves to a single bucket.
+// ---------------------------------------------------------------------------
+
+test('rename: the feature_article category label is "Features" (not "Articles")', () => {
+  assert.equal(
+    viewmodel.KNOWLEDGE_CATEGORIES.find((c) => c.type === 'feature_article')!.label,
+    'Features',
+    'the feature_article category is labeled Features',
+  );
+  const { store, cleanup } = fixture();
+  try {
+    article(store, 'a', 'A', 'x', ['packages/tui/src/x.ts']);
+    const catRow = buildDashboardState(store, st({ tab: KNOW_TAB })).rows.find((r) => r.id === 'cat:feature_article')!;
+    assert.match(catRow.lines[0].text, /Features/, 'the category row renders "Features"');
+    assert.ok(!/Articles/.test(catRow.lines[0].text), 'the old "Articles" label is gone');
+  } finally {
+    cleanup();
+  }
+});
+
+test('sub-categories (viewmodel): subgroupKey / subcatLabel / subcategoryOf / knowledgeSubgroups — dominant component, lexicographic tie-break, prettify with raw-key fallback', () => {
+  // folder key: two-deep where present, else one-deep, else (root)
+  assert.equal(viewmodel.subgroupKey('packages/tui/src/state.ts'), 'packages/tui');
+  assert.equal(viewmodel.subgroupKey('scripts/init.mjs'), 'scripts');
+  assert.equal(viewmodel.subgroupKey('scripts/hooks/h7.mjs'), 'scripts/hooks');
+  assert.equal(viewmodel.subgroupKey('CLAUDE.md'), '(root)');
+
+  // friendly labels; an unmapped key falls back to the RAW key (never a silent "Other")
+  assert.equal(viewmodel.subcatLabel('packages/tui'), 'TUI');
+  assert.equal(viewmodel.subcatLabel('scripts/hooks'), 'Hooks');
+  assert.equal(viewmodel.subcatLabel('skills/debug'), 'skills/debug');
+
+  // dominant component = the key owning the MOST files (2× store beats 1× tui)
+  const dominant = {
+    type: 'feature_article',
+    files: [
+      { path: 'packages/tui/src/x.ts', role: 'impl' },
+      { path: 'packages/store/src/a.ts', role: 'impl' },
+      { path: 'packages/store/src/b.ts', role: 'impl' },
+    ],
+  };
+  assert.equal(viewmodel.subcategoryOf(dominant), 'packages/store');
+
+  // tie (1 each) → lexicographically smallest key wins (packages/store < packages/tui)
+  const tie = { type: 'decision', file_keys: ['packages/tui/src/x.ts', 'packages/store/src/a.ts'] };
+  assert.equal(viewmodel.subcategoryOf(tie), 'packages/store');
+
+  // no file keys → the general bucket
+  assert.equal(viewmodel.subcategoryOf({ type: 'research_finding' }), viewmodel.SUBCAT_GENERAL);
+
+  // grouping is single-bucket, ordered (registry order), general LAST, empty dropped
+  const groups = viewmodel.knowledgeSubgroups([
+    { type: 'feature_article', id: '1', slug: 'a', title: 'A', state: 'active', what_it_does: '', intended_behavior: '', files: [{ path: 'packages/store/src/a.ts', role: 'impl' }], dependencies: { relies_on: [] }, version: 1 },
+    { type: 'feature_article', id: '2', slug: 'b', title: 'B', state: 'active', what_it_does: '', intended_behavior: '', files: [{ path: 'packages/tui/src/b.ts', role: 'impl' }], dependencies: { relies_on: [] }, version: 1 },
+    { type: 'research_finding', id: '3', question: 'q', answer: 'a', source_date: '2026-01-01', capture_date: '2026-01-01' },
+  ]);
+  assert.deepEqual(groups.map((g) => g.key), ['packages/tui', 'packages/store', '(general)'], 'registry order first, general last');
+  assert.deepEqual(groups.map((g) => g.label), ['TUI', 'Store', '(general)'], 'friendly display labels');
+  assert.deepEqual(groups.map((g) => g.cards.length), [1, 1, 1], 'one card per bucket (single-bucket)');
+});
+
+test('sub-categories: an expanded source spanning >1 component shows sub-category nodes; cards stay hidden until a sub-category expands; source badge == sum of sub-category counts', () => {
+  const { store, cleanup } = fixture();
+  try {
+    article(store, 'tui-a', 'TUI A', 'x', ['packages/tui/src/state.ts']);
+    article(store, 'tui-b', 'TUI B', 'x', ['packages/tui/src/render.ts', 'packages/tui/src/banner.ts']);
+    article(store, 'store-a', 'Store A', 'x', ['packages/store/src/index.ts']);
+
+    const s = buildDashboardState(store, st({ tab: KNOW_TAB, expanded: ['cat:feature_article', 'src:feature_article:project'] }));
+
+    // sub-category rows appear in registry order (TUI before Store), with friendly labels + counts
+    const subRows = s.rows.filter((r) => r.type === 'subcategory');
+    assert.deepEqual(
+      subRows.map((r) => r.id),
+      ['sub:feature_article:project:packages/tui', 'sub:feature_article:project:packages/store'],
+      'one foldable sub-category per component, registry-ordered',
+    );
+    assert.match(subRows[0].lines[0].text, /TUI \(2\)/, 'TUI bucket holds the two tui articles');
+    assert.match(subRows[1].lines[0].text, /Store \(1\)/, 'Store bucket holds the one store article');
+
+    // cards are NOT visible until a sub-category is expanded
+    assert.ok(!s.rows.some((r) => r.type === 'feature_article'), 'card rows stay hidden while sub-categories are collapsed');
+
+    // the source badge (COUNT(*)) equals the sum of the sub-category counts (3 == 2 + 1)
+    const srcRow = s.rows.find((r) => r.id === 'src:feature_article:project')!;
+    assert.match(srcRow.lines[0].text, /\(3\)/, 'source badge equals the sum of its sub-category counts (AC16 invariant)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('sub-categories: expanding a sub-category reveals its cards one level deeper (depth 3); siblings stay collapsed; screenRows stay contiguous', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const tuiA = article(store, 'tui-a', 'TUI A', 'x', ['packages/tui/src/state.ts']);
+    const storeA = article(store, 'store-a', 'Store A', 'x', ['packages/store/src/index.ts']);
+    const expanded = ['cat:feature_article', 'src:feature_article:project', 'sub:feature_article:project:packages/tui'];
+    const s = buildDashboardState(store, st({ tab: KNOW_TAB, expanded }), 80);
+
+    const card = s.rows.find((r) => r.id === tuiA.id)!;
+    assert.ok(card, 'the TUI article card is visible under its expanded sub-category');
+    // depth 3 → marker(2) + pad(6) = 8 leading spaces (one level deeper than a depth-2 flat card)
+    assert.ok(card.lines[0].text.startsWith('        '), 'a depth-3 card is indented under its sub-category (8 leading spaces)');
+    assert.match(card.lines[0].text, /TUI A/, 'the card carries its title');
+
+    // the Store sub-category stays collapsed → its card is not shown
+    assert.ok(!s.rows.some((r) => r.id === storeA.id), 'a collapsed sibling sub-category keeps its cards hidden');
+
+    // screenRows remain contiguous across all four depths
+    let expectedRow = 0;
+    for (const r of s.rows) {
+      assert.equal(r.screenRow, expectedRow, `row ${r.id} starts at the running offset`);
+      expectedRow += r.lines.length;
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('sub-categories: collapse-single-bucket — a source whose records all map to ONE component lists cards flat at depth 2 (no sub-category level)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const a = article(store, 'tui-a', 'TUI A', 'x', ['packages/tui/src/state.ts']);
+    const b = article(store, 'tui-b', 'TUI B', 'x', ['packages/tui/src/render.ts']);
+    const s = buildDashboardState(store, st({ tab: KNOW_TAB, expanded: ['cat:feature_article', 'src:feature_article:project'] }), 80);
+
+    assert.ok(!s.rows.some((r) => r.type === 'subcategory'), 'a single-bucket source inserts NO sub-category level');
+    assert.ok(s.rows.some((r) => r.id === a.id) && s.rows.some((r) => r.id === b.id), 'both cards list directly under the source');
+    // depth 2 → 6 leading spaces (marker 2 + pad 4), NOT the depth-3 eight
+    const card = s.rows.find((r) => r.id === a.id)!;
+    assert.ok(card.lines[0].text.startsWith('      ') && !card.lines[0].text.startsWith('        '), 'flat cards stay at depth 2');
+  } finally {
+    cleanup();
+  }
+});
+
+test('sub-categories: a category whose records have no file keys (research) lists flat — no (general) wrapper level', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const rf = store.create(researchRec()) as { id: string };
+    store.create(researchRec({ question: 'a second question?' }));
+    const s = buildDashboardState(store, st({ tab: KNOW_TAB, expanded: ['cat:research_finding', 'src:research_finding:project'] }));
+    assert.ok(!s.rows.some((r) => r.type === 'subcategory'), 'no file keys → single (general) bucket → no sub-category level');
+    assert.ok(s.rows.some((r) => r.id === rf.id), 'research cards list directly under the source');
+  } finally {
+    cleanup();
+  }
+});
+
+test('sub-categories: activating a sub-category row toggles its fold (navigation, no select effect)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    article(store, 'tui-a', 'TUI A', 'x', ['packages/tui/src/state.ts']);
+    article(store, 'store-a', 'Store A', 'x', ['packages/store/src/index.ts']);
+    const expandedUi = st({ tab: KNOW_TAB, expanded: ['cat:feature_article', 'src:feature_article:project'] });
+    const s = buildDashboardState(store, expandedUi);
+    const subIdx = s.rows.findIndex((r) => r.type === 'subcategory');
+    assert.ok(subIdx >= 0, 'a sub-category row is present');
+
+    const res = reduce(store, { ...expandedUi, cursor: subIdx }, { kind: 'key', name: 'ENTER' });
+    assert.deepEqual(res.effects, [], 'activating a sub-category is navigation — no select effect');
+    assert.ok(res.ui.expanded.includes(s.rows[subIdx].id), 'activating a sub-category expands it');
+  } finally {
+    cleanup();
+  }
+});
