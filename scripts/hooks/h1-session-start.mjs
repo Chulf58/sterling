@@ -116,6 +116,22 @@ if (existsSync(registryPath())) {
   }
 }
 
+/** Is the process that wrote the marker still alive? signal 0 probes existence
+ *  without delivering a signal: success or EPERM (exists, not ours to signal) =
+ *  alive; ESRCH = no such process = confirmed dead; any other error = null
+ *  (indeterminate — caller must not suppress a real warning on it). */
+function markerPidAlive(pid) {
+  if (!Number.isInteger(pid)) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') return false;
+    if (err?.code === 'EPERM') return true;
+    return null;
+  }
+}
+
 // stale-server guard (P5/P7): a running MCP server older than the current built
 // server silently serves OLD behavior (the domain-stores incident). Compare the
 // build-id the server recorded at boot to the current built id; warn the human
@@ -132,7 +148,11 @@ try {
     const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync(markerPath, 'utf8')));
     if (parsed.success) marker = parsed.data;
   }
-  const verdict = stalenessVerdict(currentBuildId, marker);
+  // Is the process that wrote the marker still alive? A confirmed-dead writer is
+  // an ORPHANED marker from a server we have since replaced (the restart-after-
+  // rebuild race — no platform ordering guarantee between this hook and the new
+  // server's boot write). Dead → suppress; indeterminate (null) → still warn.
+  const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerPidAlive(marker.pid) : null);
   if (verdict.state === 'stale') {
     staleWarning = `⚠ Sterling MCP server is STALE — running build ${verdict.running}, current ${verdict.current}. RESTART THE SESSION to load the current server (a stale server silently mis-stores domain writes). `;
   }
