@@ -129,20 +129,13 @@ export function toCard(rec: unknown): Card {
 }
 
 // ---------------------------------------------------------------------------
-// knowledgeBySource: per-source groups, project first, empty sources dropped.
+// knowledgeCountBySource: per-source COUNT(*), project first, empty sources
+// dropped. The collapsed Knowledge-tree badges read from this — NO record body
+// is fetched or parsed (the perf path; full records load only when a source is
+// expanded, via MountedStores.querySource). Counts are EXACT, not cap-limited.
 // ---------------------------------------------------------------------------
-export function knowledgeBySource(
-  stores: MountedStores,
-  type: string
-): { source: string; cards: Card[] }[] {
-  const cap = 500;
-  return stores
-    .bySource({ types: [type], cap })
-    .filter((g) => g.records.length > 0)
-    .map((g) => ({
-      source: g.source,
-      cards: g.records.map((r) => ({ ...toCard(r), source: g.source })),
-    }));
+export function knowledgeCountBySource(stores: MountedStores, type: string): { source: string; count: number }[] {
+  return stores.countBySource({ types: [type] }).filter((g) => g.count > 0);
 }
 
 // ---------------------------------------------------------------------------

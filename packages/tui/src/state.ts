@@ -3,7 +3,7 @@
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
 import type { SterlingStore, MountedStores } from '@sterling/store';
-import { KNOWLEDGE_CATEGORIES, toCard, knowledgeBySource, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
+import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
 export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run'] as const;
@@ -149,7 +149,7 @@ function rankTermsOf(query: string): string[] {
  * The Knowledge tab is a 3-level collapse/expand tree: knowledge CATEGORY →
  * SOURCE store → record. When a `knowledge` MountedStores is provided the tree
  * fans across stores (project FIRST, then each mounted domain in manifest order;
- * empty sources dropped) via knowledgeBySource/knowledgeSearch. When `knowledge`
+ * empty sources dropped) via knowledgeCountBySource (badges) + querySource (records on expand) / knowledgeSearch. When `knowledge`
  * is ABSENT the tree is sourced from the PROJECT `store` alone, so the single
  * source under every non-empty category is named 'project' (the P3 path).
  * Empty categories/sources are hidden; everything is collapsed by default. A
@@ -178,35 +178,31 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
 
   // collapsed default tree: only non-empty categories, in registry order; each
   // non-empty source appears when its category is expanded; cards appear when
-  // their source is expanded. With `knowledge`, sources fan across stores
-  // (knowledgeBySource: project first, domains next, empty dropped); without it,
-  // the single 'project' source from the project store.
+  // their source is expanded. Category + source BADGES come from COUNT(*) — no
+  // record body is fetched or parsed until a source is actually expanded (the
+  // perf path: the default all-collapsed view runs counts, not 500-row body
+  // fetches per category every frame). With `knowledge`, sources fan across
+  // stores (knowledgeCountBySource: project first, domains next, empty dropped);
+  // without it, the single 'project' source from the project store.
   const nodes: Node[] = [];
   for (const cat of KNOWLEDGE_CATEGORIES) {
-    if (knowledge) {
-      const groups = knowledgeBySource(knowledge, cat.type);
-      const count = groups.reduce((n, g) => n + g.cards.length, 0);
-      if (count === 0) continue; // empty categories hidden
-      nodes.push({ kind: 'category', type: cat.type, label: cat.label, count });
-      if (!ui.expanded.includes(catId(cat.type))) continue;
-      for (const g of groups) {
-        nodes.push({ kind: 'source', catType: cat.type, source: g.source, count: g.cards.length });
-        if (!ui.expanded.includes(srcId(cat.type, g.source))) continue;
-        for (const card of g.cards) {
-          nodes.push({ kind: 'card', card, depth: 2, knowledge: true });
-        }
-      }
-      continue;
-    }
-    const records = store.query({ types: [cat.type], cap });
-    if (records.length === 0) continue; // empty categories hidden
-    nodes.push({ kind: 'category', type: cat.type, label: cat.label, count: records.length });
+    const sources = knowledge
+      ? knowledgeCountBySource(knowledge, cat.type)
+      : [{ source: 'project', count: store.count({ types: [cat.type] }) }].filter((s) => s.count > 0);
+    const total = sources.reduce((n, s) => n + s.count, 0);
+    if (total === 0) continue; // empty categories hidden
+    nodes.push({ kind: 'category', type: cat.type, label: cat.label, count: total });
     if (!ui.expanded.includes(catId(cat.type))) continue;
-    // project-only path: the project store is the only source
-    nodes.push({ kind: 'source', catType: cat.type, source: 'project', count: records.length });
-    if (!ui.expanded.includes(srcId(cat.type, 'project'))) continue;
-    for (const r of records) {
-      nodes.push({ kind: 'card', card: { ...toCard(r), source: 'project' }, depth: 2, knowledge: true });
+    for (const sc of sources) {
+      nodes.push({ kind: 'source', catType: cat.type, source: sc.source, count: sc.count });
+      if (!ui.expanded.includes(srcId(cat.type, sc.source))) continue;
+      // source expanded → NOW fetch this ONE source's record bodies
+      const records = knowledge
+        ? knowledge.querySource(sc.source, { types: [cat.type], cap })
+        : store.query({ types: [cat.type], cap });
+      for (const r of records) {
+        nodes.push({ kind: 'card', card: { ...toCard(r), source: sc.source }, depth: 2, knowledge: true });
+      }
     }
   }
   return nodes;

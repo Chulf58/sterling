@@ -181,9 +181,13 @@ export class SterlingStore {
     return row ? (JSON.parse(row.body) as DurableRecord) : undefined;
   }
 
-  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
-  query(opts: QueryOptions = {}): DurableRecord[] {
-    const cap = opts.cap ?? 20;
+  /**
+   * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
+   * file-key join) shared by query() and count() — everything EXCEPT the rank
+   * (FTS), ordering, and cap. One definition so count() can never drift from
+   * what query() would actually return.
+   */
+  private baseFilter(opts: QueryOptions): { where: string[]; params: (string | number)[]; fileKeys: string[] } {
     const params: (string | number)[] = [];
     // != superseded, not = active: flagged_stale research findings are still
     // served — only as "stale — re-verify" (§3.2.4); the tool layer attaches the flag.
@@ -206,6 +210,25 @@ export class SterlingStore {
       );
       params.push(...fileKeys);
     }
+    return { where, params, fileKeys };
+  }
+
+  /**
+   * COUNT(*) over the §3.4 base filter — the number of records query() WOULD
+   * return ignoring rank/cap (rank_terms is a no-op here). No body fetch, no
+   * JSON.parse: the TUI Knowledge tree's collapsed category/source badges call
+   * this every 1 Hz frame instead of fetching + parsing hundreds of bodies.
+   */
+  count(opts: QueryOptions = {}): number {
+    const { where, params } = this.baseFilter(opts);
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(' AND ')}`).get(...params) as { n: number };
+    return row.n;
+  }
+
+  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
+  query(opts: QueryOptions = {}): DurableRecord[] {
+    const cap = opts.cap ?? 20;
+    const { where, params, fileKeys } = this.baseFilter(opts);
 
     if (opts.rank_terms !== undefined) {
       const terms = rankTerms.parse(opts.rank_terms);

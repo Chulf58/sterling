@@ -114,6 +114,34 @@ test('query: filter by type and stack tags, file-key join, cap (§3.4 order)', (
   }
 });
 
+test('count: COUNT(*) over the §3.4 base filter never drifts from query().length (type/stack-tag/file-key); no body fetch', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(decision({ stack_tags: ['node'] }));
+    store.create(decision({ stack_tags: ['python'], file_keys: ['src/py/x.py'] }));
+    store.create(article());
+    const cases: Record<string, unknown>[] = [
+      { types: ['decision'] },
+      { types: ['feature_article'] },
+      { types: ['anti_pattern'] }, // none anywhere → 0
+      { types: ['decision'], stack_tags: ['node'] },
+      { file_keys: ['src/py/x.py'] },
+    ];
+    for (const opts of cases) {
+      assert.equal(store.count(opts), store.query({ ...opts, cap: 1000 }).length, `count == query length for ${JSON.stringify(opts)}`);
+    }
+    assert.equal(store.count({ types: ['decision'] }), 2);
+    assert.equal(store.count({ types: ['anti_pattern'] }), 0, 'a type with no records → 0');
+    // superseded excluded (same base filter as query): supersede one decision
+    const node = store.query({ types: ['decision'], stack_tags: ['node'] })[0] as { id: string };
+    store.supersede(node.id, decision({ stack_tags: ['node'], statement: 'v2' }));
+    assert.equal(store.count({ types: ['decision'] }), 2, 'the superseded original is not counted; its active replacement is');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('rank: bm25 over rank_terms orders matching records first; freeform questions rejected (§3.4)', () => {
   const { dir, store } = tempStore();
   try {

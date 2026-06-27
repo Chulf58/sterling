@@ -115,6 +115,44 @@ test('AC2 bySource: each store runs the query INDEPENDENTLY — type filter and 
   }
 });
 
+test('countBySource: COUNT(*) twin of bySource — project FIRST then domains, per-store counts matching bySource (no body fetch)', () => {
+  const { stores, cleanup } = harness(['alpha', 'beta']);
+  try {
+    stores.create({ ...env('decision'), title: 'project dec', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    stores.create(ref('domain:alpha'));
+    stores.create({ ...ref('domain:alpha'), location: 'docs/y.md' });
+    stores.create(ref('domain:beta'));
+
+    const counts = stores.countBySource({ types: ['reference_material'] });
+    assert.deepEqual(counts.map((g) => g.source), ['project', 'alpha', 'beta'], 'project first, then domains in manifest order');
+    assert.equal(counts.find((g) => g.source === 'project')!.count, 0, 'no references in the project store');
+    assert.equal(counts.find((g) => g.source === 'alpha')!.count, 2, 'two references in alpha');
+    assert.equal(counts.find((g) => g.source === 'beta')!.count, 1, 'one reference in beta');
+    // never drifts from bySource record counts (same base filter, just COUNT(*))
+    for (const g of stores.bySource({ types: ['reference_material'] })) {
+      assert.equal(counts.find((c) => c.source === g.source)!.count, g.records.length, `countBySource == bySource length for ${g.source}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('querySource: records from ONE named source only; an unknown source → []', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    const p = stores.create({ ...env('decision'), title: 'proj', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    const a = stores.create(ref('domain:alpha'));
+    const projRecs = stores.querySource('project', { types: ['decision'] });
+    assert.ok(projRecs.some((r) => r.id === p.id), 'the project source returns the project record');
+    assert.ok(!projRecs.some((r) => r.id === a.id), 'the project source never returns a domain record');
+    const alphaRecs = stores.querySource('alpha', { types: ['reference_material'] });
+    assert.ok(alphaRecs.some((r) => r.id === a.id), 'the alpha source returns its record');
+    assert.deepEqual(stores.querySource('nonexistent', {}), [], 'an unknown source yields []');
+  } finally {
+    cleanup();
+  }
+});
+
 test('AC2 bySource: zero mounted domains → exactly one project entry', () => {
   const { stores, cleanup } = harness([]);
   try {

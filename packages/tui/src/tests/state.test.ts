@@ -590,7 +590,7 @@ interface CardLike {
 interface KnowledgeViewmodel {
   KNOWLEDGE_CATEGORIES?: CategoryEntry[];
   toCard?: (rec: unknown) => CardLike;
-  knowledgeBySource?: (store: MountedStores, type: string) => { source: string; cards: CardLike[] }[];
+  knowledgeCountBySource?: (store: MountedStores, type: string) => { source: string; count: number }[];
   knowledgeSearch?: (store: MountedStores, rankTerms: string[]) => CardLike[];
 }
 const vm = viewmodel as unknown as KnowledgeViewmodel;
@@ -774,47 +774,40 @@ test('P2 AC4: toCard bodies are never a single unbroken line for ANY multi-field
   }
 });
 
-test('P2 AC3: knowledgeBySource — project FIRST then domains; toCard-mapped cards; cards carry source; EMPTY sources dropped', () => {
+test('P2 AC3: knowledgeCountBySource — per-source COUNT(*), project FIRST then domains; EMPTY sources dropped; counts exact (no body fetch)', () => {
   const { stores, cleanup } = mountedFixture(['node']);
   try {
-    assert.strictEqual(typeof vm.knowledgeBySource, 'function', 'viewmodel.knowledgeBySource must exist (AC3)');
+    assert.strictEqual(typeof vm.knowledgeCountBySource, 'function', 'viewmodel.knowledgeCountBySource must exist (AC3)');
 
     // project: one decision; domain 'node': one decision. Both are 'decision' type.
-    const projDec = stores.create(decisionRec({ title: 'project decision' })) as { id: string };
-    const domDec = stores.create(decisionRec({ ...kenv('decision', 'domain:node'), title: 'domain decision' })) as { id: string };
+    stores.create(decisionRec({ title: 'project decision' }));
+    stores.create(decisionRec({ ...kenv('decision', 'domain:node'), title: 'domain decision' }));
 
-    const groups = vm.knowledgeBySource!(stores, 'decision');
-    // both sources are non-empty → project first, then the domain (manifest order)
-    assert.deepEqual(groups.map((g) => g.source), ['project', 'node'], 'project source first, then mounted domain');
+    const counts = vm.knowledgeCountBySource!(stores, 'decision');
+    // both sources non-empty → project first, then the domain (manifest order)
+    assert.deepEqual(counts.map((g) => g.source), ['project', 'node'], 'project source first, then mounted domain');
+    assert.equal(counts.find((g) => g.source === 'project')!.count, 1, 'exactly one decision in the project store');
+    assert.equal(counts.find((g) => g.source === 'node')!.count, 1, 'exactly one decision in the node domain store');
 
-    const proj = groups.find((g) => g.source === 'project')!;
-    const node = groups.find((g) => g.source === 'node')!;
-    // each source's records mapped via toCard (Card shape, decision type)
-    assert.ok(proj.cards.every((c) => c.type === 'decision'), 'project group holds decision cards');
-    assert.ok(proj.cards.some((c) => c.id === projDec.id), 'the project decision is under project');
-    assert.ok(node.cards.some((c) => c.id === domDec.id), 'the domain decision is under node');
-    assert.ok(!proj.cards.some((c) => c.id === domDec.id), 'a domain record never appears under project');
-    // cards are SOURCE-TAGGED with their physical store
-    assert.equal(proj.cards.find((c) => c.id === projDec.id)!.source, 'project', 'project card tagged source=project');
-    assert.equal(node.cards.find((c) => c.id === domDec.id)!.source, 'node', 'domain card tagged source=node');
-
-    // EMPTY sources dropped: query a type that exists ONLY in the project store
-    const onlyProj = stores.create(referenceRec({ title: 'project-only ref' })) as { id: string };
-    const refGroups = vm.knowledgeBySource!(stores, 'reference_material');
-    assert.deepEqual(refGroups.map((g) => g.source), ['project'], 'the empty domain source is dropped (AC3 — empty sources hidden)');
-    assert.ok(refGroups[0].cards.some((c) => c.id === onlyProj.id));
+    // EMPTY sources dropped: a type that exists ONLY in the project store
+    stores.create(referenceRec({ title: 'project-only ref' }));
+    const refCounts = vm.knowledgeCountBySource!(stores, 'reference_material');
+    assert.deepEqual(refCounts.map((g) => g.source), ['project'], 'the empty domain source is dropped (AC3 — empty sources hidden)');
+    assert.equal(refCounts[0].count, 1);
+    // (record source-tagging + cross-store isolation are proven by the P4 tree
+    // tests, which now fetch records per expanded source via querySource.)
   } finally {
     cleanup();
   }
 });
 
-test('P2 AC3: knowledgeBySource over a type with NO records anywhere → empty (every source dropped)', () => {
+test('P2 AC3: knowledgeCountBySource over a type with NO records anywhere → [] (every source dropped)', () => {
   const { stores, cleanup } = mountedFixture(['node']);
   try {
-    assert.strictEqual(typeof vm.knowledgeBySource, 'function', 'viewmodel.knowledgeBySource must exist (AC3)');
+    assert.strictEqual(typeof vm.knowledgeCountBySource, 'function', 'viewmodel.knowledgeCountBySource must exist (AC3)');
     // nothing of this type created anywhere → both sources empty → both dropped
-    const groups = vm.knowledgeBySource!(stores, 'anti_pattern');
-    assert.deepEqual(groups, [], 'no records of the type anywhere → no source groups (all empty dropped)');
+    const counts = vm.knowledgeCountBySource!(stores, 'anti_pattern');
+    assert.deepEqual(counts, [], 'no records of the type anywhere → no source entries (all empty dropped)');
   } finally {
     cleanup();
   }
@@ -1331,7 +1324,7 @@ function skipMissingFixture(domainName = 'absent') {
 test('P4 AC1/AC2: with the `knowledge` arg, the SOURCE level shows project FIRST then each domain; a domain record sits under its domain source; the category count sums across sources', () => {
   const { stores, cleanup } = mountedFixture(['node']);
   try {
-    assert.strictEqual(typeof vm.knowledgeBySource, 'function', 'the P2 knowledgeBySource viewmodel must exist (P4 sources the tree from it)');
+    assert.strictEqual(typeof vm.knowledgeCountBySource, 'function', 'the knowledgeCountBySource viewmodel must exist (the tree badges read counts from it)');
 
     // one decision PHYSICALLY in the project store, one PHYSICALLY in the 'node' domain store
     const projDec = stores.create(decisionRec({ title: 'project decision' })) as { id: string };
@@ -1408,6 +1401,35 @@ test('P4 AC2: a record physically in the node DOMAIN store NEVER appears under t
     // card is visible, the domain card is NOT (it belongs under the node source)
     assert.ok(s.rows.some((r) => r.id === projDec.id), 'the project decision is visible under the expanded project source');
     assert.ok(!s.rows.some((r) => r.id === domDec.id), 'the domain decision never appears under the project source (it lives under the node source)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('perf: the collapsed Knowledge tree runs COUNT(*) badges and fetches NO record bodies until a source is expanded (todo e22aefc7)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    store.create(decisionRec());
+    store.create(antiPatternRec());
+
+    // spy: tally count() vs query() on the project store
+    let counts = 0;
+    let queries = 0;
+    const realCount = store.count.bind(store);
+    const realQuery = store.query.bind(store);
+    store.count = (...a) => { counts++; return realCount(...a); };
+    store.query = (...a) => { queries++; return realQuery(...a); };
+
+    // ALL COLLAPSED (the default view): badges only → COUNT(*) runs, ZERO body fetches
+    const collapsed = buildDashboardState(store, st({ tab: KNOW_TAB, expanded: [] }), 80);
+    assert.ok(counts >= 1, 'collapsed view runs COUNT(*) for the category badges');
+    assert.equal(queries, 0, 'collapsed view fetches NO record bodies — the perf fix (was: query cap:500 per category every frame)');
+    assert.ok(collapsed.rows.some((r) => r.id === 'cat:decision'), 'the decision category badge still renders from the count');
+
+    // EXPAND a category + its source → NOW exactly that source is queried for bodies
+    queries = 0;
+    buildDashboardState(store, st({ tab: KNOW_TAB, expanded: ['cat:decision', 'src:decision:project'] }), 80);
+    assert.ok(queries >= 1, 'expanding a source fetches that source’s records (query)');
   } finally {
     cleanup();
   }
