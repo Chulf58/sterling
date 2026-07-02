@@ -1,7 +1,7 @@
 ---
 name: explorer
 description: Codebase exploration and blast-radius mapping. Consults articles first, code second. Its map can register as the debug-scope contract (H3).
-model: haiku
+model: claude-haiku-4-5
 effort: low
 tools: Read, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:

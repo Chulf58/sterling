@@ -1,7 +1,7 @@
 ---
 name: reviewer-performance
 description: Reviews hot-path, IO, loop, and query changes. Dispatched only when the diff implicates them or the brief flags perf_sensitive.
-model: opus
+model: claude-opus-4-8
 effort: low
 tools: Read, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:

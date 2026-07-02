@@ -66,14 +66,14 @@ export const configSchema = z.object({
   // small-scoped hard phases (coder hard override); max never appears.
   models: z
     .object({
-      test_writer: modelEffort.default({ model: 'opus', effort: 'high' }),
-      reviewers: modelEffort.default({ model: 'opus', effort: 'low' }),
-      implementation_architect: modelEffort.default({ model: 'opus', effort: 'high' }),
-      coder: modelEffort.default({ model: 'sonnet', effort: 'high' }),
-      coder_hard: modelEffort.default({ model: 'opus', effort: 'xhigh' }),
-      researcher: modelEffort.default({ model: 'sonnet', effort: 'medium' }),
-      explorer: modelEffort.default({ model: 'haiku', effort: 'low' }),
-      classifiers: modelEffort.default({ model: 'haiku', effort: 'low' }),
+      test_writer: modelEffort.default({ model: 'claude-opus-4-8', effort: 'high' }),
+      reviewers: modelEffort.default({ model: 'claude-opus-4-8', effort: 'low' }),
+      implementation_architect: modelEffort.default({ model: 'claude-opus-4-8', effort: 'high' }),
+      coder: modelEffort.default({ model: 'claude-sonnet-4-6', effort: 'high' }),
+      coder_hard: modelEffort.default({ model: 'claude-opus-4-8', effort: 'xhigh' }),
+      researcher: modelEffort.default({ model: 'claude-sonnet-4-6', effort: 'medium' }),
+      explorer: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
+      classifiers: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
     })
     .default({}),
   // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on

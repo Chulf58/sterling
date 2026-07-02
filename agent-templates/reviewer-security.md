@@ -1,7 +1,7 @@
 ---
 name: reviewer-security
 description: Reviews diff-selected changes for injection, secrets, and validation defects. Dispatched on security path/content signals, dependency-manifest changes, or the brief's security_relevant flag.
-model: opus
+model: claude-opus-4-8
 effort: low
 tools: Read, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:

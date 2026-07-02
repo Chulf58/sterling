@@ -1,7 +1,7 @@
 ---
 name: implementation-architect
 description: Cross-cutting technical design for architecturally complex features. Dispatched by the conductor at planning, pre-dispatched when complexity is visible at intake.
-model: opus
+model: claude-opus-4-8
 effort: high
 tools: Read, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:

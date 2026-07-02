@@ -15,14 +15,14 @@
     "windows": { "default": 200000 }
   },
   "models": {
-    "test_writer": { "model": "opus", "effort": "high" },
-    "reviewers": { "model": "opus", "effort": "low" },
-    "implementation_architect": { "model": "opus", "effort": "high" },
-    "coder": { "model": "sonnet", "effort": "high" },
-    "coder_hard": { "model": "opus", "effort": "xhigh" },
-    "researcher": { "model": "sonnet", "effort": "medium" },
-    "explorer": { "model": "haiku", "effort": "low" },
-    "classifiers": { "model": "haiku", "effort": "low" }
+    "test_writer": { "model": "claude-opus-4-8", "effort": "high" },
+    "reviewers": { "model": "claude-opus-4-8", "effort": "low" },
+    "implementation_architect": { "model": "claude-opus-4-8", "effort": "high" },
+    "coder": { "model": "claude-sonnet-4-6", "effort": "high" },
+    "coder_hard": { "model": "claude-opus-4-8", "effort": "xhigh" },
+    "researcher": { "model": "claude-sonnet-4-6", "effort": "medium" },
+    "explorer": { "model": "claude-haiku-4-5", "effort": "low" },
+    "classifiers": { "model": "claude-haiku-4-5", "effort": "low" }
   },
   "reviewer_selection": {
     "security_path_patterns": ["(^|/)auth/", "token", "secret", "credential"],

@@ -1,7 +1,7 @@
 ---
 name: reviewer-correctness
 description: Reviews a phase diff for logic, state, and async correctness. Always dispatched on code-touching diffs — the floor that catches what conditional reviewers miss.
-model: opus
+model: claude-opus-4-8
 effort: low
 tools: Read, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:

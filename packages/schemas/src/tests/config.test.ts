@@ -17,8 +17,8 @@ test('shipped default config parses and carries the spec defaults (§12, §5.1, 
   assert.equal(shipped.context_watch.block_pct, 95);
   assert.equal(shipped.context_watch.mode, 'observe', 'MVP-spine default is observe (§6 H6)');
   assert.equal(shipped.models.reviewers.effort, 'low', 'reviewers run low effort flat (§7.2)');
-  assert.equal(shipped.models.coder.model, 'sonnet');
-  assert.equal(shipped.models.coder_hard.model, 'opus');
+  assert.equal(shipped.models.coder.model, 'claude-sonnet-4-6');
+  assert.equal(shipped.models.coder_hard.model, 'claude-opus-4-8');
   for (const role of Object.values(shipped.models)) {
     assert.notEqual(role.effort, 'max', 'max effort is never used for subagents (§7.2 hard rule)');
   }
