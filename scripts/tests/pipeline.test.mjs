@@ -149,6 +149,64 @@ test('phase-commit.mjs (§8.1): refuses off the run branch, commits on it record
   }
 });
 
+function runReviewerSelection(dir, extra = []) {
+  return spawnSync(process.execPath, [join(root, 'scripts', 'reviewer-selection.mjs'), '--target', dir, ...extra], {
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+  });
+}
+
+test("reviewer-selection.mjs (§7.1): the active run's brief risk_flags reach selection; no run means no brief, reported not silent", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-revsel-'));
+  let store;
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const diffPath = join(dir, 'diff.json');
+    // a diff with NO security/perf path or content signal — only the brief flag can dispatch
+    writeFileSync(diffPath, JSON.stringify([{ path: 'src/plain.mjs', added_lines: ['const x = 1;'] }]));
+
+    // no active run (conductor-direct): selection runs brief-less and the output says so
+    let r = runReviewerSelection(dir, ['--diff-json', diffPath]);
+    assert.equal(r.status, 0, r.stderr);
+    let out = JSON.parse(r.stdout);
+    assert.equal(out.brief, null, 'no run → no brief, stated in the output');
+    assert.ok(out.skipped.some((s) => s.reviewer === 'security'), 'signal-less diff without a brief skips security');
+
+    const brief = store.create({
+      id: randomUUID(), type: 'brief', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      slug: 'f', title: 'F', problem: 'p', feature: 'f',
+      user_stated: { criteria: [], constraints: [] }, conductor_proposals: [],
+      acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+      risk_flags: ['security_relevant'],
+      blast_radius: { files: [{ path: 'src/plain.mjs', owning_articles: [] }], reconcile_list: [] },
+      incidental_scope: [], out_of_scope: [],
+      phases: [{ phase_id: 'p1', goal: 'g', subtasks: ['s'], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+      decisions_made: [],
+    });
+    store.createRun({ id: 'r-rs', brief_ref: brief.id, branch: 'b', machine_state: 'running', phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW });
+
+    // active run with a security_relevant brief: the flag alone dispatches security (the r-65c3 gap)
+    r = runReviewerSelection(dir, ['--diff-json', diffPath]);
+    assert.equal(r.status, 0, r.stderr);
+    out = JSON.parse(r.stdout);
+    const sec = out.dispatch.find((d) => d.reviewer === 'security');
+    assert.ok(sec, 'security dispatched from the brief flag on a signal-less diff');
+    assert.match(sec.why, /brief risk flag security_relevant/);
+    assert.deepEqual(out.brief, { run_id: 'r-rs', risk_flags: ['security_relevant'] });
+
+    // an explicit unknown --run refuses loud, never a silent brief-less selection
+    r = runReviewerSelection(dir, ['--diff-json', diffPath, '--run', 'r-ghost']);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /no run 'r-ghost'/);
+  } finally {
+    store?.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 // A git project with a store but NO active run — the conductor-direct state.
 function makeGitProjectNoRun() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-dm-'));
