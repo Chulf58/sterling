@@ -2,7 +2,6 @@
 node_modules/
 packages/*/dist/
 packages/tui/bundle/
-hooks/*.mjs
 .sterling/
 sterling.bat
 .claude/agents/
