@@ -829,3 +829,120 @@ test('dispose-run verifies the union: H7-accumulated reconcile_needed blocks dis
     cleanup();
   }
 });
+
+// --------------------------- H16 (session-event register, run r-0501) ---------------------------
+
+const H16_REGISTER = ['.sterling', 'transient', 'session-events.json'];
+function readSessionEvents(dir) {
+  const p = join(dir, ...H16_REGISTER);
+  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
+}
+
+test('H16 hooks.json matcher covers WebSearch, WebFetch, Task, Agent on PostToolUse (H11 lesson: direct-invocation tests bypass the platform matcher, so assert the registration itself)', () => {
+  const hooksJson = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8'));
+  const entry = (hooksJson.hooks.PostToolUse ?? []).find((e) =>
+    (e.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes('h16-event-register.mjs'))
+  );
+  assert.ok(entry, 'hooks.json must register H16 on PostToolUse');
+  const matcher = new RegExp(entry.matcher);
+  for (const tool of ['WebSearch', 'WebFetch', 'Task', 'Agent']) {
+    assert.ok(matcher.test(tool), `H16 matcher must cover ${tool} — else the register silently never fires for it`);
+  }
+});
+
+test('AC3: H16 records WebSearch/WebFetch as research_tool (query/url in detail) and EVERY agent dispatch regardless of type (append log, no dedup)', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const { dir, cleanup } = makeProject();
+  try {
+    const post = (tool, tool_input) =>
+      runHook('h16-event-register.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: tool, tool_input }), dir);
+
+    assert.equal(post('WebSearch', { query: 'genesys rate limit scope' }).code, 0, 'never blocks');
+    assert.equal(post('WebFetch', { url: 'https://developer.genesys.cloud/x' }).code, 0);
+    assert.equal(post('Task', { subagent_type: 'explorer', prompt: 'map the store' }).code, 0);
+    assert.equal(post('Agent', { subagent_type: 'researcher', prompt: 'go' }).code, 0);
+
+    const ev = readSessionEvents(dir);
+    assert.equal(ev.length, 4, 'each recordable call appended once, in order, never deduped (the register is an append log)');
+
+    assert.equal(ev[0].kind, 'research_tool');
+    assert.match(ev[0].detail, /genesys rate limit scope/, 'the WebSearch query lands in detail');
+    assert.equal(ev[1].kind, 'research_tool');
+    assert.match(ev[1].detail, /developer\.genesys\.cloud/, 'the WebFetch url lands in detail');
+
+    assert.equal(ev[2].kind, 'agent_dispatch');
+    assert.match(ev[2].detail, /explorer/, 'a NON-research agent dispatch is still recorded — the recorder is policy-free (research-duty filtering is phase 2)');
+    assert.equal(ev[3].kind, 'agent_dispatch');
+    assert.match(ev[3].detail, /researcher/, 'a researcher dispatch is recorded');
+
+    for (const e of ev) assert.ok(typeof e.at === 'string' && e.at.length > 0, 'every event carries an at timestamp');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC3: two identical dispatches both land (append log never dedups)', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const { dir, cleanup } = makeProject();
+  try {
+    const post = () =>
+      runHook('h16-event-register.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: 'go' } }), dir);
+    assert.equal(post().code, 0);
+    assert.equal(post().code, 0);
+    assert.equal(readSessionEvents(dir).filter((e) => e.kind === 'agent_dispatch').length, 2, 'no dedup: both identical dispatches are appended');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC6: H16 records in direct mode but is silent (allow, NO write) while a run is active', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const active = makeProject({ withRun: true });
+  try {
+    const r = runHook('h16-event-register.mjs', hookInput(active.dir, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), active.dir);
+    assert.equal(r.code, 0, 'an active run never blocks the tool');
+    assert.equal(readSessionEvents(active.dir).length, 0, 'with a run active the pipeline owns capture — H16 records nothing');
+  } finally {
+    active.cleanup();
+  }
+  const direct = makeProject();
+  try {
+    const r = runHook('h16-event-register.mjs', hookInput(direct.dir, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), direct.dir);
+    assert.equal(r.code, 0);
+    assert.equal(readSessionEvents(direct.dir).length, 1, 'direct mode (no active run) records');
+  } finally {
+    direct.cleanup();
+  }
+});
+
+test('H16: missing store → allow with no recording, never blocks (fail-open, mirrors H7)', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const bare = mkdtempSync(join(tmpdir(), 'sterling-h16-bare-'));
+  try {
+    const r = runHook('h16-event-register.mjs', hookInput(bare, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), bare);
+    assert.equal(r.code, 0, 'no .sterling store → allow, no ceremony');
+    assert.equal(readSessionEvents(bare).length, 0, 'nothing recorded without a store');
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('debug-scope.mjs register appends a debug_scope event to the register (third writer, interface slice 1)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'inmap.mjs'), 'x');
+    const r = spawnSync(
+      process.execPath,
+      [join(root, 'scripts', 'debug-scope.mjs'), 'register', '--path', 'src/inmap.mjs', '--target', dir],
+      { encoding: 'utf8', cwd: dir, timeout: 60_000 }
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const ev = readSessionEvents(dir).filter((e) => e.kind === 'debug_scope');
+    assert.equal(ev.length, 1, 'scope registration writes exactly one debug_scope event');
+    assert.ok(typeof ev[0].detail === 'string' && ev[0].detail.length > 0, 'the debug_scope event carries a non-empty detail');
+    assert.ok(typeof ev[0].at === 'string' && ev[0].at.length > 0, 'the debug_scope event carries an at timestamp');
+  } finally {
+    cleanup();
+  }
+});

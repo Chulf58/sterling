@@ -27,8 +27,9 @@ export {
   MACHINE_STATES,
   machineState,
   runRecordSchema,
+  sessionEventSchema,
 } from './transient.js';
-export type { Signal, SpineSignal, Handoff, MachineState, RunRecord } from './transient.js';
+export type { Signal, SpineSignal, Handoff, MachineState, RunRecord, SessionEvent } from './transient.js';
 export { configSchema, parseConfig } from './config.js';
 export type { SterlingConfig } from './config.js';
 export { projectRegistrationSchema } from './registry.js';

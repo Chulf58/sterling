@@ -115,6 +115,14 @@ export const configSchema = z.object({
         .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'sterling-tui.mjs']),
     })
     .default({}),
+  // §6 H16 session-event register (run r-0501): which agent types are considered
+  // research agents for the research_owed lane (phase 2 filtering). Default list
+  // is over-inclusive (§7.1 precedent) — tune down on run data.
+  session_events: z
+    .object({
+      research_agents: z.array(z.string()),
+    })
+    .default({ research_agents: ['researcher', 'claude-code-guide'] }),
   // §3.4 stale-at-read thresholds (days)
   staleness: z
     .object({

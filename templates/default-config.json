@@ -44,6 +44,9 @@
     "blast_radius_hard_threshold": 8,
     "thin_knowledge_retrieval_threshold": 2
   },
+  "session_events": {
+    "research_agents": ["researcher", "claude-code-guide"]
+  },
   "staleness": {
     "research_days": { "fast": 30, "medium": 90, "stable": 365 },
     "platform_external_days": 180

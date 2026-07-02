@@ -42,6 +42,10 @@
       {
         "matcher": "mcp__sterling__knowledge_create|mcp__plugin_sterling_sterling__knowledge_create",
         "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h11-note-structure.mjs\"", "timeout": 120 }]
+      },
+      {
+        "matcher": "WebSearch|WebFetch|Task|Agent",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h16-event-register.mjs\"" }]
       }
     ],
     "Stop": [
