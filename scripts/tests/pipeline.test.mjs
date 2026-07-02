@@ -20,6 +20,7 @@ import {
   sweepMergedBranches,
 } from '../lib/branch-manager.mjs';
 import { writeBaseline, compareBaseline, gitTestIntegrity } from '../lib/test-integrity.mjs';
+import { buildDiffJson } from '../lib/diff-json.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -204,6 +205,82 @@ test("reviewer-selection.mjs (§7.1): the active run's brief risk_flags reach se
   } finally {
     store?.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test('diff-json (board 09c237d6): buildDiffJson merges tracked (committed/staged/unstaged) with UNTRACKED files, as line CONTENT', () => {
+  const { dir, cleanup } = makeGitProjectNoRun(); // main has src/base.mjs
+  try {
+    // unstaged edit to a tracked file
+    writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\nconst c = spawn(cmd);\n');
+    // a staged-new file (in the index + on disk, so `git diff main` sees it)
+    writeFileSync(join(dir, 'src', 'staged.mjs'), 'export const s = 2;\n');
+    git(dir, ['add', 'src/staged.mjs']);
+    // an UNTRACKED new file — the r-1417 blind spot: `git diff main` never sees it
+    writeFileSync(join(dir, 'src', 'untracked.mjs'), 'export const u = 3;\nconst more = 4;\n');
+
+    const diff = buildDiffJson({ cwd: dir, base: 'main' });
+    const byPath = Object.fromEntries(diff.map((f) => [f.path, f.added_lines]));
+
+    assert.ok(byPath['src/base.mjs']?.includes('const c = spawn(cmd);'), 'unstaged edit present as content');
+    assert.ok(byPath['src/staged.mjs']?.includes('export const s = 2;'), 'staged-new file present');
+    assert.ok(byPath['src/untracked.mjs'], 'UNTRACKED file present — the blind spot is closed');
+    assert.deepEqual(byPath['src/untracked.mjs'], ['export const u = 3;', 'const more = 4;'], 'untracked lines are CONTENT, every line added');
+  } finally {
+    cleanup();
+  }
+});
+
+test('reviewer-selection --base: an untracked-only change reaches the skeptic (r-1417 under-count regression)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    // 401 plain lines, untracked — no security/perf/export signals, only size
+    const big = Array.from({ length: 401 }, (_, i) => `const x${i} = ${i};`).join('\n');
+    writeFileSync(join(dir, 'src', 'big.mjs'), big + '\n');
+
+    const r = runReviewerSelection(dir, ['--base', 'main']);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    const skeptic = out.dispatch.find((d) => d.reviewer === 'skeptic');
+    assert.ok(skeptic, 'skeptic dispatched — untracked lines were counted (0 without the fix → skipped)');
+    assert.match(skeptic.why, /401 added lines/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('reviewer-selection --base: an added line with a security signal dispatches security (content-not-line-numbers regression)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    // small untracked file whose CONTENT carries a security signal (spawn()
+    // matches rs.security_content_patterns) — a line-numbers diff would miss it
+    writeFileSync(join(dir, 'src', 'svc.mjs'), 'export function run(cmd) {\n  return spawn(cmd, [], { shell: true });\n}\n');
+
+    const r = runReviewerSelection(dir, ['--base', 'main']);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    const sec = out.dispatch.find((d) => d.reviewer === 'security');
+    assert.ok(sec, 'security dispatched from the added content signal');
+    assert.match(sec.why, /content signal in 'src\/svc\.mjs'/);
+    assert.ok(!out.dispatch.some((d) => d.reviewer === 'skeptic'), 'a tiny diff stays under the skeptic threshold');
+  } finally {
+    cleanup();
+  }
+});
+
+test('reviewer-selection: exactly one diff input required (neither / both --base and --diff-json refuse loud)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    const neither = runReviewerSelection(dir, []);
+    assert.equal(neither.status, 2);
+    assert.match(neither.stderr, /exactly one diff input/);
+
+    writeFileSync(join(dir, 'd.json'), '[]');
+    const both = runReviewerSelection(dir, ['--base', 'main', '--diff-json', join(dir, 'd.json')]);
+    assert.equal(both.status, 2);
+    assert.match(both.stderr, /exactly one diff input/);
+  } finally {
+    cleanup();
   }
 });
 
