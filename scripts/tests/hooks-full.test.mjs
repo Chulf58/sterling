@@ -1,7 +1,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -192,13 +192,15 @@ test('H1: shared project registry — touches this project last_seen + makes the
   }
 });
 
-test('H1 stale-server guard: a marker build-id differing from the current build warns the human to restart; matching, absent, or orphaned (dead writer) is silent (P1)', () => {
+test('H1 stale-server guard: a marker build-id differing from the current build warns the human to restart; matching, absent, or orphaned (dead or reused-pid writer) is silent (P1)', async () => {
   const { dir, cleanup } = makeProject();
   const serverDist = mkdtempSync(join(tmpdir(), 'sterling-dist-'));
   const markerPath = join(dir, '.sterling', 'transient', 'mcp-runtime.json');
-  // pid defaults to this (live) test process so the writer-liveness probe sees an
-  // ALIVE writer — the genuinely-stale RUNNING-server case the guard exists for.
-  const writeMarker = (buildId, pid = process.pid) => {
+  // The genuinely-stale RUNNING-server case needs a live writer that the identity
+  // probe recognizes as the server: a decoy child whose cmdline carries the
+  // 'mcp-server' marker substring (real servers run .../packages/mcp-server/dist).
+  const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', 'mcp-server-decoy'], { stdio: 'ignore' });
+  const writeMarker = (buildId, pid) => {
     mkdirSync(dirname(markerPath), { recursive: true });
     writeFileSync(markerPath, JSON.stringify({ build_id: buildId, pid, booted_at: NOW }));
   };
@@ -212,15 +214,27 @@ test('H1 stale-server guard: a marker build-id differing from the current build 
     );
   try {
     writeFileSync(join(serverDist, '.build-id'), 'BUILD_CURRENT');
+    if (process.platform === 'linux') {
+      // wait until the decoy has exec'd (its /proc cmdline shows the decoy argv)
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        try {
+          if (readFileSync(`/proc/${decoy.pid}/cmdline`, 'utf8').includes('mcp-server-decoy')) break;
+        } catch {}
+        assert.ok(Date.now() < deadline, 'decoy server process failed to start');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
 
     // fresh: the running server's recorded build matches the current build → no warning
-    writeMarker('BUILD_CURRENT');
+    writeMarker('BUILD_CURRENT', decoy.pid);
     let out = run();
     assert.doesNotMatch(out.systemMessage, /STALE/, 'matching build-id → no stale warning');
     assert.match(out.systemMessage, /^0 todos/, 'systemMessage is counts-only when fresh');
 
-    // stale: the running server predates the current build → loud restart warning
-    writeMarker('BUILD_OLD');
+    // stale: the running server (live writer, server cmdline) predates the current
+    // build → loud restart warning — the case the guard exists for
+    writeMarker('BUILD_OLD', decoy.pid);
     out = run();
     assert.match(out.systemMessage, /STALE.*running build BUILD_OLD.*current BUILD_CURRENT/s, 'mismatch → stale warning naming both builds');
     assert.match(out.systemMessage, /RESTART THE SESSION/);
@@ -240,7 +254,18 @@ test('H1 stale-server guard: a marker build-id differing from the current build 
     writeMarker('BUILD_OLD', deadPid);
     out = run();
     assert.doesNotMatch(out.systemMessage, /STALE/, 'stale build-id but DEAD writer pid → orphaned marker → no warning (P1)');
+
+    // reused pid: after a reboot (pid numbering resets — the WSL case, observed
+    // 2026-07-02) the orphan marker's pid can point at a LIVE but UNRELATED
+    // process; kill(0) alone reports "alive" and cries wolf. The Linux identity
+    // probe reads /proc/<pid>/cmdline and confirms not-the-writer → silent.
+    if (process.platform === 'linux') {
+      writeMarker('BUILD_OLD', process.pid); // this test process: live, cmdline is the node test runner — not an mcp-server
+      out = run();
+      assert.doesNotMatch(out.systemMessage, /STALE/, 'stale build-id but the live pid is NOT an mcp-server → reused pid → no warning (P1)');
+    }
   } finally {
+    decoy.kill('SIGKILL');
     rmSync(serverDist, { recursive: true, force: true });
     cleanup();
   }

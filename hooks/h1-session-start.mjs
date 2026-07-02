@@ -4629,10 +4629,10 @@ function buildIdPath(serverDir) {
 function runtimeMarkerPath(storePath) {
   return join(dirname(storePath), "transient", "mcp-runtime.json");
 }
-function stalenessVerdict(currentBuildId, marker, markerPidAlive2 = null) {
+function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
   if (!currentBuildId || !marker)
     return { state: "unknown" };
-  if (markerPidAlive2 === false)
+  if (markerPidAlive === false)
     return { state: "unknown" };
   return marker.build_id === currentBuildId ? { state: "fresh", running: marker.build_id, current: currentBuildId } : { state: "stale", running: marker.build_id, current: currentBuildId };
 }
@@ -5292,16 +5292,22 @@ if (existsSync3(registryPath())) {
     registry.close();
   }
 }
-function markerPidAlive(pid) {
+function markerWriterAlive(pid) {
   if (!Number.isInteger(pid)) return null;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
     if (err?.code === "ESRCH") return false;
-    if (err?.code === "EPERM") return true;
-    return null;
+    if (err?.code !== "EPERM") return null;
   }
+  if (process.platform !== "linux") return true;
+  try {
+    const cmdline = readFileSync2(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    if (cmdline && !cmdline.includes("mcp-server")) return false;
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
+  }
+  return true;
 }
 var staleWarning = "";
 try {
@@ -5314,7 +5320,7 @@ try {
     const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync2(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
-  const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerPidAlive(marker.pid) : null);
+  const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
   if (verdict.state === "stale") {
     staleWarning = `\u26A0 Sterling MCP server is STALE \u2014 running build ${verdict.running}, current ${verdict.current}. RESTART THE SESSION to load the current server (a stale server silently mis-stores domain writes). `;
   }
