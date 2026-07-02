@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DurableRecord } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
-import { SterlingTools } from '../tools.js';
+import { SterlingTools, type NoteExtractionPayload } from '../tools.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 
@@ -439,5 +440,125 @@ test('handoff pair: write validates, read filters by phase and files', () => {
     assert.equal(tools.handoffRead({ phase_id: 'p2' }).length, 0);
   } finally {
     cleanup();
+  }
+});
+
+// --------------------------- note structuring dispatch (board ccb14030) ---------------------------
+// PostToolUse never fires on MCP tool calls (research_finding 5e7d0a78), so
+// knowledgeCreate itself dispatches the bundled worker. These tests pin the
+// dispatch seam; the worker's own behavior stays covered in hooks-full.test.mjs.
+
+test('note create dispatches note-structuring with the hook-shaped payload; success is not a skip', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  const payloads: NoteExtractionPayload[] = [];
+  const tools = new SterlingTools({
+    store,
+    now: () => NOW,
+    repoRoot: dir,
+    noteExtraction: (p) => {
+      payloads.push(p);
+      return { dispatched: true };
+    },
+  });
+  try {
+    const { record, check_skipped } = tools.knowledgeCreate('note', {
+      raw_text: 'queue-level retries beat global backoff',
+      captured_at: NOW,
+      capture_source: 'conductor',
+      derived: [],
+    });
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0].cwd, dir, 'worker opens the store at the project root');
+    assert.equal(payloads[0].tool_input.type, 'note');
+    assert.equal(payloads[0].tool_input.fields.raw_text, 'queue-level retries beat global backoff');
+    const echoed = JSON.parse(payloads[0].tool_response.content[0].text) as { record: { id: string } };
+    assert.equal(echoed.record.id, record.id, 'tool_response carries the created record like the hook input did');
+    assert.ok(
+      !check_skipped.some((s) => s.check === 'note-structuring-h11'),
+      'a dispatched extraction is not a skipped check'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('note-structuring dispatch failure is loud: reason in the envelope AND a store row (P5)', () => {
+  // no repoRoot → the server cannot tell the worker where the store lives
+  const { store, tools, cleanup } = harness();
+  try {
+    const { check_skipped } = tools.knowledgeCreate('note', {
+      raw_text: 'a note with nowhere to extract',
+      captured_at: NOW,
+      capture_source: 'conductor',
+      derived: [],
+    });
+    assert.ok(check_skipped.some((s) => s.check === 'note-structuring-h11' && s.reason === 'no_repo_root'));
+    assert.ok(store.listCheckSkipped().some((s) => s.check_name === 'note-structuring-h11' && s.reason === 'no_repo_root'));
+  } finally {
+    cleanup();
+  }
+
+  // an injected dispatcher that reports failure (e.g. worker script missing) surfaces its reason
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-'));
+  const store2 = new SterlingStore(join(dir, 'sterling.db'));
+  const tools2 = new SterlingTools({
+    store: store2,
+    now: () => NOW,
+    repoRoot: dir,
+    noteExtraction: () => ({ dispatched: false, reason: 'worker_script_missing' }),
+  });
+  try {
+    const { check_skipped } = tools2.knowledgeCreate('note', {
+      raw_text: 'another note',
+      captured_at: NOW,
+      capture_source: 'conductor',
+      derived: [],
+    });
+    assert.ok(check_skipped.some((s) => s.check === 'note-structuring-h11' && s.reason === 'worker_script_missing'));
+  } finally {
+    store2.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('default dispatch spawns the bundled worker end-to-end: candidate lands derived_unconfirmed citing the note', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-note-e2e-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const fake = join(dir, 'fake-extractor.mjs');
+  writeFileSync(
+    fake,
+    `process.stdout.write(JSON.stringify([{ type: 'decision', fields: { title: 'Queue-level retries', statement: 'Retry per queue, not global backoff.', alternatives_rejected: [], rationale: 'per-org limits' } }]));`
+  );
+  const prevExtractor = process.env.STERLING_H11_EXTRACTOR;
+  process.env.STERLING_H11_EXTRACTOR = fake;
+  const tools = new SterlingTools({ store, repoRoot: dir }); // default noteExtraction — the real spawn
+  try {
+    const { record, check_skipped } = tools.knowledgeCreate('note', {
+      raw_text: 'genesys rate limits are per-org; we chose queue-level retries',
+      captured_at: NOW,
+      capture_source: 'conductor',
+      derived: [],
+    });
+    assert.ok(!check_skipped.some((s) => s.check === 'note-structuring-h11'), 'dispatch started');
+    // fire-and-forget: poll the store for the worker's cross-process write
+    const deadline = Date.now() + 20_000;
+    let candidates: DurableRecord[] = [];
+    while (Date.now() < deadline) {
+      candidates = store.query({ types: ['decision'], include_unconfirmed: true, cap: 5 });
+      if (candidates.length) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.equal(candidates.length, 1, 'worker wrote the extraction candidate');
+    assert.equal(candidates[0].derived_unconfirmed, true);
+    assert.ok(candidates[0].links.some((l) => l.rel === 'cites' && l.target_id === record.id), 'candidate cites the note');
+    assert.deepEqual((store.get(record.id) as { derived: string[] }).derived, [candidates[0].id], 'note.derived[] updated');
+  } finally {
+    if (prevExtractor === undefined) delete process.env.STERLING_H11_EXTRACTOR;
+    else process.env.STERLING_H11_EXTRACTOR = prevExtractor;
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

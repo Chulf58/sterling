@@ -2,9 +2,11 @@
 // the logic is unit-testable; server.ts wires them to MCP. Coarse tools are
 // safe because schemas are exact: every write revalidates at the store.
 
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import type { QueryOptions, RecordedExit, ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
@@ -21,6 +23,45 @@ export interface ToolDeps {
   newId?: () => string;
   /** project root for §3.2.5 repo-located doc mtime checks; absent → check inert */
   repoRoot?: string;
+  /** note-structuring dispatch override (tests); default detach-spawns the bundled worker */
+  noteExtraction?: (payload: NoteExtractionPayload) => NoteExtractionDispatch;
+}
+
+/**
+ * stdin payload for the bundled note-structuring worker
+ * (hooks/h11-note-structure.mjs) — mirrors the PostToolUse hook input shape the
+ * script was built against, so the worker runs unchanged now that the server,
+ * not the platform, spawns it (PostToolUse never fires on MCP tool calls —
+ * research_finding 5e7d0a78, board ccb14030).
+ */
+export interface NoteExtractionPayload {
+  cwd: string;
+  tool_input: { type: 'note'; fields: Record<string, unknown> };
+  tool_response: { content: { type: 'text'; text: string }[] };
+}
+
+export interface NoteExtractionDispatch {
+  dispatched: boolean;
+  reason?: string;
+}
+
+// The bundled worker ships with the plugin; resolve it relative to this module
+// (dist/tools.js → repo root is three levels up) so the path holds wherever the
+// server runs — self-hosted or launched from a consuming project.
+const NOTE_WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'hooks', 'h11-note-structure.mjs');
+
+function spawnNoteExtraction(payload: NoteExtractionPayload): NoteExtractionDispatch {
+  if (!existsSync(NOTE_WORKER)) return { dispatched: false, reason: 'worker_script_missing' };
+  const child = spawn(process.execPath, [NOTE_WORKER], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  // A dead child must not crash the server: 'error' fires async on both the
+  // process and its stdin pipe. Nothing to record from here — the worker owns
+  // its own check_skipped once running, and pre-exec failures are covered by
+  // the existsSync guard (process.execPath is the running node, always valid).
+  child.on('error', () => {});
+  child.stdin.on('error', () => {});
+  child.stdin.end(JSON.stringify(payload));
+  child.unref();
+  return { dispatched: true };
 }
 
 const DAY_MS = 86_400_000;
@@ -31,6 +72,7 @@ export class SterlingTools {
   private now: () => string;
   private newId: () => string;
   private repoRoot?: string;
+  private noteExtraction: (payload: NoteExtractionPayload) => NoteExtractionDispatch;
 
   constructor(deps: ToolDeps) {
     this.store = deps.store;
@@ -38,6 +80,7 @@ export class SterlingTools {
     this.now = deps.now ?? (() => new Date().toISOString());
     this.newId = deps.newId ?? randomUUID;
     this.repoRoot = deps.repoRoot;
+    this.noteExtraction = deps.noteExtraction ?? spawnNoteExtraction;
   }
 
   /** §16.1.9: unbuilt checks emit check_skipped where they would have run — never silent success. */
@@ -146,9 +189,35 @@ export class SterlingTools {
     }
 
     const record = this.store.create(candidate);
-    if (type === 'note') skipped.push(this.skip('note-structuring-h11', this.activeRunId()));
+    if (type === 'note') {
+      const failed = this.dispatchNoteStructuring(record, fields);
+      if (failed) skipped.push(failed);
+    }
     this.surfacePromotionCandidate(record, type);
     return { record, check_skipped: skipped };
+  }
+
+  /**
+   * §3.2.6 note structuring, dispatched from the server: PostToolUse hooks
+   * never fire on MCP tool calls (verified on CC 2.1.198 — research_finding
+   * 5e7d0a78, board ccb14030), so knowledge_create itself detach-spawns the
+   * bundled worker — the one seam that provably runs on every note capture.
+   * Fire-and-forget: the worker opens the store at cwd and records its own
+   * check_skipped on every failure path; only a dispatch that never starts is
+   * recorded here (loud, P5).
+   */
+  private dispatchNoteStructuring(record: DurableRecord, fields: Record<string, unknown>): SkippedCheck | undefined {
+    const dispatch = this.repoRoot
+      ? this.noteExtraction({
+          cwd: this.repoRoot,
+          tool_input: { type: 'note', fields },
+          tool_response: { content: [{ type: 'text', text: JSON.stringify({ record }) }] },
+        })
+      : { dispatched: false, reason: 'no_repo_root' };
+    if (dispatch.dispatched) return undefined;
+    const reason = dispatch.reason ?? 'dispatch_failed';
+    this.store.recordCheckSkipped('note-structuring-h11', reason, this.activeRunId(), this.now());
+    return { check: 'note-structuring-h11', reason };
   }
 
   /**

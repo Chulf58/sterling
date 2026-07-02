@@ -1,9 +1,10 @@
-// H11 — note structuring (spec §6 H11, §3.2.6). PostToolUse on the
-// knowledge_create tool (type=note), non-blocking. The hooks.json matcher must
-// cover the PLUGIN tool name (mcp__plugin_sterling_sterling__knowledge_create) —
-// the only name that exists once Sterling loads via the plugin (decision
-// 097851ed) and in every consuming project — plus the legacy project-scope name
-// for the transition. This script keys on tool_input.type, not the tool name.
+// H11 — note structuring (spec §6 H11, §3.2.6). NOT a registered hook anymore:
+// PostToolUse never fires on MCP tool calls (verified CC 2.1.198 —
+// research_finding 5e7d0a78, board ccb14030), so the hooks.json registration
+// was retired and the MCP server's knowledgeCreate detach-spawns this script
+// directly on every note create. The stdin payload keeps the PostToolUse hook
+// shape ({cwd, tool_input, tool_response}) so the script runs unchanged; it
+// keys on tool_input.type, not the tool name.
 //
 // PLATFORM DELTA (verified at step 5, flagged for approval): the spec names a
 // prompt-type (Haiku) handler, but current prompt hooks are READ-ONLY (policy
