@@ -23,7 +23,10 @@ const handoffs = store.readHandoffs(run.id, { phase_id: phaseId });
 const problems = [];
 if (handoffs.length === 0) problems.push(`no handoff written for phase '${phaseId}' — agents communicate through durable run records, never relay (§7.4)`);
 
-const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope]);
+// Mid-run scope amendments (brief mid-run-scope-amendment, decision 8e6f9491) are
+// in-contract everywhere the contract is checked — union them here too (:26).
+const amendmentPaths = (run.scope_amendments ?? []).map((a) => a.path);
+const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope, ...amendmentPaths]);
 for (const h of handoffs) {
   for (const change of h.what_changed) {
     if (!allowed.has(change.path)) problems.push(`handoff (${h.agent_role}) reports out-of-contract change: '${change.path}'`);
@@ -105,7 +108,7 @@ if (isFinal) {
 
   // whole-run diff within contract (needs the branch manager's base)
   if (isGitRepo(target) && run.base_branch) {
-    const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope]);
+    const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope, ...amendmentPaths]);
     for (const f of wholeRunDiffFiles({ cwd: target, store, runId: run.id })) {
       if (!allowed.has(f)) problems.push(`whole-run diff outside contract: '${f}' (§8.1 final completeness)`);
     }

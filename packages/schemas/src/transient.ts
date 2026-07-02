@@ -111,6 +111,12 @@ export const runRecordSchema = z.object({
   // H7 (§6): articles whose files were touched mid-run — reconciliation due at
   // completion; dispose-run verifies the union of this and the brief's list.
   reconcile_needed: z.array(z.string()).optional(),
+  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
+  // the conductor's human-gated "amend and continue" on a blast-radius omission.
+  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
+  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
+  // can never open an out_of_scope path.
+  scope_amendments: z.array(z.object({ path: repoPath, reason: z.string().min(1), at: z.string().min(1) })).optional(),
   // §8.1 branch model: the branch the run started from — the merge gate's
   // target; recorded by the branch manager at run-branch creation.
   base_branch: z.string().optional(),

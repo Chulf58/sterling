@@ -21,9 +21,10 @@ const now = new Date().toISOString();
 
 const removed = [];
 try {
+  const amendments = (run?.scope_amendments ?? []).map((a) => a.path);
   for (const p of paths) {
     const rel = normalizeRepoPath(p);
-    const scope = scopeCheck({ brief: brief?.type === 'brief' ? brief : undefined, debugScope, rel });
+    const scope = scopeCheck({ brief: brief?.type === 'brief' ? brief : undefined, debugScope, rel, amendments });
     if (scope.deny) fail(`fs-remove REFUSED (nothing deleted): ${scope.deny}`, 2);
     if (!existsSync(join(target, rel))) fail(`fs-remove REFUSED: '${rel}' does not exist`, 2);
   }

@@ -19,8 +19,9 @@ try {
   const run = store.getRun();
   const brief = run ? store.get(run.brief_ref) : undefined;
   const debugScope = run ? undefined : readDebugScope(target);
+  const amendments = (run?.scope_amendments ?? []).map((a) => a.path);
   for (const rel of [from, to]) {
-    const scope = scopeCheck({ brief: brief?.type === 'brief' ? brief : undefined, debugScope, rel });
+    const scope = scopeCheck({ brief: brief?.type === 'brief' ? brief : undefined, debugScope, rel, amendments });
     if (scope.deny) fail(`fs-move REFUSED (nothing moved): ${scope.deny}`, 2);
   }
   if (!existsSync(join(target, from))) fail(`fs-move REFUSED: '${from}' does not exist`, 2);

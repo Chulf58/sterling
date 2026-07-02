@@ -200,7 +200,9 @@ try {
       const rel = p.replace(/\/+$/, '');
       if (!rel) continue;
       const isViolation =
-        isEnforcementSurface(rel) || matchesGlob(rel, 'hooks/**') || (brief && !!scopeCheck({ brief, rel }).deny);
+        isEnforcementSurface(rel) ||
+        matchesGlob(rel, 'hooks/**') ||
+        (brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny);
       if (isViolation) {
         restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
         violations.push(rel);

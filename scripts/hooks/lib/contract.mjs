@@ -38,14 +38,18 @@ export function isEnforcementSurface(rel) {
 /**
  * Scope decision. brief != null → run mode; else debugScope != null →
  * debug-scope mode; else direct (no scope denial here).
+ * `amendments` (string[] of exact repo-relative paths, mid-run-scope-amendment
+ * decision 8e6f9491) are unioned into the allowed set AFTER the out_of_scope
+ * loop — ordering is load-bearing: an amended path that also matches out_of_scope
+ * stays denied. Omitting amendments (or []) is byte-identical to prior behavior.
  * Returns { deny: <reason> } or {}.
  */
-export function scopeCheck({ brief, debugScope, rel }) {
+export function scopeCheck({ brief, debugScope, rel, amendments = [] }) {
   if (brief) {
     for (const oos of brief.out_of_scope) {
       if (matchesGlob(rel, oos)) return { deny: `'${rel}' is declared out_of_scope ('${oos}') in the brief` };
     }
-    const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope]);
+    const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope, ...amendments]);
     if (!allowed.has(rel)) {
       return { deny: `'${rel}' is outside the brief's blast_radius + incidental_scope — re-scope, don't route around the gate (contract-violated)` };
     }

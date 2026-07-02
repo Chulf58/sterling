@@ -4378,6 +4378,12 @@ var runRecordSchema = external_exports.object({
   // H7 (§6): articles whose files were touched mid-run — reconciliation due at
   // completion; dispose-run verifies the union of this and the brief's list.
   reconcile_needed: external_exports.array(external_exports.string()).optional(),
+  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
+  // the conductor's human-gated "amend and continue" on a blast-radius omission.
+  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
+  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
+  // can never open an out_of_scope path.
+  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
   // §8.1 branch model: the branch the run started from — the merge gate's
   // target; recorded by the branch manager at run-branch creation.
   base_branch: external_exports.string().optional(),

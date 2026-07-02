@@ -4494,6 +4494,12 @@ var runRecordSchema = external_exports.object({
   // H7 (§6): articles whose files were touched mid-run — reconciliation due at
   // completion; dispose-run verifies the union of this and the brief's list.
   reconcile_needed: external_exports.array(external_exports.string()).optional(),
+  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
+  // the conductor's human-gated "amend and continue" on a blast-radius omission.
+  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
+  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
+  // can never open an out_of_scope path.
+  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
   // §8.1 branch model: the branch the run started from — the merge gate's
   // target; recorded by the branch manager at run-branch creation.
   base_branch: external_exports.string().optional(),
@@ -5013,6 +5019,16 @@ var SterlingStore = class {
   appendRunReconcileNeeded(runId, articleId) {
     this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
   }
+  /**
+   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
+   * the conductor's human-gated append of an exact repo-relative path to the run
+   * record. Idempotent-on-path — a duplicate path is skipped and the first
+   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
+   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
+   */
+  appendRunScopeAmendment(runId, amendment) {
+    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
+  }
   /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
   incrementDispatchCount(runId, agentType) {
     const next = this.updateRunOptimistic(runId, (run) => ({
@@ -5196,12 +5212,12 @@ function readDebugScope(cwd2) {
   return existsSync4(p) ? JSON.parse(readFileSync3(p, "utf8")) : null;
 }
 var ENFORCEMENT_SURFACE = [".claude/settings*.json", ".claude/agents/**", ".sterling/config.json"];
-function scopeCheck({ brief, debugScope, rel: rel2 }) {
+function scopeCheck({ brief, debugScope, rel: rel2, amendments = [] }) {
   if (brief) {
     for (const oos of brief.out_of_scope) {
       if (matchesGlob(rel2, oos)) return { deny: `'${rel2}' is declared out_of_scope ('${oos}') in the brief` };
     }
-    const allowed = /* @__PURE__ */ new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope]);
+    const allowed = /* @__PURE__ */ new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope, ...amendments]);
     if (!allowed.has(rel2)) {
       return { deny: `'${rel2}' is outside the brief's blast_radius + incidental_scope \u2014 re-scope, don't route around the gate (contract-violated)` };
     }
@@ -5244,7 +5260,7 @@ try {
     if (!rel) deny(`H3 [run mode]: '${toolPath}' is outside the repository \u2014 the run owns only the working tree; out of scope`);
     const brief = store.get(run.brief_ref);
     if (!brief || brief.type !== "brief") deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
-    const scope2 = scopeCheck({ brief, rel });
+    const scope2 = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope2.deny) deny(`H3 [run mode]: ${scope2.deny}`);
     if (!isCreation && !hasRead(ledgerPath(cwd, run.id, input.agent_id), rel)) {
       deny(`H3: no read-evidence for '${rel}' \u2014 Read the exact file before editing (read before edit; Grep/Glob hits are not read-evidence)`);

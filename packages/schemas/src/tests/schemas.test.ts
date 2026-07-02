@@ -349,3 +349,51 @@ test('research_owed is a registered SYSTEM_REASONS member draining under "captur
   }
   assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...reasons].sort(), 'DRAIN_VERBS and SYSTEM_REASONS stay 1:1');
 });
+
+// ------------------- mid-run scope amendment (run r-1417) -------------------
+
+test('runRecordSchema: scope_amendments — optional {path,reason,at}[] ; legacy round-trips; paths normalized (interface slice 1)', () => {
+  const base = {
+    id: 'r-1417',
+    brief_ref: randomUUID(),
+    branch: 'sterling/run-r-1417',
+    machine_state: 'running',
+    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+    dispatch_counts: {},
+    escalations: [],
+    started_at: NOW,
+  };
+
+  // legacy run record (no scope_amendments) round-trips WITHOUT the field being invented
+  const legacy = runRecordSchema.parse(base) as { scope_amendments?: unknown[] };
+  assert.ok(
+    legacy.scope_amendments === undefined || (Array.isArray(legacy.scope_amendments) && legacy.scope_amendments.length === 0),
+    'a legacy run record without scope_amendments round-trips unchanged'
+  );
+
+  // a run record carrying scope_amendments must PARSE (assertion-red now if the field is
+  // stripped or rejected — never a thrown crash) and each path normalizes at the boundary (repoPath)
+  let parsed: { scope_amendments?: { path: string; reason: string; at: string }[] } | undefined;
+  assert.doesNotThrow(() => {
+    parsed = runRecordSchema.parse({
+      ...base,
+      scope_amendments: [
+        { path: 'src\\amended.ts', reason: 'adjudicated mid-run', at: NOW },
+        { path: 'src/two.ts', reason: 'second amendment', at: NOW },
+      ],
+    }) as typeof parsed;
+  }, 'a run record carrying scope_amendments must parse');
+  assert.ok(Array.isArray(parsed!.scope_amendments), 'scope_amendments survives parsing as an array');
+  assert.equal(parsed!.scope_amendments!.length, 2);
+  assert.equal(parsed!.scope_amendments![0].path, 'src/amended.ts', 'repoPath normalizes the amendment path (backslash -> POSIX)');
+  assert.equal(parsed!.scope_amendments![0].reason, 'adjudicated mid-run');
+  assert.equal(parsed!.scope_amendments![0].at, NOW);
+
+  // reason is z.string().min(1); at is z.string().min(1); path is required
+  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ path: 'src/a.ts', reason: '', at: NOW }] }), /invalid|min|reason|empty/i,
+    'empty reason is rejected');
+  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ path: 'src/a.ts', reason: 'r', at: '' }] }), /invalid|min|at|empty/i,
+    'empty at is rejected');
+  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ reason: 'r', at: NOW }] }), /invalid|path|required/i,
+    'path is required on each amendment');
+});
