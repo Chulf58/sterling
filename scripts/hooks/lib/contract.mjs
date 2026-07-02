@@ -25,6 +25,16 @@ export function clearDebugScope(cwd) {
   rmSync(debugScopePath(cwd), { force: true });
 }
 
+// The enforcement surface, ONE definition (§6 H3 self-protection; H17 (A)/(B)
+// verification). NO hooks/** here — H3 self-protects the bundled hooks dir by
+// absolute path, and H17 pins hooks/** with a SEPARATE matchesGlob check.
+export const ENFORCEMENT_SURFACE = ['.claude/settings*.json', '.claude/agents/**', '.sterling/config.json'];
+
+/** True when a repo-relative POSIX path is enforcement surface. Arity 1 (rel) — no hooksRel. */
+export function isEnforcementSurface(rel) {
+  return typeof rel === 'string' && ENFORCEMENT_SURFACE.some((g) => matchesGlob(rel, g));
+}
+
 /**
  * Scope decision. brief != null → run mode; else debugScope != null →
  * debug-scope mode; else direct (no scope denial here).

@@ -694,3 +694,578 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
     cleanup();
   }
 });
+
+// ===========================================================================
+// H17 — dual-mode Bash write-sweep (v3.1 hardened hybrid). Decision 2422e76a.
+//
+// Under test: scripts/hooks/h17-bash-write-sweep.mjs — registered on the coder
+// frontmatter's PreToolUse Bash (baseline snapshot) AND PostToolUse Bash (verify
+// + restore). It closes the H14 `node --test <writer>` arbitrary-write bypass
+// (decision f404dfb4) by detecting, after an agent's Bash command, any write to:
+//   (A) tracked files — via `git status --porcelain -z` (HEAD-anchored restore),
+//       a VIOLATION iff isEnforcementSurface(rel) || matchesGlob(rel,'hooks/**')
+//       OR (run+brief resolvable AND scopeCheck({brief,rel}).deny);
+//   (B) the gitignored BASELINE set — `.claude/agents/**` + `.sterling/config.json`
+//       + `.claude/settings*.json` (v3.1 NEW; NOT sterling.db), snapshotted Pre to
+//       os.tmpdir()/sterling-enforce-<runId>.json and diffed Post.
+// v3.1 UNIVERSAL FAIL-CLOSED: during an active agent run ANY unexpected error
+// (missing/corrupt baseline, restore fs-error, store/git throw, brief-unresolvable)
+// DENIES (exit 2), NEVER a non-blocking exit 1. Non-deny only: no agent_id
+// (conductor) → allow; no active run (L2) → baseline + always-set only.
+//
+// ACCEPTED determined-attacker residuals (decision 2422e76a, option A) — NOT
+// tested here because asserting the hook blocks them would be an incorrect,
+// unpassable oracle: (A) a tamper the agent `git commit`s (HEAD-anchor restores
+// the committed tamper); (B) a forged baseline overwritten to match a tamper.
+// Both are out of f404dfb4's "well-meaning agent" threat model.
+//
+// The fixture is a real temp git repo (init + identity + initial commit) whose
+// .gitignore mirrors v3.1 reality: hooks/*.mjs + hooks/hooks.json + source + tests
+// TRACKED; .claude/agents/ + .claude/settings.local.json + .sterling/ IGNORED.
+// ===========================================================================
+
+const GIT_SKIP = (() => {
+  const r = spawnSync('git', ['--version'], { encoding: 'utf8' });
+  return !r.error && r.status === 0 ? false : 'git not available on this host';
+})();
+
+// run git in `dir` (setup helper — never silently swallows a setup failure: P5)
+function git(dir, args, { must = false } = {}) {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  if (must) assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+  return r;
+}
+
+// the same brief the node-adapter fixture uses: in-scope src/feature.ts +
+// src/new-file.ts, incidental src/types.ts, out_of_scope src/legacy/** — so
+// scopeCheck denies every OTHER repo path.
+function briefRecord() {
+  return {
+    ...envelope('brief'),
+    slug: 'feat',
+    title: 'Feature',
+    problem: 'p',
+    feature: 'f',
+    user_stated: { criteria: [], constraints: [] },
+    conductor_proposals: [],
+    acceptance_criteria: [{ ac_id: 'AC1', text: 'works end to end', verifiable_at: 'final' }],
+    technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+    blast_radius: {
+      files: [
+        { path: 'src/feature.ts', owning_articles: [] },
+        { path: 'src/new-file.ts', owning_articles: [] },
+      ],
+      reconcile_list: [],
+    },
+    incidental_scope: ['src/types.ts'],
+    out_of_scope: ['src/legacy/**'],
+    phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+    decisions_made: [],
+  };
+}
+
+// Build a git-backed project with a live Sterling store + active run.
+// `briefRef` overrides the run's brief_ref (AC9f: a well-formed but unresolvable
+// ref). `activeRun:false` gives the L2 no-run posture.
+function makeGitProject({ activeRun = true, briefRef, config = CONFIG } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-h17-'));
+  const runId = 'r-h17-' + randomUUID().slice(0, 8);
+
+  git(dir, ['init', '-q'], { must: true });
+  git(dir, ['config', 'user.email', 'h17@sterling.test'], { must: true });
+  git(dir, ['config', 'user.name', 'H17 Test'], { must: true });
+  git(dir, ['config', 'commit.gpgsign', 'false']);
+
+  // .gitignore = v3.1 reality
+  writeFileSync(join(dir, '.gitignore'), ['.claude/agents/', '.claude/settings.local.json', '.sterling/', ''].join('\n'));
+
+  // TRACKED bundled hooks (hooks/*.mjs + hooks/hooks.json)
+  mkdirSync(join(dir, 'hooks'), { recursive: true });
+  writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [] } }, null, 2) + '\n');
+  writeFileSync(join(dir, 'hooks', 'h3-contract-gate.mjs'), '// bundled enforcement hook (pristine)\nprocess.exit(0);\n');
+
+  // TRACKED source + frozen tests
+  mkdirSync(join(dir, 'src', 'legacy'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'feature.ts'), 'export const x = 1;\n'); // in-scope
+  writeFileSync(join(dir, 'src', 'types.ts'), 'export type T = 1;\n'); // incidental
+  writeFileSync(join(dir, 'src', 'other.ts'), 'export const other = 1;\n'); // out-of-contract tracked
+  writeFileSync(join(dir, 'src', 'a b.ts'), 'export const spaced = 1;\n'); // out-of-contract, spaced path
+  writeFileSync(join(dir, 'src', 'legacy', 'old.ts'), 'export const legacy = 1;\n'); // out_of_scope
+  mkdirSync(join(dir, 'tests'), { recursive: true });
+  writeFileSync(join(dir, 'tests', 'frozen.test.mjs'), "import { test } from 'node:test';\ntest('frozen', () => {});\n");
+
+  git(dir, ['add', '-A'], { must: true });
+  git(dir, ['commit', '-q', '-m', 'init'], { must: true });
+
+  // gitignored enforcement surface (present so (B) can snapshot a baseline)
+  mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'agents', 'coder.md'), '# coder (legit)\n');
+  writeFileSync(join(dir, '.claude', 'settings.local.json'), JSON.stringify({ hooks: 'enabled' }) + '\n');
+
+  // store + active run
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  if (config) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
+  const dbPath = join(dir, '.sterling', 'sterling.db');
+  let store = new SterlingStore(dbPath);
+  let brief, run;
+  if (activeRun) {
+    let ref = briefRef;
+    if (ref === undefined) {
+      brief = store.create(briefRecord());
+      ref = brief.id;
+    }
+    run = store.createRun({
+      id: runId,
+      brief_ref: ref,
+      branch: 'sterling/' + runId,
+      machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+      dispatch_counts: {},
+      escalations: [],
+      started_at: NOW,
+    });
+  }
+
+  const baselinePath = join(tmpdir(), 'sterling-enforce-' + runId + '.json');
+  let closed = false;
+  const closeStore = () => {
+    if (!closed) {
+      try {
+        store.close();
+      } catch {}
+      closed = true;
+    }
+  };
+  const cleanup = (extraPaths = []) => {
+    closeStore();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(baselinePath, { force: true });
+    for (const p of extraPaths) rmSync(p, { force: true });
+  };
+  return { dir, store, run, brief, runId, dbPath, baselinePath, closeStore, cleanup };
+}
+
+// run h17 in Pre (snapshot) or Post (verify+sweep) mode. agent_id passed via `over`.
+function h17(dir, event, over = {}) {
+  return runHook(
+    'h17-bash-write-sweep.mjs',
+    hookInput(dir, {
+      hook_event_name: event,
+      tool_name: 'Bash',
+      tool_input: { command: 'node --test src/x.mjs' },
+      ...(event === 'PostToolUse' ? { tool_response: { stdout: '', stderr: '' } } : {}),
+      ...over,
+    }),
+    dir
+  );
+}
+
+const A1 = { agent_id: 'a1' };
+
+// ---------------------------------------------------------------------------
+// AC1 — tracked bundled hooks (hooks.json + a bundled hook): tamper → deny + git-checkout-HEAD restore
+// ---------------------------------------------------------------------------
+
+test('H17 AC1: tampering tracked hooks/hooks.json + a bundled hooks/*.mjs → exit 2 + HEAD restore', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const hooksJson = join(dir, 'hooks', 'hooks.json');
+    const bundled = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    const origJson = readFileSync(hooksJson, 'utf8');
+    const origHook = readFileSync(bundled, 'utf8');
+
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'Pre snapshot succeeds');
+    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
+    writeFileSync(bundled, '// TAMPERED — enforcement neutered\nprocess.exit(0);\n');
+
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(r.code, 2, `hooks/** tamper must deny — ${r.stderr}`);
+    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'hooks.json restored via git checkout HEAD');
+    assert.equal(readFileSync(bundled, 'utf8'), origHook, 'bundled hook restored via git checkout HEAD');
+    assert.match(r.stderr, /hooks\.json/, 'the denial names hooks.json');
+    assert.match(r.stderr, /h3-contract-gate/, 'the denial names the bundled hook');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC2 — out-of-contract tracked FROZEN test tampered → deny + restore (caught via scopeCheck)
+// ---------------------------------------------------------------------------
+
+test('H17 AC2: out-of-contract tracked frozen test tampered → exit 2 + checkout restore', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const frozen = join(dir, 'tests', 'frozen.test.mjs');
+    const orig = readFileSync(frozen, 'utf8');
+
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(frozen, orig + "\ntest('injected', () => {}); // weakened via node --test writer\n");
+
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1);
+    assert.equal(r.code, 2, `out-of-blast-radius test edit must deny — ${r.stderr}`);
+    assert.equal(readFileSync(frozen, 'utf8'), orig, 'frozen test restored to HEAD');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC3 — out-of-contract source: modified→checkout; untracked FILE→deleted; untracked DIR→removed recursively
+// ---------------------------------------------------------------------------
+
+test('H17 AC3: out-of-contract source — modified→checkout, untracked file→delete, untracked dir(?? dir/)→rm -r', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    // (a) tracked out-of-contract source MODIFIED → restore via checkout
+    const other = join(dir, 'src', 'other.ts');
+    const origOther = readFileSync(other, 'utf8');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(other, origOther + '\n// out-of-contract tamper\n');
+    let r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `modified out-of-contract source must deny — ${r.stderr}`);
+    assert.equal(readFileSync(other, 'utf8'), origOther, 'modified source restored via git checkout HEAD');
+
+    // (b) UNTRACKED out-of-contract FILE → deleted
+    const evilFile = join(dir, 'src', 'evil.mjs');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(evilFile, 'console.log("planted");\n');
+    r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `untracked out-of-contract file must deny — ${r.stderr}`);
+    assert.equal(existsSync(evilFile), false, 'untracked out-of-contract file deleted');
+
+    // (c) UNTRACKED out-of-contract DIR — git collapses to `?? src/evildir/` → removed recursively
+    const evilDir = join(dir, 'src', 'evildir');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    mkdirSync(evilDir, { recursive: true });
+    writeFileSync(join(evilDir, 'a.ts'), 'x');
+    writeFileSync(join(evilDir, 'b.ts'), 'y');
+    r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `untracked out-of-contract dir must deny — ${r.stderr}`);
+    assert.equal(existsSync(evilDir), false, 'untracked dir removed recursively (?? dir/ collapse handled)');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC4 — no false block: in-contract edit + new in-scope file untouched; clean tree → 0
+// ---------------------------------------------------------------------------
+
+test('H17 AC4: no false block — clean tree → 0; in-scope edit + new in-scope file allowed & untouched', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    // clean tree → allow
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    let r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 0, `clean tree must allow — ${r.stderr}`);
+
+    // an in-blast-radius edit + a new in-scope file: allowed AND left intact
+    const feature = join(dir, 'src', 'feature.ts'); // in blast radius
+    const editedFeature = readFileSync(feature, 'utf8') + '\n// legit in-scope edit\n';
+    const newInScope = join(dir, 'src', 'new-file.ts'); // in blast radius (creation allowed)
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(feature, editedFeature);
+    writeFileSync(newInScope, 'export const created = 1;\n');
+    r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 0, `in-scope work must not be blocked — ${r.stderr}`);
+    assert.equal(readFileSync(feature, 'utf8'), editedFeature, 'in-scope edit NOT reverted');
+    assert.ok(existsSync(newInScope), 'new in-scope file NOT deleted');
+    assert.equal(readFileSync(newInScope, 'utf8'), 'export const created = 1;\n', 'new in-scope file untouched');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC5 — conductor (no agent_id) → allow, short-circuit BEFORE store/git (tamper NOT restored)
+// ---------------------------------------------------------------------------
+
+test('H17 AC5: no agent_id (conductor) → exit 0, nothing touched, short-circuits before store/git', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const hooksJson = join(dir, 'hooks', 'hooks.json');
+    const tampered = JSON.stringify({ hooks: {}, TAMPERED: true });
+    // deliberately no Pre snapshot — the conductor path must return before it
+    // would ever consult the baseline, the store, or git.
+    writeFileSync(hooksJson, tampered);
+    const r = h17(dir, 'PostToolUse'); // NO agent_id
+    assert.equal(r.code, 0, `conductor legitimately edits the enforcement surface — must allow (${r.stderr})`);
+    assert.equal(readFileSync(hooksJson, 'utf8'), tampered, 'conductor edit NOT restored — proves the short-circuit before git');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC8 (v3.1 EXPANDED) — gitignored enforcement writes caught via the (B) baseline + restored;
+//   agents/evil.md (new→delete), .sterling/config.json (modified→restore),
+//   .claude/settings.local.json (v3.1 NEW, modified→restore). sterling.db change NOT flagged.
+// ---------------------------------------------------------------------------
+
+test('H17 AC8: gitignored (B)-set writes caught via baseline + restored; sterling.db NOT flagged', { skip: GIT_SKIP }, () => {
+  const { dir, store, cleanup } = makeGitProject();
+  try {
+    // --- .claude/agents/evil.md : NEW → deleted ---
+    const evilAgent = join(dir, '.claude', 'agents', 'evil.md');
+    const legitAgent = join(dir, '.claude', 'agents', 'coder.md');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(evilAgent, '# smuggled agent (hooks stripped)\n');
+    let r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `new gitignored agent file must deny — ${r.stderr}`);
+    assert.equal(existsSync(evilAgent), false, 'new (B)-set file deleted (restore to baseline-absent)');
+    assert.ok(existsSync(legitAgent), 'a legit pre-existing agent file is left untouched');
+
+    // --- .sterling/config.json : MODIFIED → restored (kept valid so h17 config reads still succeed) ---
+    const configPath = join(dir, '.sterling', 'config.json');
+    const origConfig = readFileSync(configPath, 'utf8');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(configPath, JSON.stringify({ ...CONFIG, HACKED: true }));
+    r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `modified gitignored config must deny — ${r.stderr}`);
+    assert.equal(readFileSync(configPath, 'utf8'), origConfig, '.sterling/config.json restored to baseline');
+
+    // --- .claude/settings.local.json (the GITIGNORED hook-disable file, v3.1 NEW): MODIFIED → restored ---
+    const settingsLocal = join(dir, '.claude', 'settings.local.json');
+    const origSettings = readFileSync(settingsLocal, 'utf8');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(settingsLocal, JSON.stringify({ hooks: 'DISABLED' }));
+    r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1);
+    assert.equal(r.code, 2, `v3.1: gitignored settings.local.json write must deny — ${r.stderr}`);
+    assert.equal(readFileSync(settingsLocal, 'utf8'), origSettings, 'settings.local.json restored to baseline');
+
+    // --- sterling.db change is NOT in the (B) set and git is blind to it → NOT flagged ---
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    store.create(briefRecord()); // a legit store write mutates sterling.db between Pre and Post
+    r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 0, `a sterling.db change must NOT be flagged (${r.stderr})`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC9 (v3.1 UNIVERSAL FAIL-CLOSED) — every can't-verify path during an active agent run
+// DENIES (exit 2), explicitly NEVER a non-blocking exit 1.
+// ---------------------------------------------------------------------------
+
+test('H17 AC9a: missing baseline at Post (no Pre snapshot) → deny, not exit 1', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup, baselinePath } = makeGitProject();
+  try {
+    rmSync(baselinePath, { force: true }); // ensure absent — no Pre ran
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'must not fail open on a missing baseline');
+    assert.equal(r.code, 2, `missing baseline during active run → deny — ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC9b: corrupt/unparseable baseline → deny, not exit 1', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup, baselinePath } = makeGitProject();
+  try {
+    writeFileSync(baselinePath, '{ this is : not valid json ,,, ');
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'must not fail open on an unparseable baseline');
+    assert.equal(r.code, 2, `corrupt baseline → deny — ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC9c: restore fs-error (deterministic EISDIR dir-swap) → deny, not exit 1', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const configPath = join(dir, '.sterling', 'config.json');
+    // Pre snapshots config.json as a FILE...
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    // ...then swap the file for a DIRECTORY of the same name: on restore, h17's
+    // read/write of that path throws EISDIR — a deterministic restore fs-error.
+    rmSync(configPath, { force: true });
+    mkdirSync(configPath, { recursive: true });
+    writeFileSync(join(configPath, 'blocker'), 'x');
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'a restore fs-error must not fail open');
+    assert.equal(r.code, 2, `restore fs-error → deny — ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC9d: store/resolveRun throw (corrupt sterling.db) → deny, not exit 1', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup, closeStore, dbPath } = makeGitProject();
+  try {
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0); // baseline present — isolate the store throw as the cause
+    closeStore(); // release the fixture's handle before corrupting the db file
+    rmSync(dbPath + '-wal', { force: true });
+    rmSync(dbPath + '-shm', { force: true });
+    writeFileSync(dbPath, 'this is not a sqlite database — resolveRun must throw');
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'a store throw during an active agent run must not fail open (voids AC1)');
+    assert.equal(r.code, 2, `corrupt store → deny — ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC9e: git error/nonzero (corrupt .git/index) → deny, not exit 1', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    // Force `git status --porcelain -z` to exit nonzero deterministically: a
+    // corrupt index makes git fatal on every version (index.lock alone can be
+    // skipped as an optional lock and still exit 0, so it is not reliable here).
+    writeFileSync(join(dir, '.git', 'index'), 'corrupt index bytes — not a valid git index file');
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'a git error must not fail open');
+    assert.equal(r.code, 2, `git nonzero → deny — ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC9f: run active but brief unresolvable → deny, not exit 1', { skip: GIT_SKIP }, () => {
+  // a well-formed brief_ref that resolves to no record (unlike H3, this must fail CLOSED)
+  const { dir, cleanup } = makeGitProject({ briefRef: randomUUID() });
+  try {
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0); // baseline present — isolate brief-unresolvable
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'brief-unresolvable during an active run must not fail open');
+    assert.equal(r.code, 2, `run active + brief unresolvable → deny — ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC10 — crafted baseline with traversal ../ + absolute keys → rejected before write, no out-of-tree write, deny
+// ---------------------------------------------------------------------------
+
+test('H17 AC10: crafted baseline with ../ + absolute keys → deny + NO out-of-tree write', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup, baselinePath, runId } = makeGitProject();
+  const outParent = join(dir, '..', 'pwned-' + runId + '.txt'); // traversal escape target
+  const outAbs = join(tmpdir(), 'pwned-abs-' + runId + '.txt'); // absolute escape target
+  try {
+    // Craft a baseline whose KEYS escape the tree. h17 must validate every key
+    // (repo-relative POSIX + matches a (B) glob; reject traversal/absolute)
+    // BEFORE any restore write — so the escape files are never created.
+    // NOTE: both keys are computed expressions → they MUST be bracketed computed
+    // properties; a bare `expr: value` object key is a JS syntax error.
+    writeFileSync(
+      baselinePath,
+      JSON.stringify({
+        ['../pwned-' + runId + '.txt']: 'traversal payload',
+        [outAbs]: 'absolute payload',
+      })
+    );
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1);
+    assert.equal(r.code, 2, `a baseline with traversal/absolute keys must deny — ${r.stderr}`);
+    assert.equal(existsSync(outParent), false, 'no out-of-tree write via ../ traversal key');
+    assert.equal(existsSync(outAbs), false, 'no out-of-tree write via absolute key');
+  } finally {
+    cleanup([outParent, outAbs]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC11 — rename R dual-path (git mv restore); spaced path via -z; multiple violations → one deny naming each
+// ---------------------------------------------------------------------------
+
+test('H17 AC11 (rename): staged out-of-contract rename (R, dual-path) → deny + origin restored', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const origin = join(dir, 'src', 'other.ts'); // out-of-contract tracked
+    const target = join(dir, 'src', 'renamed.ts');
+    const origContent = readFileSync(origin, 'utf8');
+
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    // stage a rename so `git status --porcelain -z` reports `R  new\0old` (both paths)
+    git(dir, ['mv', 'src/other.ts', 'src/renamed.ts'], { must: true });
+
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1);
+    assert.equal(r.code, 2, `staged rename of an out-of-contract file must deny — ${r.stderr}`);
+    assert.ok(existsSync(origin), 'rename origin restored (dual-path handled)');
+    assert.equal(readFileSync(origin, 'utf8'), origContent, 'origin content restored');
+    assert.equal(existsSync(target), false, 'rename destination removed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC11 (spaced path): out-of-contract path with a space parsed via -z → deny + restore', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const spaced = join(dir, 'src', 'a b.ts'); // out-of-contract, embedded space
+    const orig = readFileSync(spaced, 'utf8');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(spaced, orig + '\n// tamper on a spaced path\n');
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `spaced-path change must deny — ${r.stderr}`);
+    assert.equal(readFileSync(spaced, 'utf8'), orig, 'spaced path restored — proves -z NUL parsing (no space-split)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC11 (multiple): two out-of-contract violations → ONE deny naming each + both restored', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const other = join(dir, 'src', 'other.ts'); // outside blast radius
+    const legacy = join(dir, 'src', 'legacy', 'old.ts'); // out_of_scope
+    const origOther = readFileSync(other, 'utf8');
+    const origLegacy = readFileSync(legacy, 'utf8');
+
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(other, origOther + '\n// tamper 1\n');
+    writeFileSync(legacy, origLegacy + '\n// tamper 2\n');
+
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `multiple violations must deny — ${r.stderr}`);
+    assert.match(r.stderr, /other\.ts/, 'the single deny names the first violation');
+    assert.match(r.stderr, /old\.ts/, 'the single deny names the second violation');
+    assert.equal(readFileSync(other, 'utf8'), origOther, 'first violation restored');
+    assert.equal(readFileSync(legacy, 'utf8'), origLegacy, 'second violation restored');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// contract.mjs unit block — isEnforcementSurface(rel): hits, hooks/** excluded (h17-side), arity 1
+// (guarded import: assert the export exists — never a link-crash that reds the whole file)
+// ---------------------------------------------------------------------------
+
+test('H17 unit: isEnforcementSurface(rel) — surface hits, hooks/** excluded (h17-side), arity 1', async () => {
+  const mod = await import(pathToFileURL(join(HOOKS, 'lib', 'contract.mjs')).href).catch((e) => ({ __err: e }));
+  assert.ok(mod && typeof mod.isEnforcementSurface === 'function', 'scripts/hooks/lib/contract.mjs must export isEnforcementSurface(rel)');
+  const { isEnforcementSurface, ENFORCEMENT_SURFACE } = mod;
+
+  // hits — the enforcement surface
+  assert.equal(isEnforcementSurface('.claude/agents/coder.md'), true, '.claude/agents/** (recursion)');
+  assert.equal(isEnforcementSurface('.claude/agents/nested/deep.md'), true, '.claude/agents/** recurses');
+  assert.equal(isEnforcementSurface('.sterling/config.json'), true, '.sterling/config.json');
+  assert.equal(isEnforcementSurface('.claude/settings.json'), true, 'settings*.json');
+  assert.equal(isEnforcementSurface('.claude/settings.local.json'), true, 'settings*.json glob covers the gitignored variant');
+
+  // misses — hooks/** is deliberately NOT part of isEnforcementSurface on the
+  // h17 side (h17 pins hooks/** with a SEPARATE matchesGlob check); ordinary source misses too
+  assert.equal(isEnforcementSurface('hooks/hooks.json'), false, 'hooks/** is NOT in isEnforcementSurface (h17-side, no hooksRel)');
+  assert.equal(isEnforcementSurface('hooks/h3-contract-gate.mjs'), false, 'hooks/*.mjs is NOT in isEnforcementSurface');
+  assert.equal(isEnforcementSurface('src/feature.ts'), false, 'ordinary source is not enforcement surface');
+
+  // arity 1 — signature is (rel), no hooksRel parameter
+  assert.equal(isEnforcementSurface.length, 1, 'isEnforcementSurface takes exactly one argument (rel)');
+
+  // ENFORCEMENT_SURFACE stays the declared triple (unchanged in v3.1)
+  assert.deepEqual(
+    [...ENFORCEMENT_SURFACE].sort(),
+    ['.claude/agents/**', '.claude/settings*.json', '.sterling/config.json'].sort(),
+    'ENFORCEMENT_SURFACE is the three-glob enforcement set'
+  );
+  assert.equal(ENFORCEMENT_SURFACE.length, 3);
+});
