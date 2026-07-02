@@ -268,6 +268,33 @@ test('reviewer-selection --base: an added line with a security signal dispatches
   }
 });
 
+test('diff-json: an added line whose content starts with "++ " is collected as content, not mis-read as a +++ header', () => {
+  const { dir, cleanup } = makeGitProjectNoRun(); // src/base.mjs is committed on main
+  try {
+    // git emits this added line as `+++ plus-plus content` — it must NOT be taken
+    // for a file header (it is inside a hunk, not preceded by its `--- ` pair)
+    writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n++ plus-plus content\n');
+    const diff = buildDiffJson({ cwd: dir, base: 'main' });
+    const byPath = Object.fromEntries(diff.map((f) => [f.path, f.added_lines]));
+    assert.ok(byPath['src/base.mjs']?.includes('++ plus-plus content'), 'the ++-prefixed line is kept as content of its file');
+    assert.ok(!('plus-plus content' in byPath), 'no spurious file key from the mis-parsed header');
+  } finally {
+    cleanup();
+  }
+});
+
+test('reviewer-selection --base: an option-looking base (--output=) cannot inject a git option — refuses loud, writes no file', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    const probe = join(dir, 'injected.txt');
+    const r = runReviewerSelection(dir, ['--base', `--output=${probe}`]);
+    assert.notEqual(r.status, 0, 'a malformed/option-looking base fails loud, never a silent or arbitrary-write success');
+    assert.ok(!existsSync(probe), 'git did not write the injected --output path (--end-of-options neutralized it)');
+  } finally {
+    cleanup();
+  }
+});
+
 test('reviewer-selection: exactly one diff input required (neither / both --base and --diff-json refuse loud)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {

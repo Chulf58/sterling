@@ -23,20 +23,24 @@ function git(cwd, args) {
 }
 
 // Parse a unified diff (-U0) into { path -> [added content lines] }. Only added
-// (`+`) content lines are kept, keyed by the new-file path (`+++ b/<path>`); the
-// `+++`/`---` headers and removed (`-`) lines are ignored. A pure deletion
-// (`+++ /dev/null`) contributes no path.
+// (`+`) content lines are kept, keyed by the new-file path (`+++ b/<path>`);
+// removed (`-`) lines and headers are ignored; a pure deletion (`+++ /dev/null`)
+// contributes no path. A `+++ ` line is treated as a FILE HEADER only when the
+// previous line is its `--- ` pair — git always emits the two together and never
+// inside a hunk, so an ADDED content line whose text starts with `++ ` (emitted
+// as `+++ …`) is not mistaken for a header.
 function parseUnifiedDiff(out) {
   const files = {};
   let cur = null;
-  for (const line of out.split('\n')) {
-    if (line.startsWith('+++ ')) {
+  const lines = out.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('+++ ') && i > 0 && lines[i - 1].startsWith('--- ')) {
       const p = line.slice(4);
       cur = p === '/dev/null' ? null : p.replace(/^b\//, '');
       if (cur) files[cur] ??= [];
       continue;
     }
-    if (line.startsWith('--- ')) continue; // old-file header, never content
     if (cur && line.startsWith('+')) files[cur].push(line.slice(1));
   }
   return files;
@@ -66,10 +70,13 @@ function fileLines(cwd, rel) {
  * The two sets are disjoint (a staged-new file shows in the diff; `--others`
  * lists only unstaged-untracked), but if a path somehow appears in both its lines
  * are merged. `core.quotepath=false` keeps non-ASCII paths literal.
+ * `--end-of-options` sits before `base` so a `base` that looks like an option
+ * (e.g. `--output=<path>`, an arbitrary-write sink) can never be parsed as one —
+ * it is forced into the revision position and, if malformed, fails loud.
  */
 export function buildDiffJson({ cwd = process.cwd(), base }) {
   if (!base) throw new Error('buildDiffJson requires a base ref');
-  const files = parseUnifiedDiff(git(cwd, ['-c', 'core.quotepath=false', 'diff', base, '-U0', '--no-color']));
+  const files = parseUnifiedDiff(git(cwd, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-color', '--end-of-options', base]));
   const untracked = git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])
     .split('\0')
     .filter(Boolean);
