@@ -468,3 +468,103 @@ test('merge gate runs real branch operations in a git project', () => {
     cleanup();
   }
 });
+
+// ------------------- mid-run scope amendment (run r-1417) -------------------
+
+// AC4 — completeness-check treats a run.scope_amendments path as in-contract at its PER-HANDOFF
+// citation site (:26 union). A subtask citation to an out-of-brief-but-amended file passes; without
+// the amendment reaching the run (feature not yet shipped) the out-of-contract citation blocks (red).
+test('completeness-check: a subtask citation to a run.scope_amendments path passes (AC4, :26 citation union site)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-amend-cite-'));
+  let store;
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] }));
+    store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const brief = store.create({
+      id: randomUUID(), type: 'brief', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      slug: 'f', title: 'F', problem: 'p', feature: 'f',
+      user_stated: { criteria: [], constraints: [] }, conductor_proposals: [],
+      acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+      // src/amended.mjs is deliberately OUTSIDE blast_radius/incidental/out_of_scope
+      blast_radius: { files: [{ path: 'tests/a.test.mjs', owning_articles: [] }], reconcile_list: [] },
+      incidental_scope: [], out_of_scope: [],
+      phases: [{ phase_id: 'p1', goal: 'g', subtasks: ['build amended'], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+      decisions_made: [],
+    });
+    store.createRun({
+      id: 'r-ac4', brief_ref: brief.id, branch: 'b', machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW,
+      scope_amendments: [{ path: 'src/amended.mjs', reason: 'adjudicated mid-run', at: NOW }],
+    });
+
+    writeFileSync(join(dir, 'src', 'amended.mjs'), 'export const a = 1;');
+    writeFileSync(join(dir, 'tests', 'a.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert'; test('a', () => assert.equal(1, 1));");
+    store.writeHandoff('r-ac4', { phase_id: 'p1', agent_role: 'coder', what_changed: [{ path: 'src/amended.mjs', change_role: 'built' }], wired: [], deferred: [], decisions_made: [], tests_produced: ['tests/a.test.mjs'], subtask_evidence: [{ subtask: 'build amended', files: ['src/amended.mjs'], tests: ['tests/a.test.mjs'] }], exit_signal: 'complete', unresolved: [] }, NOW);
+    store.close();
+    store = undefined;
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-ac4', '--phase', 'p1', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 120_000 });
+    assert.equal(r.status, 0, `a citation to an amended (in-contract) path must pass — ${r.stderr}`);
+  } finally {
+    store?.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+// :108 — completeness-check --final unions the run's amendments into the WHOLE-RUN diff scope
+// check. An amended file that is changed across the run is in-contract; without the amendment the
+// whole-run diff carries an out-of-contract file and --final blocks (red).
+test('completeness-check --final: an amended file in the whole-run diff is in-contract (:108 whole-run union site)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-amend-final-'));
+  let store;
+  try {
+    git(dir, ['init', '-b', 'main']);
+    git(dir, ['config', 'user.email', 'test@sterling.local']);
+    git(dir, ['config', 'user.name', 'Sterling Test']);
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n');
+    writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'base']);
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] }));
+    store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const brief = store.create({
+      id: randomUUID(), type: 'brief', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      slug: 'f', title: 'F', problem: 'p', feature: 'f',
+      user_stated: { criteria: [], constraints: [] }, conductor_proposals: [],
+      acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+      // src/extra.mjs is OUTSIDE the brief; only the amendment can make the whole-run diff clean
+      blast_radius: { files: [{ path: 'tests/a.test.mjs', owning_articles: [] }], reconcile_list: [] },
+      incidental_scope: [], out_of_scope: [],
+      phases: [{ phase_id: 'p1', goal: 'g', subtasks: ['build extra'], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+      decisions_made: [],
+    });
+    store.createRun({
+      id: 'r-final', brief_ref: brief.id, branch: 'pending', machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW,
+      scope_amendments: [{ path: 'src/extra.mjs', reason: 'adjudicated mid-run', at: NOW }],
+    });
+
+    startRunBranch({ cwd: dir, store, runId: 'r-final' });
+    writeFileSync(join(dir, 'src', 'extra.mjs'), 'export const e = 1;\n'); // out-of-brief, AMENDED
+    writeFileSync(join(dir, 'tests', 'a.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert'; test('a', () => assert.equal(1, 1));\n");
+    phaseCommit({ cwd: dir, store, runId: 'r-final', phaseId: 'p1' });
+
+    store.writeHandoff('r-final', { phase_id: 'p1', agent_role: 'coder', what_changed: [{ path: 'src/extra.mjs', change_role: 'built' }], wired: [], deferred: [], decisions_made: [], tests_produced: ['tests/a.test.mjs'], subtask_evidence: [{ subtask: 'build extra', files: ['src/extra.mjs'], tests: ['tests/a.test.mjs'] }], exit_signal: 'complete', unresolved: [] }, NOW);
+    store.close();
+    store = undefined;
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-final', '--phase', 'p1', '--final', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 120_000 });
+    assert.equal(r.status, 0, `--final must treat an amended whole-run-diff file as in-contract — ${r.stderr}`);
+  } finally {
+    store?.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

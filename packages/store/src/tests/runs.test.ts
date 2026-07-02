@@ -149,3 +149,49 @@ test('check_skipped: recorded and listable, run-scoped or global (§16.1.9)', ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ------------------- mid-run scope amendment (run r-1417) -------------------
+
+test('appendRunScopeAmendment: idempotent-on-path append; first {reason,at} stands; never touches machine_state; loud on missing run (interface slice 2)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    // guard: convert a not-yet-existing method into an ASSERTION-red (never a call-of-undefined crash).
+    // The behavioral assertions below only run once the primitive exists.
+    assert.equal(
+      typeof (store as unknown as { appendRunScopeAmendment?: unknown }).appendRunScopeAmendment,
+      'function',
+      'SterlingStore must expose appendRunScopeAmendment(runId, {path, reason, at})'
+    );
+    const s = store as unknown as {
+      appendRunScopeAmendment: (runId: string, a: { path: string; reason: string; at: string }) => void;
+    };
+
+    s.appendRunScopeAmendment(run.id, { path: 'src/amended.ts', reason: 'adjudicated', at: NOW });
+    let after = store.getRun(run.id)! as unknown as { scope_amendments: { path: string; reason: string; at: string }[]; machine_state: string };
+    assert.equal(after.scope_amendments.length, 1);
+    assert.equal(after.scope_amendments[0].path, 'src/amended.ts');
+    assert.equal(after.scope_amendments[0].reason, 'adjudicated');
+    assert.equal(after.scope_amendments[0].at, NOW);
+    assert.equal(after.machine_state, 'running', 'amendment append does not touch machine_state');
+
+    // idempotent-on-path: a duplicate path is SKIPPED; the FIRST {reason, at} stands
+    s.appendRunScopeAmendment(run.id, { path: 'src/amended.ts', reason: 'different reason', at: '2026-06-11T00:00:00.000Z' });
+    after = store.getRun(run.id)! as unknown as typeof after;
+    assert.equal(after.scope_amendments.length, 1, 'duplicate path is skipped (idempotent-on-path)');
+    assert.equal(after.scope_amendments[0].reason, 'adjudicated', 'the first reason stands on a duplicate');
+    assert.equal(after.scope_amendments[0].at, NOW, 'the first timestamp stands on a duplicate');
+
+    // a distinct path appends a second entry
+    s.appendRunScopeAmendment(run.id, { path: 'src/second.ts', reason: 'another', at: NOW });
+    after = store.getRun(run.id)! as unknown as typeof after;
+    assert.equal(after.scope_amendments.length, 2);
+    assert.deepEqual(after.scope_amendments.map((a) => a.path).sort(), ['src/amended.ts', 'src/second.ts']);
+
+    // loud on a missing run (mirrors appendRunEscalation)
+    assert.throws(() => s.appendRunScopeAmendment('r-none', { path: 'src/x.ts', reason: 'r', at: NOW }), /no run/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

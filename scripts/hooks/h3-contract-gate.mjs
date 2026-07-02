@@ -46,7 +46,7 @@ try {
     if (!rel) deny(`H3 [run mode]: '${toolPath}' is outside the repository — the run owns only the working tree; out of scope`);
     const brief = store.get(run.brief_ref);
     if (!brief || brief.type !== 'brief') deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
-    const scope = scopeCheck({ brief, rel });
+    const scope = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope.deny) deny(`H3 [run mode]: ${scope.deny}`);
     if (!isCreation && !hasRead(ledgerPath(cwd, run.id, input.agent_id), rel)) {
       deny(`H3: no read-evidence for '${rel}' — Read the exact file before editing (read before edit; Grep/Glob hits are not read-evidence)`);

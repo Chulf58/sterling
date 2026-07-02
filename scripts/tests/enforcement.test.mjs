@@ -766,8 +766,9 @@ function briefRecord() {
 
 // Build a git-backed project with a live Sterling store + active run.
 // `briefRef` overrides the run's brief_ref (AC9f: a well-formed but unresolvable
-// ref). `activeRun:false` gives the L2 no-run posture.
-function makeGitProject({ activeRun = true, briefRef, config = CONFIG } = {}) {
+// ref). `activeRun:false` gives the L2 no-run posture. `amendments` seeds the run's
+// scope_amendments (run r-1417: mid-run scope amendment consumer).
+function makeGitProject({ activeRun = true, briefRef, config = CONFIG, amendments } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h17-'));
   const runId = 'r-h17-' + randomUUID().slice(0, 8);
 
@@ -823,6 +824,7 @@ function makeGitProject({ activeRun = true, briefRef, config = CONFIG } = {}) {
       dispatch_counts: {},
       escalations: [],
       started_at: NOW,
+      ...(amendments ? { scope_amendments: amendments } : {}),
     });
   }
 
@@ -1268,4 +1270,119 @@ test('H17 unit: isEnforcementSurface(rel) — surface hits, hooks/** excluded (h
     'ENFORCEMENT_SURFACE is the three-glob enforcement set'
   );
   assert.equal(ENFORCEMENT_SURFACE.length, 3);
+});
+
+// ===========================================================================
+// mid-run scope amendment (run r-1417) — read path through H3 and H17.
+// A run.scope_amendments entry for an exact repo-relative path makes a previously
+// out-of-brief path in-contract everywhere the contract is checked; out_of_scope
+// and the enforcement surface still deny (ordering is load-bearing).
+// ===========================================================================
+
+// H3 [run mode]: an out-of-brief path listed in run.scope_amendments becomes in-contract
+// (still needs read-evidence); an amended out_of_scope path stays denied; the enforcement
+// surface stays denied for a spawned agent. (AC1 read path.)
+test('H3 [run mode]: run.scope_amendments makes an out-of-brief path in-contract; out_of_scope + enforcement still deny (AC1)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-h3amend-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  try {
+    const brief = store.create({
+      ...envelope('brief'),
+      slug: 'feat',
+      title: 'Feature',
+      problem: 'p',
+      feature: 'f',
+      user_stated: { criteria: [], constraints: [] },
+      conductor_proposals: [],
+      acceptance_criteria: [{ ac_id: 'AC1', text: 'works end to end', verifiable_at: 'final' }],
+      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+      blast_radius: { files: [{ path: 'src/feature.ts', owning_articles: [] }], reconcile_list: [] },
+      incidental_scope: ['src/types.ts'],
+      out_of_scope: ['src/legacy/**'],
+      phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+      decisions_made: [],
+    });
+    // scope_amendments seeded as run data: src/other.ts (out-of-brief) becomes in-contract;
+    // src/legacy/old.ts is a STRAY amendment that must never override out_of_scope.
+    store.createRun({
+      id: 'r-1',
+      brief_ref: brief.id,
+      branch: 'sterling/run-r-1',
+      machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+      dispatch_counts: {},
+      escalations: [],
+      started_at: NOW,
+      scope_amendments: [
+        { path: 'src/other.ts', reason: 'adjudicated mid-run', at: NOW },
+        { path: 'src/legacy/old.ts', reason: 'stray amendment', at: NOW },
+      ],
+    });
+    mkdirSync(join(dir, 'src', 'legacy'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'feature.ts'), 'export const x = 1;');
+    writeFileSync(join(dir, 'src', 'other.ts'), 'export const o = 1;');
+    writeFileSync(join(dir, 'src', 'legacy', 'old.ts'), 'export const l = 1;');
+
+    const edit = (path, agentId = 'a1') =>
+      runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: path }, agent_id: agentId }), dir);
+
+    // amended path, but no read-evidence yet: the amendment makes it in-contract, so the
+    // remaining gate is READ-EVIDENCE — not "outside the brief". (Proves scope now admits it.)
+    let r = edit(join(dir, 'src', 'other.ts'));
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /read-evidence/, 'amended path is in-contract; the remaining gate is read-evidence, not scope');
+
+    // amended path WITH read-evidence → allowed, without restarting the run (AC1)
+    seedLedger(dir, 'r-1', 'a1', ['src/other.ts', 'src/legacy/old.ts']);
+    r = edit(join(dir, 'src', 'other.ts'));
+    assert.equal(r.code, 0, `amended path with read-evidence must be allowed — ${r.stderr}`);
+
+    // out_of_scope still denies even when amended (ordering is load-bearing)
+    r = edit(join(dir, 'src', 'legacy', 'old.ts'));
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /out_of_scope/, 'an amendment can never override out_of_scope');
+
+    // enforcement surface still denies for a spawned agent, even if it were amended
+    const denyEnf = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, '.sterling', 'config.json') }, agent_id: 'a1' }), dir);
+    assert.equal(denyEnf.code, 2);
+    assert.match(denyEnf.stderr, /self-protection/, 'enforcement-surface denial precedes amendment scope');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// H17: an amended path is in-contract — a Bash write to it survives the sweep (AC1 "survives H17").
+test('H17 (amendment): a run.scope_amendments path is in-contract — the edit survives the sweep (AC1)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject({ amendments: [{ path: 'src/other.ts', reason: 'adjudicated mid-run', at: NOW }] });
+  try {
+    const other = join(dir, 'src', 'other.ts'); // tracked, out-of-brief — but AMENDED
+    const edited = readFileSync(other, 'utf8') + '\n// in-contract via amendment\n';
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(other, edited);
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1);
+    assert.equal(r.code, 0, `an amended path must pass the sweep — ${r.stderr}`);
+    assert.equal(readFileSync(other, 'utf8'), edited, 'amended-path edit NOT reverted to HEAD');
+  } finally {
+    cleanup();
+  }
+});
+
+// H17 ordering: an amended path that ALSO matches out_of_scope is still swept + restored.
+test('H17 (amendment ordering): an amended path that ALSO matches out_of_scope stays swept + restored', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject({ amendments: [{ path: 'src/legacy/old.ts', reason: 'stray amendment', at: NOW }] });
+  try {
+    const legacy = join(dir, 'src', 'legacy', 'old.ts'); // out_of_scope AND amended
+    const orig = readFileSync(legacy, 'utf8');
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    writeFileSync(legacy, orig + '\n// tamper on an out_of_scope path\n');
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, `out_of_scope beats the amendment — ${r.stderr}`);
+    assert.equal(readFileSync(legacy, 'utf8'), orig, 'out_of_scope amended path still restored to HEAD');
+  } finally {
+    cleanup();
+  }
 });

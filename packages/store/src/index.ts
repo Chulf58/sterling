@@ -501,6 +501,21 @@ export class SterlingStore {
     );
   }
 
+  /**
+   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
+   * the conductor's human-gated append of an exact repo-relative path to the run
+   * record. Idempotent-on-path — a duplicate path is skipped and the first
+   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
+   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
+   */
+  appendRunScopeAmendment(runId: string, amendment: { path: string; reason: string; at: string }): void {
+    this.updateRunOptimistic(runId, (run) =>
+      (run.scope_amendments ?? []).some((a) => a.path === amendment.path)
+        ? run
+        : { ...run, scope_amendments: [...(run.scope_amendments ?? []), amendment] }
+    );
+  }
+
   /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
   incrementDispatchCount(runId: string, agentType: string): number {
     const next = this.updateRunOptimistic(runId, (run) => ({

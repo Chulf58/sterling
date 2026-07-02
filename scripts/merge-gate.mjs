@@ -22,6 +22,8 @@ const summary = {
   branch: run.branch,
   phases: run.phases.map((p) => ({ id: p.id, status: p.status, signals: p.signals.length })),
   escalations: run.escalations,
+  check_skipped: run.summaries?.check_skipped ?? [],
+  scope_amendments: run.scope_amendments ?? [],
   summaries: run.summaries ?? null,
 };
 
