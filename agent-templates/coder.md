@@ -22,6 +22,8 @@ hooks:
       hooks:
         - type: command
           command: '{{NODE}} "{{HOOKS_DIR}}/h14-bash-allowlist.mjs"'
+        - type: command
+          command: '{{NODE}} "{{HOOKS_DIR}}/h17-bash-write-sweep.mjs"'
     - matcher: "*"
       hooks:
         - type: command
@@ -35,6 +37,10 @@ hooks:
       hooks:
         - type: command
           command: '{{NODE}} "{{HOOKS_DIR}}/h7-file-touch.mjs"'
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: '{{NODE}} "{{HOOKS_DIR}}/h17-bash-write-sweep.mjs"'
     - matcher: "*"
       hooks:
         - type: command

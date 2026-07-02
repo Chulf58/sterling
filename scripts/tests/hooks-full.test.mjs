@@ -1274,3 +1274,34 @@ test('H10 AC7 (SOP half): the drain skill text routes the research_owed lane (fu
   assert.match(skill, /research_owed/, 'the drain SOP must name the research_owed lane');
   assert.match(skill, /research_owed[\s\S]{0,400}quer/i, 'the lane routes to writing the durable record from the cited queries');
 });
+
+// --------------------------- H17 (bash write sweep — coder-frontmatter registration + bundled) ---------------------------
+test('H17 is registered on the coder frontmatter Pre AND Post ToolUse Bash matchers (matcher-coverage; H11 silent-dead lesson)', () => {
+  const coder = readFileSync(join(root, 'agent-templates', 'coder.md'), 'utf8');
+  const fm = (coder.match(/^---\n([\s\S]*?)\n---\n/) ?? [])[1];
+  assert.ok(fm, 'coder template has a frontmatter block');
+  const postIdx = fm.indexOf('PostToolUse:');
+  assert.ok(postIdx > 0, 'coder frontmatter declares PostToolUse');
+  const pre = fm.slice(0, postIdx);
+  const post = fm.slice(postIdx);
+  // Pre: H17 rides the Bash matcher beside H14 to snapshot the baseline BEFORE the command.
+  assert.match(pre, /matcher:\s*"Bash"[\s\S]*?h17-bash-write-sweep\.mjs/, 'H17 must be on the PreToolUse Bash matcher');
+  // Post: H17 rides a Bash matcher to sweep AFTER the command — else the guard silently never fires.
+  assert.match(post, /matcher:\s*"Bash"[\s\S]*?h17-bash-write-sweep\.mjs/, 'H17 must be on a PostToolUse Bash matcher — else the sweep silently never runs');
+});
+
+test('H17 bundle runs standalone (no runtime workspace resolution); conductor (no agent_id) short-circuits to allow', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-h17-bundle-'));
+  try {
+    const r = spawnSync(process.execPath, [join(root, 'hooks', 'h17-bash-write-sweep.mjs')], {
+      input: JSON.stringify({ cwd: dir, hook_event_name: 'PostToolUse', tool_input: { command: 'echo hi' } }),
+      encoding: 'utf8',
+      cwd: dir,
+      timeout: 60_000,
+    });
+    assert.doesNotMatch(r.stderr ?? '', /Cannot find module|ERR_MODULE_NOT_FOUND/, 'H17 must be esbuild-bundled — no workspace import at runtime');
+    assert.equal(r.status, 0, `conductor (no agent_id) must short-circuit to allow (exit 0); stderr: ${r.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

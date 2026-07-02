@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { matchesGlob } from '@sterling/schemas';
 import { readStdin, deny, allow, openStore, repoRel } from './lib/common.mjs';
 import { ledgerPath, hasRead } from './lib/ledger.mjs';
-import { scopeCheck, readDebugScope } from './lib/contract.mjs';
+import { scopeCheck, readDebugScope, ENFORCEMENT_SURFACE } from './lib/contract.mjs';
 
 const input = readStdin();
 const cwd = input.cwd;
@@ -22,7 +22,6 @@ const rel = repoRel(toolPath, cwd);
 // enforcement surface are denied unconditionally in every mode, regardless of
 // scope, store presence, or registered maps. The conductor (human-attended)
 // is exempt and goes through the normal contract rules below.
-const ENFORCEMENT_SURFACE = ['.claude/settings*.json', '.claude/agents/**', '.sterling/config.json'];
 if (input.agent_id && toolPath) {
   const fwd = String(toolPath).replace(/\\/g, '/');
   const hooksDir = dirname(fileURLToPath(import.meta.url)).replace(/\\/g, '/'); // bundled: <plugin>/hooks
