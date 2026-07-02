@@ -530,7 +530,7 @@ test('default dispatch spawns the bundled worker end-to-end: candidate lands der
   const fake = join(dir, 'fake-extractor.mjs');
   writeFileSync(
     fake,
-    `process.stdout.write(JSON.stringify([{ type: 'decision', fields: { title: 'Queue-level retries', statement: 'Retry per queue, not global backoff.', alternatives_rejected: [], rationale: 'per-org limits' } }]));`
+    `process.stdout.write(JSON.stringify({ candidates: [{ type: 'decision', fields: { title: 'Queue-level retries', statement: 'Retry per queue, not global backoff.', alternatives_rejected: [], rationale: 'per-org limits' } }] }));`
   );
   const prevExtractor = process.env.STERLING_H11_EXTRACTOR;
   process.env.STERLING_H11_EXTRACTOR = fake;
