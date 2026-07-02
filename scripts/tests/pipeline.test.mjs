@@ -115,6 +115,40 @@ test('branch manager: dirty tree refuses run start; discard leaves main untouche
   }
 });
 
+function runPhaseCommit(dir, extra = []) {
+  return spawnSync(process.execPath, [join(root, 'scripts', 'phase-commit.mjs'), '--target', dir, ...extra], {
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+  });
+}
+
+test('phase-commit.mjs (§8.1): refuses off the run branch, commits on it recording the sha, refuses unknown phase', () => {
+  const { dir, store, cleanup } = makeGitProject();
+  try {
+    // off the run branch (run.branch is 'pending', tree on main) → refused, nothing recorded
+    const refused = runPhaseCommit(dir, ['--run', 'r-git', '--phase', 'p1']);
+    assert.equal(refused.status, 2, refused.stderr);
+    assert.match(refused.stderr, /REFUSED: on 'main' but run 'r-git' owns 'pending'/);
+    assert.deepEqual(store.getRun('r-git').phases[0].commits, [], 'refusal records nothing');
+
+    startRunBranch({ cwd: dir, store, runId: 'r-git' });
+    writeFileSync(join(dir, 'src', 'feature.mjs'), 'export const f = 7;\n');
+    const ok = runPhaseCommit(dir, ['--run', 'r-git', '--phase', 'p1']);
+    assert.equal(ok.status, 0, ok.stderr);
+    const out = JSON.parse(ok.stdout);
+    assert.equal(out.phase_id, 'p1');
+    assert.equal(out.committed, git(dir, ['rev-parse', 'HEAD']), 'the commit is HEAD on the run branch');
+    assert.deepEqual(store.getRun('r-git').phases[0].commits, [out.committed], 'sha recorded on the run record');
+
+    const badPhase = runPhaseCommit(dir, ['--run', 'r-git', '--phase', 'nope']);
+    assert.equal(badPhase.status, 2);
+    assert.match(badPhase.stderr, /no phase 'nope' on run 'r-git'/);
+  } finally {
+    cleanup();
+  }
+});
+
 // A git project with a store but NO active run — the conductor-direct state.
 function makeGitProjectNoRun() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-dm-'));
