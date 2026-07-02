@@ -5165,7 +5165,7 @@ var PROMPT = [
   `NOTE: ${noteText}`
 ].join("\n");
 var extractor = process.env.STERLING_H11_EXTRACTOR;
-var result = extractor ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: "utf8", timeout: 9e4 }) : spawnSync("claude", ["-p", PROMPT, "--model", "haiku"], { encoding: "utf8", timeout: 9e4, shell: true });
+var result = extractor ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: "utf8", timeout: 9e4 }) : spawnSync("claude", ["-p", PROMPT, "--model", "haiku"], { encoding: "utf8", timeout: 9e4 });
 if (result.error || result.status !== 0) skipLoud(extractor ? "extractor_failed" : "claude_cli_unavailable");
 var candidates;
 try {
@@ -5179,6 +5179,7 @@ var now = (/* @__PURE__ */ new Date()).toISOString();
 for (const cand of candidates) {
   try {
     const record = store.create({
+      ...cand.fields,
       id: randomUUID(),
       type: cand.type,
       created_at: now,
@@ -5189,9 +5190,8 @@ for (const cand of candidates) {
       links: [{ rel: "cites", target_id: noteId }],
       scope: "project",
       stack_tags: [],
-      derived_unconfirmed: true,
+      derived_unconfirmed: true
       // §3.2.6: lower-trust; excluded from retrieval unless opted in
-      ...cand.fields
     });
     created.push(record.id);
   } catch (e) {
