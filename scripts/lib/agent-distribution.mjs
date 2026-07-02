@@ -145,14 +145,19 @@ export function refuseInstruction(name) {
     `     .claude/agents/${name}.md and re-apply them on the fresh version, or`,
     `  2) discard your changes — delete .claude/agents/${name}.md and re-run`,
     '     /sterling:sync-agents to install the fresh version.',
+    '(Header-only drift — an installed body byte-identical to the current template',
+    'render — is repaired automatically; this refusal means the content genuinely differs.)',
     'A guided three-way review is deliberately stubbed for now (spec §16.1 Slice 1).',
   ].join('\n');
 }
 
 // /sterling:sync-agents core (spec §13): header hash compare; refresh clean+stale
 // installs; refuse to overwrite local modification (refuse-and-instruct stub for
-// the three-way review). Statuses: installed | refreshed | up_to_date |
-// locally_modified_up_to_date | refused_local_modification | foreign_file.
+// the three-way review). A "modified" install whose body is byte-identical to
+// the fresh render is header-only drift (stale generated header, not a divergent
+// edit) — repaired, not refused. Statuses: installed | refreshed |
+// header_repaired | up_to_date | locally_modified_up_to_date |
+// refused_local_modification | foreign_file.
 export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {} }) {
   const registry = loadRegistry(registryPath);
   mkdirSync(targetAgentsDir, { recursive: true });
@@ -160,15 +165,15 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
   for (const entry of registry.agents) {
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
     const installedPath = join(targetAgentsDir, `${entry.name}.md`);
-    const render = () => {
+    const renderCandidate = () => {
       const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars });
       if (name !== entry.name) {
         throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
       }
-      writeFileSync(installedPath, installedContent);
+      return installedContent;
     };
     if (!existsSync(installedPath)) {
-      render();
+      writeFileSync(installedPath, renderCandidate());
       report.push({ name: entry.name, status: 'installed' });
       continue;
     }
@@ -182,11 +187,23 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
     const modified = isLocallyModified(installed, header);
     const stale = header.templateHash !== sha256(templateContent);
     if (modified && stale) {
-      report.push({ name: entry.name, status: 'refused_local_modification', instruction: refuseInstruction(entry.name) });
+      // Provable equivalence before refusing: bodies are compared byte-for-byte
+      // against the fresh render with THIS machine's vars baked, so a
+      // cross-machine var difference (e.g. WSL vs Windows node paths) never
+      // reads as repairable — it still refuses.
+      const candidate = renderCandidate();
+      const installedBody = normalize(installed).replace(header.headerLine + '\n', '');
+      const candidateBody = candidate.replace(parseInstalledHeader(candidate).headerLine + '\n', '');
+      if (installedBody === candidateBody) {
+        writeFileSync(installedPath, candidate);
+        report.push({ name: entry.name, status: 'header_repaired' });
+      } else {
+        report.push({ name: entry.name, status: 'refused_local_modification', instruction: refuseInstruction(entry.name) });
+      }
     } else if (modified) {
       report.push({ name: entry.name, status: 'locally_modified_up_to_date' });
     } else if (stale) {
-      render();
+      writeFileSync(installedPath, renderCandidate());
       report.push({ name: entry.name, status: 'refreshed' });
     } else {
       report.push({ name: entry.name, status: 'up_to_date' });

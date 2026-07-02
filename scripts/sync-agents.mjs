@@ -38,7 +38,7 @@ for (const r of report) {
     refused += 1;
     console.error('\n' + r.instruction + '\n');
   }
-  if (r.status === 'installed' || r.status === 'refreshed') changed += 1;
+  if (r.status === 'installed' || r.status === 'refreshed' || r.status === 'header_repaired') changed += 1;
 }
 if (report.length === 0) console.log('no agents registered — nothing to sync');
 if (changed > 0) console.log('\n' + restartInstruction);
