@@ -116,20 +116,36 @@ if (existsSync(registryPath())) {
   }
 }
 
-/** Is the process that wrote the marker still alive? signal 0 probes existence
- *  without delivering a signal: success or EPERM (exists, not ours to signal) =
- *  alive; ESRCH = no such process = confirmed dead; any other error = null
- *  (indeterminate — caller must not suppress a real warning on it). */
-function markerPidAlive(pid) {
+/** Is the process that wrote the marker still alive — and actually the WRITER?
+ *  signal 0 probes existence without delivering a signal: success or EPERM
+ *  (exists, not ours to signal) = a live process; ESRCH = confirmed dead; any
+ *  other error = null (indeterminate — caller must not suppress a real warning
+ *  on it). Existence alone over-warns: pid numbering resets on reboot (WSL
+ *  restarts routinely), so an orphan marker's pid is often REUSED by an
+ *  unrelated process and the dead-writer suppression (decision 132177d2) fails
+ *  — observed 2026-07-02. On Linux, confirm identity via /proc/<pid>/cmdline:
+ *  the writer is always the MCP server, launched from .../packages/mcp-server/
+ *  dist, so a live cmdline WITHOUT 'mcp-server' is a reused pid = confirmed
+ *  not-the-writer = dead. An empty/unreadable cmdline or a non-Linux platform
+ *  keeps the existence verdict (err loud: a missed real warning is worse than
+ *  a rare false one). */
+function markerWriterAlive(pid) {
   if (!Number.isInteger(pid)) return null;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
     if (err?.code === 'ESRCH') return false;
-    if (err?.code === 'EPERM') return true;
-    return null;
+    if (err?.code !== 'EPERM') return null;
   }
+  if (process.platform !== 'linux') return true;
+  try {
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
+    if (cmdline && !cmdline.includes('mcp-server')) return false; // reused pid — not the writer
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'ESRCH') return false; // exited between probe and read
+    // other read errors: identity indeterminate — keep the existence verdict
+  }
+  return true;
 }
 
 // stale-server guard (P5/P7): a running MCP server older than the current built
@@ -148,11 +164,12 @@ try {
     const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync(markerPath, 'utf8')));
     if (parsed.success) marker = parsed.data;
   }
-  // Is the process that wrote the marker still alive? A confirmed-dead writer is
-  // an ORPHANED marker from a server we have since replaced (the restart-after-
-  // rebuild race — no platform ordering guarantee between this hook and the new
-  // server's boot write). Dead → suppress; indeterminate (null) → still warn.
-  const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerPidAlive(marker.pid) : null);
+  // Is the process that wrote the marker still alive AND the writer? A confirmed-
+  // dead (or confirmed-reused-pid) writer is an ORPHANED marker from a server we
+  // have since replaced (the restart-after-rebuild race — no platform ordering
+  // guarantee between this hook and the new server's boot write). Dead → suppress;
+  // indeterminate (null) → still warn.
+  const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
   if (verdict.state === 'stale') {
     staleWarning = `⚠ Sterling MCP server is STALE — running build ${verdict.running}, current ${verdict.current}. RESTART THE SESSION to load the current server (a stale server silently mis-stores domain writes). `;
   }
