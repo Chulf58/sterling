@@ -151,6 +151,7 @@ export const SYSTEM_REASONS = [
   'wire_in_dormant',
   'refresh_reference', // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
+  'research_owed', // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
 ] as const;
 
 // §11 queue drain verbs: draining means the fulfilling artifact was written,
@@ -165,6 +166,7 @@ export const DRAIN_VERBS = {
   wire_in_dormant: 'wired',
   refresh_reference: 'refreshed',
   article_missing: 'created',
+  research_owed: 'captured',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:

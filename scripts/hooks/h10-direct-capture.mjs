@@ -11,6 +11,12 @@
 // missing at session end → article_missing maintenance item. General capture
 // does NOT satisfy the demand — only ownership does (the unowned set
 // recomputes per Stop, so creating the article clears it mechanically).
+// Session-event register (run r-a6cf): H10 also reads session-events.json
+// (written by H16/debug-scope). Dual-register entry: proceeds if touches OR
+// events are non-empty. Capture duty: touches ∪ debug_scope events. Research
+// duty: research_tool ∪ configured agent_dispatch events not followed by a
+// durable capture → nag once (shared marker), then research_owed on release.
+// All terminal paths clear both registers + the nag marker together (P4).
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
@@ -25,31 +31,89 @@ const store = openStore(input.cwd);
 if (!store) allow();
 
 const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');
+const eventsPath = join(input.cwd, '.sterling', 'transient', 'session-events.json');
 const nagMarker = join(input.cwd, '.sterling', 'transient', 'capture-nagged.json');
 
 try {
-  if (store.getRun()) allow(); // pipeline runs are H9's territory
-  if (!existsSync(touchesPath)) allow();
-  const touches = JSON.parse(readFileSync(touchesPath, 'utf8'));
-  if (!touches.length) allow();
+  if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers
 
-  const config = parseConfig(loadConfig(input.cwd) ?? {}); // schema defaults apply (reviewer_selection sets etc.)
-  const now = new Date().toISOString();
-  // §6 H10: only files that STILL EXIST drive a demand — a file created and then
-  // deleted within the session (e.g. a throwaway) leaves a stale H7 touch entry
-  // but needs no owner and no capture. (raw rm doesn't update the register;
-  // fs-remove does — that asymmetry is the gap this guards.)
-  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
-  if (!paths.length) {
+  // Read touches
+  let touches = [];
+  if (existsSync(touchesPath)) {
+    touches = JSON.parse(readFileSync(touchesPath, 'utf8'));
+  }
+
+  // Read session events; degrade to empty on parse failure (phase-1 advisory:
+  // H16 appends without schema-validating, so malformed bytes are possible).
+  let sessionEvents = [];
+  try {
+    if (existsSync(eventsPath)) {
+      const raw = JSON.parse(readFileSync(eventsPath, 'utf8'));
+      if (Array.isArray(raw)) sessionEvents = raw;
+    }
+  } catch {
+    sessionEvents = [];
+  }
+
+  // Clear all three transient registers together (P4 — every terminal path).
+  const clearRegisters = () => {
     rmSync(touchesPath, { force: true });
+    rmSync(eventsPath, { force: true });
     rmSync(nagMarker, { force: true });
+  };
+
+  // Dual-register entry: proceed only if either register has content.
+  if (!touches.length && !sessionEvents.length) {
+    clearRegisters();
     allow();
   }
 
-  const earliest = touches.map((t) => t.at).sort()[0];
+  const config = parseConfig(loadConfig(input.cwd) ?? {});
+  const now = new Date().toISOString();
+
+  // §6 H10: only files that STILL EXIST drive a demand — a file created and then
+  // deleted within the session (e.g. a throwaway) leaves a stale H7 touch entry
+  // but needs no owner and no capture. (raw rm leaves the H7 entry stale;
+  // fs-remove does — that asymmetry is the gap this guards.)
+  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
+
+  // Classify session events.
+  const debugEvents = sessionEvents.filter((e) => e.kind === 'debug_scope');
+  const researchAgents = new Set(config.session_events?.research_agents ?? ['researcher', 'claude-code-guide']);
+  const researchEvents = sessionEvents.filter(
+    (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
+  );
+
+  // Capture duty: triggered by file-touching work OR debug-scope events.
+  const hasCaptureDuty = paths.length > 0 || debugEvents.length > 0;
+  // Research duty: triggered by research events (research_tool or configured agent).
+  const hasResearchDuty = researchEvents.length > 0;
+
+  if (!hasCaptureDuty && !hasResearchDuty) {
+    // No duties to enforce (e.g. only non-research dispatches recorded) — clear and release.
+    clearRegisters();
+    allow();
+  }
+
+  // Earliest timestamp across touches ∪ events (the captured-set window anchor).
+  const allTimestamps = [...touches.map((t) => t.at), ...sessionEvents.map((e) => e.at)].filter(Boolean).sort();
+  const earliest = allTimestamps.length ? allTimestamps[0] : now;
+
+  // Widened captured set: decision|anti_pattern|note|feature_article|research_finding|disconfirmed_hypothesis
   const captured = store
-    .query({ types: ['decision', 'anti_pattern', 'note', 'feature_article'], cap: 1000, include_unconfirmed: true })
+    .query({ types: ['decision', 'anti_pattern', 'note', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000, include_unconfirmed: true })
     .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+
+  // Research duty satisfaction: research_finding|decision|anti_pattern since earliest research event.
+  let researchSatisfied = true;
+  let earliestResearch = null;
+  if (hasResearchDuty) {
+    const rts = researchEvents.map((e) => e.at).filter(Boolean).sort();
+    earliestResearch = rts.length ? rts[0] : now;
+    researchSatisfied = store
+      .query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
+      .some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
+  }
 
   // §6 H10 article demand: touched files nothing owns, at threshold or any new
   // unowned file (vs git HEAD; no-git degrades loud to threshold-only).
@@ -75,16 +139,17 @@ try {
   }
   const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
 
-  if (captured && !articleDemand) {
-    rmSync(touchesPath, { force: true });
-    rmSync(nagMarker, { force: true });
+  // All duties satisfied → clear registers and release.
+  const captureSatisfied = !hasCaptureDuty || captured;
+  if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && !articleDemand) {
+    clearRegisters();
     allow();
   }
 
-  // test-touching → test-integrity vs git HEAD (§8.2); non-git degrades loud
+  // test-touching → test-integrity vs git HEAD (§8.2); non-git degrades loud.
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = '';
-  if (!captured && paths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
+  if (hasCaptureDuty && !captured && paths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
     const ti = gitTestIntegrity({ cwd: input.cwd, testGlobs });
     if (ti.no_git) store.recordCheckSkipped('test-integrity', 'no_git', undefined, now);
     else if (ti.modified.length || ti.deleted.length) {
@@ -95,17 +160,43 @@ try {
   if (!input.stop_hook_active && !existsSync(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [];
-    if (!captured) {
-      // code-touching → deterministic reviewer selection (paths only at this surface)
+
+    // Capture duty nag (touches or debug events present, nothing captured).
+    if (hasCaptureDuty && !captured) {
+      const hasDebug = debugEvents.length > 0;
       const diff = paths.map((path) => ({ path, added_lines: [] }));
-      const selection = selectReviewers({ config, diff });
+      if (hasDebug) {
+        let capturePart =
+          `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).\n` +
+          `Capture what was learned inline — expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).`;
+        if (paths.length > 0) {
+          const selection = selectReviewers({ config, diff });
+          capturePart += `\nReviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.`;
+        }
+        capturePart += integrityNote;
+        parts.push(capturePart);
+      } else {
+        const selection = selectReviewers({ config, diff });
+        parts.push(
+          `H10: direct-mode work touched ${paths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
+            `Capture what was learned inline (knowledge_create), or state explicitly that nothing durable was learned.\n` +
+            `Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` +
+            integrityNote
+        );
+      }
+    }
+
+    // Research duty nag: cite queries/agents verbatim (interface slice 2).
+    if (hasResearchDuty && !researchSatisfied) {
+      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join(', ');
       parts.push(
-        `H10: direct-mode work touched ${paths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
-          `Capture what was learned inline (knowledge_create), or state explicitly that nothing durable was learned.\n` +
-          `Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` +
-          integrityNote
+        `H10: research in this session was not followed by a durable capture (no research_finding/decision/anti_pattern since ${earliestResearch}).\n` +
+          `Queries/agents: ${queryTexts}\n` +
+          `Capture the research findings now (knowledge_create type research_finding), or state explicitly that nothing durable was learned.`
       );
     }
+
+    // Article demand nag.
     if (articleDemand) {
       parts.push(
         `H10 article demand (§6): ${unowned.length} touched file(s) have no owner (feature_article or repo-located reference doc)` +
@@ -113,11 +204,12 @@ try {
           `Create or extend the owning article(s) NOW (knowledge_create type feature_article; for a governing document, reference_material kind doc) — the knowledge is freshest before this session ends; general capture does not satisfy this.`
       );
     }
+
     deny(parts.join('\n\n'));
   }
 
-  // second pass: still owed — queue it and let the session end (P1: don't trap the human)
-  if (!captured) {
+  // Second pass: still owed — queue items and let the session end (P1: don't trap the human).
+  if (hasCaptureDuty && !captured) {
     const open = store
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
@@ -163,8 +255,30 @@ try {
       });
     }
   }
-  rmSync(touchesPath, { force: true });
-  rmSync(nagMarker, { force: true });
+  if (hasResearchDuty && !researchSatisfied) {
+    const open = store
+      .query({ types: ['todo'], cap: 1000 })
+      .some((t) => t.source === 'system' && t.system_reason === 'research_owed');
+    if (!open) {
+      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join('; ');
+      store.create({
+        id: randomUUID(),
+        type: 'todo',
+        created_at: now,
+        updated_at: now,
+        author: 'system',
+        status: 'active',
+        superseded_by: null,
+        links: [],
+        scope: 'project',
+        stack_tags: [],
+        text: `research owed: session research not captured (queries/agents: ${queryTexts})`,
+        source: 'system',
+        system_reason: 'research_owed',
+      });
+    }
+  }
+  clearRegisters();
   allow();
 } finally {
   store.close();

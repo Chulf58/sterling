@@ -311,3 +311,41 @@ test('§11 drain verbs: every maintenance lane has its completed-section verb (t
   }
   assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...SYSTEM_REASONS].sort(), 'no orphan verbs for unregistered reasons');
 });
+
+// ------------------- session-event register (run r-0501: session-event-register) -------------------
+
+test('sessionEventSchema: the three register kinds parse; unknown kind + missing fields rejected (interface slice 1)', async () => {
+  // dynamic import + cast: sessionEventSchema does not exist until this phase ships, so a
+  // missing export must fail an ASSERTION below — never a compile-time reference to a
+  // not-yet-declared symbol (that would break the package build; a crash-red proves nothing).
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  const research = s.parse({ kind: 'research_tool', detail: 'WebSearch: genesys rate limit scope', at: NOW });
+  assert.equal(research.kind, 'research_tool');
+  assert.equal(research.detail, 'WebSearch: genesys rate limit scope');
+  assert.equal(research.at, NOW);
+
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'researcher', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'src/a.mjs', at: NOW }).kind, 'debug_scope');
+
+  // kind is a closed enum of exactly the three register writers
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the three writers is rejected');
+  // detail is a required string; at is required
+  assert.throws(() => s.parse({ kind: 'research_tool', at: NOW }), 'detail is required');
+  assert.throws(() => s.parse({ kind: 'research_tool', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'research_tool', detail: 'x' }), 'at is required');
+});
+
+test('research_owed is a registered SYSTEM_REASONS member draining under "captured"; 1:1 totality holds (AC7, interface slice 4)', () => {
+  const reasons = SYSTEM_REASONS as readonly string[];
+  const verbs = DRAIN_VERBS as Record<string, string>;
+  assert.ok(reasons.includes('research_owed'), 'research_owed must join SYSTEM_REASONS');
+  assert.equal(verbs['research_owed'], 'captured', 'research_owed drains under the "captured" verb (interface slice 4)');
+  for (const reason of reasons) {
+    assert.equal(typeof verbs[reason], 'string', `SYSTEM_REASON '${reason}' is missing a DRAIN_VERBS entry`);
+    assert.ok(verbs[reason].length > 0, `verb for '${reason}' must not be blank`);
+  }
+  assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...reasons].sort(), 'DRAIN_VERBS and SYSTEM_REASONS stay 1:1');
+});

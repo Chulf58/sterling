@@ -35,3 +35,29 @@ test('empty config gets full defaults; malformed config fails loud', () => {
   assert.throws(() => parseConfig({ context_watch: { mode: 'silent' } }));
   assert.throws(() => parseConfig({ models: { coder: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
 });
+
+// ------------------- session_events config (run r-0501, AC7 / interface slice 3) -------------------
+
+// session_events is a new config block; access it through a cast so referencing it here
+// does not require the field to exist at compile time — the assertions below fail cleanly
+// (not the package build) until parseConfig grows the default.
+type CfgWithEvents = { session_events?: { research_agents?: string[] } };
+
+test('session_events.research_agents: default [researcher, claude-code-guide] from an empty config', () => {
+  const empty = parseConfig({}) as unknown as CfgWithEvents;
+  assert.ok(empty.session_events, 'parseConfig defaults must add session_events');
+  assert.deepEqual(empty.session_events?.research_agents, ['researcher', 'claude-code-guide']);
+});
+
+test('session_events.research_agents: explicit list overrides the default; a non-array is rejected loud', () => {
+  const overridden = parseConfig({ session_events: { research_agents: ['claude-code-guide'] } }) as unknown as CfgWithEvents;
+  assert.ok(overridden.session_events, 'supplied session_events survives parsing');
+  assert.deepEqual(overridden.session_events?.research_agents, ['claude-code-guide']);
+  assert.throws(() => parseConfig({ session_events: { research_agents: 'researcher' } }), /invalid/i, 'research_agents must be a string array');
+});
+
+test('templates/default-config.json carries the shipped session_events default and still parses', () => {
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithEvents;
+  assert.ok(shipped.session_events, 'the shipped default-config carries session_events');
+  assert.deepEqual(shipped.session_events?.research_agents, ['researcher', 'claude-code-guide']);
+});

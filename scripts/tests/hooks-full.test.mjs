@@ -829,3 +829,448 @@ test('dispose-run verifies the union: H7-accumulated reconcile_needed blocks dis
     cleanup();
   }
 });
+
+// --------------------------- H16 (session-event register, run r-0501) ---------------------------
+
+const H16_REGISTER = ['.sterling', 'transient', 'session-events.json'];
+function readSessionEvents(dir) {
+  const p = join(dir, ...H16_REGISTER);
+  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
+}
+
+test('H16 hooks.json matcher covers WebSearch, WebFetch, Task, Agent on PostToolUse (H11 lesson: direct-invocation tests bypass the platform matcher, so assert the registration itself)', () => {
+  const hooksJson = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8'));
+  const entry = (hooksJson.hooks.PostToolUse ?? []).find((e) =>
+    (e.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes('h16-event-register.mjs'))
+  );
+  assert.ok(entry, 'hooks.json must register H16 on PostToolUse');
+  const matcher = new RegExp(entry.matcher);
+  for (const tool of ['WebSearch', 'WebFetch', 'Task', 'Agent']) {
+    assert.ok(matcher.test(tool), `H16 matcher must cover ${tool} — else the register silently never fires for it`);
+  }
+});
+
+test('AC3: H16 records WebSearch/WebFetch as research_tool (query/url in detail) and EVERY agent dispatch regardless of type (append log, no dedup)', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const { dir, cleanup } = makeProject();
+  try {
+    const post = (tool, tool_input) =>
+      runHook('h16-event-register.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: tool, tool_input }), dir);
+
+    assert.equal(post('WebSearch', { query: 'genesys rate limit scope' }).code, 0, 'never blocks');
+    assert.equal(post('WebFetch', { url: 'https://developer.genesys.cloud/x' }).code, 0);
+    assert.equal(post('Task', { subagent_type: 'explorer', prompt: 'map the store' }).code, 0);
+    assert.equal(post('Agent', { subagent_type: 'researcher', prompt: 'go' }).code, 0);
+
+    const ev = readSessionEvents(dir);
+    assert.equal(ev.length, 4, 'each recordable call appended once, in order, never deduped (the register is an append log)');
+
+    assert.equal(ev[0].kind, 'research_tool');
+    assert.match(ev[0].detail, /genesys rate limit scope/, 'the WebSearch query lands in detail');
+    assert.equal(ev[1].kind, 'research_tool');
+    assert.match(ev[1].detail, /developer\.genesys\.cloud/, 'the WebFetch url lands in detail');
+
+    assert.equal(ev[2].kind, 'agent_dispatch');
+    assert.match(ev[2].detail, /explorer/, 'a NON-research agent dispatch is still recorded — the recorder is policy-free (research-duty filtering is phase 2)');
+    assert.equal(ev[3].kind, 'agent_dispatch');
+    assert.match(ev[3].detail, /researcher/, 'a researcher dispatch is recorded');
+
+    for (const e of ev) assert.ok(typeof e.at === 'string' && e.at.length > 0, 'every event carries an at timestamp');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC3: two identical dispatches both land (append log never dedups)', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const { dir, cleanup } = makeProject();
+  try {
+    const post = () =>
+      runHook('h16-event-register.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: 'go' } }), dir);
+    assert.equal(post().code, 0);
+    assert.equal(post().code, 0);
+    assert.equal(readSessionEvents(dir).filter((e) => e.kind === 'agent_dispatch').length, 2, 'no dedup: both identical dispatches are appended');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC6: H16 records in direct mode but is silent (allow, NO write) while a run is active', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const active = makeProject({ withRun: true });
+  try {
+    const r = runHook('h16-event-register.mjs', hookInput(active.dir, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), active.dir);
+    assert.equal(r.code, 0, 'an active run never blocks the tool');
+    assert.equal(readSessionEvents(active.dir).length, 0, 'with a run active the pipeline owns capture — H16 records nothing');
+  } finally {
+    active.cleanup();
+  }
+  const direct = makeProject();
+  try {
+    const r = runHook('h16-event-register.mjs', hookInput(direct.dir, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), direct.dir);
+    assert.equal(r.code, 0);
+    assert.equal(readSessionEvents(direct.dir).length, 1, 'direct mode (no active run) records');
+  } finally {
+    direct.cleanup();
+  }
+});
+
+test('H16: missing store → allow with no recording, never blocks (fail-open, mirrors H7)', () => {
+  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
+  const bare = mkdtempSync(join(tmpdir(), 'sterling-h16-bare-'));
+  try {
+    const r = runHook('h16-event-register.mjs', hookInput(bare, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), bare);
+    assert.equal(r.code, 0, 'no .sterling store → allow, no ceremony');
+    assert.equal(readSessionEvents(bare).length, 0, 'nothing recorded without a store');
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('debug-scope.mjs register appends a debug_scope event to the register (third writer, interface slice 1)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'inmap.mjs'), 'x');
+    const r = spawnSync(
+      process.execPath,
+      [join(root, 'scripts', 'debug-scope.mjs'), 'register', '--path', 'src/inmap.mjs', '--target', dir],
+      { encoding: 'utf8', cwd: dir, timeout: 60_000 }
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const ev = readSessionEvents(dir).filter((e) => e.kind === 'debug_scope');
+    assert.equal(ev.length, 1, 'scope registration writes exactly one debug_scope event');
+    assert.ok(typeof ev[0].detail === 'string' && ev[0].detail.length > 0, 'the debug_scope event carries a non-empty detail');
+    assert.ok(typeof ev[0].at === 'string' && ev[0].at.length > 0, 'the debug_scope event carries an at timestamp');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---- H10 evaluation of the session-event register (run r-a6cf, phase 2) ----
+//
+// Phase 1 built the WRITERS (H16 / debug-scope) + schema + lanes; those are frozen
+// and green above. This phase makes H10 READ session-events.json at Stop: a dual
+// register entry, a widened captured-type set, a debug-aware capture duty, and a
+// research duty with a query-citing nag and a deduped research_owed enqueue — all
+// registers clearing together on every terminal path. We SEED session-events.json
+// directly (interface slice 3), exactly as the frozen H10 tests seed touches.json.
+//
+// Timeline: events precede the capture that would satisfy a duty, because both the
+// captured set and the research duty count only records created SINCE the earliest
+// event/touch. NOW (12:00) is the touch clock; events sit at 11:00; satisfying
+// captures at 13:00.
+const R_EVENT_AT = '2026-06-10T11:00:00.000Z';
+const CAPTURE_AT = '2026-06-10T13:00:00.000Z';
+const LATE_EVENT_AT = '2026-06-10T14:00:00.000Z';
+
+const rEvent = (detail, at = R_EVENT_AT) => ({ kind: 'research_tool', detail, at });
+const aEvent = (detail, at = R_EVENT_AT) => ({ kind: 'agent_dispatch', detail, at }); // detail = bare subagent_type (phase-1 writer format)
+const dEvent = (detail = 'src/probe.mjs', at = R_EVENT_AT) => ({ kind: 'debug_scope', detail, at });
+
+function writeSessionEvents(dir, events) {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(join(dir, ...H16_REGISTER), typeof events === 'string' ? events : JSON.stringify(events));
+}
+// H10 must resolve research_agents from config; make the block explicit so the tests
+// do not depend on H10's own defaulting when config membership is the point under test.
+function seedEventsConfig(dir, research_agents = ['researcher', 'claude-code-guide']) {
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, session_events: { research_agents } }));
+}
+function researchFinding(store, at = CAPTURE_AT) {
+  return store.create({
+    ...envelope('research_finding', at),
+    question: 'genesys webhook signature scope?',
+    answer: 'per-org secret, validated at the edge',
+    source_urls: ['https://developer.genesys.cloud/x'],
+    source_date: '2026-06-10',
+    capture_date: '2026-06-10',
+  });
+}
+function disconfirmed(store, at = CAPTURE_AT) {
+  return store.create({
+    ...envelope('disconfirmed_hypothesis', at),
+    question: 'was the cache the cause?',
+    rejected_answer: 'no — TTL was correct',
+    evidence: 'traces show clock skew',
+  });
+}
+function decisionAfter(store, at = CAPTURE_AT) {
+  return store.create({ ...envelope('decision', at), title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' });
+}
+const owed = (store, reason) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === reason);
+const eventsPath = (dir) => join(dir, ...H16_REGISTER);
+
+test('H10 AC1: a research-only session (no touches, no capture) soft-blocks EXACTLY once citing the actual queries/agents, then enqueues one research_owed carrying them and ends', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    // A file-LESS session: a WebSearch query and a researcher dispatch, nothing captured.
+    writeSessionEvents(dir, [rEvent('genesys webhook signature validation'), aEvent('researcher')]);
+    const stop = (over = {}) => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', ...over }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'session-events alone (no touches) must still make H10 proceed and soft-block — the new dual-register entry');
+    assert.match(nag.stderr, /genesys webhook signature validation/, 'the nag cites the ACTUAL query verbatim, not a generic message');
+    assert.match(nag.stderr, /researcher/, 'the configured research agent is cited too');
+    assert.match(nag.stderr, /research/i, 'the nag is the research duty');
+
+    const second = stop();
+    assert.equal(second.code, 0, 'soft-blocked exactly once — the second Stop releases');
+    const items = owed(store, 'research_owed');
+    assert.equal(items.length, 1, 'exactly one research_owed enqueued on release');
+    assert.equal(items[0].source, 'system');
+    assert.match(items[0].text, /genesys webhook signature validation/, 'the item carries the session queries verbatim (interface slice 2)');
+    assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared once the session ends (P4)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 AC2: a research event followed by a research_finding passes Stop with no research nag; both registers clear', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    writeSessionEvents(dir, [rEvent('genesys webhook signature validation')]);
+    researchFinding(store); // created AFTER the earliest research event → satisfies the duty
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'a research_finding since the earliest research event satisfies the research duty');
+    assert.doesNotMatch(r.stderr, /research duty|nothing was researched/i, 'no research nag when satisfied');
+    assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared on the satisfied terminal path');
+    assert.equal(owed(store, 'research_owed').length, 0, 'nothing owed when the duty is met');
+  } finally {
+    cleanup();
+  }
+  // a decision (or anti_pattern) created after the event equally satisfies the duty
+  const alt = makeProject();
+  try {
+    seedEventsConfig(alt.dir);
+    writeSessionEvents(alt.dir, [rEvent('some query')]);
+    decisionAfter(alt.store);
+    const r = runHook('h10-direct-capture.mjs', hookInput(alt.dir, { hook_event_name: 'Stop' }), alt.dir);
+    assert.equal(r.code, 0, 'a decision created since the research event also satisfies the duty');
+    assert.equal(owed(alt.store, 'research_owed').length, 0);
+  } finally {
+    alt.cleanup();
+  }
+});
+
+test('H10 AC3: only config research_agents drive the research duty — a non-research dispatch never nags; a researcher dispatch self-clears with a finding after it', () => {
+  // an Explore / general-purpose dispatch alone: recorded, but NOT a research event
+  const explore = makeProject();
+  try {
+    seedEventsConfig(explore.dir); // default ['researcher','claude-code-guide']
+    writeSessionEvents(explore.dir, [aEvent('explorer'), aEvent('general-purpose')]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(explore.dir, { hook_event_name: 'Stop' }), explore.dir);
+    assert.equal(r.code, 0, 'non-research dispatches drive no duty — no nag');
+    assert.equal(owed(explore.store, 'research_owed').length, 0, 'and nothing owed');
+    assert.equal(existsSync(eventsPath(explore.dir)), false, 'the register still clears on this terminal path');
+  } finally {
+    explore.cleanup();
+  }
+  // a researcher dispatch WITH a finding created after it → self-clears
+  const cleared = makeProject();
+  try {
+    seedEventsConfig(cleared.dir);
+    writeSessionEvents(cleared.dir, [aEvent('researcher')]);
+    researchFinding(cleared.store);
+    const r = runHook('h10-direct-capture.mjs', hookInput(cleared.dir, { hook_event_name: 'Stop' }), cleared.dir);
+    assert.equal(r.code, 0, 'a configured research agent dispatch is satisfied by a finding created after it');
+  } finally {
+    cleared.cleanup();
+  }
+  // config is authoritative: with research_agents narrowed to exclude 'researcher',
+  // a researcher dispatch is NOT a research event — pins config-driven, not hardcoded
+  const narrowed = makeProject();
+  try {
+    seedEventsConfig(narrowed.dir, ['claude-code-guide']);
+    writeSessionEvents(narrowed.dir, [aEvent('researcher')]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(narrowed.dir, { hook_event_name: 'Stop' }), narrowed.dir);
+    assert.equal(r.code, 0, 'researcher is not a research agent under this config → no research duty');
+    assert.equal(owed(narrowed.store, 'research_owed').length, 0);
+  } finally {
+    narrowed.cleanup();
+  }
+});
+
+test('H10 AC4: a file-touching session whose only capture is a research_finding or a disconfirmed_hypothesis is NOT falsely capture-nagged (widened captured set)', () => {
+  const rf = makeProject();
+  try {
+    touchRegister(rf.dir, ['src/a.mjs']); // one file: under the article-demand threshold
+    researchFinding(rf.store); // created after the touch
+    const r = runHook('h10-direct-capture.mjs', hookInput(rf.dir, { hook_event_name: 'Stop' }), rf.dir);
+    assert.equal(r.code, 0, 'a research_finding now counts as capture for a file-touching session');
+    assert.equal(owed(rf.store, 'capture_owed').length, 0, 'no capture_owed — the duty is satisfied');
+    assert.equal(existsSync(join(rf.dir, '.sterling', 'transient', 'touches.json')), false, 'register cleared');
+  } finally {
+    rf.cleanup();
+  }
+  const dh = makeProject();
+  try {
+    touchRegister(dh.dir, ['src/b.mjs']);
+    disconfirmed(dh.store);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dh.dir, { hook_event_name: 'Stop' }), dh.dir);
+    assert.equal(r.code, 0, 'a disconfirmed_hypothesis now counts as capture too');
+    assert.equal(owed(dh.store, 'capture_owed').length, 0);
+  } finally {
+    dh.cleanup();
+  }
+});
+
+test('H10 AC5: a debug_scope event with zero touches and no capture triggers the capture nag naming disconfirmed_hypothesis / anti_pattern', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [dEvent('src/suspect.mjs')]); // debugging happened, nothing captured, nothing touched
+    const stop = (over = {}) => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', ...over }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'a debug_scope event alone (no touches) triggers the capture duty');
+    assert.match(nag.stderr, /disconfirmed_hypothesis/, 'the debug-aware nag names disconfirmed_hypothesis as an expected type');
+    assert.match(nag.stderr, /anti_pattern/, 'and anti_pattern');
+
+    const second = stop();
+    assert.equal(second.code, 0, 'second Stop releases');
+    assert.equal(owed(store, 'capture_owed').length, 1, 'the unmet debug capture duty enqueues capture_owed');
+    assert.equal(existsSync(eventsPath(dir)), false, 'register cleared');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 AC6: every terminal path clears touches.json + session-events.json + the nag marker together; allow-only while a run is active', () => {
+  // (a) satisfied path clears both registers AND the nag marker (proven by a fresh nag afterward)
+  const sat = makeProject();
+  try {
+    touchRegister(sat.dir, ['src/a.mjs']);
+    writeSessionEvents(sat.dir, [dEvent('src/a.mjs')]);
+    decisionAfter(sat.store); // satisfies the (touch ∪ debug) capture duty
+    const stop = (over = {}) => runHook('h10-direct-capture.mjs', hookInput(sat.dir, { hook_event_name: 'Stop', ...over }), sat.dir);
+    const r = stop();
+    assert.equal(r.code, 0, 'both duties satisfied → pass');
+    assert.equal(existsSync(join(sat.dir, '.sterling', 'transient', 'touches.json')), false, 'touches.json cleared');
+    assert.equal(existsSync(eventsPath(sat.dir)), false, 'session-events.json cleared together with it');
+    // marker cleared: a fresh unmet debug event (dated AFTER the earlier decision) must
+    // draw a FIRST nag again — not silently auto-release from a stuck marker.
+    writeSessionEvents(sat.dir, [dEvent('src/a.mjs', LATE_EVENT_AT)]);
+    assert.equal(stop().code, 2, 'the nag marker cleared on the satisfied terminal path — the next unmet Stop nags afresh');
+  } finally {
+    sat.cleanup();
+  }
+  // (b) nag→release path clears both registers together
+  const rel = makeProject();
+  try {
+    touchRegister(rel.dir, ['src/a.mjs']);
+    writeSessionEvents(rel.dir, [dEvent('src/a.mjs')]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(rel.dir, { hook_event_name: 'Stop' }), rel.dir);
+    assert.equal(stop().code, 2, 'unmet capture duty nags');
+    assert.equal(stop().code, 0, 'release');
+    assert.equal(existsSync(join(rel.dir, '.sterling', 'transient', 'touches.json')), false, 'touches.json cleared on release');
+    assert.equal(existsSync(eventsPath(rel.dir)), false, 'session-events.json cleared on release too');
+  } finally {
+    rel.cleanup();
+  }
+  // (c) allow-only while a run is active — the pipeline owns capture, H10 does not act
+  const active = makeProject({ withRun: true });
+  try {
+    touchRegister(active.dir, ['src/a.mjs']);
+    writeSessionEvents(active.dir, [rEvent('a query'), dEvent('src/a.mjs')]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(active.dir, { hook_event_name: 'Stop' }), active.dir);
+    assert.equal(r.code, 0, 'a live run: H10 is allow-only');
+    assert.equal(owed(active.store, 'capture_owed').length + owed(active.store, 'research_owed').length, 0, 'no items enqueued while a run is active');
+    assert.equal(existsSync(eventsPath(active.dir)), true, 'allow-only means the register is left untouched, not cleared');
+  } finally {
+    active.cleanup();
+  }
+});
+
+test('H10 boundary: research + debug + touches in ONE session compose into a single nag, then enqueue both capture_owed and research_owed on release', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    touchRegister(dir, ['src/a.mjs']); // one file → no article demand to muddy the duties
+    writeSessionEvents(dir, [rEvent('genesys webhook validation'), dEvent('src/a.mjs')]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'a single soft-block covers both unmet duties (shared one-nag marker)');
+    assert.match(nag.stderr, /genesys webhook validation/, 'the research duty cites its query');
+    assert.match(nag.stderr, /disconfirmed_hypothesis/, 'the capture duty names debug types (debug event present)');
+    assert.match(nag.stderr, /anti_pattern/);
+
+    const release = stop();
+    assert.equal(release.code, 0, 'second Stop releases the whole session');
+    assert.equal(owed(store, 'capture_owed').length, 1, 'one capture_owed for the unmet capture duty');
+    assert.equal(owed(store, 'research_owed').length, 1, 'one research_owed for the unmet research duty');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), false, 'touches.json cleared');
+    assert.equal(existsSync(eventsPath(dir)), false, 'session-events.json cleared');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 boundary: malformed session-events.json degrades to empty (never crashes the Stop) — touches still drive the capture duty', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    touchRegister(dir, ['src/m.mjs']);
+    writeSessionEvents(dir, '{ this is not valid json'); // H16 appends untrusted bytes; H10 must tolerate
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const nag = stop();
+    assert.notEqual(nag.code, 1, 'a parse failure must not crash the Stop hook');
+    assert.doesNotMatch(nag.stderr, /SyntaxError|Unexpected token|TypeError|Cannot read/i, 'no uncaught exception surfaced');
+    assert.equal(nag.code, 2, 'the valid touch register still drives the capture duty (events degraded to empty)');
+    assert.match(nag.stderr, /nothing was captured/, 'the standard capture nag, not a research nag from garbage');
+
+    const release = stop();
+    assert.equal(release.code, 0, 'release proceeds normally');
+    assert.equal(owed(store, 'research_owed').length, 0, 'unparseable events yield no research duty and no research_owed');
+    assert.equal(existsSync(eventsPath(dir)), false, 'the malformed register is cleared like any other on the terminal path');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 boundary: a research_tool event with an empty detail (schema-invalid per H16 append) is tolerated — no crash, session still ends', () => {
+  // Phase-1 reviewer advisory: H16 appends without validating sessionEventSchema
+  // (detail: min(1)); H10's read side must degrade gracefully on an empty detail.
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [{ kind: 'research_tool', detail: '', at: R_EVENT_AT }]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    const r1 = stop();
+    assert.notEqual(r1.code, 1, 'an empty-detail entry must not crash the Stop');
+    assert.doesNotMatch(r1.stderr, /SyntaxError|TypeError|Cannot read/i, 'no uncaught exception building the nag/item text');
+    const r2 = stop();
+    assert.notEqual(r2.code, 1, 'still no crash on the second Stop');
+    assert.equal(existsSync(eventsPath(dir)), false, 'the session ends cleanly — the register is cleared');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 boundary: research_owed is deduped — an already-open research_owed item suppresses a second on release', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [rEvent('a fresh query')]);
+    store.create({
+      ...envelope('todo'),
+      text: 'research owed: earlier session queries',
+      source: 'system',
+      system_reason: 'research_owed',
+      author: 'system',
+    });
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(stop().code, 2, 'the unmet research duty nags');
+    assert.equal(stop().code, 0, 'release');
+    assert.equal(owed(store, 'research_owed').length, 1, 'at most one open research_owed item (interface slice 2 dedup)');
+    assert.equal(existsSync(eventsPath(dir)), false, 'register cleared');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 AC7 (SOP half): the drain skill text routes the research_owed lane (fulfil = write the record from the cited queries)', () => {
+  const skill = readFileSync(join(root, 'skills', 'drain', 'SKILL.md'), 'utf8');
+  assert.match(skill, /research_owed/, 'the drain SOP must name the research_owed lane');
+  assert.match(skill, /research_owed[\s\S]{0,400}quer/i, 'the lane routes to writing the durable record from the cited queries');
+});
