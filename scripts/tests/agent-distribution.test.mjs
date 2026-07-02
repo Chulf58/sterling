@@ -165,6 +165,68 @@ test('syncAgents covers every status path', () => {
   }
 });
 
+test('syncAgents repairs header-only drift (in-place edit mirrored in the template) instead of refusing', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe-agent.md': TEMPLATE });
+    const targetAgentsDir = join(dir, 'project', '.claude', 'agents');
+    syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS });
+
+    // The pinning incident: the same edit lands in the template AND in the
+    // installed copy, but the installed header keeps the old hashes.
+    const pinned = TEMPLATE.replace('tools: Read', 'tools: Read\nmodel: claude-sonnet-4-6');
+    writeFileSync(join(templatesDir, 'probe-agent.md'), pinned);
+    const installedPath = join(targetAgentsDir, 'probe-agent.md');
+    writeFileSync(installedPath, readFileSync(installedPath, 'utf8').replace('tools: Read', 'tools: Read\nmodel: claude-sonnet-4-6'));
+
+    let r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1 });
+    assert.deepEqual(r.report, [{ name: 'probe-agent', status: 'header_repaired' }]);
+    const repaired = readFileSync(installedPath, 'utf8');
+    assert.ok(repaired.includes('model: claude-sonnet-4-6'), 'edited content survives the repair');
+    const header = parseInstalledHeader(repaired);
+    assert.equal(header.templateHash, sha256(pinned), 'header now records the current template');
+    assert.equal(isLocallyModified(repaired, header), false, 'content hash is consistent again');
+    assert.equal(header.installedAt, T1, 'repair re-stamps installed_at (restart semantics)');
+
+    // converged: the next sync is a no-op
+    r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1 });
+    assert.deepEqual(r.report.map((x) => x.status), ['up_to_date']);
+
+    // genuine divergence on a changed template still refuses, file untouched
+    writeFileSync(installedPath, repaired.replace('Fixture body line one.', 'a real local edit'));
+    writeFileSync(join(templatesDir, 'probe-agent.md'), pinned.replace('line one', 'line one v2'));
+    r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.3.0', now: T1 });
+    assert.equal(r.report[0].status, 'refused_local_modification');
+    assert.ok(readFileSync(installedPath, 'utf8').includes('a real local edit'), 'refused file must be untouched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('syncAgents never repairs across a machine-var difference (frontmatter divergence refuses)', () => {
+  const dir = scratch();
+  try {
+    const VAR_TEMPLATE = TEMPLATE.replace('"C:/tools/node.exe"', '{{NODE}}');
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe-agent.md': VAR_TEMPLATE });
+    const targetAgentsDir = join(dir, 'project', '.claude', 'agents');
+    syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars: { NODE: '"/usr/bin/node"' } });
+
+    // Header-only drift is forged exactly as in the repair test — but the
+    // machine changed: the fresh render bakes a different NODE into the
+    // frontmatter, so the bodies differ and repair must NOT fire.
+    const v2 = VAR_TEMPLATE.replace('line one', 'line one v2');
+    writeFileSync(join(templatesDir, 'probe-agent.md'), v2);
+    const installedPath = join(targetAgentsDir, 'probe-agent.md');
+    writeFileSync(installedPath, readFileSync(installedPath, 'utf8').replace('line one', 'line one v2'));
+
+    const r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1, vars: { NODE: '"C:/other/node.exe"' } });
+    assert.equal(r.report[0].status, 'refused_local_modification');
+    assert.ok(readFileSync(installedPath, 'utf8').includes('/usr/bin/node'), 'file untouched — the other machine’s baked paths preserved');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('checkAgentsVisible: ok / missing_agent / restart_required / missing_generated_header', () => {
   const dir = scratch();
   try {
