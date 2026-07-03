@@ -2,12 +2,13 @@
 // Exits politely on non-TTY stdout (§11). terminal-kit loads only after the
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { MountedStores, resolveDomainMounts, type DomainMount } from '@sterling/store';
-import { parseConfig } from '@sterling/schemas';
+import { randomUUID } from 'node:crypto';
+import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
+import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
-import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, type UiState } from './state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect } from './state.js';
 import { bannerLines } from './banner.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
@@ -24,6 +25,11 @@ if (storeIdx === -1 || !args[storeIdx + 1]) {
   process.exit(2);
 }
 const storePath = args[storeIdx + 1];
+// System tab (run r-f9a7): the project config + installed agent dir. The store
+// lives at <project>/.sterling/sterling.db, so the config sits beside it and the
+// installed agents under <project>/.claude/agents/.
+const configPath = join(dirname(storePath), 'config.json');
+const agentsDir = join(dirname(dirname(storePath)), '.claude', 'agents');
 
 const termkit = await import('terminal-kit');
 const term = termkit.default.terminal;
@@ -52,7 +58,6 @@ if (owner !== null) {
 let mounts: DomainMount[] = [];
 let domainsAvailable = true;
 try {
-  const configPath = join(dirname(storePath), 'config.json');
   const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
   mounts = resolveDomainMounts(config);
 } catch {
@@ -71,6 +76,125 @@ const projectName = basename(dirname(dirname(storePath))) + (domainsAvailable ? 
 const showBanner = process.env.STERLING_NO_BANNER !== '1';
 let ui: UiState = initialUi;
 
+// System tab (run r-f9a7): the agent roster snapshot, read ON TAB ACTIVATION
+// only (never the 1 Hz redraw loop, per decision 98064d77 — perf). Undefined
+// until the tab is first activated; recomputed after a swap so drift markers and
+// the new values reflect the write.
+let roster: AgentRosterSnapshot | undefined;
+
+/** Read a governed agent's INSTALLED model:/effort: from its frontmatter (the
+ *  copy that governs dispatch). Missing/unparsable → blanks (surfaces as drift). */
+function readInstalledModelEffort(name: string): { model: string; effort: string } {
+  try {
+    const content = readFileSync(join(agentsDir, `${name}.md`), 'utf8');
+    const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
+    const block = fm ? fm[1] : '';
+    return {
+      model: block.match(/^model:\s*(\S+)/m)?.[1] ?? '',
+      effort: block.match(/^effort:\s*(\S+)/m)?.[1] ?? '',
+    };
+  } catch {
+    return { model: '', effort: '' };
+  }
+}
+
+/** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
+ *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
+ *  a deduped refresh when the catalog is stale (decision 98064d77). */
+function loadRoster(): AgentRosterSnapshot {
+  const nowISO = new Date().toISOString();
+  let config: unknown;
+  try {
+    config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+  } catch {
+    config = { models: {}, models_catalog: { staleness_days: 45 } };
+  }
+  const cfg = config as { models?: Record<string, { model: string; effort: string }>; models_catalog?: { staleness_days?: number } };
+  const configModels = cfg.models ?? {};
+  const agents: RosterAgent[] = Object.keys(AGENT_MODEL_KEY)
+    .filter((name) => existsSync(join(agentsDir, `${name}.md`)))
+    .map((name) => {
+      const v = readInstalledModelEffort(name);
+      return { name, installedModel: v.model, installedEffort: v.effort };
+    });
+
+  let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
+  try {
+    store.bootstrapCatalogIfAbsent(config, nowISO);
+    const rec = store.query({ types: ['reference_material'], cap: 200 }).find((r) => (r as { catalog?: unknown }).catalog);
+    const days = cfg.models_catalog?.staleness_days ?? 45;
+    const status = catalogStatus(rec ?? null, nowISO, days);
+    if (status.stale) store.enqueueRefreshReferenceOnce(nowISO);
+    catalog = {
+      present: status.present,
+      stale: status.stale,
+      staleDate: status.staleDate ? status.staleDate.slice(0, 10) : null,
+      entries: ((rec as { catalog?: { entries?: CatalogStatusView['entries'] } })?.catalog?.entries ?? []),
+    };
+  } catch (err) {
+    console.error(`sterling-tui: catalog unavailable — ${(err as Error).message}`);
+  }
+  return { agents, configModels, catalog };
+}
+
+/** Execute a model_swap effect (the impure seam): config.models write
+ *  (authoritative) → surgical setInstalledModelEffort on each governed installed
+ *  file (machine vars untouched, d53dc92c) → a durable swap decision (AC5). A
+ *  partial projection is not silent — it surfaces as the next activation's drift
+ *  marker (P5). setInstalledModelEffort/parseInstalledHeader are loaded at
+ *  runtime from scripts/lib (outside the tui tsc rootDir). */
+async function applySwap(e: ModelSwapEffect): Promise<void> {
+  const nowISO = new Date().toISOString();
+  try {
+    // 1. config.models write — the authoritative per-project declaration
+    const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { models?: Record<string, unknown> };
+    raw.models = raw.models ?? {};
+    raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
+    writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+
+    // 2. surgical installed-frontmatter projection on each governed agent file
+    const distUrl = new URL('../../../scripts/lib/agent-distribution.mjs', import.meta.url).href;
+    const dist = await import(distUrl);
+    for (const name of e.agents) {
+      const p = join(agentsDir, `${name}.md`);
+      if (!existsSync(p)) continue;
+      const content = readFileSync(p, 'utf8');
+      const hdr = dist.parseInstalledHeader(content);
+      writeFileSync(
+        p,
+        dist.setInstalledModelEffort(content, {
+          model: e.to.model,
+          effort: e.to.effort,
+          pluginVersion: hdr?.pluginVersion ?? '0.0.0',
+          now: nowISO,
+        })
+      );
+    }
+
+    // 3. durable swap decision (AC5) — reuse the decision type (decision 98064d77)
+    store.create({
+      id: randomUUID(),
+      type: 'decision',
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: 'conductor',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      title: e.decisionTitle,
+      statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
+      rationale:
+        'Model/effort pin changed from the TUI System tab (decision 98064d77 — config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL↔Windows machine boundary, d53dc92c).',
+      alternatives_rejected: [],
+    });
+  } catch (err) {
+    // P5: never silent — the next activation's drift marker backstops a partial write
+    console.error(`sterling-tui: model swap for '${e.key}' failed partway — ${(err as Error).message}`);
+  }
+}
+
 // One ScreenBuffer for the process lifetime: draw({delta:true}) diffs each
 // frame against the previous one and writes only the changed cells.
 let screen = new termkit.default.ScreenBuffer({ dst: term });
@@ -85,13 +209,22 @@ function viewport() {
 
 function redraw(): void {
   const vp = viewport();
-  draw(screen, buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores));
+  // roster is the cached activation snapshot — the 1 Hz redraw never re-reads it
+  draw(screen, buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster));
 }
 
-function handle(event: ReturnType<typeof keyToEvent>): void {
+async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   if (!event) return;
-  const result = reduce(store, ui, event, viewport(), stores);
+  const prevTab = ui.tab;
+  const result = reduce(store, ui, event, viewport(), stores, roster);
   ui = result.ui;
+  // System tab: (re)load the roster ONLY on activation (never the 1 Hz loop)
+  if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster)) roster = loadRoster();
+  // execute any model_swap effect (the TUI's write surface), then refresh the
+  // roster so the swap's new values + any residual drift are reflected
+  const swaps = result.effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
+  for (const e of swaps) await applySwap(e);
+  if (swaps.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {
     term.grabInput(false);
     term.hideCursor(false);
@@ -109,8 +242,8 @@ function handle(event: ReturnType<typeof keyToEvent>): void {
 term.fullscreen(true);
 term.hideCursor();
 term.grabInput({ mouse: 'button' });
-term.on('key', (name: string) => handle(keyToEvent(name)));
-term.on('mouse', (name: string, data: { x: number; y: number }) => handle(mouseToEvent(name, data)));
+term.on('key', (name: string) => void handle(keyToEvent(name)));
+term.on('mouse', (name: string, data: { x: number; y: number }) => void handle(mouseToEvent(name, data)));
 term.on('resize', () => {
   // fresh buffer at the new size; its empty delta state forces a full repaint
   screen = new termkit.default.ScreenBuffer({ dst: term });

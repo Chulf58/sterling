@@ -96,7 +96,7 @@ test('buildDashboardState: rows with screen offsets; expansion adds detail lines
   const { store, t1, cleanup } = fixture();
   try {
     let s = buildDashboardState(store, initialUi);
-    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false, false, false]);
+    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false, false, false, false]);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 1]);
     assert.equal(s.rows[0].selected, true);
     assert.equal(s.rows[0].lines.length, 1, 'collapsed by default: one title line');
