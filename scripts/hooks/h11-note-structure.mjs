@@ -20,6 +20,9 @@
 // deterministic extractor).
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { readStdin, allow, openStore } from './lib/common.mjs';
 
 const input = readStdin();
@@ -137,10 +140,21 @@ const SCHEMA = JSON.stringify({
 // costs a 3s CLI wait). A future CLI that drops a flag exits non-zero →
 // claude_cli_unavailable, loud as ever.
 const extractor = process.env.STERLING_H11_EXTRACTOR;
+// Native Windows (the second launcher, decision 67350de4): claude's install dir
+// %USERPROFILE%\.local\bin is NOT reliably on PATH — the native launcher itself
+// calls claude.exe by absolute path for the same reason (anti_pattern 6ac730b1)
+// — and libuv's shell:false search never resolves an npm claude.cmd shim. So on
+// win32 prefer the canonical native claude.exe when it exists; the bare name
+// everywhere else keeps POSIX byte-identical and still covers a PATH-reachable
+// claude.exe. A miss still degrades loud (claude_cli_unavailable). Verified
+// live under Windows node v24.14.0: bare 'claude' is ENOENT on the registry
+// PATH, the absolute .exe runs (decision 2d6da80f).
+const nativeWinClaude = join(homedir(), '.local', 'bin', 'claude.exe');
+const claudeCmd = process.platform === 'win32' && existsSync(nativeWinClaude) ? nativeWinClaude : 'claude';
 const result = extractor
   ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: 'utf8', timeout: 90_000 })
   : spawnSync(
-      'claude',
+      claudeCmd,
       ['-p', PROMPT, '--model', 'claude-haiku-4-5-20251001', '--json-schema', SCHEMA, '--tools', '', '--safe-mode', '--no-session-persistence'],
       { input: '', encoding: 'utf8', timeout: 90_000 }
     );
