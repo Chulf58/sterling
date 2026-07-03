@@ -127,6 +127,32 @@ export function isLocallyModified(content, header) {
   return sha256(withoutHeader) !== header.contentHash;
 }
 
+// Machine-activation surface (P5; the 2026-07-03 dead-hooks incident,
+// anti_pattern 60e8463d): installed agents bake NODE/HOOKS_DIR into frontmatter
+// hook commands at install time (d53dc92c) — an install produced by the OTHER
+// machine context (WSL vs native Windows) is self-consistent and
+// template-current, so hash bookkeeping alone reads it up_to_date while every
+// baked command points at an unresolvable node and every hook fails
+// non-blocking. The frontmatter hook command lines ARE that machine surface:
+// extract them for drift comparison (syncAgents) and node-path executability
+// probing (checkAgentsVisible, H1).
+export function extractHookCommandLines(content) {
+  const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return [];
+  return [...m[1].matchAll(/^\s*command:\s*(.+)$/gm)].map((x) => x[1].trim());
+}
+
+// Every double-quoted token of every baked command: the node executable AND
+// the hook script path — BOTH must resolve for a hook to run (review follow-up
+// on 946125ff: a same-node/different-HOOKS_DIR flip must not slip the probe).
+export function extractBakedCommandPaths(content) {
+  const paths = new Set();
+  for (const line of extractHookCommandLines(content)) {
+    for (const m of line.matchAll(/"([^"]+)"/g)) paths.add(m[1]);
+  }
+  return [...paths];
+}
+
 // Surgical model/effort swap (design 98064d77 §b): the TUI System tab's write
 // projection. Given an ALREADY-INSTALLED agent file, rewrite ONLY the frontmatter
 // model:/effort: lines and re-stamp the generated header's content_hash, reusing
@@ -214,9 +240,13 @@ export function refuseInstruction(name) {
 // installs; refuse to overwrite local modification (refuse-and-instruct stub for
 // the three-way review). A "modified" install whose body is byte-identical to
 // the fresh render is header-only drift (stale generated header, not a divergent
-// edit) — repaired, not refused. Statuses: installed | refreshed |
-// header_repaired | up_to_date | locally_modified_up_to_date |
-// refused_local_modification | foreign_file.
+// edit) — repaired, not refused. An UNMODIFIED, template-current install whose
+// baked hook command lines differ from a fresh render with THIS machine's vars
+// is a machine-context flip (invisible to hash bookkeeping — anti_pattern
+// 60e8463d) — re-baked loudly as machine_rebaked, never reported up_to_date.
+// Statuses: installed | refreshed | header_repaired | machine_rebaked |
+// up_to_date | locally_modified_up_to_date | refused_local_modification |
+// foreign_file.
 export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config }) {
   const registry = loadRegistry(registryPath);
   mkdirSync(targetAgentsDir, { recursive: true });
@@ -265,7 +295,24 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       writeFileSync(installedPath, renderCandidate());
       report.push({ name: entry.name, status: 'refreshed' });
     } else {
-      report.push({ name: entry.name, status: 'up_to_date' });
+      // Unmodified + template-current — but hash bookkeeping cannot see a
+      // machine-context flip (anti_pattern 60e8463d: nine× up_to_date while
+      // every hook command pointed at the other context's node). Compare the
+      // baked hook command lines against a fresh render with THIS machine's
+      // vars: command drift on an UNMODIFIED install is provably baked-var
+      // drift (the body hash matches the header, so no human edited it) →
+      // re-bake loudly. Body-only divergence (config.models values) stays
+      // up_to_date: config authority is realized at install/refresh/swap
+      // (98064d77) and the System tab's drift marker owns its visibility.
+      const candidate = renderCandidate();
+      const sameCommands =
+        JSON.stringify(extractHookCommandLines(installed)) === JSON.stringify(extractHookCommandLines(candidate));
+      if (!sameCommands) {
+        writeFileSync(installedPath, candidate);
+        report.push({ name: entry.name, status: 'machine_rebaked' });
+      } else {
+        report.push({ name: entry.name, status: 'up_to_date' });
+      }
     }
   }
   return { report, restartInstruction: RESTART_INSTRUCTION };
@@ -275,7 +322,12 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
 // start, so the installed agent set is visible only if every registered agent
 // is installed AND the current session started after the newest install.
 // The first pipeline run is blocked until this passes.
-export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt }) {
+// probeExecutability (opt-in; the check-agents-visible CLI always enables it):
+// additionally verify every baked hook node path resolves on THIS machine —
+// visibility alone said 'ok' during the 2026-07-03 incident while every hook
+// failed non-blocking (enforcement silently absent, anti_pattern 60e8463d).
+// Opt-in so the lib contract (pure visibility) is unchanged for existing callers.
+export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt, probeExecutability = false }) {
   const registry = loadRegistry(registryPath);
   const problems = [];
   const sessionStart = Date.parse(sessionStartedAt);
@@ -288,7 +340,8 @@ export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStart
       problems.push({ name: entry.name, reason: 'missing_agent' });
       continue;
     }
-    const header = parseInstalledHeader(readFileSync(installedPath, 'utf8'));
+    const installed = readFileSync(installedPath, 'utf8');
+    const header = parseInstalledHeader(installed);
     if (!header) {
       problems.push({ name: entry.name, reason: 'missing_generated_header' });
       continue;
@@ -298,6 +351,12 @@ export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStart
       problems.push({ name: entry.name, reason: 'unparseable_installed_at' });
     } else if (installedAt > sessionStart) {
       problems.push({ name: entry.name, reason: 'restart_required' });
+    }
+    if (probeExecutability) {
+      const unresolved = extractBakedCommandPaths(installed).find((p) => !existsSync(p));
+      if (unresolved) {
+        problems.push({ name: entry.name, reason: 'hook_node_unresolvable', detail: unresolved });
+      }
     }
   }
   return { visible: problems.length === 0, problems };

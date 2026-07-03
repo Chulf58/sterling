@@ -27,6 +27,10 @@ const { visible, problems } = checkAgentsVisible({
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(targetDir, '.claude', 'agents'),
   sessionStartedAt,
+  // Executability probe (anti_pattern 60e8463d): a machine-context flip leaves
+  // baked hook node paths unresolvable while visibility alone still passes —
+  // the gate must block on dead enforcement, not just an absent roster.
+  probeExecutability: true,
 });
 
 if (visible) {
@@ -34,6 +38,14 @@ if (visible) {
   process.exit(0);
 }
 console.error('agent set NOT visible — pipeline runs are blocked:');
-for (const p of problems) console.error(`  ${p.name}: ${p.reason}`);
+for (const p of problems) console.error(`  ${p.name}: ${p.reason}${p.detail ? ` (${p.detail})` : ''}`);
 console.error('If reasons include restart_required, restart Claude Code in this project.');
+if (problems.some((p) => p.reason === 'hook_node_unresolvable')) {
+  console.error(
+    'If reasons include hook_node_unresolvable, the installed agents were baked by the OTHER\n' +
+      'machine context (WSL vs native Windows) and every hook of those agents fails non-blocking:\n' +
+      'run /sterling:sync-agents FROM THIS context (re-bakes as machine_rebaked), then restart\n' +
+      'Claude Code in this project.'
+  );
+}
 process.exit(2);

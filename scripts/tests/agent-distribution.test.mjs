@@ -14,6 +14,8 @@ import {
   checkRegistryConsistency,
   findDeadTerms,
   findBackslashHookCommands,
+  extractHookCommandLines,
+  extractBakedCommandPaths,
   sha256,
   RESTART_INSTRUCTION,
 } from '../lib/agent-distribution.mjs';
@@ -534,6 +536,118 @@ test('a config MODEL divergence is never silently repaired — like the machine-
     const r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1, ...cfgBoth(modelsB) });
     assert.equal(r.report[0].status, 'refused_local_modification', 'a config-model divergence is a genuine divergence — refuses, never header_repaired');
     assert.match(frontmatter(readFileSync(installedPath, 'utf8')), /^model: claude-sonnet-4-6$/m, 'refused file untouched — the installed model is preserved, not silently flipped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Machine-var drift detection (todo 8789eccf, anti_pattern 60e8463d): a
+// machine-context flip (WSL <-> native Windows) leaves an installed agent
+// self-consistent and template-current, so hash bookkeeping alone reads it
+// up_to_date while every baked hook command points at the other context's
+// node. sync must re-bake loudly (machine_rebaked); the visibility gate must
+// block on unresolvable baked node paths (opt-in probe); and config-only
+// divergence must NOT read as machine drift (phase-4 drift-marker seam).
+
+const MACHINE_TOKEN_TEMPLATE = `---
+name: probe-agent
+description: Fixture agent with machine-var tokens.
+tools: Read
+hooks:
+  PreToolUse:
+    - matcher: "Read"
+      hooks:
+        - type: command
+          command: '{{NODE}} "{{HOOKS_DIR}}/h.mjs"'
+---
+
+Fixture body line one.
+`;
+
+const MACHINE_A = { NODE: '"/machine-a/bin/node"', HOOKS_DIR: '/machine-a/hooks' };
+const MACHINE_B = { NODE: '"/machine-b/bin/node"', HOOKS_DIR: '/machine-b/hooks' };
+
+test('extractHookCommandLines/extractBakedCommandPaths read the baked machine surface (node exe AND hook script)', () => {
+  const { installedContent } = renderInstalledAgent(MACHINE_TOKEN_TEMPLATE, 'probe-agent.md', { ...OPTS, vars: MACHINE_A });
+  assert.deepEqual(extractHookCommandLines(installedContent), [`'"/machine-a/bin/node" "/machine-a/hooks/h.mjs"'`]);
+  assert.deepEqual(extractBakedCommandPaths(installedContent), ['/machine-a/bin/node', '/machine-a/hooks/h.mjs']);
+  assert.deepEqual(extractHookCommandLines('no frontmatter here'), []);
+});
+
+test('syncAgents: unmodified install from the OTHER machine context -> machine_rebaked with THIS machine vars, never up_to_date', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe-agent.md': MACHINE_TOKEN_TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars: MACHINE_A });
+    // same template, same plugin version — only the invoking machine differs
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, vars: MACHINE_B });
+    assert.deepEqual(report, [{ name: 'probe-agent', status: 'machine_rebaked' }]);
+    const rebaked = readFileSync(join(targetAgentsDir, 'probe-agent.md'), 'utf8');
+    assert.deepEqual(extractBakedCommandPaths(rebaked), ['/machine-b/bin/node', '/machine-b/hooks/h.mjs'], 'hook commands re-baked for the invoking machine');
+    const header = parseInstalledHeader(rebaked);
+    assert.equal(header.installedAt, T1, 'installed_at re-stamped — restart/visibility semantics fire');
+    assert.equal(isLocallyModified(rebaked, header), false, 'rebaked install is self-consistent');
+    // converges: a second sync from machine B is up_to_date
+    const again = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, vars: MACHINE_B });
+    assert.deepEqual(again.report, [{ name: 'probe-agent', status: 'up_to_date' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('syncAgents: a LOCALLY MODIFIED install is never machine-rebaked — modified semantics unchanged (d53dc92c)', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe-agent.md': MACHINE_TOKEN_TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars: MACHINE_A });
+    const installedPath = join(targetAgentsDir, 'probe-agent.md');
+    writeFileSync(installedPath, readFileSync(installedPath, 'utf8') + 'local edit\n');
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, vars: MACHINE_B });
+    assert.deepEqual(report, [{ name: 'probe-agent', status: 'locally_modified_up_to_date' }]);
+    assert.deepEqual(extractBakedCommandPaths(readFileSync(installedPath, 'utf8')), ['/machine-a/bin/node', '/machine-a/hooks/h.mjs'], 'modified file untouched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('syncAgents: config-only divergence on an unmodified install stays up_to_date — the phase-4 drift marker owns it (98064d77)', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth({ coder: { model: 'claude-sonnet-4-6', effort: 'high' } }) });
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, ...cfgBoth({ coder: { model: 'claude-opus-4-8', effort: 'high' } }) });
+    assert.deepEqual(report, [{ name: 'coder', status: 'up_to_date' }]);
+    assert.match(frontmatter(readFileSync(join(targetAgentsDir, 'coder.md'), 'utf8')), /^model: claude-sonnet-4-6$/m, 'installed model untouched by sync — config authority realizes at install/refresh/swap');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkAgentsVisible probeExecutability: unresolvable baked node blocks; default contract unchanged', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe-agent.md': MACHINE_TOKEN_TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars: MACHINE_A }); // /machine-a/... does not exist here
+    const after = '2026-01-01T00:00:01.000Z';
+    const legacy = checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt: after });
+    assert.equal(legacy.visible, true, 'default contract: pure visibility, no probe');
+    const probed = checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt: after, probeExecutability: true });
+    assert.equal(probed.visible, false);
+    assert.deepEqual(probed.problems, [{ name: 'probe-agent', reason: 'hook_node_unresolvable', detail: '/machine-a/bin/node' }]);
+    // a fully resolvable baked command (node exe AND hook script) passes the probe
+    rmSync(targetAgentsDir, { recursive: true, force: true });
+    const realHooksDir = join(dir, 'hooks-live');
+    mkdirSync(realHooksDir, { recursive: true });
+    writeFileSync(join(realHooksDir, 'h.mjs'), '// probe fixture');
+    const RESOLVABLE = { NODE: `"${process.execPath.replace(/\\/g, '/')}"`, HOOKS_DIR: realHooksDir.replace(/\\/g, '/') };
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars: RESOLVABLE });
+    const ok = checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt: after, probeExecutability: true });
+    assert.equal(ok.visible, true, JSON.stringify(ok.problems));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

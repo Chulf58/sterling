@@ -48,7 +48,12 @@ for (const r of report) {
     refused += 1;
     console.error('\n' + r.instruction + '\n');
   }
-  if (r.status === 'installed' || r.status === 'refreshed' || r.status === 'header_repaired') changed += 1;
+  if (r.status === 'installed' || r.status === 'refreshed' || r.status === 'header_repaired' || r.status === 'machine_rebaked') changed += 1;
+  if (r.status === 'machine_rebaked') {
+    console.error(
+      `machine_rebaked: '${r.name}' carried hook commands baked for another machine context — re-baked for THIS machine (anti_pattern 60e8463d).`
+    );
+  }
 }
 if (report.length === 0) console.log('no agents registered — nothing to sync');
 if (changed > 0) console.log('\n' + restartInstruction);
