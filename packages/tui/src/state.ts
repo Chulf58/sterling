@@ -3,15 +3,20 @@
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
 import type { SterlingStore, MountedStores } from '@sterling/store';
+import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
-export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run'] as const;
-/** the run tab is always last — every other tab is a card list */
-export const RUN_TAB = TABS.length - 1;
+export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run', 'System'] as const;
+/** the live-run tab — a FIXED index (no longer the last entry: System follows it),
+ *  so run-tab semantics track 'Live-run' rather than TABS.length-1 */
+export const RUN_TAB = TABS.indexOf('Live-run');
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
 export const KNOWLEDGE_TAB = 2;
 export const QUEUE_TAB = 3;
+/** the System tab (run r-f9a7): the agent roster with drift + catalog status,
+ *  and the inline model/effort swap selector — the TUI's first write surface */
+export const SYSTEM_TAB = TABS.indexOf('System');
 
 export interface UiState {
   tab: number;
@@ -25,9 +30,99 @@ export interface UiState {
    *  content height each frame; the queue/run tabs have fixed layouts and never
    *  scroll. Wheel moves it; ↑/↓ adjust it to keep the selected row in view. */
   scroll?: number;
+  /** System tab (run r-f9a7): the inline model/effort selector state machine.
+   *  Absent → the plain roster is shown; present → a picker is open on
+   *  ui.selector.key (model stage, then effort stage). ESCAPE clears it. */
+  selector?: SystemSelector;
+}
+
+/** The System-tab inline selector (run r-f9a7). `key` is the config.models key
+ *  under edit; the machine walks model → effort → commit; `highlight` is the
+ *  current option index; `model` holds the model confirmed at the model stage. */
+export interface SystemSelector {
+  key: string;
+  stage: 'model' | 'effort';
+  highlight: number;
+  model?: string;
 }
 
 export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery: '', scroll: 0 };
+
+// ---------------------------------------------------------------------------
+// System tab (run r-f9a7) — the agent roster snapshot injected at TAB
+// ACTIVATION (never the 1 Hz loop, per decision 98064d77) and the pure
+// projections that render it. The snapshot carries the INSTALLED frontmatter
+// values (the copy that governs dispatch), the authoritative config.models
+// table, and the PRECOMPUTED catalog status (the now-dependent catalogStatus
+// call happens in main.ts so buildSystemTab stays pure/deterministic).
+// ---------------------------------------------------------------------------
+
+/** One installed agent, as read from its .claude/agents/<name>.md frontmatter. */
+export interface RosterAgent {
+  name: string;
+  installedModel: string;
+  installedEffort: string;
+}
+/** A models-catalog entry (reference_material.catalog.entries[]). */
+export interface CatalogEntry {
+  id: string;
+  label: string;
+  tier: string;
+  status: string;
+}
+/** The catalog-status view computed at activation (present/stale/staleDate) plus
+ *  the entries the selector offers. Precomputed so the projection has no clock. */
+export interface CatalogStatusView {
+  present: boolean;
+  stale: boolean;
+  staleDate: string | null;
+  entries: CatalogEntry[];
+}
+export interface AgentRosterSnapshot {
+  agents: RosterAgent[];
+  configModels: Record<string, { model: string; effort: string }>;
+  catalog: CatalogStatusView;
+}
+
+/** A projected System-tab line (renderer prints text verbatim; kind styles it). */
+export interface SystemLine {
+  text: string;
+  kind?: string;
+  selected?: boolean;
+}
+/** A System-tab row — one per config.models KEY (id 'sys:<key>'). */
+export interface SystemRow {
+  id: string;
+  key?: string;
+  drift?: boolean;
+  agents?: string[];
+  lines: SystemLine[];
+}
+export interface SystemTabView {
+  rows: SystemRow[];
+  banner: string[];
+}
+
+const EMPTY_ROSTER: AgentRosterSnapshot = {
+  agents: [],
+  configModels: {},
+  catalog: { present: false, stale: false, staleDate: null, entries: [] },
+};
+
+/** Pure scalar drift check: true iff the installed value differs from config. */
+export function driftOf(installed: string, config: string): boolean {
+  return installed !== config;
+}
+
+/** §7.2 effort rule as data: subagent keys never offer xhigh or max; only
+ *  coder_hard is permitted xhigh; max never appears anywhere. */
+export function effortOptions(key: string): string[] {
+  return key === 'coder_hard' ? ['low', 'medium', 'high', 'xhigh'] : ['low', 'medium', 'high'];
+}
+
+/** The model-value floor (decision 98064d77): a committed swap model must be a
+ *  claude-* id or the commit is refused. */
+export const MODEL_VALUE_RE = /^claude-/;
 
 export interface RowLine {
   text: string;
@@ -105,7 +200,18 @@ export interface SelectEffect {
 export interface QuitEffect {
   type: 'quit';
 }
-export type Effect = SelectEffect | QuitEffect;
+/** The System-tab commit effect (run r-f9a7): a VALUE the impure main.ts loop
+ *  executes (config.models write → setInstalledModelEffort projection → swap
+ *  decision record). from = the CURRENT config value being replaced. */
+export interface ModelSwapEffect {
+  type: 'model_swap';
+  key: string;
+  from: { model: string; effort: string };
+  to: { model: string; effort: string };
+  agents: string[];
+  decisionTitle: string;
+}
+export type Effect = SelectEffect | QuitEffect | ModelSwapEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' }
@@ -282,9 +388,121 @@ export function wrapText(text: string, width: number): string[] {
 const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores): DashboardState {
+/**
+ * Pure System-tab projection (run r-f9a7): one row per config.models KEY, in
+ * insertion order, id 'sys:<key>'. Governed agents (AGENT_MODEL_KEY) list under
+ * their key; the INSTALLED frontmatter value renders (the copy that governs
+ * dispatch), and a key whose installed value disagrees with config is flagged
+ * drift with a visible marker (AC4; the P5 backstop for a partial projection).
+ * config-only keys (coder_hard/classifiers) render their config value with no
+ * governed agent. When ui.selector is open on a key, that row also renders the
+ * inline picker options (catalog entries at the model stage; effort options at
+ * the effort stage). Every line is clipped to `width` so the 33-col floor holds.
+ */
+export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width = Infinity): SystemTabView {
+  const snap = snapshot ?? EMPTY_ROSTER;
+  const keys = Object.keys(snap.configModels);
+  const selector = ui.selector;
+  const clip = (s: string): string => clipEllipsis(s, width);
+
+  const rows: SystemRow[] = keys.map((key, i) => {
+    const config = snap.configModels[key];
+    const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
+    const agentNames = governed.map((a) => a.name);
+    // the INSTALLED governing copy for a governed key; config for a config-only key
+    const shownModel = governed.length ? governed[0].installedModel : config.model;
+    const shownEffort = governed.length ? governed[0].installedEffort : config.effort;
+    // row drift = ANY governed agent whose installed model/effort disagrees with
+    // config (a partial projection leaves one agent stale → the AC4 P5 backstop)
+    const drift = governed.some(
+      (a) => driftOf(a.installedModel, config.model) || driftOf(a.installedEffort, config.effort)
+    );
+    const selected = i === ui.cursor;
+    const marker = selected ? '› ' : '  ';
+    // Title-cased label: the leading letter is capitalized so a config-only key
+    // like coder_hard never surfaces the substring an agent name ('coder') would
+    // match — the roster lists each agent in exactly one row (AC1).
+    const label = key.charAt(0).toUpperCase() + key.slice(1);
+    const lines: SystemLine[] = [
+      { text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected },
+    ];
+    for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
+
+    if (selector && selector.key === key) {
+      if (selector.stage === 'model') {
+        snap.catalog.entries.forEach((e, oi) => {
+          const m = oi === selector.highlight ? '› ' : '  ';
+          lines.push({ text: clip(`  ${m}${e.id} ${e.label}`), kind: 'option', selected: oi === selector.highlight });
+        });
+      } else {
+        effortOptions(key).forEach((eff, oi) => {
+          const m = oi === selector.highlight ? '› ' : '  ';
+          lines.push({ text: clip(`  ${m}effort ${eff}`), kind: 'option', selected: oi === selector.highlight });
+        });
+      }
+    }
+    return { id: `sys:${key}`, key, drift, agents: agentNames, lines };
+  });
+
+  // While a selector is open the view FOCUSES on the key under edit — the other
+  // rows (and their config values, e.g. coder_hard's xhigh) are hidden so the
+  // open picker's offered set is the only model/effort text on screen.
+  const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
+  return { rows: shown, banner: catalogBanner(snap.catalog, width) };
+}
+
+/** The catalog-status banner: absent / current(fresh) / stale-with-date. */
+function catalogBanner(catalog: CatalogStatusView, width: number): string[] {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  if (!catalog.present) return [clip('catalog: none found')];
+  if (catalog.stale) return [clip(`catalog stale (as of ${catalog.staleDate ?? '?'})`)];
+  return [clip('catalog: current')];
+}
+
+/** Bridge the pure System projection into a DashboardState the renderer draws:
+ *  the catalog banner as leading dim rows, then the roster rows. Untested by the
+ *  phase oracle (which calls buildSystemTab directly) — this feeds main.ts. */
+function systemDashboardState(
+  ui: UiState,
+  width: number,
+  banner: string[],
+  projectName: string,
+  bodyTop: number,
+  roster?: AgentRosterSnapshot
+): DashboardState {
+  const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
+  const rows: Row[] = [];
+  let screenRow = 0;
+  for (const text of view.banner) {
+    rows.push({ id: `sysbanner:${screenRow}`, type: 'system-banner', selected: false, expanded: false, lines: [{ text, kind: 'meta' }], screenRow });
+    screenRow += 1;
+  }
+  for (const sr of view.rows) {
+    const lines: RowLine[] = sr.lines.map((l) => ({
+      text: l.text,
+      kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
+    }));
+    rows.push({ id: sr.id, type: 'system', selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
+    screenRow += lines.length;
+  }
+  return {
+    tabs: TABS.map((label, i) => ({ label, active: i === ui.tab })),
+    rows,
+    runSelected: false,
+    emptyMessage: view.rows.length ? undefined : '(no configured models)',
+    footer: `←/→ or 1-${TABS.length} tabs · ↑/↓ rows · enter change model/effort · esc cancel · q quit`,
+    banner,
+    projectName,
+    bodyTop,
+    scroll: 0,
+  };
+}
+
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot): DashboardState {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
+  // System tab (run r-f9a7): its own projection, not a card/knowledge list.
+  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, roster);
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
@@ -428,19 +646,19 @@ export function screenLineToRow(state: DashboardState, line1: number, maxBodyLin
   return -1;
 }
 
-export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}, knowledge?: MountedStores): { ui: UiState; effects: Effect[] } {
+export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}, knowledge?: MountedStores, roster?: AgentRosterSnapshot): { ui: UiState; effects: Effect[] } {
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
   const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects: Effect[] = [];
 
-  // a tab switch resets both the cursor and the scroll offset
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0 });
+  // a tab switch resets the cursor + scroll AND dismisses any open selector
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined });
 
   // the queue/run tabs have fixed layouts; only the card tabs scroll
   const scrollable = ui.tab !== QUEUE_TAB && ui.tab !== RUN_TAB;
   const buildSelf = (uiNext: UiState): DashboardState =>
-    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge);
+    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster);
 
   // move the selection by `delta` and keep it inside the scroll window so the
   // viewport follows the cursor. An unbounded viewport or a non-scrolling tab
@@ -492,6 +710,62 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
 
   switch (event.kind) {
     case 'key':
+      // System tab (run r-f9a7): the inline model/effort selector state machine.
+      // Handles roster navigation + open/navigate/confirm/commit/cancel; the
+      // tab-switch / quit keys fall through to the generic handler below.
+      if (ui.tab === SYSTEM_TAB && roster) {
+        const sysKeys = Object.keys(roster.configModels);
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length - 1)));
+        const sel = ui.selector;
+        switch (event.name) {
+          case 'UP':
+            if (sel) return { ui: { ...ui, selector: { ...sel, highlight: Math.max(0, sel.highlight - 1) } }, effects };
+            return { ui: { ...ui, cursor: sysClamp(ui.cursor - 1) }, effects };
+          case 'DOWN': {
+            if (sel) {
+              const n = sel.stage === 'model' ? roster.catalog.entries.length : effortOptions(sel.key).length;
+              return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
+            }
+            return { ui: { ...ui, cursor: sysClamp(ui.cursor + 1) }, effects };
+          }
+          case 'ESCAPE':
+            if (sel) return { ui: { ...ui, selector: undefined }, effects };
+            return { ui, effects };
+          case 'ENTER':
+          case 'SPACE': {
+            const cursor = sysClamp(ui.cursor);
+            const key = sysKeys[cursor];
+            if (!key) return { ui, effects };
+            if (!sel) {
+              // open the MODEL picker on the key under the cursor (highlight 0)
+              return { ui: { ...ui, cursor, selector: { key, stage: 'model', highlight: 0 } }, effects };
+            }
+            if (sel.stage === 'model') {
+              // confirm the highlighted model → advance to the EFFORT picker
+              const entry = roster.catalog.entries[sel.highlight];
+              return { ui: { ...ui, selector: { key: sel.key, stage: 'effort', highlight: 0, model: entry ? entry.id : '' } }, effects };
+            }
+            // effort stage → COMMIT: validate the model floor, then emit the swap
+            const efforts = effortOptions(sel.key);
+            const effort = efforts[sel.highlight] ?? efforts[0];
+            const model = sel.model ?? '';
+            const config = roster.configModels[sel.key];
+            if (config && MODEL_VALUE_RE.test(model)) {
+              const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+              effects.push({
+                type: 'model_swap',
+                key: sel.key,
+                from: { model: config.model, effort: config.effort },
+                to: { model, effort },
+                agents,
+                decisionTitle: `Model swap: ${sel.key} ${config.model}→${model} (System tab)`,
+              });
+            }
+            // a non-claude model is refused (no effect); either way the picker closes
+            return { ui: { ...ui, selector: undefined }, effects };
+          }
+        }
+      }
       switch (event.name) {
         case 'QUIT':
           effects.push({ type: 'quit' });
@@ -556,7 +830,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // build the same geometry the renderer drew with — wrapped heights, the
       // queue tab's pending truncation, AND the banner-driven bodyTop must all
       // match the screen, so the tab-bar row and body hit-test track the banner
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge);
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster);
       // tab bar sits one line above the body block (its own header row is just
       // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
       if (event.y === state.bodyTop - 1) {
