@@ -153,6 +153,23 @@ test('§16.2 step 11 — end-to-end dry run: init → conductor-direct capture �
     tools.agentExit({ run_id: 'r-dry', phase_id: 'p1', agent_role: 'test-writer', signal: 'complete', payload: { handoff_ref: 'p1/test-writer' } });
     assert.equal(sh('consume-exit.mjs', ['--run', 'r-dry', '--step', 'tests-written', '--target', dir], dir).code, 0, 'intra-phase complete consumed (§5.2)');
 
+    // orphan pending exit (incident 2026-07-03 r-ea9e): a conductor-direct
+    // subagent's agent_exit binds to the active run with a phase_id that is
+    // not on it — normal consumption cannot resolve the phase and the full
+    // slot deadlocks the wire. --discard-orphan is the explicit recovery.
+    tools.agentExit({ run_id: 'r-dry', phase_id: 'conductor-direct', agent_role: 'reviewer-correctness', signal: 'complete', payload: { handoff_ref: 'conductor-direct/reviewer-correctness' } });
+    const wedged = sh('consume-exit.mjs', ['--run', 'r-dry', '--target', dir], dir);
+    assert.equal(wedged.code, 2, 'orphan phase refuses normal consumption');
+    assert.match(wedged.stderr, /no phase 'conductor-direct'/);
+    assert.match(wedged.stderr, /--discard-orphan/, 'the refusal teaches the recovery');
+    const discarded = sh('consume-exit.mjs', ['--run', 'r-dry', '--discard-orphan', '--target', dir], dir);
+    assert.equal(discarded.code, 0, discarded.stderr);
+    assert.match(discarded.stdout, /discarded_orphan_exit/);
+    assert.match(discarded.stdout, /conductor-direct/, 'the discard names what it dropped');
+    const emptied = sh('consume-exit.mjs', ['--run', 'r-dry', '--discard-orphan', '--target', dir], dir);
+    assert.equal(emptied.code, 2, 'slot cleared — nothing left to consume');
+    assert.match(emptied.stderr, /no pending exit/);
+
     // coder stand-in → green → boundary complete → run_signal
     writeFileSync(join(dir, 'src', 'sum.mjs'), 'export const sum = (a, b) => a + b;\n');
     writeFileSync(join(dir, 'src', 'app.mjs'), "import { sum } from './sum.mjs';\nexport const app = () => sum(2, 3);\n");
