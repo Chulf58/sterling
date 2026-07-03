@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
+import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync } from "node:fs";
 import { dirname as dirname4, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -4189,6 +4189,14 @@ var researchFindingSchema = base.extend({
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional()
 }).superRefine(refineSupersession);
+var modelsCatalogSchema = external_exports.object({
+  entries: external_exports.array(external_exports.object({
+    id: external_exports.string(),
+    label: external_exports.string(),
+    tier: external_exports.string(),
+    status: external_exports.string()
+  }))
+});
 var referenceMaterialSchema = base.extend({
   type: external_exports.literal("reference_material"),
   title: external_exports.string().min(1),
@@ -4203,7 +4211,11 @@ var referenceMaterialSchema = base.extend({
   // feature_article.file_baselines: the read-time check confirms a real content
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
-  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional()
+  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
+  // unchanged (field_baselines optional-field precedent); a catalog-bearing record
+  // carries a validated modelsCatalogSchema payload.
+  catalog: modelsCatalogSchema.optional()
 }).superRefine(refineSupersession);
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
@@ -4591,6 +4603,13 @@ var configSchema = external_exports.object({
       stable: external_exports.number().int().positive().default(365)
     }).default({}),
     platform_external_days: external_exports.number().int().positive().default(180)
+  }).default({}),
+  // run r-ea9e, AC7: TUI System tab — how long a KB-maintained models catalog
+  // reference_material is considered fresh before the tab prompts a refresh.
+  // Distinct from the existing `staleness` block (which governs research
+  // findings and platform docs, not the models catalog).
+  models_catalog: external_exports.object({
+    staleness_days: external_exports.number().int().positive().default(45)
   }).default({})
 });
 
@@ -4641,6 +4660,7 @@ function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { mkdirSync as mkdirSync2, existsSync } from "node:fs";
 import { dirname as dirname3 } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
@@ -5178,6 +5198,80 @@ var SterlingStore = class {
   listCheckSkipped(runId) {
     return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
   }
+  // -------------------------------------------------------------------------
+  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
+  // -------------------------------------------------------------------------
+  /**
+   * Idempotent bootstrap: if no project-scoped reference_material carrying a
+   * `catalog` payload exists, create one seeded from config.models' DISTINCT
+   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
+   * already in use by the installed agents.
+   */
+  bootstrapCatalogIfAbsent(config, nowISO) {
+    const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
+    if (existing.length > 0)
+      return;
+    const cfg = config;
+    const models = cfg.models ?? {};
+    const ids = /* @__PURE__ */ new Set();
+    for (const v of Object.values(models)) {
+      if (v?.model)
+        ids.add(v.model);
+    }
+    const dateStr = nowISO.slice(0, 10);
+    this.create({
+      id: randomUUID(),
+      type: "reference_material",
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      title: "Models catalog",
+      kind: "doc",
+      location: ".sterling/models-catalog",
+      summary: "KB-maintained model catalog for the TUI System tab.",
+      source_date: dateStr,
+      capture_date: dateStr,
+      catalog: {
+        entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
+      }
+    });
+  }
+  /**
+   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
+   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
+   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
+   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   */
+  enqueueRefreshReferenceOnce(nowISO) {
+    const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
+    if (pending.length > 0)
+      return;
+    const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
+    const todo = {
+      id: randomUUID(),
+      type: "todo",
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      text: "Refresh the KB models catalog",
+      source: "system",
+      system_reason: "refresh_reference"
+    };
+    if (catalogs.length > 0) {
+      todo.feature_link = catalogs[0].id;
+    }
+    this.create(todo);
+  }
   insertRecord(record) {
     const entry = RECORD_TYPES[record.type];
     this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, scope, created_at, updated_at, author, derived_unconfirmed, body)
@@ -5216,6 +5310,37 @@ function openStore(cwd) {
   const p = join3(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
+
+// scripts/lib/agent-distribution.mjs
+var normalize = (s2) => s2.replace(/\r\n/g, "\n");
+var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
+function parseInstalledHeader(content) {
+  const m = normalize(content).match(HEADER_RE);
+  if (!m) return null;
+  const [line, pluginVersion2, template, templateHash, contentHash, installedAt] = m;
+  return { headerLine: line, pluginVersion: pluginVersion2, template, templateHash, contentHash, installedAt };
+}
+function extractHookCommandLines(content) {
+  const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return [];
+  return [...m[1].matchAll(/^\s*command:\s*(.+)$/gm)].map((x) => x[1].trim());
+}
+function extractBakedCommandPaths(content) {
+  const paths = /* @__PURE__ */ new Set();
+  for (const line of extractHookCommandLines(content)) {
+    for (const m of line.matchAll(/"([^"]+)"/g)) paths.add(m[1]);
+  }
+  return [...paths];
+}
+var RESTART_INSTRUCTION = [
+  "================================================================",
+  "RESTART REQUIRED \u2014 project subagents load at session start.",
+  "Agents installed into .claude/agents/ are NOT visible to a",
+  "session that was already running. Restart Claude Code in this",
+  "project before the first pipeline run; the run is blocked until",
+  "the runtime visibility check confirms the installed agent set.",
+  "================================================================"
+].join("\n");
 
 // scripts/hooks/h1-session-start.mjs
 var CONVENTIONS = [
@@ -5326,6 +5451,27 @@ try {
   }
 } catch {
 }
+var machineWarning = "";
+var machineContext = "";
+try {
+  const agentsDir = join4(input.cwd, ".claude", "agents");
+  if (existsSync3(agentsDir)) {
+    const dead = [];
+    for (const f of readdirSync(agentsDir).filter((n) => n.endsWith(".md"))) {
+      const content = readFileSync2(join4(agentsDir, f), "utf8");
+      if (!parseInstalledHeader(content)) continue;
+      const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync3(p));
+      if (unresolved) dead.push({ agent: f, node: unresolved });
+    }
+    if (dead.length) {
+      machineWarning = `\u26A0 ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context (e.g. ${dead[0].agent} \u2192 ${dead[0].node}) \u2014 their hooks fail silently. Run /sterling:sync-agents from this context, then restart. `;
+      machineContext = `
+
+MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on this machine (${dead.map((d) => d.agent).join(", ")}). Every hook of those agents fails non-blocking \u2014 the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work until scripts/check-agents-visible.mjs passes.`;
+    }
+  }
+} catch {
+}
 if (process.env.STERLING_NO_BANNER !== "1") {
   const width = Math.max(...BANNER_ROWS.map((r) => r.length));
   const version = pluginVersion();
@@ -5334,8 +5480,8 @@ if (process.env.STERLING_NO_BANNER !== "1") {
 ${versionLine}`);
 }
 var output = {
-  systemMessage: `${staleWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + registryContext }
+  systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + registryContext + machineContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();
