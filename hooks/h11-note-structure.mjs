@@ -8,6 +8,9 @@ var __export = (target, all) => {
 // scripts/hooks/h11-note-structure.mjs
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { existsSync as existsSync3 } from "node:fs";
+import { join as join2 } from "node:path";
+import { homedir } from "node:os";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -5221,8 +5224,10 @@ var SCHEMA = JSON.stringify({
   required: ["candidates"]
 });
 var extractor = process.env.STERLING_H11_EXTRACTOR;
+var nativeWinClaude = join2(homedir(), ".local", "bin", "claude.exe");
+var claudeCmd = process.platform === "win32" && existsSync3(nativeWinClaude) ? nativeWinClaude : "claude";
 var result = extractor ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: "utf8", timeout: 9e4 }) : spawnSync(
-  "claude",
+  claudeCmd,
   ["-p", PROMPT, "--model", "claude-haiku-4-5-20251001", "--json-schema", SCHEMA, "--tools", "", "--safe-mode", "--no-session-persistence"],
   { input: "", encoding: "utf8", timeout: 9e4 }
 );
