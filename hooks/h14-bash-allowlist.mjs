@@ -4184,14 +4184,6 @@ var researchFindingSchema = base.extend({
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional()
 }).superRefine(refineSupersession);
-var modelsCatalogSchema = external_exports.object({
-  entries: external_exports.array(external_exports.object({
-    id: external_exports.string(),
-    label: external_exports.string(),
-    tier: external_exports.string(),
-    status: external_exports.string()
-  }))
-});
 var referenceMaterialSchema = base.extend({
   type: external_exports.literal("reference_material"),
   title: external_exports.string().min(1),
@@ -4206,11 +4198,7 @@ var referenceMaterialSchema = base.extend({
   // feature_article.file_baselines: the read-time check confirms a real content
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
-  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
-  // unchanged (field_baselines optional-field precedent); a catalog-bearing record
-  // carries a validated modelsCatalogSchema payload.
-  catalog: modelsCatalogSchema.optional()
+  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional()
 }).superRefine(refineSupersession);
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
@@ -4516,13 +4504,6 @@ var configSchema = external_exports.object({
       stable: external_exports.number().int().positive().default(365)
     }).default({}),
     platform_external_days: external_exports.number().int().positive().default(180)
-  }).default({}),
-  // run r-ea9e, AC7: TUI System tab — how long a KB-maintained models catalog
-  // reference_material is considered fresh before the tab prompts a refresh.
-  // Distinct from the existing `staleness` block (which governs research
-  // findings and platform docs, not the models catalog).
-  models_catalog: external_exports.object({
-    staleness_days: external_exports.number().int().positive().default(45)
   }).default({})
 });
 

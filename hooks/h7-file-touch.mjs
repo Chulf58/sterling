@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h7-file-touch.mjs
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3 } from "node:fs";
 import { join as join2, dirname as dirname2 } from "node:path";
 
@@ -4198,14 +4198,6 @@ var researchFindingSchema = base.extend({
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional()
 }).superRefine(refineSupersession);
-var modelsCatalogSchema = external_exports.object({
-  entries: external_exports.array(external_exports.object({
-    id: external_exports.string(),
-    label: external_exports.string(),
-    tier: external_exports.string(),
-    status: external_exports.string()
-  }))
-});
 var referenceMaterialSchema = base.extend({
   type: external_exports.literal("reference_material"),
   title: external_exports.string().min(1),
@@ -4220,11 +4212,7 @@ var referenceMaterialSchema = base.extend({
   // feature_article.file_baselines: the read-time check confirms a real content
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
-  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
-  // unchanged (field_baselines optional-field precedent); a catalog-bearing record
-  // carries a validated modelsCatalogSchema payload.
-  catalog: modelsCatalogSchema.optional()
+  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional()
 }).superRefine(refineSupersession);
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
@@ -4612,13 +4600,6 @@ var configSchema = external_exports.object({
       stable: external_exports.number().int().positive().default(365)
     }).default({}),
     platform_external_days: external_exports.number().int().positive().default(180)
-  }).default({}),
-  // run r-ea9e, AC7: TUI System tab — how long a KB-maintained models catalog
-  // reference_material is considered fresh before the tab prompts a refresh.
-  // Distinct from the existing `staleness` block (which governs research
-  // findings and platform docs, not the models catalog).
-  models_catalog: external_exports.object({
-    staleness_days: external_exports.number().int().positive().default(45)
   }).default({})
 });
 
@@ -4654,7 +4635,6 @@ var runtimeMarkerSchema = external_exports.object({
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
@@ -5129,80 +5109,6 @@ var SterlingStore = class {
   listCheckSkipped(runId) {
     return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
   }
-  // -------------------------------------------------------------------------
-  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
-  // -------------------------------------------------------------------------
-  /**
-   * Idempotent bootstrap: if no project-scoped reference_material carrying a
-   * `catalog` payload exists, create one seeded from config.models' DISTINCT
-   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
-   * already in use by the installed agents.
-   */
-  bootstrapCatalogIfAbsent(config, nowISO) {
-    const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
-    if (existing.length > 0)
-      return;
-    const cfg = config;
-    const models = cfg.models ?? {};
-    const ids = /* @__PURE__ */ new Set();
-    for (const v of Object.values(models)) {
-      if (v?.model)
-        ids.add(v.model);
-    }
-    const dateStr = nowISO.slice(0, 10);
-    this.create({
-      id: randomUUID(),
-      type: "reference_material",
-      created_at: nowISO,
-      updated_at: nowISO,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      title: "Models catalog",
-      kind: "doc",
-      location: ".sterling/models-catalog",
-      summary: "KB-maintained model catalog for the TUI System tab.",
-      source_date: dateStr,
-      capture_date: dateStr,
-      catalog: {
-        entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
-      }
-    });
-  }
-  /**
-   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
-   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
-   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
-   */
-  enqueueRefreshReferenceOnce(nowISO) {
-    const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
-    if (pending.length > 0)
-      return;
-    const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
-    const todo = {
-      id: randomUUID(),
-      type: "todo",
-      created_at: nowISO,
-      updated_at: nowISO,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      text: "Refresh the KB models catalog",
-      source: "system",
-      system_reason: "refresh_reference"
-    };
-    if (catalogs.length > 0) {
-      todo.feature_link = catalogs[0].id;
-    }
-    this.create(todo);
-  }
   insertRecord(record) {
     const entry = RECORD_TYPES[record.type];
     this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, scope, created_at, updated_at, author, derived_unconfirmed, body)
@@ -5274,7 +5180,7 @@ try {
       const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link === article.id);
       if (!open) {
         store.create({
-          id: randomUUID2(),
+          id: randomUUID(),
           type: "todo",
           created_at: now,
           updated_at: now,
