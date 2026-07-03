@@ -136,6 +136,15 @@ export const configSchema = z.object({
       platform_external_days: z.number().int().positive().default(180),
     })
     .default({}),
+  // run r-ea9e, AC7: TUI System tab — how long a KB-maintained models catalog
+  // reference_material is considered fresh before the tab prompts a refresh.
+  // Distinct from the existing `staleness` block (which governs research
+  // findings and platform docs, not the models catalog).
+  models_catalog: z
+    .object({
+      staleness_days: z.number().int().positive().default(45),
+    })
+    .default({}),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;

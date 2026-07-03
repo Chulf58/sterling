@@ -2,6 +2,7 @@ export { normalizeRepoPath, repoPath, toRepoRelative, matchesGlob } from './path
 export { LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, envelopeFields, refineSupersession } from './envelope.js';
 export {
   verifiableAt,
+  modelsCatalogSchema,
   decisionSchema,
   antiPatternSchema,
   researchFindingSchema,
@@ -15,6 +16,7 @@ export {
   DRAIN_VERBS,
   RECORD_TYPES,
   validateRecord,
+  AGENT_MODEL_KEY,
 } from './records.js';
 export type { RecordType, RecordTypeEntry, DurableRecord } from './records.js';
 export {

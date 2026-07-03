@@ -61,3 +61,33 @@ test('templates/default-config.json carries the shipped session_events default a
   assert.ok(shipped.session_events, 'the shipped default-config carries session_events');
   assert.deepEqual(shipped.session_events?.research_agents, ['researcher', 'claude-code-guide']);
 });
+
+// ------------------- models_catalog config (run r-ea9e, AC7 / TUI System tab) -------------------
+
+// models_catalog is a NEW top-level config block (distinct from the existing `staleness` block).
+// Accessed through a cast so referencing it here does not require the field at compile time —
+// assertions fail cleanly (not the package build) until parseConfig grows the default.
+type CfgWithCatalog = { models_catalog?: { staleness_days?: number } };
+
+test('models_catalog.staleness_days: default 45 from an empty config', () => {
+  const empty = parseConfig({}) as unknown as CfgWithCatalog;
+  assert.ok(empty.models_catalog, 'parseConfig defaults must add a models_catalog block');
+  assert.equal(empty.models_catalog?.staleness_days, 45, 'models_catalog.staleness_days defaults to 45');
+});
+
+test('models_catalog.staleness_days: an explicit override parses; a non-number is rejected loud', () => {
+  const overridden = parseConfig({ models_catalog: { staleness_days: 14 } }) as unknown as CfgWithCatalog;
+  assert.ok(overridden.models_catalog, 'supplied models_catalog survives parsing');
+  assert.equal(overridden.models_catalog?.staleness_days, 14, 'an explicit staleness_days overrides the 45 default');
+  assert.throws(
+    () => parseConfig({ models_catalog: { staleness_days: 'soon' } }),
+    /invalid/i,
+    'staleness_days must be a number — a non-number fails loud'
+  );
+});
+
+test('templates/default-config.json carries the shipped models_catalog block and still parses', () => {
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithCatalog;
+  assert.ok(shipped.models_catalog, 'the shipped default-config carries a models_catalog block');
+  assert.equal(shipped.models_catalog?.staleness_days, 45, 'the shipped models_catalog.staleness_days is 45');
+});

@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   normalizeRepoPath,
   toRepoRelative,
@@ -18,6 +21,7 @@ import {
   SYSTEM_REASONS,
   DRAIN_VERBS,
 } from '../index.js';
+import { parseConfig } from '../config.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 
@@ -396,4 +400,158 @@ test('runRecordSchema: scope_amendments — optional {path,reason,at}[] ; legacy
     'empty at is rejected');
   assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ reason: 'r', at: NOW }] }), /invalid|path|required/i,
     'path is required on each amendment');
+});
+
+// ------------------- TUI System tab: AGENT_MODEL_KEY + models catalog (run r-ea9e, AC7) -------------------
+
+// packages/schemas/src/tests -> src -> schemas -> packages -> repo root
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+
+test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every registered agent maps to a config.models key (AC7, interface slice 2)', async () => {
+  // dynamic import + cast: AGENT_MODEL_KEY does not exist until this phase ships, so a missing
+  // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const map = mod.AGENT_MODEL_KEY as Record<string, string> | undefined;
+  assert.ok(map, 'AGENT_MODEL_KEY must be exported from the schemas index (defined once, invariant 1)');
+
+  // the totality oracle: read the registry the map must be total over
+  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
+    agents: { name: string }[];
+  };
+  const registeredNames = registry.agents.map((a) => a.name).sort();
+
+  // DIRECTION (knowledge slice): totality is over REGISTERED AGENTS -> keys, not keys -> agents.
+  // Every registered agent has a non-blank mapping...
+  for (const name of registeredNames) {
+    assert.equal(typeof map![name], 'string', `registered agent '${name}' is missing an AGENT_MODEL_KEY entry`);
+    assert.ok(map![name].length > 0, `AGENT_MODEL_KEY['${name}'] must not be blank`);
+  }
+  // ...and there are no orphan keys: the map's keys are EXACTLY the registered agents.
+  assert.deepEqual(
+    Object.keys(map!).sort(),
+    registeredNames,
+    'AGENT_MODEL_KEY keys are exactly the registered agents — none missing, none orphaned'
+  );
+
+  // the exact expected mapping (interface slice 2). reviewers is many-to-one and CORRECT.
+  assert.deepEqual(map, {
+    'test-writer': 'test_writer',
+    coder: 'coder',
+    'reviewer-correctness': 'reviewers',
+    'reviewer-security': 'reviewers',
+    'reviewer-skeptic': 'reviewers',
+    'reviewer-performance': 'reviewers',
+    'implementation-architect': 'implementation_architect',
+    researcher: 'researcher',
+    explorer: 'explorer',
+  });
+
+  // many-to-one asserted head-on: all four reviewer agents resolve to the single 'reviewers' key.
+  // (map re-cast to Record<string,string> at the string-indexed lookup: the preceding deepEqual
+  // unifies `map` to its inferred 9-literal-key shape, which otherwise trips TS7053 on map![r].)
+  const lookup = map as Record<string, string>;
+  const reviewerAgents = registeredNames.filter((n) => n.startsWith('reviewer-'));
+  assert.equal(reviewerAgents.length, 4, 'the registry carries four reviewer agents');
+  for (const r of reviewerAgents) {
+    assert.equal(lookup[r], 'reviewers', `reviewer agent '${r}' is governed by the single 'reviewers' config key`);
+  }
+
+  // config-only keys have NO installed/registered agent, so they are NOT keys of AGENT_MODEL_KEY.
+  assert.ok(!('coder_hard' in lookup), 'coder_hard is a config-only key — never a registered-agent key');
+  assert.ok(!('classifiers' in lookup), 'classifiers is a config-only key — never a registered-agent key');
+
+  // every VALUE the map yields must be a real config.models key (cross-check against parseConfig defaults).
+  const cfg = parseConfig({}) as unknown as { models: Record<string, unknown> };
+  const configKeys = Object.keys(cfg.models);
+  for (const value of Object.values(lookup)) {
+    assert.ok(configKeys.includes(value), `AGENT_MODEL_KEY value '${value}' must be an actual config.models key`);
+  }
+});
+
+test('modelsCatalogSchema: {entries:[{id,label,tier,status}]} round-trips; malformed entries fail loud (AC7, interface slice 3)', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const schema = mod.modelsCatalogSchema as
+    | { parse: (v: unknown) => { entries: { id: string; label: string; tier: string; status: string }[] } }
+    | undefined;
+  assert.ok(schema, 'modelsCatalogSchema must be exported from the schemas index (defined once, invariant 1)');
+
+  const valid = {
+    entries: [
+      { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' },
+      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', tier: 'sonnet', status: 'active' },
+    ],
+  };
+  const parsed = schema!.parse(valid);
+  assert.deepEqual(parsed.entries, valid.entries, 'catalog entries round-trip unchanged (id, label, tier, status all preserved)');
+
+  // boundary: an empty catalog (zero entries) is a well-formed shape.
+  assert.deepEqual(schema!.parse({ entries: [] }).entries, [], 'a catalog with no entries still parses');
+
+  // entries is required and must be an array.
+  assert.throws(() => schema!.parse({}), 'entries is a required field');
+  assert.throws(() => schema!.parse({ entries: 'claude-opus-4-8' }), 'entries must be an array, not a string');
+  assert.throws(() => schema!.parse({ entries: {} }), 'entries must be an array, not an object');
+
+  // every entry requires id, label, tier, status — each present and a string.
+  const good = { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' };
+  for (const field of ['id', 'label', 'tier', 'status'] as const) {
+    const { [field]: _omitted, ...missing } = good;
+    assert.throws(() => schema!.parse({ entries: [missing] }), `entry field '${field}' is required`);
+    assert.throws(() => schema!.parse({ entries: [{ ...good, [field]: 42 }] }), `entry field '${field}' must be a string`);
+  }
+});
+
+test('referenceMaterialSchema: optional typed catalog field — legacy round-trips; catalog persists; malformed catalog fails loud (AC7, file_baselines precedent 57d9a52d)', () => {
+  // a LEGACY reference_material WITHOUT a catalog must round-trip untouched — the field is never
+  // invented (same optional-field precedent as file_baselines / scope_amendments).
+  const legacy = validateRecord({
+    ...envelope('reference_material'),
+    title: 'Genesys API guide',
+    kind: 'url',
+    location: 'https://developer.genesys.cloud',
+    summary: 'platform API reference',
+    source_date: '2025-11-01',
+    capture_date: '2026-06-01',
+    basis: 'platform',
+  }) as { catalog?: unknown };
+  assert.ok(
+    !('catalog' in legacy) || legacy.catalog === undefined,
+    'a legacy reference_material without catalog round-trips with no invented catalog field'
+  );
+
+  // a reference_material CARRYING a catalog must parse and preserve the typed entries.
+  const withCatalog = validateRecord({
+    ...envelope('reference_material'),
+    title: 'Sterling models catalog',
+    kind: 'url',
+    location: 'https://docs.anthropic.com/models',
+    summary: 'KB-maintained model choices for the System tab',
+    source_date: '2026-07-01',
+    capture_date: '2026-07-01',
+    basis: 'platform',
+    catalog: {
+      entries: [{ id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' }],
+    },
+  }) as { catalog?: { entries: { id: string; label: string; tier: string; status: string }[] } };
+  assert.ok(withCatalog.catalog, 'the catalog field survives parsing on a reference_material record');
+  assert.equal(withCatalog.catalog!.entries.length, 1);
+  assert.deepEqual(withCatalog.catalog!.entries[0], { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' });
+
+  // the catalog field is TYPED, not free-form: a malformed catalog entry is rejected loud.
+  assert.throws(
+    () =>
+      validateRecord({
+        ...envelope('reference_material'),
+        title: 'bad catalog',
+        kind: 'url',
+        location: 'https://example.com/bad',
+        summary: 's',
+        source_date: '2026-07-01',
+        capture_date: '2026-07-01',
+        basis: 'platform',
+        catalog: { entries: [{ id: 'claude-opus-4-8' }] },
+      }),
+    /invalid|required/i,
+    'a catalog entry missing label/tier/status is rejected'
+  );
 });
