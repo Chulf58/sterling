@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
 // Dead-term check (spec §0.4, CLAUDE.md conduct rules): no residue of the
 // predecessor's vocabulary in anything shipped, scaffolded, or generated.
@@ -61,13 +62,36 @@ export function findBackslashHookCommands(frontmatter) {
 export const HEADER_RE =
   /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 
-export function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars = {} }) {
+// Per-agent model/effort resolution (design 98064d77 §a): model:/effort: in the
+// shipped templates are {{MODEL}}/{{EFFORT}} substitution tokens, resolved at
+// render time from config.models via AGENT_MODEL_KEY (reviewers fold to one key).
+// Token-GATED: a template carrying no {{MODEL}}/{{EFFORT}} needs no config at all
+// (config stays optional), so a token-free template renders byte-identically with
+// or without config. When the tokens ARE present, config.models must resolve them
+// or we refuse loudly (P5) rather than emit a half-baked frontmatter.
+function resolveModelVars(templateContent, label, config) {
+  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
+  const { name } = parseTemplate(templateContent, label);
+  const key = AGENT_MODEL_KEY[name];
+  if (!key) {
+    throw new Error(`model resolution failed for ${label}: agent '${name}' has no AGENT_MODEL_KEY entry — cannot resolve {{MODEL}}/{{EFFORT}}`);
+  }
+  const entry = config && config.models && config.models[key];
+  if (!entry || typeof entry.model !== 'string' || typeof entry.effort !== 'string') {
+    throw new Error(`model resolution failed for ${label}: config.models['${key}'] is missing model/effort — a tokenized template needs config.models (P5)`);
+  }
+  return { MODEL: entry.model, EFFORT: entry.effort };
+}
+
+export function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars = {}, config } = {}) {
   // Install-time variable substitution: installed agents are project-side and
   // cannot use ${CLAUDE_PLUGIN_ROOT}; templates carry {{NODE}}/{{HOOKS_DIR}}
   // tokens that install bakes to machine-detected forward-slash paths (§6
-  // emission rule — the backslash check below guards the substituted result).
+  // emission rule — the backslash check below guards the substituted result) and
+  // {{MODEL}}/{{EFFORT}} tokens resolved per agent from config.models (98064d77).
+  const allVars = { ...vars, ...resolveModelVars(templateContent, label, config) };
   let substituted = templateContent;
-  for (const [key, value] of Object.entries(vars)) {
+  for (const [key, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key}}}`).join(value);
   }
   const { name, frontmatter, body } = parseTemplate(substituted, label);
@@ -103,6 +127,67 @@ export function isLocallyModified(content, header) {
   return sha256(withoutHeader) !== header.contentHash;
 }
 
+// Machine-activation surface (P5; the 2026-07-03 dead-hooks incident,
+// anti_pattern 60e8463d): installed agents bake NODE/HOOKS_DIR into frontmatter
+// hook commands at install time (d53dc92c) — an install produced by the OTHER
+// machine context (WSL vs native Windows) is self-consistent and
+// template-current, so hash bookkeeping alone reads it up_to_date while every
+// baked command points at an unresolvable node and every hook fails
+// non-blocking. The frontmatter hook command lines ARE that machine surface:
+// extract them for drift comparison (syncAgents) and node-path executability
+// probing (checkAgentsVisible, H1).
+export function extractHookCommandLines(content) {
+  const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return [];
+  return [...m[1].matchAll(/^\s*command:\s*(.+)$/gm)].map((x) => x[1].trim());
+}
+
+// Every double-quoted token of every baked command: the node executable AND
+// the hook script path — BOTH must resolve for a hook to run (review follow-up
+// on 946125ff: a same-node/different-HOOKS_DIR flip must not slip the probe).
+export function extractBakedCommandPaths(content) {
+  const paths = new Set();
+  for (const line of extractHookCommandLines(content)) {
+    for (const m of line.matchAll(/"([^"]+)"/g)) paths.add(m[1]);
+  }
+  return [...paths];
+}
+
+// Surgical model/effort swap (design 98064d77 §b): the TUI System tab's write
+// projection. Given an ALREADY-INSTALLED agent file, rewrite ONLY the frontmatter
+// model:/effort: lines and re-stamp the generated header's content_hash, reusing
+// this module's sha256/HEADER machinery (6d5935d3) so the result is self-consistent
+// (isLocallyModified === false) and a later sync-agents refresh does not read the
+// swap as a local modification (AC6). It is deliberately frontmatter-SCOPED: body
+// lines that merely start with model:/effort: are left untouched. Machine vars
+// (NODE/HOOKS_DIR baked into hook commands) are byte-identical — a swap can NEVER
+// flip the WSL↔Windows machine boundary (d53dc92c). template_hash is preserved (a
+// swap does not change template identity); installed_at is re-stamped to `now`
+// because, like header_repaired, a swap needs a restart to govern dispatch.
+export function setInstalledModelEffort(installedContent, { model, effort, pluginVersion, now }) {
+  const normalized = normalize(installedContent);
+  const header = parseInstalledHeader(normalized);
+  if (!header) {
+    throw new Error('setInstalledModelEffort: no sterling-generated header — refusing to swap a file this module did not generate');
+  }
+  const m = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error('setInstalledModelEffort: missing frontmatter block');
+  const frontmatter = m[1]
+    .split('\n')
+    .map((line) => {
+      if (/^model:\s/.test(line)) return `model: ${model}`;
+      if (/^effort:\s/.test(line)) return `effort: ${effort}`;
+      return line;
+    })
+    .join('\n');
+  // m[2] is `${headerLine}\n${body}` — drop the stale header, keep the body verbatim.
+  const body = m[2].replace(header.headerLine + '\n', '');
+  const withoutHeader = `---\n${frontmatter}\n---\n${body}`;
+  const newHeader =
+    `<!-- sterling-generated v=${pluginVersion} template=${header.template} template_hash=${header.templateHash} content_hash=${sha256(withoutHeader)} installed_at=${now} -->`;
+  return `---\n${frontmatter}\n---\n${newHeader}\n${body}`;
+}
+
 export function loadRegistry(registryPath) {
   const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
@@ -121,13 +206,13 @@ export const RESTART_INSTRUCTION = [
   '================================================================',
 ].join('\n');
 
-export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {} }) {
+export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config }) {
   const registry = loadRegistry(registryPath);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of registry.agents) {
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
-    const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars });
+    const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
     }
@@ -155,10 +240,14 @@ export function refuseInstruction(name) {
 // installs; refuse to overwrite local modification (refuse-and-instruct stub for
 // the three-way review). A "modified" install whose body is byte-identical to
 // the fresh render is header-only drift (stale generated header, not a divergent
-// edit) — repaired, not refused. Statuses: installed | refreshed |
-// header_repaired | up_to_date | locally_modified_up_to_date |
-// refused_local_modification | foreign_file.
-export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {} }) {
+// edit) — repaired, not refused. An UNMODIFIED, template-current install whose
+// baked hook command lines differ from a fresh render with THIS machine's vars
+// is a machine-context flip (invisible to hash bookkeeping — anti_pattern
+// 60e8463d) — re-baked loudly as machine_rebaked, never reported up_to_date.
+// Statuses: installed | refreshed | header_repaired | machine_rebaked |
+// up_to_date | locally_modified_up_to_date | refused_local_modification |
+// foreign_file.
+export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config }) {
   const registry = loadRegistry(registryPath);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
@@ -166,7 +255,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
     const installedPath = join(targetAgentsDir, `${entry.name}.md`);
     const renderCandidate = () => {
-      const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars });
+      const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
       if (name !== entry.name) {
         throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
       }
@@ -206,7 +295,24 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       writeFileSync(installedPath, renderCandidate());
       report.push({ name: entry.name, status: 'refreshed' });
     } else {
-      report.push({ name: entry.name, status: 'up_to_date' });
+      // Unmodified + template-current — but hash bookkeeping cannot see a
+      // machine-context flip (anti_pattern 60e8463d: nine× up_to_date while
+      // every hook command pointed at the other context's node). Compare the
+      // baked hook command lines against a fresh render with THIS machine's
+      // vars: command drift on an UNMODIFIED install is provably baked-var
+      // drift (the body hash matches the header, so no human edited it) →
+      // re-bake loudly. Body-only divergence (config.models values) stays
+      // up_to_date: config authority is realized at install/refresh/swap
+      // (98064d77) and the System tab's drift marker owns its visibility.
+      const candidate = renderCandidate();
+      const sameCommands =
+        JSON.stringify(extractHookCommandLines(installed)) === JSON.stringify(extractHookCommandLines(candidate));
+      if (!sameCommands) {
+        writeFileSync(installedPath, candidate);
+        report.push({ name: entry.name, status: 'machine_rebaked' });
+      } else {
+        report.push({ name: entry.name, status: 'up_to_date' });
+      }
     }
   }
   return { report, restartInstruction: RESTART_INSTRUCTION };
@@ -216,7 +322,12 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
 // start, so the installed agent set is visible only if every registered agent
 // is installed AND the current session started after the newest install.
 // The first pipeline run is blocked until this passes.
-export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt }) {
+// probeExecutability (opt-in; the check-agents-visible CLI always enables it):
+// additionally verify every baked hook node path resolves on THIS machine —
+// visibility alone said 'ok' during the 2026-07-03 incident while every hook
+// failed non-blocking (enforcement silently absent, anti_pattern 60e8463d).
+// Opt-in so the lib contract (pure visibility) is unchanged for existing callers.
+export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt, probeExecutability = false }) {
   const registry = loadRegistry(registryPath);
   const problems = [];
   const sessionStart = Date.parse(sessionStartedAt);
@@ -229,7 +340,8 @@ export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStart
       problems.push({ name: entry.name, reason: 'missing_agent' });
       continue;
     }
-    const header = parseInstalledHeader(readFileSync(installedPath, 'utf8'));
+    const installed = readFileSync(installedPath, 'utf8');
+    const header = parseInstalledHeader(installed);
     if (!header) {
       problems.push({ name: entry.name, reason: 'missing_generated_header' });
       continue;
@@ -239,6 +351,12 @@ export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStart
       problems.push({ name: entry.name, reason: 'unparseable_installed_at' });
     } else if (installedAt > sessionStart) {
       problems.push({ name: entry.name, reason: 'restart_required' });
+    }
+    if (probeExecutability) {
+      const unresolved = extractBakedCommandPaths(installed).find((p) => !existsSync(p));
+      if (unresolved) {
+        problems.push({ name: entry.name, reason: 'hook_node_unresolvable', detail: unresolved });
+      }
     }
   }
   return { visible: problems.length === 0, problems };

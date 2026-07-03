@@ -8,6 +8,7 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { selectReviewers } from '../lib/reviewer-selection.mjs';
 import { runWiringCheck } from '../lib/wiring-check.mjs';
+import { renderInstalledAgent } from '../lib/agent-distribution.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -187,6 +188,66 @@ test('H1: shared project registry — touches this project last_seen + makes the
     } finally {
       after.close();
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 machine-activation guard: unresolvable baked hook node warns human + conductor; resolvable or foreign installs stay quiet (anti_pattern 60e8463d)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const agentsDir = join(dir, '.claude', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    const template = [
+      '---',
+      'name: probe-agent',
+      'description: machine-guard fixture',
+      'tools: Read',
+      'hooks:',
+      '  PreToolUse:',
+      '    - matcher: "Read"',
+      '      hooks:',
+      '        - type: command',
+      "          command: '{{NODE}} \"{{HOOKS_DIR}}/h.mjs\"'",
+      '---',
+      '',
+      'Body.',
+      '',
+    ].join('\n');
+    // baked by "another machine": the node path does not resolve here
+    const flipped = renderInstalledAgent(template, 'probe-agent.md', {
+      pluginVersion: '0.1.0',
+      now: NOW,
+      vars: { NODE: '"/other-context/bin/node"', HOOKS_DIR: '/other-context/hooks' },
+    }).installedContent;
+    writeFileSync(join(agentsDir, 'probe-agent.md'), flipped);
+    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1', STERLING_NO_BANNER: '1' });
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.match(out.systemMessage, /baked for ANOTHER machine context/, 'human warned in systemMessage');
+    assert.match(out.systemMessage, /probe-agent\.md/, 'offending agent named');
+    assert.match(out.hookSpecificOutput.additionalContext, /MACHINE-CONTEXT DRIFT \(H1/, 'conductor told in additionalContext');
+    assert.match(out.hookSpecificOutput.additionalContext, /machine_rebaked/, 'recovery path names the sync re-bake');
+
+    // this machine's node AND hook script resolve — quiet
+    const liveHooksDir = join(dir, 'hooks-live');
+    mkdirSync(liveHooksDir, { recursive: true });
+    writeFileSync(join(liveHooksDir, 'h.mjs'), '// probe fixture');
+    const activated = renderInstalledAgent(template, 'probe-agent.md', {
+      pluginVersion: '0.1.0',
+      now: NOW,
+      vars: { NODE: `"${process.execPath.replace(/\\/g, '/')}"`, HOOKS_DIR: liveHooksDir.replace(/\\/g, '/') },
+    }).installedContent;
+    writeFileSync(join(agentsDir, 'probe-agent.md'), activated);
+    const quiet = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1', STERLING_NO_BANNER: '1' });
+    const qo = JSON.parse(quiet.stdout);
+    assert.doesNotMatch(qo.systemMessage, /machine context/, 'resolvable node stays quiet');
+    assert.doesNotMatch(qo.hookSpecificOutput.additionalContext, /MACHINE-CONTEXT DRIFT/);
+
+    // a foreign (non-generated) file is never judged
+    writeFileSync(join(agentsDir, 'hand-made.md'), "---\nname: hand-made\n---\ncommand: '\"/other-context/bin/node\" \"/x/h.mjs\"'\n");
+    const foreign = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1', STERLING_NO_BANNER: '1' });
+    assert.doesNotMatch(JSON.parse(foreign.stdout).systemMessage, /machine context/, 'foreign files are not ours to judge');
   } finally {
     cleanup();
   }

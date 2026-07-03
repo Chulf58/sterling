@@ -50,5 +50,8 @@
   "staleness": {
     "research_days": { "fast": 30, "medium": 90, "stable": 365 },
     "platform_external_days": 180
+  },
+  "models_catalog": {
+    "staleness_days": 45
   }
 }

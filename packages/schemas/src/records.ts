@@ -99,6 +99,20 @@ export const researchFindingSchema = base
   })
   .superRefine(refineSupersession);
 
+// §3.2.5 models catalog: typed shape for KB-maintained model lists (run r-ea9e, AC7).
+// Free strings at schema level (tier/status enums and id-regex are phase-2/4 territory
+// per decision 98064d77 — do NOT add enum/regex constraints here).
+export const modelsCatalogSchema = z.object({
+  entries: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      tier: z.string(),
+      status: z.string(),
+    })
+  ),
+});
+
 // §3.2.5 — large, stable, loaded on demand; never bulk-injected.
 export const referenceMaterialSchema = base
   .extend({
@@ -116,6 +130,10 @@ export const referenceMaterialSchema = base
     // change before raising refresh_reference, so an mtime-only bump (a merge) is
     // not mistaken for an out-of-band edit. url/pdf locations carry none.
     file_baselines: z.record(z.string(), z.string()).optional(),
+    // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
+    // unchanged (field_baselines optional-field precedent); a catalog-bearing record
+    // carries a validated modelsCatalogSchema payload.
+    catalog: modelsCatalogSchema.optional(),
   })
   .superRefine(refineSupersession);
 
@@ -253,6 +271,25 @@ export const briefSchema = base
       }
     }
   });
+
+// ---------------------------------------------------------------------------
+// AGENT_MODEL_KEY — run r-ea9e, AC7 (TUI System tab).
+// Plain record: every registered agent name (agent-templates/registry.json)
+// → the config.models key that governs its model+effort. Totality-tested in
+// schemas.test.ts; coder_hard/classifiers are config-only keys (no installed
+// agent) and are NOT map keys.
+// ---------------------------------------------------------------------------
+export const AGENT_MODEL_KEY = {
+  'test-writer': 'test_writer',
+  coder: 'coder',
+  'reviewer-correctness': 'reviewers',
+  'reviewer-security': 'reviewers',
+  'reviewer-skeptic': 'reviewers',
+  'reviewer-performance': 'reviewers',
+  'implementation-architect': 'implementation_architect',
+  researcher: 'researcher',
+  explorer: 'explorer',
+} as Record<string, string>;
 
 // ---------------------------------------------------------------------------
 // Record-type registry (invariant 3, spec §15): the single source of truth for

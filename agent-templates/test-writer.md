@@ -1,8 +1,8 @@
 ---
 name: test-writer
 description: Adversarial, spec-only test author for a pipeline phase. Writes tests from the brief and ACs — never from implementation.
-model: claude-opus-4-8
-effort: high
+model: {{MODEL}}
+effort: {{EFFORT}}
 tools: Read, Write, Grep, Glob, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - brief (problem, feature, full acceptance_criteria)

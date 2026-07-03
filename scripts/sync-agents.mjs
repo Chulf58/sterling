@@ -6,7 +6,8 @@
 // Exit codes: 0 = synced/up-to-date; 2 = at least one refusal (loud).
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { parseConfig } from '@sterling/schemas';
 import { syncAgents } from './lib/agent-distribution.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -18,6 +19,14 @@ const targetDir = targetIdx !== -1 ? resolve(args[targetIdx + 1]) : process.cwd(
 
 const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 
+// config.models is the authoritative model/effort source (98064d77): read the
+// target project's config when present, else the shipped default config, so a
+// refresh resolves {{MODEL}}/{{EFFORT}} to pinned ids (never a leftover token).
+const configPath = join(targetDir, '.sterling', 'config.json');
+const config = parseConfig(
+  JSON.parse(readFileSync(existsSync(configPath) ? configPath : join(pluginRoot, 'templates', 'default-config.json'), 'utf8'))
+);
+
 const { report, restartInstruction } = syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
@@ -28,6 +37,7 @@ const { report, restartInstruction } = syncAgents({
     NODE: `"${process.execPath.replace(/\\/g, '/')}"`,
     HOOKS_DIR: join(pluginRoot, 'hooks').replace(/\\/g, '/'),
   },
+  config,
 });
 
 let refused = 0;
@@ -38,7 +48,12 @@ for (const r of report) {
     refused += 1;
     console.error('\n' + r.instruction + '\n');
   }
-  if (r.status === 'installed' || r.status === 'refreshed' || r.status === 'header_repaired') changed += 1;
+  if (r.status === 'installed' || r.status === 'refreshed' || r.status === 'header_repaired' || r.status === 'machine_rebaked') changed += 1;
+  if (r.status === 'machine_rebaked') {
+    console.error(
+      `machine_rebaked: '${r.name}' carried hook commands baked for another machine context — re-baked for THIS machine (anti_pattern 60e8463d).`
+    );
+  }
 }
 if (report.length === 0) console.log('no agents registered — nothing to sync');
 if (changed > 0) console.log('\n' + restartInstruction);

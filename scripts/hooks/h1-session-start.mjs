@@ -4,12 +4,13 @@
 // invisible; this is its visibility pressure. Banner art goes to stderr
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore } from './lib/common.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
+import { parseInstalledHeader, extractBakedCommandPaths } from '../lib/agent-distribution.mjs';
 
 const CONVENTIONS = [
   'Sterling conventions (injected by H1):',
@@ -177,6 +178,46 @@ try {
   // fail-open — the staleness guard must never break SessionStart
 }
 
+// Machine-activation guard (todo 8789eccf, anti_pattern 60e8463d): installed
+// agents bake node paths per machine context (d53dc92c); a WSL↔Windows context
+// flip leaves every agent hook failing non-blocking — the enforcement floor is
+// silently absent while sync-agents' hash bookkeeping reads up_to_date. Probe
+// the baked node paths of Sterling-generated installs at session start and
+// warn BOTH surfaces: the human (systemMessage) and the conductor
+// (additionalContext, with the recovery duty). Fail-open — the probe must
+// never break SessionStart.
+let machineWarning = '';
+let machineContext = '';
+try {
+  const agentsDir = join(input.cwd, '.claude', 'agents');
+  if (existsSync(agentsDir)) {
+    const dead = [];
+    for (const f of readdirSync(agentsDir).filter((n) => n.endsWith('.md'))) {
+      const content = readFileSync(join(agentsDir, f), 'utf8');
+      if (!parseInstalledHeader(content)) continue; // foreign/hand-made — not ours to judge
+      const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync(p));
+      if (unresolved) dead.push({ agent: f, node: unresolved });
+    }
+    if (dead.length) {
+      machineWarning =
+        `⚠ ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context ` +
+        `(e.g. ${dead[0].agent} → ${dead[0].node}) — their hooks fail silently. ` +
+        `Run /sterling:sync-agents from this context, then restart. `;
+      machineContext =
+        `\n\nMACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ${dead.length} installed agent(s) in ` +
+        `.claude/agents/ carry hook node paths that do not resolve on this machine ` +
+        `(${dead.map((d) => d.agent).join(', ')}). Every hook of those agents fails non-blocking — ` +
+        `the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. Before dispatching any ` +
+        `subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as ` +
+        `machine_rebaked), tell the user a RESTART is required, and do not start pipeline work ` +
+        `until scripts/check-agents-visible.mjs passes.`;
+    }
+  }
+} catch {
+  // fail-open — never break SessionStart (P1); the check-agents-visible gate
+  // still blocks pipeline dispatch on the same condition.
+}
+
 if (process.env.STERLING_NO_BANNER !== '1') {
   const width = Math.max(...BANNER_ROWS.map((r) => r.length));
   const version = pluginVersion();
@@ -185,8 +226,8 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${staleWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext },
+  systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext + machineContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

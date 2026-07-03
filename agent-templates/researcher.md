@@ -1,8 +1,8 @@
 ---
 name: researcher
 description: Bounded online research answering exactly one specific question, under a capped budget. Output is captured as a research_finding with both clocks.
-model: claude-sonnet-4-6
-effort: medium
+model: {{MODEL}}
+effort: {{EFFORT}}
 tools: WebSearch, WebFetch, Read, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_create, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - the single question (verbatim)

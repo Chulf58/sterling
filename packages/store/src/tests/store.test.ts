@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '../index.js';
 import type { QueryOptions } from '../index.js';
+import * as storeMod from '../index.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 const LATER = '2026-06-10T13:00:00.000Z';
@@ -453,6 +454,327 @@ test('AC6 match_all:true: PREFIX terms are AND-joined too (zap*/quib* → inters
     const andPrefix = store.query(withMatchAll({ types: ['feature_article'], rank_terms: ['zap*', 'quib*'], cap: 50 }, true));
     assert.equal(andPrefix.length, 1, 'match_all:true AND-joins PREFIX terms — only the record matching both prefixes');
     assert.equal((andPrefix[0] as { slug: string }).slug, 'rec-both', 'the both-tokens record is the sole prefix-AND hit');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
+// AC8 — models catalog: bootstrap-if-absent, catalogStatus (present/stale),
+// and deduped refresh_reference enqueue. Store-level oracle for run r-ea9e
+// phase 3, brief tui-system-tab (08bfa318). SPEC-ONLY: catalogStatus /
+// bootstrapCatalogIfAbsent / enqueueRefreshReferenceOnce do not exist yet.
+//
+// Governing design — decision 98064d77:
+//   - the catalog is a PROJECT-scoped reference_material record carrying the
+//     optional typed `catalog` field {entries:[{id,label,tier,status}]}
+//     (phase-1 schema, commit e44e78a); one record.
+//   - bootstrap seeds entries from config.models' DISTINCT pinned model IDs
+//     (no network — day one the dropdown offers the pinned IDs).
+//   - staleness is TIME-based against the tunable models_catalog.staleness_days
+//     (default 45), reusing the EXISTING refresh_reference maintenance lane
+//     (source=system board item); enqueue is deduped — no-op while a pending
+//     item exists.
+//
+// STALENESS CONVENTION (grounded, not invented): the existing refresh_reference /
+// staleness lane compares `age > threshold` STRICTLY (packages/mcp-server/src/
+// tools.ts: `sourceAge > threshold`, `ageDays(updated_at) > platform_external_days`,
+// with age = floor((now - anchor)/DAY_MS)). Decision 98064d77 says the catalog
+// "reuses the EXISTING refresh_reference maintenance lane", so this oracle pins
+// the SAME strict-greater semantics: at EXACTLY staleness_days elapsed the catalog
+// is FRESH; it becomes stale only PAST the threshold. A `>=` implementation is a
+// defect against the mirrored §3.2.5 convention. Boundary fixtures use only
+// whole-day offsets, so the verdict is identical whether the impl floors to whole
+// days or compares raw milliseconds.
+//
+// INTERFACE-FORM NOTE (resolved behaviorally, not blocked — mirrors the accepted
+// phase-2 cfgBoth precedent): the interface slice gives catalogStatus an explicit
+// record-first pure signature `(catalogRecord|null, now, thresholdDays)` — an
+// unambiguous FREE function. It does NOT state whether bootstrapCatalogIfAbsent /
+// enqueueRefreshReferenceOnce are SterlingStore methods or free functions, nor
+// their exact arg order. Rather than block an unattended run on a calling
+// convention whose MECHANISM is fully specified, the adapters below accept BOTH
+// forms at runtime and compile now via casts (this file's frozen-oracle
+// convention). CANONICAL forms this oracle expects the coder to land:
+//     catalogStatus(record|null, nowISO, thresholdDays)            // free, pure
+//     store.bootstrapCatalogIfAbsent(config, nowISO)               // store method
+//     store.enqueueRefreshReferenceOnce(nowISO)                    // store method
+// If the coder picks the free-function variant instead, the adapter still routes
+// to it; a genuinely different arg SHAPE is a localized one-line fix in these
+// helpers, and the behavioral assertions are the contract either way.
+// ===========================================================================
+
+const DAY_MS = 86_400_000;
+const SEED = '2026-01-01T00:00:00.000Z';
+const isoPlusDays = (base: string, days: number): string => new Date(Date.parse(base) + days * DAY_MS).toISOString();
+
+const StoreMod = storeMod as unknown as Record<string, ((...a: unknown[]) => unknown) | undefined>;
+
+interface CatalogStatusResult {
+  present: boolean;
+  stale: boolean;
+  staleDate: string | null | undefined;
+}
+
+/** catalogStatus is a pure, record-first free function per the interface slice. */
+function callCatalogStatus(record: unknown, nowISO: string, thresholdDays: number): CatalogStatusResult {
+  const fn = StoreMod.catalogStatus;
+  if (typeof fn === 'function') return fn(record, nowISO, thresholdDays) as CatalogStatusResult;
+  throw new Error('catalogStatus export not found (expected free `catalogStatus(record|null, now, thresholdDays)`)');
+}
+
+/** bootstrap: store method `store.bootstrapCatalogIfAbsent(config, now)`, or free `(store, config, now)`. */
+function callBootstrap(store: SterlingStore, config: unknown, nowISO: string): unknown {
+  const method = (store as unknown as Record<string, ((...a: unknown[]) => unknown) | undefined>).bootstrapCatalogIfAbsent;
+  if (typeof method === 'function') return method.call(store, config, nowISO);
+  const free = StoreMod.bootstrapCatalogIfAbsent;
+  if (typeof free === 'function') return free(store, config, nowISO);
+  throw new Error('bootstrapCatalogIfAbsent not found (expected `store.bootstrapCatalogIfAbsent(config, now)` or free `(store, config, now)`)');
+}
+
+/** enqueue: store method `store.enqueueRefreshReferenceOnce(now)`, or free `(store, now)`. */
+function callEnqueue(store: SterlingStore, nowISO: string): unknown {
+  const method = (store as unknown as Record<string, ((...a: unknown[]) => unknown) | undefined>).enqueueRefreshReferenceOnce;
+  if (typeof method === 'function') return method.call(store, nowISO);
+  const free = StoreMod.enqueueRefreshReferenceOnce;
+  if (typeof free === 'function') return free(store, nowISO);
+  throw new Error('enqueueRefreshReferenceOnce not found (expected `store.enqueueRefreshReferenceOnce(now)` or free `(store, now)`)');
+}
+
+/** A reference_material-shaped catalog record with created_at === updated_at (clock-choice agnostic). */
+function catalogRecordAt(
+  anchorISO: string,
+  entries: { id: string; label: string; tier: string; status: string }[] = [
+    { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' },
+  ]
+) {
+  return {
+    id: randomUUID(),
+    type: 'reference_material',
+    created_at: anchorISO,
+    updated_at: anchorISO,
+    author: 'conductor',
+    status: 'active',
+    superseded_by: null,
+    links: [],
+    scope: 'project',
+    stack_tags: ['node'],
+    title: 'Models catalog',
+    kind: 'doc',
+    location: '.sterling/models-catalog',
+    summary: 'KB-maintained model catalog for the TUI System tab.',
+    catalog: { entries },
+  };
+}
+
+/** The catalog reference_material record(s) actually in the store: reference_material carrying a catalog payload. */
+function catalogRecords(store: SterlingStore): Record<string, unknown>[] {
+  return store
+    .query({ types: ['reference_material'], cap: 200 })
+    .filter((r) => (r as Record<string, unknown>).catalog) as unknown as Record<string, unknown>[];
+}
+
+/** Pending refresh_reference maintenance items. */
+function refreshItems(store: SterlingStore): Record<string, unknown>[] {
+  return store
+    .query({ types: ['todo'], cap: 200 })
+    .filter((r) => (r as Record<string, unknown>).system_reason === 'refresh_reference') as unknown as Record<string, unknown>[];
+}
+
+// config.models with a DUPLICATE pinned ID (5 roles, 3 distinct IDs) — the
+// distinct-dedup discriminator: a naive one-entry-per-role impl yields 5.
+const MODELS = {
+  coder: { model: 'claude-sonnet-4-6', effort: 'medium' },
+  researcher: { model: 'claude-sonnet-4-6', effort: 'medium' }, // duplicate ID
+  test_writer: { model: 'claude-opus-4-8', effort: 'high' },
+  reviewers: { model: 'claude-opus-4-8', effort: 'high' }, // duplicate ID
+  explorer: { model: 'claude-haiku-4-5', effort: 'low' },
+};
+const DISTINCT_IDS = ['claude-haiku-4-5', 'claude-opus-4-8', 'claude-sonnet-4-6']; // sorted
+
+// --- catalogStatus (pure) -------------------------------------------------
+
+test('AC8 catalogStatus: a missing catalog (null) reports present:false and is NOT stale (absence is the bootstrap path, not staleness)', () => {
+  const res = callCatalogStatus(null, isoPlusDays(SEED, 100), 45);
+  assert.equal(res.present, false, 'a null catalog record is not present');
+  assert.equal(res.stale, false, 'absence is handled by bootstrap — a missing catalog is not reported "stale"');
+  assert.ok(res.staleDate == null, 'no record → no stale horizon');
+});
+
+test('AC8 catalogStatus: a present, recent catalog reports present:true, stale:false, and a future stale horizon', () => {
+  const rec = catalogRecordAt(SEED);
+  const now = isoPlusDays(SEED, 10); // 10 days old, threshold 45
+  const res = callCatalogStatus(rec, now, 45);
+  assert.equal(res.present, true, 'a catalog-bearing record is present');
+  assert.equal(res.stale, false, '10 days < 45-day threshold → fresh');
+  assert.ok(res.staleDate != null, 'a present catalog reports a stale horizon');
+  assert.equal(
+    Date.parse(res.staleDate as string),
+    Date.parse(SEED) + 45 * DAY_MS,
+    'stale horizon = catalog clock + thresholdDays'
+  );
+  assert.ok(Date.parse(now) < Date.parse(res.staleDate as string), 'a fresh catalog: now is before the stale horizon');
+});
+
+test('AC8 catalogStatus: a catalog older than the threshold reports stale:true (present stays true)', () => {
+  const rec = catalogRecordAt(SEED);
+  const now = isoPlusDays(SEED, 60); // 60 days old, threshold 45
+  const res = callCatalogStatus(rec, now, 45);
+  assert.equal(res.present, true, 'a stale catalog is still present');
+  assert.equal(res.stale, true, '60 days > 45-day threshold → stale');
+  assert.ok(Date.parse(now) > Date.parse(res.staleDate as string), 'a stale catalog: now is past the stale horizon');
+});
+
+test('AC8 catalogStatus BOUNDARY: at EXACTLY staleness_days elapsed the catalog is FRESH (strict > convention, §3.2.5)', () => {
+  const rec = catalogRecordAt(SEED);
+  // exactly 45 whole days old, threshold 45 — age == threshold, NOT past it.
+  const atEdge = callCatalogStatus(rec, isoPlusDays(SEED, 45), 45);
+  assert.equal(atEdge.present, true);
+  assert.equal(atEdge.stale, false, 'age == staleness_days is the LAST fresh point (strict >, mirroring tools.ts sourceAge > threshold)');
+  // one whole day past the threshold — now stale.
+  const pastEdge = callCatalogStatus(rec, isoPlusDays(SEED, 46), 45);
+  assert.equal(pastEdge.stale, true, 'age == staleness_days + 1 is past the threshold → stale');
+});
+
+test('AC8 catalogStatus: the thresholdDays tunable governs the verdict for the same catalog', () => {
+  const rec = catalogRecordAt(SEED);
+  const now = isoPlusDays(SEED, 30); // fixed 30-day-old catalog
+  assert.equal(callCatalogStatus(rec, now, 20).stale, true, 'threshold 20 (< age 30) → stale');
+  assert.equal(callCatalogStatus(rec, now, 45).stale, false, 'threshold 45 (> age 30) → fresh — the tunable, not a hardcoded window, decides');
+});
+
+// --- bootstrapCatalogIfAbsent ---------------------------------------------
+
+test('AC8 bootstrap: an absent catalog is seeded from config.models DISTINCT pinned IDs (5 roles → 3 entries)', () => {
+  const { dir, store } = tempStore();
+  try {
+    assert.equal(catalogRecords(store).length, 0, 'precondition: no catalog exists');
+    callBootstrap(store, { models: MODELS }, NOW);
+
+    const cats = catalogRecords(store);
+    assert.equal(cats.length, 1, 'bootstrap creates exactly one project-scoped catalog reference_material');
+    const entries = (cats[0].catalog as { entries: { id: string }[] }).entries;
+    const ids = entries.map((e) => e.id).sort();
+    assert.deepEqual(ids, DISTINCT_IDS, 'entries are the DISTINCT pinned model IDs from config.models');
+    assert.equal(entries.length, 3, 'distinct dedup — NOT one entry per role (5 roles, 3 distinct IDs)');
+    for (const e of entries) {
+      assert.ok(DISTINCT_IDS.includes(e.id), `no fabricated ID: ${e.id} came from config.models (no network seed)`);
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC8 bootstrap: idempotent — a second call with a DIFFERENT config is a no-op (catalog present is left untouched)', () => {
+  const { dir, store } = tempStore();
+  try {
+    callBootstrap(store, { models: MODELS }, NOW);
+    // A different config, at a later time — must NOT reseed or append.
+    callBootstrap(store, { models: { coder: { model: 'claude-sonnet-5-0', effort: 'medium' } } }, LATER);
+
+    const cats = catalogRecords(store);
+    assert.equal(cats.length, 1, 'still exactly one catalog — the second bootstrap did not create a duplicate');
+    const ids = (cats[0].catalog as { entries: { id: string }[] }).entries.map((e) => e.id).sort();
+    assert.deepEqual(ids, DISTINCT_IDS, 'the present catalog is preserved — not reseeded from the second config');
+    assert.ok(!ids.includes('claude-sonnet-5-0'), 'a no-op bootstrap does not adopt the second config\'s IDs');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC8 bootstrap BOUNDARY: empty config.models never throws, fabricates no IDs, and creates at most one catalog', () => {
+  const { dir, store } = tempStore();
+  try {
+    assert.doesNotThrow(() => callBootstrap(store, { models: {} }, NOW), 'empty config.models is a degenerate but non-fatal input');
+    const cats = catalogRecords(store);
+    assert.ok(cats.length <= 1, 'empty config.models creates at most one catalog record');
+    if (cats.length === 1) {
+      const entries = (cats[0].catalog as { entries: unknown[] } | undefined)?.entries ?? [];
+      assert.equal(entries.length, 0, 'empty config.models seeds ZERO entries — no fabricated defaults');
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- enqueueRefreshReferenceOnce ------------------------------------------
+
+test('AC8 enqueue: creates exactly ONE refresh_reference system maintenance item', () => {
+  const { dir, store } = tempStore();
+  try {
+    callBootstrap(store, { models: MODELS }, NOW);
+    callEnqueue(store, NOW);
+
+    const items = refreshItems(store);
+    assert.equal(items.length, 1, 'one refresh_reference item enqueued');
+    const item = items[0];
+    assert.equal(item.source, 'system', 'a maintenance item is source:system');
+    assert.equal(item.system_reason, 'refresh_reference', 'reuses the existing refresh_reference lane (decision 98064d77)');
+    if (item.feature_link != null) {
+      assert.equal(item.feature_link, catalogRecords(store)[0].id, 'when linked, the refresh item points at the catalog record');
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC8 enqueue: deduped — a second enqueue is a no-op while one is pending (never a duplicate)', () => {
+  const { dir, store } = tempStore();
+  try {
+    callBootstrap(store, { models: MODELS }, NOW);
+    callEnqueue(store, NOW);
+    const firstId = refreshItems(store)[0].id;
+
+    callEnqueue(store, LATER); // second call, item still pending
+
+    const items = refreshItems(store);
+    assert.equal(items.length, 1, 'still exactly one refresh_reference item — no duplicate while one is pending');
+    assert.equal(items[0].id, firstId, 'the pending item is left in place, not replaced by a fresh one');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC8 enqueue: once the pending item is removed, a fresh enqueue is allowed again (a genuinely new record)', () => {
+  const { dir, store } = tempStore();
+  try {
+    callBootstrap(store, { models: MODELS }, NOW);
+    callEnqueue(store, NOW);
+    const firstId = refreshItems(store)[0].id as string;
+
+    store.remove(firstId, LATER); // the maintenance item is worked/drained
+    assert.equal(refreshItems(store).length, 0, 'removing the pending item clears the refresh_reference queue');
+
+    callEnqueue(store, LATER);
+    const after = refreshItems(store);
+    assert.equal(after.length, 1, 'with no pending item, a fresh enqueue is allowed again');
+    assert.notEqual(after[0].id, firstId, 'the re-enqueued item is a NEW record, not the removed one');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC8 enqueue BOUNDARY: dedup is scoped to the refresh_reference lane — an unrelated pending item does not suppress it', () => {
+  const { dir, store } = tempStore();
+  try {
+    callBootstrap(store, { models: MODELS }, NOW);
+    // An unrelated pending maintenance item on a DIFFERENT lane.
+    store.create({ ...envelope('todo'), text: 'reconcile something unrelated', source: 'system', system_reason: 'reconcile_needed' });
+
+    callEnqueue(store, NOW);
+
+    assert.equal(refreshItems(store).length, 1, 'dedup keys on refresh_reference — a pending reconcile_needed item must NOT block the enqueue');
+    const reconciles = store
+      .query({ types: ['todo'], cap: 200 })
+      .filter((r) => (r as Record<string, unknown>).system_reason === 'reconcile_needed');
+    assert.equal(reconciles.length, 1, 'enqueue leaves unrelated maintenance items untouched');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
