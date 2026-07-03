@@ -10,6 +10,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   RECORD_TYPES,
@@ -107,6 +108,36 @@ export interface RecordedExit {
 }
 
 const ACTIVE_STATES = ['running', 'completing', 'awaiting_merge_gate', 'halted'];
+
+// ---------------------------------------------------------------------------
+// AC8: catalog status + bootstrap + dedup enqueue (run r-ea9e, phase 3)
+// ---------------------------------------------------------------------------
+
+const CATALOG_DAY_MS = 86_400_000;
+
+/**
+ * Pure function: reports whether a models-catalog reference_material record is
+ * present and/or stale against the tunable threshold.
+ *
+ * Staleness is STRICT GREATER (age > threshold), mirroring the existing
+ * §3.2.5 refresh_reference lane convention in tools.ts (sourceAge > threshold).
+ * At EXACTLY thresholdDays elapsed the catalog is FRESH; one day past → STALE.
+ *
+ * @param record  the catalog reference_material record, or null when absent.
+ * @param nowISO  ISO timestamp for "now" (injectable for testing).
+ * @param thresholdDays  models_catalog.staleness_days from config.
+ */
+export function catalogStatus(
+  record: unknown,
+  nowISO: string,
+  thresholdDays: number
+): { present: boolean; stale: boolean; staleDate: string | null } {
+  if (!record) return { present: false, stale: false, staleDate: null };
+  const anchor = (record as { updated_at: string }).updated_at;
+  const age = Math.floor((Date.parse(nowISO) - Date.parse(anchor)) / CATALOG_DAY_MS);
+  const staleDate = new Date(Date.parse(anchor) + thresholdDays * CATALOG_DAY_MS).toISOString();
+  return { present: true, stale: age > thresholdDays, staleDate };
+}
 
 function deepReplaceString(value: unknown, from: string, to: string): unknown {
   if (typeof value === 'string') return value === from ? to : value;
@@ -629,6 +660,92 @@ export class SterlingStore {
         ? this.db.prepare('SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq').all(runId)
         : this.db.prepare('SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq').all()
     ) as { run_id: string | null; check_name: string; reason: string; at: string }[];
+  }
+
+  // -------------------------------------------------------------------------
+  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Idempotent bootstrap: if no project-scoped reference_material carrying a
+   * `catalog` payload exists, create one seeded from config.models' DISTINCT
+   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
+   * already in use by the installed agents.
+   */
+  bootstrapCatalogIfAbsent(config: unknown, nowISO: string): void {
+    const existing = this.query({ types: ['reference_material'], cap: 200 }).filter(
+      (r) => (r as Record<string, unknown>).catalog
+    );
+    if (existing.length > 0) return; // catalog already present — idempotent
+
+    const cfg = config as { models?: Record<string, { model?: string } | null | undefined> };
+    const models = cfg.models ?? {};
+    const ids = new Set<string>();
+    for (const v of Object.values(models)) {
+      if (v?.model) ids.add(v.model);
+    }
+
+    const dateStr = nowISO.slice(0, 10); // YYYY-MM-DD for source_date / capture_date
+    this.create({
+      id: randomUUID(),
+      type: 'reference_material',
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: 'system',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      title: 'Models catalog',
+      kind: 'doc',
+      location: '.sterling/models-catalog',
+      summary: 'KB-maintained model catalog for the TUI System tab.',
+      source_date: dateStr,
+      capture_date: dateStr,
+      catalog: {
+        entries: [...ids].map((id) => ({ id, label: id, tier: 'unknown', status: 'active' })),
+      },
+    });
+  }
+
+  /**
+   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
+   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
+   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
+   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   */
+  enqueueRefreshReferenceOnce(nowISO: string): void {
+    const pending = this.query({ types: ['todo'], cap: 200 }).filter(
+      (r) => (r as Record<string, unknown>).system_reason === 'refresh_reference'
+    );
+    if (pending.length > 0) return; // already pending — no duplicate
+
+    const catalogs = this.query({ types: ['reference_material'], cap: 200 }).filter(
+      (r) => (r as Record<string, unknown>).catalog
+    );
+
+    const todo: Record<string, unknown> = {
+      id: randomUUID(),
+      type: 'todo',
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: 'system',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      text: 'Refresh the KB models catalog',
+      source: 'system',
+      system_reason: 'refresh_reference',
+    };
+
+    if (catalogs.length > 0) {
+      todo.feature_link = (catalogs[0] as Record<string, unknown>).id;
+    }
+
+    this.create(todo);
   }
 
   private insertRecord(record: DurableRecord): void {
