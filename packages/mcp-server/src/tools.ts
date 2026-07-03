@@ -556,6 +556,19 @@ export class SterlingTools {
       );
     }
     const run = this.runState(args.run_id);
+    // Phase validation at the RECORD seam (board 7d051522, incident 2026-07-03):
+    // an exit naming a phase that is not on the run must fail HERE, loudly,
+    // with nothing recorded — an orphan in the pending slot deadlocks the wire
+    // (every later agent_exit refuses on the full slot and consume-exit cannot
+    // resolve the phase). Conductor-direct subagents hit this when a run is
+    // active: their deliverable is their final text, not a run exit.
+    if (!run.phases.some((p) => p.id === args.phase_id)) {
+      throw new Error(
+        `agent_exit: no phase '${args.phase_id}' on run '${run.id}' — nothing was recorded. ` +
+          `The run's phases: ${run.phases.map((p) => p.id).join(', ')}. A pipeline agent must exit against its dispatched phase; ` +
+          `an agent working OUTSIDE the pipeline (conductor-direct) must not call agent_exit while a run is active — its final message is its deliverable.`
+      );
+    }
     const exit: RecordedExit = {
       signal: parsed.data,
       payload: payloadCheck.data as Record<string, unknown>,
