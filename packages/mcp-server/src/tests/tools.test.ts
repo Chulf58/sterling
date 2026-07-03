@@ -363,6 +363,32 @@ test('agent_exit: in-band rejection of non-enum signals; valid exit lands on the
   }
 });
 
+test('agent_exit: a phase_id not on the active run is refused at RECORD time — nothing enters the slot (board 7d051522)', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    // the 2026-07-03 incident: a conductor-direct subagent's exit bound to the
+    // active run with a phase that does not exist, wedging the wire for the
+    // whole phase. The seam must fail HERE, loudly, with nothing recorded.
+    assert.throws(
+      () => tools.agentExit({ phase_id: 'conductor-direct', agent_role: 'reviewer-correctness', signal: 'complete', payload: { handoff_ref: 'x/y' } }),
+      /no phase 'conductor-direct' on run 'r-0001'.*phases: p1/s,
+      'unknown phase refused, run phases named'
+    );
+    assert.equal(store.getPendingExit('r-0001'), undefined, 'nothing recorded — the slot stays empty');
+    // abnormal signals with a bogus phase are refused the same way (never wedged)
+    assert.throws(
+      () => tools.agentExit({ phase_id: 'nope', agent_role: 'coder', signal: 'blocked', payload: { reason: 'r' } }),
+      /no phase 'nope'/
+    );
+    // a valid phase still records exactly as before
+    const { recorded } = tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
+    assert.equal(recorded.phase_id, 'p1');
+  } finally {
+    cleanup();
+  }
+});
+
 test('run_signal: reads the stored exit, applies the CAS transition, advances phases', () => {
   const { store, tools, cleanup } = harness();
   try {

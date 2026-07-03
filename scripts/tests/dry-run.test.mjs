@@ -154,10 +154,17 @@ test('§16.2 step 11 — end-to-end dry run: init → conductor-direct capture �
     assert.equal(sh('consume-exit.mjs', ['--run', 'r-dry', '--step', 'tests-written', '--target', dir], dir).code, 0, 'intra-phase complete consumed (§5.2)');
 
     // orphan pending exit (incident 2026-07-03 r-ea9e): a conductor-direct
-    // subagent's agent_exit binds to the active run with a phase_id that is
-    // not on it — normal consumption cannot resolve the phase and the full
-    // slot deadlocks the wire. --discard-orphan is the explicit recovery.
-    tools.agentExit({ run_id: 'r-dry', phase_id: 'conductor-direct', agent_role: 'reviewer-correctness', signal: 'complete', payload: { handoff_ref: 'conductor-direct/reviewer-correctness' } });
+    // subagent's agent_exit bound to the active run with a phase_id not on it.
+    // ROOT FIX (board 7d051522): the wire now refuses at RECORD time — the
+    // orphan cannot be created through agent_exit at all.
+    assert.throws(
+      () => tools.agentExit({ run_id: 'r-dry', phase_id: 'conductor-direct', agent_role: 'reviewer-correctness', signal: 'complete', payload: { handoff_ref: 'conductor-direct/reviewer-correctness' } }),
+      /no phase 'conductor-direct' on run 'r-dry'/,
+      'the record seam refuses an off-run phase (7d051522)'
+    );
+    // --discard-orphan remains the RECOVERY for a slot wedged by other means
+    // (legacy stores, out-of-band writes): seed the orphan at the store level.
+    store.recordPendingExit('r-dry', { signal: 'complete', payload: { handoff_ref: 'conductor-direct/reviewer-correctness' }, phase_id: 'conductor-direct', agent_role: 'reviewer-correctness', at: NOW() });
     const wedged = sh('consume-exit.mjs', ['--run', 'r-dry', '--target', dir], dir);
     assert.equal(wedged.code, 2, 'orphan phase refuses normal consumption');
     assert.match(wedged.stderr, /no phase 'conductor-direct'/);
