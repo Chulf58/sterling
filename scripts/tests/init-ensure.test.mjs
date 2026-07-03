@@ -333,6 +333,43 @@ test('init notes the project in the shared registry (decision 8f9e6db2)', () => 
 });
 
 // =============================================================================
+// Phase 2 (r-ea9e) — config.models wiring end-to-end through init.
+//
+// init writes .sterling/config.json (carrying config.models, shipped defaults),
+// THEN installs the agents; the phase goal requires init to thread that PARSED
+// CONFIG through the render path so {{MODEL}}/{{EFFORT}} resolve per agent via
+// AGENT_MODEL_KEY. Observable contract: every installed agent frontmatter carries
+// a CONCRETE pinned model/effort (no surviving token), and coder resolves to the
+// shipped-default coder model — proving config.models is authoritative at install.
+// =============================================================================
+
+test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed agents from its own config.models (no token survives; concrete pinned ids)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+
+    // config.models is present and pinned in the config init just wrote.
+    const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    assert.ok(config.models && config.models.coder, 'init wrote config.models with a coder entry');
+
+    for (const name of ['coder.md', 'reviewer-correctness.md']) {
+      const installed = readFileSync(join(dir, '.claude', 'agents', name), 'utf8');
+      const fm = installed.match(/^---\n([\s\S]*?)\n---/)[1];
+      assert.ok(!installed.includes('{{'), `${name}: no substitution token survives install`);
+      assert.match(fm, /^model: claude-[a-z0-9.\-]+$/m, `${name}: model resolved to a concrete pinned claude- id`);
+      assert.match(fm, /^effort: [a-z]+$/m, `${name}: effort resolved to a concrete value`);
+    }
+
+    // coder resolves to the shipped-default coder model — config.models is the
+    // authoritative source at install (matches config.test.ts's shipped default).
+    const coderFm = readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8').match(/^---\n([\s\S]*?)\n---/)[1];
+    assert.match(coderFm, /^model: claude-sonnet-4-6$/m, 'coder installs on the shipped-default coder model (config.models authoritative)');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// =============================================================================
 // P5 — domain-knowledge snapshot bridge: scripts/snapshot-domains-for-windows.mjs
 //
 // AC8: the native-Windows launcher refreshes a VACUUM-INTO snapshot of each WSL

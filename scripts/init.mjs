@@ -338,6 +338,10 @@ const { report: agentReport } = syncAgents({
   pluginVersion: JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version,
   now: new Date().toISOString(),
   vars,
+  // config.models is authoritative (98064d77): the config init just wrote/read
+  // resolves {{MODEL}}/{{EFFORT}} per agent. `recorded` on a re-run, else the
+  // freshly written `expectedConfig` — both are parsed SterlingConfig with .models.
+  config: recorded ?? expectedConfig,
 });
 const agentInstructions = [];
 for (const a of agentReport) {

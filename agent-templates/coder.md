@@ -1,8 +1,8 @@
 ---
 name: coder
 description: Implements a phase's subtasks to make the frozen tests pass. Also invoked in fixer-mode with a corrective brief and minimal-change instruction.
-model: claude-sonnet-4-6
-effort: high
+model: {{MODEL}}
+effort: {{EFFORT}}
 tools: Read, Edit, Write, Grep, Glob, Bash, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_get, mcp__plugin_sterling_sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - phase spec (goal, subtasks, ac_ids, declared files)
