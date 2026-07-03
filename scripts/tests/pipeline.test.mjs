@@ -672,3 +672,97 @@ test('completeness-check --final: an amended file in the whole-run diff is in-co
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+// ------- generated hook bundles in the whole-run diff (decision 66c15d77 corollary retired) -------
+
+// The enforcement suite runs build-hooks.mjs in-repo, so any run touching a bundle input
+// (scripts/hooks/**, packages/schemas/**, packages/store/**) sweeps regenerated hooks/h*.mjs
+// bundles into its whole-run diff. --final derives a diff'd bundle as in-contract from its
+// CAUSE — another diff file under the input roots that is itself in the allowed set — so
+// briefs list real sources, not every bundle (r-1417's interim rule). Sources live at BASE
+// so only deliberate writes appear in the diff; a generating source must EXIST to derive.
+function makeBundleFixture({ blastPaths }) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-bundlederive-'));
+  git(dir, ['init', '-b', 'main']);
+  git(dir, ['config', 'user.email', 'test@sterling.local']);
+  git(dir, ['config', 'user.name', 'Sterling Test']);
+  mkdirSync(join(dir, 'scripts', 'hooks', 'lib'), { recursive: true });
+  mkdirSync(join(dir, 'hooks'), { recursive: true });
+  mkdirSync(join(dir, 'tests'), { recursive: true });
+  writeFileSync(join(dir, 'scripts', 'hooks', 'h1-alpha.mjs'), '// hook source\n');
+  writeFileSync(join(dir, 'scripts', 'hooks', 'h5-beta.mjs'), '// hook source\n');
+  writeFileSync(join(dir, 'scripts', 'hooks', 'lib', 'contract.mjs'), '// shared lib\n');
+  writeFileSync(join(dir, 'hooks', 'h1-alpha.mjs'), '// bundle v1\n');
+  writeFileSync(join(dir, 'hooks', 'h5-beta.mjs'), '// bundle v1\n');
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-m', 'base']);
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] }));
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const brief = store.create({
+    id: randomUUID(), type: 'brief', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+    slug: 'f', title: 'F', problem: 'p', feature: 'f',
+    user_stated: { criteria: [], constraints: [] }, conductor_proposals: [],
+    acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+    technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
+    blast_radius: { files: blastPaths.map((path) => ({ path, owning_articles: [] })), reconcile_list: [] },
+    incidental_scope: [], out_of_scope: [],
+    phases: [{ phase_id: 'p1', goal: 'g', subtasks: ['change input'], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+    decisions_made: [],
+  });
+  store.createRun({
+    id: 'r-bundle', brief_ref: brief.id, branch: 'pending', machine_state: 'running',
+    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW,
+  });
+  startRunBranch({ cwd: dir, store, runId: 'r-bundle' });
+  return { dir, store };
+}
+
+function finalCheckBundleRun(dir, store, changedPath) {
+  writeFileSync(join(dir, 'tests', 'a.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert'; test('a', () => assert.equal(1, 1));\n");
+  phaseCommit({ cwd: dir, store, runId: 'r-bundle', phaseId: 'p1' });
+  store.writeHandoff('r-bundle', { phase_id: 'p1', agent_role: 'coder', what_changed: [{ path: changedPath, change_role: 'changed' }], wired: [], deferred: [], decisions_made: [], tests_produced: ['tests/a.test.mjs'], subtask_evidence: [{ subtask: 'change input', files: [changedPath], tests: ['tests/a.test.mjs'] }], exit_signal: 'complete', unresolved: [] }, NOW);
+  store.close();
+  return spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-bundle', '--phase', 'p1', '--final', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 120_000 });
+}
+
+test('completeness-check --final: regenerated bundles derive in-contract from an in-contract bundle-input cause', () => {
+  const { dir, store } = makeBundleFixture({ blastPaths: ['scripts/hooks/lib/contract.mjs', 'tests/a.test.mjs'] });
+  try {
+    writeFileSync(join(dir, 'scripts', 'hooks', 'lib', 'contract.mjs'), '// shared lib v2\n');
+    writeFileSync(join(dir, 'hooks', 'h1-alpha.mjs'), '// bundle v2\n');
+    writeFileSync(join(dir, 'hooks', 'h5-beta.mjs'), '// bundle v2\n');
+    const r = finalCheckBundleRun(dir, store, 'scripts/hooks/lib/contract.mjs');
+    assert.equal(r.status, 0, `bundles regenerated from an in-contract input must pass --final without being brief-listed — ${r.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test('completeness-check --final: a bundle change with NO in-contract cause is still refused (no blanket allow)', () => {
+  const { dir, store } = makeBundleFixture({ blastPaths: ['tests/a.test.mjs'] });
+  try {
+    writeFileSync(join(dir, 'hooks', 'h1-alpha.mjs'), '// bundle v2\n');
+    const r = finalCheckBundleRun(dir, store, 'tests/a.test.mjs');
+    assert.notEqual(r.status, 0, 'a bundle change with no in-contract bundle-input cause must refuse');
+    assert.match(r.stderr, /whole-run diff outside contract: 'hooks\/h1-alpha\.mjs'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test('completeness-check --final: a hooks/*.mjs file with no generating source never derives, even with a cause', () => {
+  const { dir, store } = makeBundleFixture({ blastPaths: ['scripts/hooks/lib/contract.mjs', 'tests/a.test.mjs'] });
+  try {
+    writeFileSync(join(dir, 'scripts', 'hooks', 'lib', 'contract.mjs'), '// shared lib v2\n');
+    writeFileSync(join(dir, 'hooks', 'h1-alpha.mjs'), '// bundle v2\n'); // real bundle — derives
+    writeFileSync(join(dir, 'hooks', 'h9-rogue.mjs'), '// no source\n'); // stray — must refuse
+    const r = finalCheckBundleRun(dir, store, 'scripts/hooks/lib/contract.mjs');
+    assert.notEqual(r.status, 0, 'a sourceless hooks/*.mjs must refuse even when a rebuild cause is present');
+    assert.match(r.stderr, /whole-run diff outside contract: 'hooks\/h9-rogue\.mjs'/);
+    assert.doesNotMatch(r.stderr, /h1-alpha/, 'the real bundle must still derive in the same run');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

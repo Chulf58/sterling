@@ -109,8 +109,22 @@ if (isFinal) {
   // whole-run diff within contract (needs the branch manager's base)
   if (isGitRepo(target) && run.base_branch) {
     const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope, ...amendmentPaths]);
-    for (const f of wholeRunDiffFiles({ cwd: target, store, runId: run.id })) {
-      if (!allowed.has(f)) problems.push(`whole-run diff outside contract: '${f}' (§8.1 final completeness)`);
+    const diffFiles = wholeRunDiffFiles({ cwd: target, store, runId: run.id });
+    // Generated hook bundles (build-hooks.mjs: scripts/hooks/h*.mjs → hooks/<name>.mjs,
+    // lib + workspace packages inlined) regenerate whenever any bundle input changes,
+    // and the enforcement suite runs build-hooks in-repo — so a run touching an input
+    // sweeps regenerated bundles into the whole-run diff (decision 66c15d77). A diff'd
+    // bundle is in-contract when its regeneration CAUSE is: some other in-contract diff
+    // file under the bundle-input roots. Never a blanket allow — a bundle change with
+    // no in-contract cause still refuses, a bundle with no generating source still
+    // refuses, and hooks/** stays agent-unwritable (H3 self-protection, H17) regardless.
+    const bundleInput = (f) => ['scripts/hooks/', 'packages/schemas/', 'packages/store/'].some((p) => f.startsWith(p));
+    const rebuildCaused = diffFiles.some((f) => bundleInput(f) && allowed.has(f));
+    const isGeneratedBundle = (f) => /^hooks\/h[^/]*\.mjs$/.test(f) && existsSync(join(target, 'scripts', f));
+    for (const f of diffFiles) {
+      if (allowed.has(f)) continue;
+      if (rebuildCaused && isGeneratedBundle(f)) continue;
+      problems.push(`whole-run diff outside contract: '${f}' (§8.1 final completeness)`);
     }
   } else {
     skip('whole-run-diff', run.base_branch ? 'no_git' : 'no_base_branch');
