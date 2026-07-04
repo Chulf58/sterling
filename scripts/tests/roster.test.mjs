@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderInstalledAgent, loadRegistry } from '../lib/agent-distribution.mjs';
 import { lintAgentPrompt, checkSpawnContract, collectAgentTemplates, lintSkill, collectSkills } from '../lib/checks.mjs';
-import { AGENT_MODEL_KEY } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, REVIEWER_ROLES } from '@sterling/schemas';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TPL = join(root, 'agent-templates');
@@ -122,4 +122,41 @@ test('skills ship with live file references and pass the skill linter', () => {
   ]);
   for (const s of skills) assert.deepEqual(lintSkill(s.content, s.file, root), []);
   assert.ok(existsSync(join(root, 'skills', 'debug', 'SKILL.md')));
+});
+
+// ---------------------------------------------------------------------------
+// AC6 (run r-d630 phase 3) — every reviewer template carries a worked handoff
+// example with the exact required arrays plus a dispositions example (both verbs).
+// Templates are read at TEST RUNTIME (never copied into a fixture) so the assertion
+// tracks the shipped file. The existing linter test above keeps dead-term + prompt
+// -section linters green across all templates.
+// ---------------------------------------------------------------------------
+
+test('AC6: all four reviewer templates carry a worked handoff example (required arrays, empty [] permitted) plus a dispositions example with both verbs', () => {
+  // derive the four reviewer names from the registry-backed predicate — a template
+  // rename or a fifth reviewer fails loudly here, not silently.
+  const reviewers = [...REVIEWER_ROLES].sort();
+  assert.deepEqual(
+    reviewers,
+    ['reviewer-correctness', 'reviewer-performance', 'reviewer-security', 'reviewer-skeptic'],
+    'REVIEWER_ROLES resolves exactly the four reviewer templates the handoff example must reach'
+  );
+
+  for (const role of reviewers) {
+    const content = readFileSync(join(TPL, `${role}.md`), 'utf8');
+    // the worked handoff example shows the exact required arrays
+    for (const key of ['what_changed', 'wired', 'deferred']) {
+      assert.ok(content.includes(key), `${role}.md worked handoff example must show the '${key}' array`);
+    }
+    // and a dispositions example exercising BOTH disposition verbs (+ the reason the
+    // not_applicable_because verb requires) — the recurring first-write schema failure
+    // this example kills.
+    assert.ok(content.includes('dispositions'), `${role}.md must show a dispositions example block`);
+    assert.ok(content.includes('addressed'), `${role}.md dispositions example must show the 'addressed' verb`);
+    assert.ok(
+      content.includes('not_applicable_because'),
+      `${role}.md dispositions example must show the 'not_applicable_because' verb`
+    );
+    assert.ok(content.includes('reason'), `${role}.md dispositions example must show the reason field the not_applicable_because verb requires`);
+  }
 });

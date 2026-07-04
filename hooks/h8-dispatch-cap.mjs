@@ -4312,6 +4312,18 @@ var briefSchema = base.extend({
     }
   }
 });
+var AGENT_MODEL_KEY = {
+  "test-writer": "test_writer",
+  coder: "coder",
+  "reviewer-correctness": "reviewers",
+  "reviewer-security": "reviewers",
+  "reviewer-skeptic": "reviewers",
+  "reviewer-performance": "reviewers",
+  "implementation-architect": "implementation_architect",
+  researcher: "researcher",
+  explorer: "explorer"
+};
+var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -4432,6 +4444,18 @@ var SIGNAL_PAYLOADS = {
     raw_excerpt: external_exports.string()
   })
 };
+var dispositionItemSchema = external_exports.object({
+  record_id: external_exports.string().min(1),
+  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
+  reason: external_exports.string().optional()
+}).superRefine((item, ctx) => {
+  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "disposition 'not_applicable_because' requires a non-empty reason"
+    });
+  }
+});
 var handoffSchema = external_exports.object({
   phase_id: external_exports.string().min(1),
   agent_role: external_exports.string().min(1),
@@ -4445,6 +4469,9 @@ var handoffSchema = external_exports.object({
   // script verifies cited evidence exists and passes; the honesty classifier
   // is deferred until real runs show dishonest citations slipping by.
   subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
+  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
+  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
+  dispositions: external_exports.array(dispositionItemSchema).optional(),
   exit_signal: signalSchema,
   unresolved: external_exports.array(external_exports.string())
 });
@@ -4454,6 +4481,11 @@ var sessionEventSchema = external_exports.object({
   kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
+});
+var reviewMandatoryItemSchema = external_exports.object({
+  phase_id: external_exports.string().min(1),
+  record_id: external_exports.string().min(1),
+  reason: external_exports.string().min(1)
 });
 var runRecordSchema = external_exports.object({
   id: external_exports.string().min(1),
@@ -4478,6 +4510,11 @@ var runRecordSchema = external_exports.object({
   // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
   // can never open an out_of_scope path.
   scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
+  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
+  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
+  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
+  // Optional; legacy runs round-trip unchanged.
+  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
   // §8.1 branch model: the branch the run started from — the merge gate's
   // target; recorded by the branch manager at run-branch creation.
   base_branch: external_exports.string().optional(),
@@ -4493,6 +4530,13 @@ var runRecordSchema = external_exports.object({
       cap_omissions: external_exports.number().int().nonnegative(),
       mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
     })),
+    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
+    // mandatory ids left undispositioned across the run's reviewer handoffs,
+    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
+    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
+    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
+    // round-trip unchanged.
+    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
     snapshot_path: external_exports.string()
   }).optional()
 });
@@ -5011,6 +5055,21 @@ var SterlingStore = class {
   appendRunScopeAmendment(runId, amendment) {
     this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
   }
+  /**
+   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
+   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
+   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
+   * phase, not global). An empty items list clears that phase only. Uses
+   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
+   * Pick — agent-invisible (decision 628c4b7f).
+   */
+  setRunReviewMandatory(runId, phaseId, items) {
+    this.updateRunOptimistic(runId, (run) => {
+      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
+      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
+      return { ...run, review_mandatory: [...kept, ...added] };
+    });
+  }
   /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
   incrementDispatchCount(runId, agentType2) {
     const next = this.updateRunOptimistic(runId, (run) => ({
@@ -5237,6 +5296,15 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/h8-dispatch-cap.mjs
+var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_MODEL_KEY));
+var SLICE_MARKER_RE = /^STERLING-SLICE /m;
+var SLICE_WAIVER_RE = /^SLICE-WAIVED: .+/m;
+function sliceDenial(agentType2, prompt) {
+  if (!PIPELINE_AGENT_TYPES.has(agentType2)) return null;
+  const text = typeof prompt === "string" ? prompt : "";
+  if (SLICE_MARKER_RE.test(text) || SLICE_WAIVER_RE.test(text)) return null;
+  return `H8: pipeline dispatch of '${agentType2}' during an active run carries no knowledge slice. Every guarded dispatch must include, on its own line, either the prep-stamped marker 'STERLING-SLICE run=<id> phase=<id> role=<role> staged=<ISO>' (paste the reviewer/builder dispatch_slice prep wrote), or 'SLICE-WAIVED: <reason>' to waive by convention (fixer-mode). Neither was present \u2014 spawning is denied (\xA77.4). A slice-denied dispatch consumes no cap slot.`;
+}
 var input = readStdin();
 var agentType = input.tool_input?.subagent_type;
 if (!agentType) allow();
@@ -5245,6 +5313,8 @@ if (!store) allow();
 try {
   const run = store.getRun();
   if (!run || run.machine_state !== "running") allow();
+  const sliceDeny = sliceDenial(agentType, input.tool_input?.prompt);
+  if (sliceDeny) deny(sliceDeny);
   const cap = loadConfig(input.cwd)?.caps?.dispatch_per_agent_type ?? 25;
   const current = run.dispatch_counts[agentType] ?? 0;
   if (current + 1 > cap) {
@@ -5263,3 +5333,6 @@ try {
 } finally {
   store.close();
 }
+export {
+  sliceDenial
+};

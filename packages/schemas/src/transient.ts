@@ -172,6 +172,13 @@ export const runRecordSchema = z.object({
           mandatory: z.array(z.object({ record_id: z.string(), reason: z.string() })),
         })
       ),
+      // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
+      // mandatory ids left undispositioned across the run's reviewer handoffs,
+      // folded in by dispose-run BEFORE transients are deleted (P4) and printed
+      // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
+      // the shared mandatory tuple (invariant 1). Optional so legacy summaries
+      // round-trip unchanged.
+      undispositioned_mandatory: z.array(reviewMandatoryItemSchema).optional(),
       snapshot_path: z.string(),
     })
     .optional(),

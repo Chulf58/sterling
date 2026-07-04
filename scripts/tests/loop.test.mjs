@@ -62,7 +62,7 @@ function articleFields(briefId, { traceAC = true, fulfills = [] } = {}) {
   };
 }
 
-function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mountDomain = false } = {}) {
+function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mountDomain = false, decisionInDecisionsMade = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-loop-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   const config = {
@@ -124,7 +124,10 @@ function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mount
     phases: [
       { phase_id: 'p1', goal: 'implement add', subtasks: ['write add'], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet', rank_terms: ['calc'] },
     ],
-    decisions_made: [],
+    // required_by_contract (AC3) = staged ids ∩ brief.decisions_made — the seeded
+    // decision is staged (file-keyed to the phase file), so opting it into
+    // decisions_made makes the join non-empty.
+    decisions_made: decisionInDecisionsMade ? [decision.id] : [],
   });
   const run = store.createRun({
     id: 'r-loop',
@@ -554,6 +557,210 @@ test('dispose-run --abort: discards the run branch (real git), leaving the base 
     assert.equal(git(dir, ['branch', '--list', 'sterling/run-r-loop']), '', 'run branch deleted');
     assert.equal(existsSync(join(dir, 'wip.txt')), false, 'abandoned run work is not on the base branch');
     assert.equal(store.getRun(), undefined, 'no active run after abort');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC3 (run r-d630 phase 3) — prep emits role-scoped dispatch slices + stamps
+// run.review_mandatory; the knowledge_pack manifest is unchanged.
+// ---------------------------------------------------------------------------
+
+const RUN_DIR = (dir) => join(dir, '.sterling', 'runs', 'r-loop');
+const SLICE_MARKER = (role) =>
+  new RegExp(`^STERLING-SLICE run=r-loop phase=p1 role=${role} staged=\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$`);
+
+test('AC3: prep emits reviewer + builder slices (marker line 1); reviewer body = decision/anti_pattern only + known_gap mandatory; builder body = full pack; pack manifest unchanged; review_mandatory stamped', () => {
+  const fix = makeLoopProject(); // decisions_made [] → required_by_contract empty; only the known_gap is mandatory
+  const { dir, store, decision, gapArticle, brief } = fix;
+  try {
+    // a plain feature_article keyed on the phase file, NOT a known_gap and NOT in
+    // decisions_made: it must be STAGED (broad pack) yet EXCLUDED from the reviewer
+    // slice (reviewer = anti_pattern/decision only), while present in the builder slice.
+    const plainArticle = store.create({
+      ...envelope('feature_article'),
+      ...articleFields(brief.id),
+      slug: 'calc-plain',
+      links: [],
+    });
+
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.equal(prep.code, 0, prep.stderr);
+
+    const reviewerPath = join(RUN_DIR(dir), 'dispatch_slice-p1-reviewer.md');
+    const builderPath = join(RUN_DIR(dir), 'dispatch_slice-p1-builder.md');
+    assert.equal(existsSync(reviewerPath), true, 'prep emits runs/<id>/dispatch_slice-p1-reviewer.md');
+    assert.equal(existsSync(builderPath), true, 'prep emits runs/<id>/dispatch_slice-p1-builder.md');
+
+    const reviewer = readFileSync(reviewerPath, 'utf8');
+    const builder = readFileSync(builderPath, 'utf8');
+
+    // line 1 is the deterministic marker; ISO asserted by FORMAT, not exact value
+    assert.match(reviewer.split('\n')[0], SLICE_MARKER('reviewer'), 'reviewer slice line 1 is the STERLING-SLICE marker');
+    assert.match(builder.split('\n')[0], SLICE_MARKER('builder'), 'builder slice line 1 is the STERLING-SLICE marker');
+
+    // reviewer body: decision (allowed type) present by full UUID; the plain
+    // feature_article (non-mandatory) ABSENT — no feature_articles as knowledge records
+    assert.ok(reviewer.includes(decision.id), 'reviewer slice carries the file-keyed decision (full UUID)');
+    assert.ok(!reviewer.includes(plainArticle.id), 'a non-mandatory feature_article is NOT in the reviewer slice');
+
+    // mandatory section: the known_gap record by full UUID with its reason
+    assert.ok(reviewer.includes(gapArticle.id), 'the known_gap record is a mandatory item (full UUID)');
+    assert.match(reviewer, /known_gap/, 'the mandatory known_gap item carries its reason');
+
+    // builder body: the FULL staged pack — decision + both articles by full UUID
+    assert.ok(builder.includes(decision.id), 'builder slice renders the decision');
+    assert.ok(builder.includes(plainArticle.id), 'builder slice renders the plain feature_article (full pack)');
+    assert.ok(builder.includes(gapArticle.id), 'builder slice renders the gap article (full pack)');
+
+    // the knowledge_pack manifest is unchanged in shape/content
+    const pack = JSON.parse(readFileSync(join(RUN_DIR(dir), 'knowledge_pack-p1.json'), 'utf8'));
+    assert.ok(pack.returned_record_ids.includes(decision.id), 'pack manifest still stages the decision');
+    assert.ok(pack.returned_record_ids.includes(gapArticle.id), 'pack manifest still stages the gap article');
+    assert.deepEqual(pack.mandatory, [{ record_id: gapArticle.id, reason: 'known_gap' }], 'pack.mandatory byte-unchanged (known_gap only)');
+
+    // run.review_mandatory stamped for the phase = the mandatory union (known_gap only here)
+    const rm = (store.getRun('r-loop').review_mandatory ?? []).filter((m) => m.phase_id === 'p1');
+    assert.deepEqual(
+      [...new Set(rm.map((m) => m.record_id))].sort(),
+      [gapArticle.id].sort(),
+      'prep stamps run.review_mandatory for p1 with the mandatory record ids'
+    );
+    assert.equal(rm.find((m) => m.record_id === gapArticle.id)?.reason, 'known_gap', 'the stamped known_gap item carries its reason');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('AC3: a non-empty required_by_contract join (staged decision ∈ brief.decisions_made) lands the decision as a mandatory item with an excerpt, and stamps it into review_mandatory alongside the known_gap', () => {
+  const fix = makeLoopProject({ decisionInDecisionsMade: true }); // decisions_made = [decision.id]
+  const { dir, store, decision, gapArticle } = fix;
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.equal(prep.code, 0, prep.stderr);
+
+    const reviewerPath = join(RUN_DIR(dir), 'dispatch_slice-p1-reviewer.md');
+    assert.equal(existsSync(reviewerPath), true, 'prep emits runs/<id>/dispatch_slice-p1-reviewer.md');
+    const reviewer = readFileSync(reviewerPath, 'utf8');
+
+    // required_by_contract mandatory item: decision by full UUID, its reason, and a
+    // mechanical excerpt of its primary structured field (the decision.statement)
+    assert.ok(reviewer.includes(decision.id), 'the required_by_contract decision is a mandatory item (full UUID)');
+    assert.match(reviewer, /required_by_contract/, 'the mandatory item names the required_by_contract lane');
+    assert.ok(reviewer.includes('calc functions never coerce strings'), 'the mandatory item carries a mechanical excerpt of the record primary field');
+
+    // run.review_mandatory = known_gap ∪ required_by_contract for the phase
+    const rm = (store.getRun('r-loop').review_mandatory ?? []).filter((m) => m.phase_id === 'p1');
+    const ids = new Set(rm.map((m) => m.record_id));
+    assert.ok(ids.has(gapArticle.id), 'known_gap id stamped');
+    assert.ok(ids.has(decision.id), 'required_by_contract id stamped (the union)');
+    assert.equal(rm.find((m) => m.record_id === decision.id)?.reason, 'required_by_contract', 'the decision item is stamped as required_by_contract');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC5 (run r-d630 phase 3) — dispose-run folds the undispositioned remainder into
+// the surviving summaries BEFORE deleting transients; merge-gate prints it.
+// ---------------------------------------------------------------------------
+
+function writeReviewerHandoff(store, agent_role, dispositions, at) {
+  store.writeHandoff(
+    'r-loop',
+    {
+      phase_id: 'p1',
+      agent_role,
+      what_changed: [],
+      wired: [],
+      deferred: [],
+      decisions_made: [],
+      tests_produced: [],
+      dispositions,
+      exit_signal: 'complete',
+      unresolved: [],
+    },
+    at
+  );
+}
+
+test('AC5: dispose-run folds a populated undispositioned remainder into surviving summaries, and merge-gate prints it — a wrong role-string handoff bypasses the wire out-of-band, so its dispositions never count', () => {
+  const fix = makeReadyToDispose();
+  const { store } = fix;
+  try {
+    const m1 = randomUUID();
+    const m2 = randomUUID();
+    store.setRunReviewMandatory('r-loop', 'p1', [
+      { record_id: m1, reason: 'known_gap' },
+      { record_id: m2, reason: 'required_by_contract' },
+    ]);
+    // out-of-band: dispositions carried under a NON-reviewer role string (a typo of a
+    // reviewer role). The phase-2 wire check ignores it; the fold must credit ONLY the
+    // exact REVIEWER_ROLES, so m1/m2 remain undispositioned (catches a prefix-match mutant).
+    writeReviewerHandoff(
+      store,
+      'reviewer-correctnes', // typo → not a REVIEWER_ROLE
+      [
+        { record_id: m1, disposition: 'addressed' },
+        { record_id: m2, disposition: 'addressed' },
+      ],
+      '2026-06-10T12:30:00.000Z'
+    );
+
+    const dispose = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(dispose.code, 0, dispose.stdout + dispose.stderr);
+    assert.equal(existsSync(RUN_DIR(fix.dir)), false, 'transients deleted (the fold ran BEFORE deletion)');
+
+    const und = store.getRun('r-loop').summaries?.undispositioned_mandatory;
+    assert.ok(Array.isArray(und), 'dispose folds summaries.undispositioned_mandatory (it survives disposal)');
+    const ids = new Set(und.map((x) => x.record_id));
+    assert.ok(ids.has(m1) && ids.has(m2), 'both mandatory ids remain undispositioned — a non-reviewer role string never counts');
+    assert.ok(und.every((x) => x.phase_id === 'p1'), 'the remainder is folded per-phase');
+
+    const gate = runScript('merge-gate.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(gate.code, 0, gate.stderr);
+    const gs = JSON.parse(gate.stdout);
+    assert.ok(Array.isArray(gs.summaries.undispositioned_mandatory), 'merge-gate summary carries undispositioned_mandatory');
+    const gateIds = new Set(gs.summaries.undispositioned_mandatory.map((x) => x.record_id));
+    assert.ok(gateIds.has(m1) && gateIds.has(m2), 'the gate prints the populated remainder (the wire was bypassed out-of-band)');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('AC5: undispositioned_mandatory is EMPTY when a genuine reviewer-role handoff dispositions every mandatory id — dispose folds [] and merge-gate prints empty', () => {
+  const fix = makeReadyToDispose();
+  const { store } = fix;
+  try {
+    const m1 = randomUUID();
+    const m2 = randomUUID();
+    store.setRunReviewMandatory('r-loop', 'p1', [
+      { record_id: m1, reason: 'known_gap' },
+      { record_id: m2, reason: 'required_by_contract' },
+    ]);
+    // an exact REVIEWER_ROLES handoff covering both ids (both disposition verbs)
+    writeReviewerHandoff(
+      store,
+      'reviewer-correctness',
+      [
+        { record_id: m1, disposition: 'addressed' },
+        { record_id: m2, disposition: 'not_applicable_because', reason: 'not exercised on this path' },
+      ],
+      '2026-06-10T12:30:00.000Z'
+    );
+
+    const dispose = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(dispose.code, 0, dispose.stdout + dispose.stderr);
+
+    const und = store.getRun('r-loop').summaries?.undispositioned_mandatory;
+    assert.ok(Array.isArray(und), 'undispositioned_mandatory is present (an array) even when coverage is complete');
+    assert.deepEqual(und, [], 'empty when the wire enforcement did its job (every mandatory id dispositioned by a reviewer handoff)');
+
+    const gate = runScript('merge-gate.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(gate.code, 0, gate.stderr);
+    const gs = JSON.parse(gate.stdout);
+    assert.deepEqual(gs.summaries.undispositioned_mandatory, [], 'merge-gate prints an empty undispositioned_mandatory when coverage was complete');
   } finally {
     fix.cleanup();
   }

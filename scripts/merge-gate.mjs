@@ -24,6 +24,10 @@ const summary = {
   escalations: run.escalations,
   check_skipped: run.summaries?.check_skipped ?? [],
   scope_amendments: run.scope_amendments ?? [],
+  // Disposal backstop surfaced at the gate (decision 628c4b7f (c)): the
+  // undispositioned reviewer-mandatory remainder the disposal fold left on the
+  // run summaries (P5 — the wire can be fooled, the gate cannot).
+  undispositioned_mandatory: run.summaries?.undispositioned_mandatory ?? [],
   summaries: run.summaries ?? null,
 };
 
