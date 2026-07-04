@@ -4637,10 +4637,11 @@ var runCommandPrefixes = config.toolchains.flatMap((tc) => Object.values(tc.run_
 var firstArg = command.match(/^node\s+(?:"([^"]+)"|(\S+))/);
 var helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
 var isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
-var allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper;
+var isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command) && !/[<>]/.test(command);
+var allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper || isReadOnlySearch;
 if (!allowed) {
   deny(
-    `H14: command not on the allowlist: '${command}'. Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, and the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs). All other file access flows through Edit/Write/Read/Grep/Glob.`
+    `H14: command not on the allowlist: '${command}'. Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
   );
 }
 allow();

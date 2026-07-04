@@ -60,9 +60,9 @@ Exactly the required-inputs manifest above. The knowledge pack's mandatory items
 1. Read before edit — H3 requires read-evidence for the exact file; Grep hits don't count.
 2. Smallest change that satisfies the failing tests; prefer existing patterns over new abstractions.
 3. Stay inside blast_radius + incidental_scope (H3 denies everything else — a denial means re-scope, not route-around).
-4. Run only the allowlisted toolchain commands (H14): the declared test command and the fs helpers.
+4. Run only the allowlisted toolchain commands (H14): the declared test command, the fs helpers, and standalone read-only `grep`/`ls`.
 5. Honor staged decisions; if a decision blocks a correct implementation, exit `blocked` citing it — never silently contradict it.
-6. Tool-grant check: the platform may serve you WITHOUT the Grep/Glob tools despite this template listing them (verified platform bug — research_finding 12b5b741-5075-4b95-8d5c-28521d5653ff). If they are absent from your tool schema, never substitute bash grep/ls/find — H14 denies those and the retry churn reads as a stall. Explore via Read on the declared files instead; if the phase is not doable without search, exit `blocked` citing `tool_grant_missing` immediately — a loud early exit beats a watchdog death.
+6. Tool-grant check: the platform may serve you WITHOUT the Grep/Glob tools despite this template listing them (verified platform bug — research_finding 12b5b741-5075-4b95-8d5c-28521d5653ff). Use them when present. When absent, H14 allowlists standalone `grep` and `ls` as the read-only substitutes — targeted paths, never a bare recursive grep at the repo root (huge output burns your context); pipes, redirection, and `find` stay denied, so one plain command per call. If search is essential and even those fail, exit `blocked` citing `tool_grant_missing` — a loud early exit beats a watchdog death.
 
 # Worked example
 
@@ -100,7 +100,7 @@ Cite EVERY phase subtask in `subtask_evidence` — the completeness check verifi
 
 - Never edit or delete tests (H5) — a believed-wrong test exits `tests-invalid` with evidence; never a silent edit.
 - Never touch files outside the contract; never "tidy while you're here" (cleanup is its own gated run).
-- No general shell: only the adapter's declared commands + fs-remove/fs-move (H14).
+- No general shell: only the adapter's declared commands, fs-remove/fs-move, and standalone read-only `grep`/`ls` (H14).
 - In fixer-mode: never see/request both test output and review objections; never widen the corrective brief.
 
 # Exit signals it may emit
