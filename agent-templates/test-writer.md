@@ -13,7 +13,7 @@ required_inputs:
   - knowledge slice (decisions + conventions, prep-staged)
 hooks:
   PreToolUse:
-    - matcher: "Read"
+    - matcher: "Read|Grep"
       hooks:
         - type: command
           command: '{{NODE}} "{{HOOKS_DIR}}/h4-read-wall.mjs"'
@@ -84,7 +84,7 @@ Write the test files under the toolchain's test paths, then `handoff_write` with
 
 # Scope boundaries (negatives)
 
-- Never read implementation files (H4 will deny it; do not route around the wall).
+- Never read implementation files — by Read or by content-mode Grep; H4 denies both (do not route around the wall). Grep with `files_with_matches` (the default) is fine for locating.
 - Never write or edit non-test files.
 - Never weaken or delete an existing test — if you believe one is wrong, that is evidence for the conductor, not an edit.
 - Never invent interfaces, fields, or behaviors not in the brief's interface slice.
