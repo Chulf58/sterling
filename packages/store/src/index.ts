@@ -547,6 +547,22 @@ export class SterlingStore {
     );
   }
 
+  /**
+   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
+   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
+   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
+   * phase, not global). An empty items list clears that phase only. Uses
+   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
+   * Pick — agent-invisible (decision 628c4b7f).
+   */
+  setRunReviewMandatory(runId: string, phaseId: string, items: { record_id: string; reason: string }[]): void {
+    this.updateRunOptimistic(runId, (run) => {
+      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
+      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
+      return { ...run, review_mandatory: [...kept, ...added] };
+    });
+  }
+
   /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
   incrementDispatchCount(runId: string, agentType: string): number {
     const next = this.updateRunOptimistic(runId, (run) => ({

@@ -202,6 +202,9 @@ export class MountedStores {
   readHandoffs(...args: Parameters<SterlingStore['readHandoffs']>): ReturnType<SterlingStore['readHandoffs']> {
     return this.project.readHandoffs(...args);
   }
+  setRunReviewMandatory(...args: Parameters<SterlingStore['setRunReviewMandatory']>): ReturnType<SterlingStore['setRunReviewMandatory']> {
+    return this.project.setRunReviewMandatory(...args);
+  }
 
   /** Per-store snapshot (§2.3): each store snapshots independently; the caller
    *  supplies a path per store name ('project' or 'domain-<name>'). */

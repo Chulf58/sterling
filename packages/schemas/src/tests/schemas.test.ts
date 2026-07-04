@@ -555,3 +555,166 @@ test('referenceMaterialSchema: optional typed catalog field — legacy round-tri
     'a catalog entry missing label/tier/status is rejected'
   );
 });
+
+// ------------------- reviewer knowledge loop v2 (run r-d630, phase 1 — AC1) -------------------
+
+test('handoffSchema.dispositions: optional array; not_applicable_because requires a NON-empty reason; addressed reason optional; legacy round-trips (AC1)', () => {
+  const base = {
+    phase_id: 'p1',
+    agent_role: 'reviewer-correctness',
+    what_changed: [{ path: 'src\\a.ts', change_role: 'reviewed' }],
+    wired: [],
+    deferred: [],
+    decisions_made: [],
+    tests_produced: [],
+    exit_signal: 'complete',
+    unresolved: [],
+  };
+
+  // LEGACY handoff (no dispositions field) round-trips WITHOUT the field being invented
+  const legacy = handoffSchema.parse(base) as { dispositions?: unknown[] };
+  assert.ok(
+    legacy.dispositions === undefined || (Array.isArray(legacy.dispositions) && legacy.dispositions.length === 0),
+    'a legacy handoff without dispositions round-trips unchanged (field never invented)'
+  );
+
+  // an EMPTY dispositions array is a well-formed shape (boundary)
+  const empty = handoffSchema.parse({ ...base, dispositions: [] }) as { dispositions?: unknown[] };
+  assert.ok(Array.isArray(empty.dispositions), 'dispositions survives parsing as an array when supplied');
+  assert.equal(empty.dispositions!.length, 0, 'an empty dispositions array parses to an empty array');
+
+  // 'addressed' WITHOUT a reason is allowed (reason optional for addressed) and preserves fields.
+  // Front-load the array assertion so a STRIPPED field yields an AssertionError, not a TypeError.
+  let parsed: { dispositions?: { record_id: string; disposition: string; reason?: string }[] } | undefined;
+  assert.doesNotThrow(() => {
+    parsed = handoffSchema.parse({
+      ...base,
+      dispositions: [{ record_id: 'rec-1', disposition: 'addressed' }],
+    }) as typeof parsed;
+  }, "'addressed' without a reason must parse");
+  assert.ok(Array.isArray(parsed!.dispositions), 'dispositions survives parsing as an array (never stripped)');
+  assert.equal(parsed!.dispositions!.length, 1);
+  assert.equal(parsed!.dispositions![0].record_id, 'rec-1');
+  assert.equal(parsed!.dispositions![0].disposition, 'addressed');
+
+  // 'addressed' WITH a reason is also allowed (reason is optional, not forbidden, for addressed)
+  assert.doesNotThrow(
+    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-1', disposition: 'addressed', reason: 'folded into the fix' }] }),
+    "'addressed' with a reason is allowed"
+  );
+
+  // 'not_applicable_because' WITH a non-empty reason parses and preserves the reason.
+  let na: { dispositions?: { record_id: string; disposition: string; reason?: string }[] } | undefined;
+  assert.doesNotThrow(() => {
+    na = handoffSchema.parse({
+      ...base,
+      dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because', reason: 'out of this phase scope' }],
+    }) as typeof na;
+  }, 'not_applicable_because with a non-empty reason must parse');
+  assert.ok(Array.isArray(na!.dispositions), 'dispositions survives parsing as an array');
+  assert.equal(na!.dispositions![0].disposition, 'not_applicable_because');
+  assert.equal(na!.dispositions![0].reason, 'out of this phase scope');
+
+  // REFINE: 'not_applicable_because' WITHOUT a reason is rejected loud
+  assert.throws(
+    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because' }] }),
+    /invalid|reason/i,
+    'not_applicable_because requires a reason'
+  );
+  // REFINE: an EMPTY reason does not satisfy not_applicable_because (must be NON-empty)
+  assert.throws(
+    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because', reason: '' }] }),
+    /invalid|reason|empty|min/i,
+    'not_applicable_because requires a NON-empty reason'
+  );
+
+  // disposition is a closed enum of exactly the two verbs
+  assert.throws(
+    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-3', disposition: 'ignored' }] }),
+    /invalid/i,
+    'a disposition outside {addressed, not_applicable_because} is rejected'
+  );
+  // record_id is required on each disposition
+  assert.throws(
+    () => handoffSchema.parse({ ...base, dispositions: [{ disposition: 'addressed' }] }),
+    /invalid|record_id|required/i,
+    'record_id is required on each disposition'
+  );
+});
+
+test('runRecordSchema.review_mandatory: optional {phase_id, record_id, reason}[]; legacy round-trips; each field required (AC1)', () => {
+  const base = {
+    id: 'r-d630',
+    brief_ref: randomUUID(),
+    branch: 'sterling/run-r-d630',
+    machine_state: 'running',
+    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+    dispatch_counts: {},
+    escalations: [],
+    started_at: NOW,
+  };
+
+  // LEGACY run record (no review_mandatory) round-trips WITHOUT the field being invented
+  const legacy = runRecordSchema.parse(base) as { review_mandatory?: unknown[] };
+  assert.ok(
+    legacy.review_mandatory === undefined || (Array.isArray(legacy.review_mandatory) && legacy.review_mandatory.length === 0),
+    'a legacy run record without review_mandatory round-trips unchanged'
+  );
+
+  // a run record CARRYING review_mandatory must parse (assertion-red if stripped, never a crash)
+  // and survive as an array of the shared mandatory tuple {phase_id, record_id, reason}.
+  let parsed: { review_mandatory?: { phase_id: string; record_id: string; reason: string }[] } | undefined;
+  assert.doesNotThrow(() => {
+    parsed = runRecordSchema.parse({
+      ...base,
+      review_mandatory: [
+        { phase_id: 'p1', record_id: 'rec-1', reason: 'governing design decision' },
+        { phase_id: 'p2', record_id: 'rec-2', reason: 'anti-pattern to avoid' },
+      ],
+    }) as typeof parsed;
+  }, 'a run record carrying review_mandatory must parse');
+  assert.ok(Array.isArray(parsed!.review_mandatory), 'review_mandatory survives parsing as an array');
+  assert.equal(parsed!.review_mandatory!.length, 2);
+  assert.deepEqual(parsed!.review_mandatory![0], { phase_id: 'p1', record_id: 'rec-1', reason: 'governing design decision' });
+
+  // each field of the mandatory tuple is required (fail loud on omission — P5)
+  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ record_id: 'rec-1', reason: 'r' }] }), /invalid|phase_id|required/i, 'phase_id is required on each mandatory item');
+  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ phase_id: 'p1', reason: 'r' }] }), /invalid|record_id|required/i, 'record_id is required on each mandatory item');
+  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ phase_id: 'p1', record_id: 'rec-1' }] }), /invalid|reason|required/i, 'reason is required on each mandatory item');
+});
+
+test('REVIEWER_ROLES: registry-derived set resolving exactly the four reviewer-* names; totality vs AGENT_MODEL_KEY and the roster (AC1)', async () => {
+  // dynamic import + cast: REVIEWER_ROLES does not exist until this phase ships, so a missing
+  // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const rolesRaw = mod.REVIEWER_ROLES as Set<string> | string[] | undefined;
+  assert.ok(rolesRaw, 'REVIEWER_ROLES must be exported from the schemas index (defined once, invariant 1)');
+
+  // coerce the set (Set or array) to a sorted member list — the oracle tests membership, not the container type
+  const members = (Array.isArray(rolesRaw) ? [...rolesRaw] : [...(rolesRaw as Set<string>)]).slice().sort();
+  const expected = ['reviewer-correctness', 'reviewer-performance', 'reviewer-security', 'reviewer-skeptic'];
+  assert.deepEqual(members, expected, 'REVIEWER_ROLES resolves EXACTLY the four reviewer-* names');
+
+  // the is-a-reviewer predicate: reviewers are members, non-reviewers are not
+  const has = (n: string) =>
+    typeof (rolesRaw as Set<string>).has === 'function' ? (rolesRaw as Set<string>).has(n) : members.includes(n);
+  for (const r of expected) assert.ok(has(r), `${r} is a reviewer role`);
+  assert.ok(!has('coder'), 'coder is not a reviewer role');
+  assert.ok(!has('test-writer'), 'test-writer is not a reviewer role');
+  assert.ok(!has('implementation-architect'), 'implementation-architect is not a reviewer role');
+
+  // DERIVATION (single source of truth): REVIEWER_ROLES is EXACTLY the AGENT_MODEL_KEY keys that
+  // map to 'reviewers' — a hardcoded list was explicitly REJECTED as a second source (decision 628c4b7f).
+  const map = mod.AGENT_MODEL_KEY as Record<string, string> | undefined;
+  assert.ok(map, 'AGENT_MODEL_KEY must be exported — REVIEWER_ROLES derives from it');
+  const derivedFromMap = Object.keys(map!).filter((k) => map![k] === 'reviewers').sort();
+  assert.deepEqual(members, derivedFromMap, "REVIEWER_ROLES is exactly AGENT_MODEL_KEY's 'reviewers' keys — no drift from the map");
+
+  // TOTALITY vs the roster (invariant 3): read agent-templates/registry.json at runtime; its
+  // reviewer-* agents are EXACTLY REVIEWER_ROLES — none missing, none orphaned.
+  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
+    agents: { name: string }[];
+  };
+  const rosterReviewers = registry.agents.map((a) => a.name).filter((n) => n.startsWith('reviewer-')).sort();
+  assert.deepEqual(members, rosterReviewers, 'REVIEWER_ROLES matches the reviewer-* agents in the roster (totality vs registry.json)');
+});

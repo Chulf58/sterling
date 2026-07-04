@@ -17,6 +17,7 @@ export {
   RECORD_TYPES,
   validateRecord,
   AGENT_MODEL_KEY,
+  REVIEWER_ROLES,
 } from './records.js';
 export type { RecordType, RecordTypeEntry, DurableRecord } from './records.js';
 export {

@@ -291,3 +291,50 @@ test('MountedStores: a domain record written through one project mount is read b
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ------------------- reviewer knowledge loop v2 (run r-d630, phase 1 — AC1) -------------------
+
+test('MountedStores forwards setRunReviewMandatory to the project store; loud on missing run (AC1)', () => {
+  const { stores, cleanup } = harness([]);
+  try {
+    // guard: the forwarding method must exist (assertion-red, never a call-of-undefined crash)
+    assert.equal(
+      typeof (stores as unknown as { setRunReviewMandatory?: unknown }).setRunReviewMandatory,
+      'function',
+      'MountedStores must forward setRunReviewMandatory(runId, phaseId, items) to the project store'
+    );
+
+    // seed a run in the PROJECT store (setRunReviewMandatory is a project-store run primitive)
+    const runId = 'r-d630';
+    stores.project.createRun({
+      id: runId,
+      brief_ref: randomUUID(),
+      branch: 'sterling/run-r-d630',
+      machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+      dispatch_counts: {},
+      escalations: [],
+      started_at: NOW,
+    });
+
+    const rec = randomUUID();
+    const forward = (stores as unknown as {
+      setRunReviewMandatory: (runId: string, phaseId: string, items: { record_id: string; reason: string }[]) => void;
+    }).setRunReviewMandatory.bind(stores);
+
+    forward(runId, 'p1', [{ record_id: rec, reason: 'governing design decision' }]);
+
+    // the forwarded write landed in the PROJECT store (the forwarding target)
+    const after = stores.project.getRun(runId)! as unknown as { review_mandatory: { phase_id: string; record_id: string; reason: string }[] };
+    assert.ok(Array.isArray(after.review_mandatory), 'review_mandatory is an array after the forwarded call (assertion-red, not a crash)');
+    const p1 = after.review_mandatory.filter((m) => m.phase_id === 'p1');
+    assert.equal(p1.length, 1, 'exactly the one forwarded item landed under p1 in the project store');
+    assert.equal(p1[0].record_id, rec, 'the forwarded record_id is preserved');
+    assert.equal(p1[0].reason, 'governing design decision', 'the forwarded reason is preserved');
+
+    // loud on a missing run is carried through the forward
+    assert.throws(() => forward('r-none', 'p1', [{ record_id: rec, reason: 'r' }]), /no run/);
+  } finally {
+    cleanup();
+  }
+});
