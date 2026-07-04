@@ -31,6 +31,32 @@ export function sliceDenial(agentType, prompt) {
   );
 }
 
+// Breadth backstop (two-axis phase discipline, decision 288936ab): a guarded
+// dispatch whose STERLING-SLICE marker names a phase over the configured
+// split_interface_threshold is denied — bigness is a decomposition failure
+// (P7), never absorbed at dispatch. Ordered AFTER sliceDenial (the marker must
+// already be present to be judged) and BEFORE the cap increment: a
+// breadth-denied dispatch consumes no cap slot. Markerless/SLICE-WAIVED
+// prompts and phase ids absent from the brief are not this guard's business —
+// they fall through to the slice guard or pass unchecked, same as before.
+const BREADTH_MARKER_RE = /^STERLING-SLICE run=\S+ phase=(\S+) role=\S+ staged=\S+$/m;
+export function breadthDenial(prompt, brief, config) {
+  const text = typeof prompt === 'string' ? prompt : '';
+  const match = BREADTH_MARKER_RE.exec(text);
+  if (!match) return null; // no marker to judge — sliceDenial's business, not this guard's
+  const phaseId = match[1];
+  const phase = brief?.phases?.find((p) => p.phase_id === phaseId);
+  if (!phase) return null; // unknown phase — never judged here
+  const threshold = config?.difficulty?.split_interface_threshold ?? 3;
+  const count = (phase.interfaces ?? []).length;
+  if (count <= threshold) return null;
+  return (
+    `H8: pipeline dispatch names phase '${phaseId}', which is over-wide — ${count} interfaces exceeds ` +
+    `the split threshold (${threshold}). An over-wide phase is a decomposition failure (P7): split it into ` +
+    `narrower phases at planning, then re-dispatch. Spawning is denied — a breadth-denied dispatch consumes no cap slot.`
+  );
+}
+
 const input = readStdin();
 const agentType = input.tool_input?.subagent_type;
 if (!agentType) allow();
@@ -44,10 +70,20 @@ try {
 
   // Slice-presence check ORDERED BEFORE the cap increment: a denied dispatch
   // consumes no cap slot and is not a cap escalation (decision 628c4b7f (e)).
-  const sliceDeny = sliceDenial(agentType, input.tool_input?.prompt);
+  const prompt = input.tool_input?.prompt;
+  const sliceDeny = sliceDenial(agentType, prompt);
   if (sliceDeny) deny(sliceDeny);
 
-  const cap = loadConfig(input.cwd)?.caps?.dispatch_per_agent_type ?? 25;
+  const config = loadConfig(input.cwd);
+
+  // Breadth check: needs the run's brief to see the named phase's interface
+  // count. Loaded only here (not in the slice-denied path above), and it must
+  // still run BEFORE the cap increment (decision 628c4b7f (e) extended).
+  const brief = run.brief_ref ? store.get(run.brief_ref) : null;
+  const breadthDeny = breadthDenial(prompt, brief, config);
+  if (breadthDeny) deny(breadthDeny);
+
+  const cap = config?.caps?.dispatch_per_agent_type ?? 25;
   const current = run.dispatch_counts[agentType] ?? 0;
   if (current + 1 > cap) {
     store.appendRunEscalation(run.id, {

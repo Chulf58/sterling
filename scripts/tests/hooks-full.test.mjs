@@ -1542,3 +1542,148 @@ test('H8 AC4: existing cap semantics are unchanged — at the limit the cap stil
     cleanup();
   }
 });
+
+// --------------------------- H8 breadth backstop (run r-68eb phase 2, AC2) ---------------------------
+//
+// The NEW check H8 gains for two-axis phase discipline: breadthDenial. During an
+// active run, a guarded pipeline dispatch whose STERLING-SLICE marker names a phase
+// whose interface count STRICTLY EXCEEDS config.difficulty.split_interface_threshold
+// (default 3) is DENIED, naming phase/count/threshold. breadthDenial is ordered AFTER
+// sliceDenial (so the marker is already present) and BEFORE the cap increment (a
+// breadth-denied dispatch consumes NO cap slot). Markerless / SLICE-WAIVED /
+// unknown-phase / within-threshold prompts pass breadth unchecked. The same config
+// field governs (a custom threshold widens/tightens the gate). Probe interface counts
+// are chosen distinct (5, 3, 2) so an off-by-one (>= vs >) mutant is caught by the
+// exactly-at-threshold case.
+//
+// These tests build their own over-wide brief + run r-h5 inline (makeProject's default
+// brief is within-threshold), mirroring makeProject's withRun block.
+
+const breadthMarker = (phase, role = 'coder') => `STERLING-SLICE run=r-h5 phase=${phase} role=${role} staged=2026-06-10T12:00:00.000Z`;
+
+// Builds a project with run r-h5 whose brief's single phase p1 declares `interfaceCount`
+// interfaces (all also in technical_design.interfaces, per the briefSchema superRefine).
+// splitThreshold, when set, is written onto config.difficulty.split_interface_threshold —
+// the SAME field prep and the gate flag read; omitted → the schema default (3) governs.
+function makeBreadthRun({ interfaceCount = 5, splitThreshold = null } = {}) {
+  const { dir, store, cleanup } = makeProject();
+  if (splitThreshold != null) {
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, difficulty: { split_interface_threshold: splitThreshold } }));
+  }
+  const names = Array.from({ length: interfaceCount }, (_, i) => `iface_${i}`);
+  const brief = store.create({
+    ...envelope('brief'),
+    slug: 'f',
+    title: 'F',
+    problem: 'p',
+    feature: 'f',
+    user_stated: { criteria: [], constraints: [] },
+    conductor_proposals: [],
+    acceptance_criteria: [{ ac_id: 'AC1', text: 'works', verifiable_at: 'final' }],
+    technical_design: { approach: 'a', interfaces: names.map((n) => ({ name: n, contract: `${n}() -> void` })), shared_structures: [] },
+    blast_radius: { files: [{ path: 'src/a.mjs', owning_articles: [] }], reconcile_list: [] },
+    incidental_scope: [],
+    out_of_scope: [],
+    phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], interfaces: names, difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
+    decisions_made: [],
+  });
+  const run = store.createRun({
+    id: 'r-h5',
+    brief_ref: brief.id,
+    branch: 'sterling/run-r-h5',
+    machine_state: 'running',
+    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+    dispatch_counts: {},
+    escalations: [],
+    started_at: NOW,
+  });
+  return { dir, store, brief, run, names, cleanup };
+}
+
+const breadthDispatch = (dir, prompt) =>
+  runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt } }), dir);
+
+test('H8 AC2: a dispatch whose STERLING-SLICE marker names an OVER-WIDE phase is breadth-DENIED (naming phase/count/threshold) and consumes NO cap slot', () => {
+  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 }); // 5 > default 3 → over-wide
+  try {
+    const denied = breadthDispatch(dir, `${breadthMarker('p1')}\nImplement it.`);
+    assert.equal(denied.code, 2, 'an over-wide-phase marker is breadth-denied');
+    assert.match(denied.stderr, /p1/, 'the deny names the over-wide phase');
+    assert.match(denied.stderr, /\b5\b/, 'the deny names the interface count (5)');
+    assert.match(denied.stderr, /\b3\b/, 'the deny names the threshold in effect (default 3)');
+    assert.doesNotMatch(denied.stderr, /dispatch cap exceeded/, 'it is the breadth deny, not the cap deny');
+    // ordered AFTER sliceDenial (marker present → slice guard satisfied) and BEFORE the cap increment
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'a breadth-denied dispatch consumes no cap slot');
+    assert.ok(!(store.getRun('r-h5').escalations ?? []).some((e) => e.kind === 'dispatch_cap_exceeded'), 'the breadth deny is not a cap-exceeded escalation');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 AC2: a marker naming a WITHIN-threshold phase passes breadth and consumes its slot (strictly-greater: interfaces exactly AT the threshold are allowed)', () => {
+  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 3 }); // 3 === default threshold → NOT over-wide
+  try {
+    const passed = breadthDispatch(dir, `${breadthMarker('p1')}\nbody`);
+    assert.equal(passed.code, 0, 'a phase with interfaces exactly at the threshold is within bounds — breadth passes');
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'a breadth-passing dispatch consumes its cap slot exactly as today');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 AC2: a SLICE-WAIVED prompt passes breadth unchecked even when the run brief has an over-wide phase (the waiver stays the fixer-mode escape)', () => {
+  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 });
+  try {
+    const waived = breadthDispatch(dir, 'SLICE-WAIVED: fixer-mode targeted one-line patch\ngo');
+    assert.equal(waived.code, 0, 'the waiver bypasses the breadth backstop as it bypasses the slice guard');
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'the waived dispatch consumes its slot');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 AC2: a marker naming a phase NOT in the brief passes breadth unchecked (unknown phase ⇒ null, never a deny)', () => {
+  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 }); // brief has only the over-wide p1; the marker names p9
+  try {
+    const r = breadthDispatch(dir, `${breadthMarker('p9')}\nbody`);
+    assert.equal(r.code, 0, 'a marker phase absent from the brief is not breadth-judged');
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'and it consumes its slot like any passing dispatch');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 AC2: a markerless prompt in an over-wide-phase run is denied by the slice guard, not the breadth backstop (breadth passes markerless prompts unchecked)', () => {
+  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 });
+  try {
+    const denied = breadthDispatch(dir, 'implement it, no marker');
+    assert.equal(denied.code, 2, 'markerless is still denied — by the slice-presence guard');
+    assert.match(denied.stderr, /STERLING-SLICE/, 'it is the slice deny (teaches the marker format), not a breadth deny');
+    assert.match(denied.stderr, /SLICE-WAIVED/, 'and the waiver format');
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'a slice-denied dispatch consumes no cap slot');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 AC2: the SAME config field governs the breadth backstop — a custom difficulty.split_interface_threshold widens and tightens it', () => {
+  // 5 interfaces would be over-wide at the default 3, but a custom threshold of 10 lets it pass
+  const wide = makeBreadthRun({ interfaceCount: 5, splitThreshold: 10 });
+  try {
+    const r = breadthDispatch(wide.dir, `${breadthMarker('p1')}\nbody`);
+    assert.equal(r.code, 0, '5 interfaces is within a custom threshold of 10 — H8 reads difficulty.split_interface_threshold');
+    assert.equal(wide.store.getRun('r-h5').dispatch_counts.coder, 1, 'the breadth-passing dispatch consumes its slot');
+  } finally {
+    wide.cleanup();
+  }
+  // 3 interfaces exceeds a custom threshold of 2 → breadth-denied (proves the field, not a hardcoded 3)
+  const tight = makeBreadthRun({ interfaceCount: 3, splitThreshold: 2 });
+  try {
+    const r = breadthDispatch(tight.dir, `${breadthMarker('p1')}\nbody`);
+    assert.equal(r.code, 2, '3 interfaces exceeds a custom threshold of 2 — breadth-denied');
+    assert.doesNotMatch(r.stderr, /dispatch cap exceeded/, 'it is the breadth deny, not the cap deny');
+    assert.equal(tight.store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'no slot consumed on the breadth deny');
+  } finally {
+    tight.cleanup();
+  }
+});
