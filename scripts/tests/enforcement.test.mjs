@@ -529,6 +529,29 @@ test('H14: allows adapter run commands and fs helpers; denies everything else na
   }
 });
 
+test('H14: standalone read-only grep/ls are allowed; chaining, redirection, find, and lookalikes stay denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const bash = (command) => runHook('h14-bash-allowlist.mjs', hookInput(dir, { tool_name: 'Bash', tool_input: { command } }), dir);
+    assert.equal(bash('grep -rn "runCommandPrefixes" scripts/hooks').code, 0);
+    assert.equal(bash('grep -l pattern src/a.ts src/b.ts').code, 0);
+    assert.equal(bash('ls packages/schemas/src').code, 0);
+    assert.equal(bash('ls').code, 0, 'bare ls is a complete read-only command');
+    assert.equal(bash('grep foo | head').code, 2, 'grep cannot pipe (control operators)');
+    let r = bash('grep -r secret . > exfil.txt');
+    assert.equal(r.code, 2, 'redirection turns grep into a write — denied');
+    r = bash('ls -la > listing.txt');
+    assert.equal(r.code, 2, 'redirection turns ls into a write — denied');
+    r = bash('find . -name "*.ts"');
+    assert.equal(r.code, 2, 'find stays denied (-exec/-delete execute)');
+    assert.match(r.stderr, /read-only search/, 'the denial teaches the grep/ls allowance');
+    assert.equal(bash('lsof -i').code, 2, 'allowance needs a word boundary (lsof is not ls)');
+    assert.equal(bash('grepx foo').code, 2, 'allowance needs a word boundary (grepx is not grep)');
+  } finally {
+    cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // H6 context watcher (observe mode default)
 // ---------------------------------------------------------------------------
