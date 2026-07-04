@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
+import { REVIEWER_ROLES } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools, type NoteExtractionPayload } from '../tools.js';
 
@@ -464,6 +465,161 @@ test('handoff pair: write validates, read filters by phase and files', () => {
     assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 1);
     assert.equal(tools.handoffRead({ files: ['src/a.ts'] }).length, 1);
     assert.equal(tools.handoffRead({ phase_id: 'p2' }).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- AC2: reviewer disposition coverage enforcement (run r-d630 phase 2) ---------------------------
+// A reviewer-role handoff_write must disposition EXACTLY the record_ids the run
+// record's review_mandatory holds for that handoff's phase — set equality. A
+// missing or extra id refuses the write LOUDLY, naming the offending ids, and
+// nothing is persisted. Non-reviewer roles are entirely unaffected. Placement
+// mirrors the 32fa4a05 agent_exit off-run-phase refusal (fail-loud at the seam,
+// nothing written). REVIEWER_ROLES is imported, never redefined (invariant 1).
+
+// The four exact agent_role strings the reviewer templates emit — pinned here so
+// the wire is proven to fire for exactly these and no others (the free-string
+// hole is left to the phase-3 disposal-fold backstop per decision 628c4b7f).
+const REVIEWER_ROLE_STRINGS = ['reviewer-correctness', 'reviewer-security', 'reviewer-performance', 'reviewer-skeptic'] as const;
+
+type Disposition = { record_id: string; disposition: 'addressed' | 'not_applicable_because'; reason?: string };
+
+const handoffArgs = (agent_role: string, phase_id: string, dispositions?: Disposition[]) => ({
+  handoff: {
+    phase_id,
+    agent_role,
+    what_changed: [],
+    wired: [],
+    deferred: [],
+    decisions_made: [],
+    tests_produced: [],
+    exit_signal: 'complete',
+    unresolved: [],
+    ...(dispositions ? { dispositions } : {}),
+  },
+});
+
+test('AC2: the enforced reviewer role strings are exactly REVIEWER_ROLES — the wire fires for these four and no others', () => {
+  // The pinned template strings and the imported registry must set-equal; if a
+  // template role were renamed or a fifth reviewer added, this fails loudly.
+  assert.deepEqual([...REVIEWER_ROLES].sort(), [...REVIEWER_ROLE_STRINGS].sort());
+});
+
+test('AC2: a reviewer handoff without exact review_mandatory coverage is REFUSED loudly (missing/extra ids named) with nothing written — all four roles', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    const m1 = randomUUID();
+    const m2 = randomUUID();
+    const extra = randomUUID();
+
+    for (const role of REVIEWER_ROLE_STRINGS) {
+      // replace-by-phase: p1 requires exactly {m1, m2}
+      store.setRunReviewMandatory('r-0001', 'p1', [
+        { record_id: m1, reason: 'blocking anti-pattern' },
+        { record_id: m2, reason: 'blocking anti-pattern' },
+      ]);
+
+      // (a) no dispositions at all → both mandatory ids missing, both named
+      assert.throws(
+        () => tools.handoffWrite(handoffArgs(role, 'p1')),
+        (err: Error) => new RegExp(m1).test(err.message) && new RegExp(m2).test(err.message) && /missing/i.test(err.message),
+        `${role}: empty dispositions refused, both missing ids named`
+      );
+
+      // (b) partial coverage → the one uncovered id is named as missing
+      assert.throws(
+        () => tools.handoffWrite(handoffArgs(role, 'p1', [{ record_id: m1, disposition: 'addressed' }])),
+        (err: Error) => new RegExp(m2).test(err.message) && /missing/i.test(err.message),
+        `${role}: partial coverage refused, the missing id named`
+      );
+
+      // (c) superset → the id not in the mandatory set is named as extra
+      assert.throws(
+        () =>
+          tools.handoffWrite(
+            handoffArgs(role, 'p1', [
+              { record_id: m1, disposition: 'addressed' },
+              { record_id: m2, disposition: 'addressed' },
+              { record_id: extra, disposition: 'addressed' },
+            ])
+          ),
+        (err: Error) => new RegExp(extra).test(err.message) && /extra/i.test(err.message),
+        `${role}: superset refused, the extra id named`
+      );
+    }
+
+    // every refused write persisted NOTHING (the seam refuses before writing)
+    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 0, 'no refused reviewer handoff was persisted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC2: a reviewer handoff with EXACT coverage lands — any mix of addressed / not_applicable_because+reason — all four roles', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    const m1 = randomUUID();
+    const m2 = randomUUID();
+    store.setRunReviewMandatory('r-0001', 'p1', [
+      { record_id: m1, reason: 'blocking anti-pattern' },
+      { record_id: m2, reason: 'blocking anti-pattern' },
+    ]);
+    for (const role of REVIEWER_ROLE_STRINGS) {
+      assert.doesNotThrow(
+        () =>
+          tools.handoffWrite(
+            handoffArgs(role, 'p1', [
+              { record_id: m1, disposition: 'addressed' },
+              { record_id: m2, disposition: 'not_applicable_because', reason: 'out of scope for this surface' },
+            ])
+          ),
+        `${role}: exact-coverage reviewer handoff lands`
+      );
+      assert.ok(
+        tools.handoffRead({ phase_id: 'p1' }).some((h) => (h as { agent_role?: string }).agent_role === role),
+        `${role}: the landed reviewer handoff is readable`
+      );
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC2: a reviewer handoff lands with NO dispositions when the phase mandatory set is empty; a DIFFERENT phase\'s review_mandatory never binds this phase', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    // (1) no review_mandatory anywhere → empty set-equals empty → lands, no dispositions
+    assert.doesNotThrow(() => tools.handoffWrite(handoffArgs('reviewer-correctness', 'p1')));
+    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 1);
+
+    // (2) review_mandatory seeded ONLY for p2 must not bind a p1 handoff
+    store.setRunReviewMandatory('r-0001', 'p2', [{ record_id: randomUUID(), reason: 'blocking anti-pattern' }]);
+    assert.doesNotThrow(() => tools.handoffWrite(handoffArgs('reviewer-security', 'p1')));
+    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 2, "another phase's mandatory set never binds p1");
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC2: non-reviewer handoffs are entirely unaffected — they land with or without dispositions regardless of review_mandatory state', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    const m1 = randomUUID();
+    // a non-empty mandatory set that a reviewer WOULD have to satisfy exactly
+    store.setRunReviewMandatory('r-0001', 'p1', [{ record_id: m1, reason: 'blocking anti-pattern' }]);
+
+    // coder with NO dispositions → lands despite the non-empty mandatory set
+    assert.doesNotThrow(() => tools.handoffWrite(handoffArgs('coder', 'p1')));
+    // test-writer WITH non-matching dispositions → dispositions ignored, lands
+    assert.doesNotThrow(() =>
+      tools.handoffWrite(handoffArgs('test-writer', 'p1', [{ record_id: randomUUID(), disposition: 'addressed' }]))
+    );
+    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 2, 'both non-reviewer handoffs persisted, coverage never checked');
   } finally {
     cleanup();
   }

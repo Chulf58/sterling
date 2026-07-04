@@ -46,6 +46,26 @@ Signal: `.map(async …)` in `src/board/load.mjs`. Inspect: per-todo `knowledge_
 
 `handoff_write` (role reviewer-performance) then `agent_exit`. Objections to `unresolved`; mandatory items dispositioned in `decisions_made`.
 
+Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
+
+```json
+{
+  "phase_id": "p2",
+  "agent_role": "reviewer-performance",
+  "what_changed": [],
+  "wired": [],
+  "deferred": [],
+  "decisions_made": ["performance verdict: no hot-path regression at project scale"],
+  "tests_produced": [],
+  "dispositions": [
+    { "record_id": "<mandatory-record-uuid-1>", "disposition": "addressed" },
+    { "record_id": "<mandatory-record-uuid-2>", "disposition": "not_applicable_because", "reason": "the loop this survivor marks is not on a hot path at real scale" }
+  ],
+  "exit_signal": "complete",
+  "unresolved": []
+}
+```
+
 # Scope boundaries (negatives)
 
 - Read-only; never optimize speculatively; cost must be argued at real scale.

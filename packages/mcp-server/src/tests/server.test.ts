@@ -133,6 +133,68 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
   }
 });
 
+test('AC2 over the wire: a reviewer handoff without exact review_mandatory coverage is refused in-band (missing id named) with nothing written; exact coverage lands; non-reviewers untouched', async () => {
+  const { client, store, cleanup } = await harness();
+  try {
+    store.createRun({
+      id: 'r-0001',
+      brief_ref: randomUUID(),
+      branch: 'sterling/run-r-0001',
+      machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
+      dispatch_counts: {},
+      escalations: [],
+      started_at: '2026-06-10T12:00:00.000Z',
+    });
+    const m1 = randomUUID();
+    store.setRunReviewMandatory('r-0001', 'p1', [{ record_id: m1, reason: 'blocking anti-pattern' }]);
+
+    const base = {
+      phase_id: 'p1',
+      what_changed: [],
+      wired: [],
+      deferred: [],
+      decisions_made: [],
+      tests_produced: [],
+      exit_signal: 'complete',
+      unresolved: [],
+    };
+
+    // reviewer with NO dispositions against a non-empty mandatory set → refused in-band
+    const refused = await client.callTool({
+      name: 'handoff_write',
+      arguments: { handoff: { ...base, agent_role: 'reviewer-correctness' } },
+    });
+    assert.equal(refused.isError, true, 'uncovered reviewer handoff refused in-band so the agent can self-correct');
+    assert.match((refused.content as { text: string }[])[0].text, new RegExp(m1), 'the missing mandatory id is named in the refusal');
+
+    let read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
+    assert.equal(read.length, 0, 'the refused reviewer handoff wrote nothing over the wire');
+
+    // reviewer with exact coverage → lands
+    const ok = await client.callTool({
+      name: 'handoff_write',
+      arguments: {
+        handoff: { ...base, agent_role: 'reviewer-correctness', dispositions: [{ record_id: m1, disposition: 'addressed' }] },
+      },
+    });
+    assert.notEqual(ok.isError, true, 'exact-coverage reviewer handoff lands over the wire');
+    read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
+    assert.equal(read.length, 1, 'exact-coverage reviewer handoff persisted');
+
+    // non-reviewer against the same non-empty mandatory set, no dispositions → untouched, lands
+    const coder = await client.callTool({
+      name: 'handoff_write',
+      arguments: { handoff: { ...base, agent_role: 'coder' } },
+    });
+    assert.notEqual(coder.isError, true, 'non-reviewer handoff is unaffected by review_mandatory');
+    read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
+    assert.equal(read.length, 2, 'the non-reviewer handoff landed alongside the reviewer one');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('§3.2.5 repo-located docs: only a real content change (not an mtime-only bump) → verify_before_use + exactly one refresh_reference item; url-kind inert', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ref-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });

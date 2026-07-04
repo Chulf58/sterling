@@ -46,6 +46,26 @@ Diff adds `ExportStrategyFactory` with one strategy. Objection: "speculative abs
 
 `handoff_write` (role reviewer-skeptic) then `agent_exit`. Objections to `unresolved`; mandatory items dispositioned in `decisions_made`.
 
+Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
+
+```json
+{
+  "phase_id": "p2",
+  "agent_role": "reviewer-skeptic",
+  "what_changed": [],
+  "wired": [],
+  "deferred": [],
+  "decisions_made": ["skeptic verdict: smallest change that satisfies the brief; no speculative surface"],
+  "tests_produced": [],
+  "dispositions": [
+    { "record_id": "<mandatory-record-uuid-1>", "disposition": "addressed" },
+    { "record_id": "<mandatory-record-uuid-2>", "disposition": "not_applicable_because", "reason": "this decision does not bear on the abstraction the diff introduces" }
+  ],
+  "exit_signal": "complete",
+  "unresolved": []
+}
+```
+
 # Scope boundaries (negatives)
 
 - Read-only; never propose rewrites — name the defect and the evidence.

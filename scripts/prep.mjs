@@ -44,6 +44,28 @@ for (const rec of returned) {
   }
 }
 
+// required_by_contract (decision 628c4b7f (d)): the staged records the brief
+// itself cited as governing this work — staged ids ∩ brief.decisions_made (a
+// confirmed UUID array). Live from run one because this feature's own brief
+// cites its decisions. These join the known_gaps into the per-phase reviewer
+// mandatory set (the run-record home), but do NOT enter pack.mandatory —
+// pack.mandatory stays byte-for-byte the §3.7 known_gap manifest.
+const byId = new Map(returned.map((r) => [r.id, r]));
+const decisionsMade = new Set(brief.decisions_made ?? []);
+const requiredByContract = returned
+  .filter((r) => decisionsMade.has(r.id))
+  .map((r) => ({ record_id: r.id, reason: 'required_by_contract' }));
+
+// review_mandatory = known_gap ∪ required_by_contract (dedupe by record_id;
+// a known_gap wins a tie so its lane name is the one carried).
+const mandatoryUnion = [];
+const seenMandatory = new Set();
+for (const item of [...mandatory, ...requiredByContract]) {
+  if (seenMandatory.has(item.record_id)) continue;
+  seenMandatory.add(item.record_id);
+  mandatoryUnion.push(item);
+}
+
 // Intra-run blast radius: prior phases' handoffs intersecting this phase's files (§7.4).
 const priorHandoffs = store.readHandoffs(run.id, { files });
 
@@ -62,5 +84,83 @@ const pack = {
 const dir = runDir(cwd, run.id);
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, `knowledge_pack-${phaseId}.json`), JSON.stringify(pack, null, 2));
+
+// ---------------------------------------------------------------------------
+// Role-scoped dispatch slices + review_mandatory stamp (decision 628c4b7f (d)).
+// The single standard invocation emits BOTH slices; delivery-by-prompt retires
+// the H4 pack seam without touching H4. Line 1 is the deterministic marker H8
+// checks for; the body is retrieval rendered mechanically (P3 — no LLM).
+// ---------------------------------------------------------------------------
+const EXCERPT_CHARS = 600; // mechanical truncation of a record's primary field
+
+// The primary structured field per type — the one field an excerpt truncates.
+function primaryField(rec) {
+  switch (rec.type) {
+    case 'decision':
+      return rec.statement;
+    case 'anti_pattern':
+      return rec.guidance;
+    case 'feature_article':
+      return rec.what_it_does;
+    case 'research_finding':
+      return rec.answer;
+    case 'reference_material':
+      return rec.summary;
+    case 'note':
+      return rec.raw_text;
+    default:
+      return rec.title ?? '';
+  }
+}
+const collapse = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+const oneLiner = (rec) => collapse(primaryField(rec)).slice(0, 120);
+const excerpt = (rec) => collapse(primaryField(rec)).slice(0, EXCERPT_CHARS);
+const marker = (role) => `STERLING-SLICE run=${run.id} phase=${phaseId} role=${role} staged=${new Date().toISOString()}`;
+
+// Reviewer slice (spec §7.4): narrows to anti_pattern + decision knowledge
+// records, plus the mandatory union (known_gap ∪ required_by_contract) each with
+// its reason + a mechanical excerpt of its primary field.
+const reviewerKnowledge = returned.filter((r) => r.type === 'anti_pattern' || r.type === 'decision');
+const reviewerLines = [
+  marker('reviewer'),
+  '',
+  '# Reviewer knowledge slice — anti-patterns & decisions keyed to this phase',
+  '',
+  ...(reviewerKnowledge.length
+    ? reviewerKnowledge.map((r) => `- ${r.type} — ${r.title} [${r.id}] — ${oneLiner(r)}`)
+    : ['(no anti-pattern or decision records staged for this phase)']),
+  '',
+  '## Mandatory review items — each needs a disposition in your handoff',
+  '',
+  ...(mandatoryUnion.length
+    ? mandatoryUnion.flatMap((m) => {
+        const rec = byId.get(m.record_id);
+        const title = rec?.title ?? '(record not in staged pack)';
+        return [`- ${m.reason}: ${title} [${m.record_id}]`, `  ${rec ? excerpt(rec) : ''}`];
+      })
+    : ['(no mandatory items for this phase)']),
+  '',
+];
+writeFileSync(join(dir, `dispatch_slice-${phaseId}-reviewer.md`), reviewerLines.join('\n'));
+
+// Builder slice (coder/test-writer): the full staged pack, title + full UUID +
+// one-liner — the existing broad retrieval, delivered by prompt.
+const builderLines = [
+  marker('builder'),
+  '',
+  '# Builder knowledge pack — full staged retrieval for this phase',
+  '',
+  ...(returned.length
+    ? returned.map((r) => `- ${r.type} — ${r.title ?? r.slug ?? '(untitled)'} [${r.id}] — ${oneLiner(r)}`)
+    : ['(no records staged for this phase)']),
+  '',
+];
+writeFileSync(join(dir, `dispatch_slice-${phaseId}-builder.md`), builderLines.join('\n'));
+
+// Stamp the per-phase reviewer mandatory set onto the run record (phase-1
+// primitive, replace-by-phase) — the only home readable at handoffWrite,
+// dispose-run, and merge-gate (decision 628c4b7f (a)).
+store.setRunReviewMandatory(run.id, phaseId, mandatoryUnion.map((m) => ({ record_id: m.record_id, reason: m.reason })));
+
 store.close();
 console.log(JSON.stringify({ written: `knowledge_pack-${phaseId}.json`, returned: returned.length, mandatory: mandatory.length, cap_omissions: capOmissions }));

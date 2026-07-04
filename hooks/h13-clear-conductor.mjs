@@ -4311,6 +4311,18 @@ var briefSchema = base.extend({
     }
   }
 });
+var AGENT_MODEL_KEY = {
+  "test-writer": "test_writer",
+  coder: "coder",
+  "reviewer-correctness": "reviewers",
+  "reviewer-security": "reviewers",
+  "reviewer-skeptic": "reviewers",
+  "reviewer-performance": "reviewers",
+  "implementation-architect": "implementation_architect",
+  researcher: "researcher",
+  explorer: "explorer"
+};
+var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 
 // packages/schemas/dist/transient.js
 var SIGNALS = [
@@ -4349,6 +4361,18 @@ var SIGNAL_PAYLOADS = {
     raw_excerpt: external_exports.string()
   })
 };
+var dispositionItemSchema = external_exports.object({
+  record_id: external_exports.string().min(1),
+  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
+  reason: external_exports.string().optional()
+}).superRefine((item, ctx) => {
+  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "disposition 'not_applicable_because' requires a non-empty reason"
+    });
+  }
+});
 var handoffSchema = external_exports.object({
   phase_id: external_exports.string().min(1),
   agent_role: external_exports.string().min(1),
@@ -4362,6 +4386,9 @@ var handoffSchema = external_exports.object({
   // script verifies cited evidence exists and passes; the honesty classifier
   // is deferred until real runs show dishonest citations slipping by.
   subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
+  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
+  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
+  dispositions: external_exports.array(dispositionItemSchema).optional(),
   exit_signal: signalSchema,
   unresolved: external_exports.array(external_exports.string())
 });
@@ -4371,6 +4398,11 @@ var sessionEventSchema = external_exports.object({
   kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
+});
+var reviewMandatoryItemSchema = external_exports.object({
+  phase_id: external_exports.string().min(1),
+  record_id: external_exports.string().min(1),
+  reason: external_exports.string().min(1)
 });
 var runRecordSchema = external_exports.object({
   id: external_exports.string().min(1),
@@ -4395,6 +4427,11 @@ var runRecordSchema = external_exports.object({
   // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
   // can never open an out_of_scope path.
   scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
+  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
+  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
+  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
+  // Optional; legacy runs round-trip unchanged.
+  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
   // §8.1 branch model: the branch the run started from — the merge gate's
   // target; recorded by the branch manager at run-branch creation.
   base_branch: external_exports.string().optional(),
@@ -4410,6 +4447,13 @@ var runRecordSchema = external_exports.object({
       cap_omissions: external_exports.number().int().nonnegative(),
       mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
     })),
+    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
+    // mandatory ids left undispositioned across the run's reviewer handoffs,
+    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
+    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
+    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
+    // round-trip unchanged.
+    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
     snapshot_path: external_exports.string()
   }).optional()
 });

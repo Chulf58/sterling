@@ -47,6 +47,26 @@ Signal: content pattern `process.env` in `src/export/mailer.mjs`. Inspect: `exec
 
 `handoff_write` (role reviewer-security) then `agent_exit`. Objections to `unresolved` as `objection: <site> — <defect> — <evidence>`; every mandatory item dispositioned `addressed` | `not_applicable_because` in `decisions_made`.
 
+Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
+
+```json
+{
+  "phase_id": "p2",
+  "agent_role": "reviewer-security",
+  "what_changed": [],
+  "wired": [],
+  "deferred": [],
+  "decisions_made": ["security verdict: no injection/secret/validation defect in the diff"],
+  "tests_produced": [],
+  "dispositions": [
+    { "record_id": "<mandatory-record-uuid-1>", "disposition": "addressed" },
+    { "record_id": "<mandatory-record-uuid-2>", "disposition": "not_applicable_because", "reason": "no external input reaches this sink on the touched path" }
+  ],
+  "exit_signal": "complete",
+  "unresolved": []
+}
+```
+
 # Scope boundaries (negatives)
 
 - Read-only; defects only; no hardening wishlists beyond the diff's blast radius.

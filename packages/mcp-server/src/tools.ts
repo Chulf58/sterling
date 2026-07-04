@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import type { QueryOptions, RecordedExit, ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -665,6 +665,29 @@ export class SterlingTools {
 
   handoffWrite(args: { run_id?: string; handoff: unknown }): { written: true; phase_id: string } {
     const run = this.runState(args.run_id);
+    // AC2: reviewer-role disposition coverage check (decision 628c4b7f, run r-d630, phase 2).
+    // Placement mirrors the 32fa4a05 agent_exit off-run-phase guard: validate BEFORE persisting —
+    // a refused write records NOTHING. Non-reviewer roles skip this check entirely.
+    // The handoff is pre-parsed here for the guard only; schema validation still flows through
+    // the store's writeHandoff (so malformed handoffs continue to surface as schema errors).
+    const parsedForCheck = handoffSchema.safeParse(args.handoff);
+    if (parsedForCheck.success && REVIEWER_ROLES.has(parsedForCheck.data.agent_role)) {
+      const phaseId = parsedForCheck.data.phase_id;
+      const mandatoryIds = new Set(
+        (run.review_mandatory ?? []).filter((m) => m.phase_id === phaseId).map((m) => m.record_id)
+      );
+      const dispositionIds = new Set((parsedForCheck.data.dispositions ?? []).map((d) => d.record_id));
+      const missing = [...mandatoryIds].filter((id) => !dispositionIds.has(id));
+      const extra = [...dispositionIds].filter((id) => !mandatoryIds.has(id));
+      if (missing.length > 0 || extra.length > 0) {
+        const parts: string[] = [];
+        if (missing.length > 0) parts.push(`missing mandatory ids: ${missing.join(', ')}`);
+        if (extra.length > 0) parts.push(`extra ids not in review_mandatory: ${extra.join(', ')}`);
+        throw new Error(
+          `handoff_write: reviewer '${parsedForCheck.data.agent_role}' disposition coverage mismatch — ${parts.join('; ')}. Nothing was written.`
+        );
+      }
+    }
     const handoff = this.store.writeHandoff(run.id, args.handoff, this.now());
     return { written: true, phase_id: handoff.phase_id };
   }

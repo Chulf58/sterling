@@ -461,8 +461,12 @@ test('H7 [§3.2.5 pipeline]: a Sterling-governed touch lands the reference doc o
 test('H8: dispatch cap — probe-verified blocking PreToolUse on the Agent tool', () => {
   const { dir, store, cleanup } = makeProject({ withRun: true });
   try {
+    // SLICE-WAIVED first line so the AC4 slice-presence guard lets this dispatch
+    // reach the cap-increment path (conductor-authorized, intent-preserving fixture
+    // adaptation — the coder is fail-closed on test globs per H5). Assertions below
+    // are unchanged: this test still pins the cap semantics only.
     const spawn = () =>
-      runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: 'go' } }), dir);
+      runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: 'SLICE-WAIVED: cap-path fixture (pre-existing test, adapted for AC4)\ngo' } }), dir);
     store.updateRunOptimistic('r-h5', (run) => ({ ...run, dispatch_counts: { coder: 24 } }));
     assert.equal(spawn().code, 0, '25th dispatch is within the cap');
     assert.equal(store.getRun('r-h5').dispatch_counts.coder, 25);
@@ -1440,5 +1444,101 @@ test('H17 bundle runs standalone (no runtime workspace resolution); conductor (n
     assert.equal(r.status, 0, `conductor (no agent_id) must short-circuit to allow (exit 0); stderr: ${r.stderr}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --------------------------- H8 slice-presence guard (run r-d630 phase 3, AC4) ---------------------------
+//
+// The NEW check H8 gains: during an active run, a guarded pipeline-agent dispatch
+// whose prompt carries neither the STERLING-SLICE marker nor a SLICE-WAIVED: <reason>
+// line is DENIED (teaching both formats) BEFORE the cap increment. 'coder' is a proven
+// guarded pipeline type (the cap test above increments dispatch_counts.coder). Marker,
+// waiver, non-pipeline, and no-run paths behave exactly as today; the cap is untouched.
+
+const SLICE = (role = 'coder') => `STERLING-SLICE run=r-h5 phase=p1 role=${role} staged=2026-06-10T12:00:00.000Z`;
+
+test('H8 AC4: a guarded pipeline dispatch with neither marker nor waiver is DENIED, teaching both formats, and consumes NO cap slot', () => {
+  const { dir, store, cleanup } = makeProject({ withRun: true });
+  try {
+    const dispatch = (over = {}) =>
+      runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', ...over } }), dir);
+
+    const denied = dispatch({ prompt: 'Implement the export feature end to end.' });
+    assert.equal(denied.code, 2, 'a markerless/waiverless guarded pipeline dispatch during an active run is denied');
+    assert.match(denied.stderr, /STERLING-SLICE/, 'the deny message teaches the marker format');
+    assert.match(denied.stderr, /SLICE-WAIVED/, 'the deny message teaches the waiver format');
+    // the slice guard is ordered BEFORE the cap increment — no slot consumed
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'a slice-denied dispatch consumes no cap slot');
+    // and it is NOT a cap escalation — this is the slice deny, not the cap deny
+    assert.ok(!(store.getRun('r-h5').escalations ?? []).some((e) => e.kind === 'dispatch_cap_exceeded'), 'the slice deny is not a cap-exceeded escalation');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 AC4: a dispatch carrying the STERLING-SLICE marker (any line) passes and consumes its slot; a SLICE-WAIVED: <reason> line passes; a reasonless SLICE-WAIVED: is denied', () => {
+  const { dir, store, cleanup } = makeProject({ withRun: true });
+  try {
+    const dispatch = (over = {}) =>
+      runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', ...over } }), dir);
+
+    // marker on a line other than the first — the check is line-anchored, not string-start
+    const passed = dispatch({ prompt: `Here is your dispatch.\n${SLICE()}\n- decision …` });
+    assert.equal(passed.code, 0, 'a dispatch whose prompt contains the STERLING-SLICE marker line passes');
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'a passing dispatch consumes its cap slot exactly as today');
+
+    const waived = dispatch({ prompt: 'SLICE-WAIVED: fixer-mode targeted one-line patch\napply it' });
+    assert.equal(waived.code, 0, 'a SLICE-WAIVED: <reason> line passes (fixer-mode waiver)');
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 2, 'the waived dispatch also consumes its slot');
+
+    const emptyWaiver = dispatch({ prompt: 'SLICE-WAIVED:' });
+    assert.equal(emptyWaiver.code, 2, 'a reasonless SLICE-WAIVED: does not satisfy the waiver (^SLICE-WAIVED: .+)');
+    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 2, 'the denied empty-waiver dispatch consumed no slot');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 AC4: non-pipeline and no-run dispatches behave exactly as today (no slice guard)', () => {
+  const withRun = makeProject({ withRun: true });
+  try {
+    // a NON-pipeline subagent_type (the platform default, not a Sterling pipeline
+    // agent) is not slice-guarded even markerless during an active run
+    const nonPipe = runHook(
+      'h8-dispatch-cap.mjs',
+      hookInput(withRun.dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'general-purpose', prompt: 'markerless direct dispatch' } }),
+      withRun.dir
+    );
+    assert.equal(nonPipe.code, 0, 'a non-pipeline subagent_type is not slice-guarded (behaves exactly as today)');
+  } finally {
+    withRun.cleanup();
+  }
+  const noRun = makeProject();
+  try {
+    // no active run → the slice guard does not apply, markerless is fine
+    const r = runHook(
+      'h8-dispatch-cap.mjs',
+      hookInput(noRun.dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: 'markerless' } }),
+      noRun.dir
+    );
+    assert.equal(r.code, 0, 'no active run → no slice guard (behaves exactly as today)');
+  } finally {
+    noRun.cleanup();
+  }
+});
+
+test('H8 AC4: existing cap semantics are unchanged — at the limit the cap still denies even with a valid marker (the slice guard never shadows the cap)', () => {
+  const { dir, store, cleanup } = makeProject({ withRun: true });
+  try {
+    store.updateRunOptimistic('r-h5', (run) => ({ ...run, dispatch_counts: { coder: 25 } }));
+    const capped = runHook(
+      'h8-dispatch-cap.mjs',
+      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: `${SLICE()}\nbody` } }),
+      dir
+    );
+    assert.equal(capped.code, 2, 'a marker-carrying dispatch at the cap limit is still denied by the cap');
+    assert.match(capped.stderr, /dispatch cap exceeded/, 'it is the cap deny, not the slice deny — cap semantics unchanged');
+  } finally {
+    cleanup();
   }
 });

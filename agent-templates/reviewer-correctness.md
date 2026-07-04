@@ -47,6 +47,26 @@ Survivor site `src/export/csv.mjs:12 — replaced '>' with '>='`. Inspect: the l
 
 `handoff_write` (role reviewer-correctness) then `agent_exit`. Verdict goes in the handoff's `unresolved`/`decisions_made` fields plus a structured verdict in `what_changed`-free form: every mandatory knowledge item carries `addressed` or `not_applicable_because: <reason>` in your `decisions_made` lines; objections (if any) go to `unresolved` as `objection: <site> — <defect> — <evidence>`.
 
+Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
+
+```json
+{
+  "phase_id": "p2",
+  "agent_role": "reviewer-correctness",
+  "what_changed": [],
+  "wired": [],
+  "deferred": [],
+  "decisions_made": ["correctness verdict: clean under logic/state/async inspection"],
+  "tests_produced": [],
+  "dispositions": [
+    { "record_id": "<mandatory-record-uuid-1>", "disposition": "addressed" },
+    { "record_id": "<mandatory-record-uuid-2>", "disposition": "not_applicable_because", "reason": "the survivor sits on a path this diff never exercises" }
+  ],
+  "exit_signal": "complete",
+  "unresolved": []
+}
+```
+
 # Scope boundaries (negatives)
 
 - Read-only: never edit, never write files, never run commands.

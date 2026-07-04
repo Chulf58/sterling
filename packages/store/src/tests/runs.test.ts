@@ -195,3 +195,60 @@ test('appendRunScopeAmendment: idempotent-on-path append; first {reason,at} stan
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ------------------- reviewer knowledge loop v2 (run r-d630, phase 1 — AC1) -------------------
+
+test('setRunReviewMandatory: replace-by-phase under optimistic update; never touches machine_state; loud on missing run (AC1)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    // guard: convert a not-yet-existing method into an ASSERTION-red (never a call-of-undefined crash).
+    assert.equal(
+      typeof (store as unknown as { setRunReviewMandatory?: unknown }).setRunReviewMandatory,
+      'function',
+      'SterlingStore must expose setRunReviewMandatory(runId, phaseId, items)'
+    );
+    const s = store as unknown as {
+      setRunReviewMandatory: (runId: string, phaseId: string, items: { record_id: string; reason: string }[]) => void;
+    };
+    type Mand = { phase_id: string; record_id: string; reason: string };
+    const A = randomUUID(), B = randomUUID(), C = randomUUID(), D = randomUUID();
+
+    // set p1 -> {A, B}; the phaseId param stamps phase_id on each stored entry
+    s.setRunReviewMandatory(run.id, 'p1', [{ record_id: A, reason: 'governing design decision' }, { record_id: B, reason: 'anti-pattern' }]);
+    let after = store.getRun(run.id)! as unknown as { review_mandatory: Mand[]; machine_state: string };
+    assert.ok(Array.isArray(after.review_mandatory), 'review_mandatory is an array after the first set (assertion-red, not a crash)');
+    const p1first = after.review_mandatory.filter((m) => m.phase_id === 'p1');
+    assert.equal(p1first.length, 2, 'p1 carries both items');
+    assert.deepEqual(p1first.map((m) => m.record_id).sort(), [A, B].sort(), 'p1 record_ids landed');
+    const a = after.review_mandatory.find((m) => m.record_id === A)!;
+    assert.equal(a.phase_id, 'p1', 'the phaseId param stamps phase_id on each entry');
+    assert.equal(a.reason, 'governing design decision', 'the per-item reason is preserved');
+    assert.equal(after.machine_state, 'running', 'setRunReviewMandatory does not touch machine_state');
+
+    // set p2 -> {C}: a DIFFERENT phase — p1 must remain untouched (replace is per-phase, not global)
+    s.setRunReviewMandatory(run.id, 'p2', [{ record_id: C, reason: 'convention' }]);
+    after = store.getRun(run.id)! as unknown as typeof after;
+    assert.equal(after.review_mandatory.filter((m) => m.phase_id === 'p1').length, 2, 'p1 remains after setting p2');
+    assert.equal(after.review_mandatory.filter((m) => m.phase_id === 'p2').length, 1, 'p2 has its one item');
+    assert.equal(after.machine_state, 'running', 'still no machine_state change');
+
+    // REPLACE-BY-PHASE: re-set p1 -> {D}. p1's old {A,B} are GONE; p2's {C} is untouched.
+    s.setRunReviewMandatory(run.id, 'p1', [{ record_id: D, reason: 'new decision' }]);
+    after = store.getRun(run.id)! as unknown as typeof after;
+    assert.deepEqual(after.review_mandatory.filter((m) => m.phase_id === 'p1').map((m) => m.record_id), [D], 'p1 is REPLACED, not appended (old A, B removed)');
+    assert.equal(after.review_mandatory.filter((m) => m.phase_id === 'p2').length, 1, 'p2 untouched by re-setting p1');
+
+    // BOUNDARY: setting an EMPTY list for a phase clears that phase only
+    s.setRunReviewMandatory(run.id, 'p1', []);
+    after = store.getRun(run.id)! as unknown as typeof after;
+    assert.equal(after.review_mandatory.filter((m) => m.phase_id === 'p1').length, 0, 'empty items clears p1');
+    assert.equal(after.review_mandatory.filter((m) => m.phase_id === 'p2').length, 1, 'p2 still intact after clearing p1');
+
+    // LOUD on a missing run (mirrors appendRunEscalation / appendRunScopeAmendment; P5)
+    assert.throws(() => s.setRunReviewMandatory('r-none', 'p1', [{ record_id: A, reason: 'r' }]), /no run/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -291,6 +291,14 @@ export const AGENT_MODEL_KEY = {
   explorer: 'explorer',
 } as Record<string, string>;
 
+// REVIEWER_ROLES (decision 628c4b7f, run r-d630, phase 1 — AC1): derived from
+// AGENT_MODEL_KEY — exactly the keys that map to 'reviewers'. Single source of
+// truth; a hardcoded list was explicitly rejected (second source of truth would
+// drift from the roster). Totality-tested in schemas.test.ts vs registry.json.
+export const REVIEWER_ROLES: Set<string> = new Set(
+  Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === 'reviewers')
+);
+
 // ---------------------------------------------------------------------------
 // Record-type registry (invariant 3, spec §15): the single source of truth for
 // durable types. The store consults it on every write — an unregistered type

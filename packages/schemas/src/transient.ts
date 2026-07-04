@@ -57,6 +57,26 @@ export const SPINE_SIGNALS = SIGNALS;
 export const spineSignal = signalSchema;
 export type SpineSignal = Signal;
 
+// Disposition item (reviewer-knowledge-loop v2, run r-d630, phase 1 — AC1).
+// handoffSchema.dispositions[]: reviewer declares per-mandatory-id outcome.
+// 'not_applicable_because' requires a non-empty reason (zod refine);
+// 'addressed' reason is optional. Defined ONCE here (invariant 1); the
+// coverage check (role-conditional set-equality) lives in tools.ts phase 2.
+const dispositionItemSchema = z
+  .object({
+    record_id: z.string().min(1),
+    disposition: z.enum(['addressed', 'not_applicable_because']),
+    reason: z.string().optional(),
+  })
+  .superRefine((item, ctx) => {
+    if (item.disposition === 'not_applicable_because' && (!item.reason || item.reason.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "disposition 'not_applicable_because' requires a non-empty reason",
+      });
+    }
+  });
+
 export const handoffSchema = z.object({
   phase_id: z.string().min(1),
   agent_role: z.string().min(1),
@@ -72,6 +92,9 @@ export const handoffSchema = z.object({
   subtask_evidence: z
     .array(z.object({ subtask: z.string().min(1), files: z.array(repoPath), tests: z.array(repoPath) }))
     .optional(),
+  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
+  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
+  dispositions: z.array(dispositionItemSchema).optional(),
   exit_signal: signalSchema,
   unresolved: z.array(z.string()),
 });
@@ -91,6 +114,15 @@ export const sessionEventSchema = z.object({
   at: z.string().min(1),
 });
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
+
+// Shared mandatory tuple (decision 628c4b7f, run r-d630, phase 1 — AC1).
+// Defined ONCE here (invariant 1); reused by runRecordSchema.review_mandatory
+// and (phase 2+) summaries.undispositioned_mandatory.
+export const reviewMandatoryItemSchema = z.object({
+  phase_id: z.string().min(1),
+  record_id: z.string().min(1),
+  reason: z.string().min(1),
+});
 
 export const runRecordSchema = z.object({
   id: z.string().min(1),
@@ -117,6 +149,11 @@ export const runRecordSchema = z.object({
   // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
   // can never open an out_of_scope path.
   scope_amendments: z.array(z.object({ path: repoPath, reason: z.string().min(1), at: z.string().min(1) })).optional(),
+  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
+  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
+  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
+  // Optional; legacy runs round-trip unchanged.
+  review_mandatory: z.array(reviewMandatoryItemSchema).optional(),
   // §8.1 branch model: the branch the run started from — the merge gate's
   // target; recorded by the branch manager at run-branch creation.
   base_branch: z.string().optional(),
@@ -135,6 +172,13 @@ export const runRecordSchema = z.object({
           mandatory: z.array(z.object({ record_id: z.string(), reason: z.string() })),
         })
       ),
+      // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
+      // mandatory ids left undispositioned across the run's reviewer handoffs,
+      // folded in by dispose-run BEFORE transients are deleted (P4) and printed
+      // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
+      // the shared mandatory tuple (invariant 1). Optional so legacy summaries
+      // round-trip unchanged.
+      undispositioned_mandatory: z.array(reviewMandatoryItemSchema).optional(),
       snapshot_path: z.string(),
     })
     .optional(),
