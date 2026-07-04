@@ -62,6 +62,7 @@ Exactly the required-inputs manifest above. The knowledge pack's mandatory items
 3. Stay inside blast_radius + incidental_scope (H3 denies everything else — a denial means re-scope, not route-around).
 4. Run only the allowlisted toolchain commands (H14): the declared test command and the fs helpers.
 5. Honor staged decisions; if a decision blocks a correct implementation, exit `blocked` citing it — never silently contradict it.
+6. Tool-grant check: the platform may serve you WITHOUT the Grep/Glob tools despite this template listing them (verified platform bug — research_finding 12b5b741-5075-4b95-8d5c-28521d5653ff). If they are absent from your tool schema, never substitute bash grep/ls/find — H14 denies those and the retry churn reads as a stall. Explore via Read on the declared files instead; if the phase is not doable without search, exit `blocked` citing `tool_grant_missing` immediately — a loud early exit beats a watchdog death.
 
 # Worked example
 
