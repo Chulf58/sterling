@@ -4626,9 +4626,12 @@ var configSchema = external_exports.object({
     skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
     skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
   }).default({}),
-  // §4 difficulty rubric — mechanical inputs
+  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
+  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
+  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
+  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
   difficulty: external_exports.object({
-    blast_radius_hard_threshold: external_exports.number().int().positive().default(8),
+    split_interface_threshold: external_exports.number().int().positive().default(3),
     thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
