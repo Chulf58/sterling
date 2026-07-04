@@ -4630,14 +4630,14 @@ if (!config?.toolchains?.length) {
   deny("H14: no toolchains in .sterling/config.json \u2014 the Bash allowlist cannot resolve run commands; failing closed (P5)");
 }
 var command = String(input.tool_input?.command ?? "").trim();
-if (/[;&|`\n]|\$\(/.test(command)) {
-  deny(`H14: shell control operators are not allowed in agent commands: '${command}'`);
+if (/[;&|`\n<>]|\$\(/.test(command)) {
+  deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
 }
 var runCommandPrefixes = config.toolchains.flatMap((tc) => Object.values(tc.run_commands ?? {}));
 var firstArg = command.match(/^node\s+(?:"([^"]+)"|(\S+))/);
 var helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
 var isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
-var isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command) && !/[<>]/.test(command);
+var isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
 var allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper || isReadOnlySearch;
 if (!allowed) {
   deny(

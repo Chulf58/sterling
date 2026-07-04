@@ -524,6 +524,14 @@ test('H14: allows adapter run commands and fs helpers; denies everything else na
     assert.equal(r.code, 2, 'an allowed prefix cannot smuggle a chained command');
     assert.match(r.stderr, /control operators/);
     assert.equal(bash('node --test $(rm -rf /)').code, 2);
+    // Redirection on an allowed prefix is a write vector (`node --test > src/x.ts`
+    // clobbers a path) — denied by the operator gate, not only swept by H17.
+    r = bash('node --test > /tmp/evil.txt');
+    assert.equal(r.code, 2, 'redirection on an allowed prefix is denied (H14 redirection gap fix)');
+    assert.match(r.stderr, /redirection/);
+    assert.equal(bash('node --test src/x.test.mjs > clobber.ts').code, 2, 'stdout redirect onto a repo path is denied');
+    assert.equal(bash('node --test 2> err.log').code, 2, 'stderr redirect is denied too');
+    assert.equal(bash('node --test >> append.txt').code, 2, 'append redirect is denied');
   } finally {
     cleanup();
   }
