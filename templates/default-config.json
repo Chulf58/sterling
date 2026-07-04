@@ -41,7 +41,7 @@
     "skeptic_new_export_threshold": 5
   },
   "difficulty": {
-    "blast_radius_hard_threshold": 8,
+    "split_interface_threshold": 3,
     "thin_knowledge_retrieval_threshold": 2
   },
   "session_events": {

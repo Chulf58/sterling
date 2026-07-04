@@ -138,3 +138,92 @@ test('grill-plan-flags CLI reads the brief from the store', () => {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+// ------------------- phase_over_wide breadth flag (run r-68eb, brief afd9b684, AC1 — gate split axis) -------------------
+//
+// computeDivergenceFlags(brief, config?) gains an ADDITIVE optional config param. A phase is
+// over-wide ⇔ (phase.interfaces ?? []).length STRICTLY EXCEEDS config.difficulty.split_interface_threshold
+// (default 3 when the param is omitted). Each over-wide phase emits {kind:'phase_over_wide', detail}
+// whose detail NAMES phase_id, interface count, threshold-in-effect, and subtask count (the human's
+// tiebreak signal). The exact detail field-shape is NOT frozen (decision 288936ab) — so these tests
+// assert the required VALUES appear in the flag, representation-robust, via a JSON stringify. The
+// probe values are chosen distinct (interface count 5, subtask count 8, threshold 3/4) so a naive
+// implementation that drops one of the four is caught. phase_id 'p1' is kept (renaming it would
+// orphan AC1's 'phase:1' and trip ac_without_phase); its only digit is '1', which none of the probe
+// numbers reuse.
+
+// Builds a brief whose single phase p1 declares `interfaceCount` interfaces (all also declared in
+// technical_design.interfaces, per the briefSchema superRefine) and `subtaskCount` subtasks, staying
+// otherwise clean (files in scope, ac_ids present, risk_flags present) so the ONLY divergence in play
+// is phase_over_wide.
+function wideBrief({ interfaceCount = 5, subtaskCount = 8 } = {}) {
+  const names = Array.from({ length: interfaceCount }, (_, i) => `iface_${i}`);
+  const base = goodBrief();
+  return {
+    ...base,
+    technical_design: { ...base.technical_design, interfaces: names.map((n) => ({ name: n, contract: `${n}() -> void` })) },
+    phases: [{
+      ...base.phases[0],
+      interfaces: names,
+      subtasks: Array.from({ length: subtaskCount }, (_, i) => `subtask ${i}`),
+    }],
+  };
+}
+
+const overWideFlags = (b, config) =>
+  (config === undefined ? computeDivergenceFlags(b) : computeDivergenceFlags(b, config)).filter((f) => f.kind === 'phase_over_wide');
+
+test('phase_over_wide: an over-wide phase (5 interfaces > default 3) is flagged, naming phase_id + interface count + threshold + subtask count', () => {
+  const flags = overWideFlags(wideBrief({ interfaceCount: 5, subtaskCount: 8 }));
+  assert.equal(flags.length, 1, 'exactly one phase_over_wide flag for the one over-wide phase');
+  const s = JSON.stringify(flags[0]);
+  assert.ok(s.includes('p1'), 'detail names the offending phase (phase_id)');
+  assert.ok(s.includes('5'), 'detail names the interface count (5)');
+  assert.ok(s.includes('3'), 'detail names the threshold in effect (default 3)');
+  assert.ok(s.includes('8'), "detail names the phase's subtask count (8) — the human's tiebreak signal");
+});
+
+test('phase_over_wide: strictly greater — a phase with interfaces exactly AT the threshold (3) is NOT flagged', () => {
+  assert.equal(overWideFlags(wideBrief({ interfaceCount: 3 })).length, 0, 'interfaces.length === threshold is within bounds (strictly-greater predicate)');
+  assert.equal(overWideFlags(wideBrief({ interfaceCount: 4 })).length, 1, 'one over the threshold IS flagged');
+});
+
+test('phase_over_wide: a brief whose phases are all within threshold emits no such flag', () => {
+  assert.deepEqual(overWideFlags(goodBrief()), [], 'the 1-interface goodBrief is within threshold — no phase_over_wide');
+  // and the whole clean brief remains flag-free (the additive param must not manufacture flags)
+  assert.deepEqual(computeDivergenceFlags(goodBrief()), []);
+});
+
+test('phase_over_wide: called WITHOUT the config param, the threshold falls back to the schema default (3)', () => {
+  const flags = overWideFlags(wideBrief({ interfaceCount: 5, subtaskCount: 8 }), undefined);
+  assert.equal(flags.length, 1, 'a no-config call still flags an over-wide phase at the default threshold 3');
+  assert.ok(JSON.stringify(flags[0]).includes('3'), 'the fallback threshold reported in detail is 3');
+});
+
+test('phase_over_wide: a custom difficulty.split_interface_threshold governs (tunable)', () => {
+  const wide = wideBrief({ interfaceCount: 5, subtaskCount: 8 });
+  // raise the threshold above the phase's breadth ⇒ no longer over-wide
+  assert.equal(
+    overWideFlags(wide, { difficulty: { split_interface_threshold: 10 } }).length,
+    0,
+    '5 interfaces is within a custom threshold of 10 — not flagged'
+  );
+  // lower the threshold below the breadth ⇒ flagged, and the custom threshold is the one reported
+  const tightened = overWideFlags(wide, { difficulty: { split_interface_threshold: 4 } });
+  assert.equal(tightened.length, 1, '5 interfaces exceeds a custom threshold of 4 — flagged');
+  assert.ok(JSON.stringify(tightened[0]).includes('4'), 'the threshold-in-effect reported in detail is the custom 4, not the default 3');
+});
+
+test('phase_over_wide: additive param — omitting config is byte-identical to passing the default threshold, and never disturbs existing flags', () => {
+  // For a non-over-wide brief that trips an existing flag, omitting config === passing the default-3 config.
+  const b = goodBrief({ risk_flags: [] });
+  assert.deepEqual(
+    computeDivergenceFlags(b),
+    computeDivergenceFlags(b, { difficulty: { split_interface_threshold: 3 } }),
+    'omitted config falls back to the schema default 3 — result is byte-identical'
+  );
+  // the existing divergence is still detected, and no phase_over_wide is fabricated, with the param omitted
+  const kinds = computeDivergenceFlags(b).map((f) => f.kind);
+  assert.ok(kinds.includes('no_risk_flags'), 'existing flag behavior is preserved when the param is omitted');
+  assert.ok(!kinds.includes('phase_over_wide'), 'a within-threshold brief gains no phase_over_wide from the additive param');
+});
