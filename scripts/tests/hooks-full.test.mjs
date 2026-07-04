@@ -367,6 +367,38 @@ test('H4: test-writer read wall — denies implementation, allows tests/docs/out
   }
 });
 
+test('H4: content-mode Grep hits the same wall — the r-ea9e bypass replay (denied Read, denied content Grep, allowed locate Grep)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const call = (tool, tool_input) => runHook('h4-read-wall.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: tool, tool_input }), dir);
+    const impl = join(dir, 'src', 'records.mjs');
+
+    // the incident, replayed: Read denied → the same file's content re-fetched via Grep -C
+    assert.equal(call('Read', { file_path: impl }).code, 2);
+    const bypass = call('Grep', { pattern: 'schema', path: impl, output_mode: 'content', '-C': 3 });
+    assert.equal(bypass.code, 2, 'content-mode Grep on a Read-denied file is the same read');
+    assert.match(bypass.stderr, /H4/);
+
+    // locating is fine — paths-only and count reveal no content
+    assert.equal(call('Grep', { pattern: 'schema', path: impl, output_mode: 'files_with_matches' }).code, 0);
+    assert.equal(call('Grep', { pattern: 'schema' }).code, 0, 'default output mode locates, repo-wide');
+    assert.equal(call('Grep', { pattern: 'schema', path: impl, output_mode: 'count' }).code, 0);
+
+    // content mode stays available exactly where Read is allowed
+    assert.equal(call('Grep', { pattern: 'x', path: join(dir, 'tests', 'x.test.mjs'), output_mode: 'content' }).code, 0);
+    assert.equal(call('Grep', { pattern: 'x', path: join(dir, 'docs', 'guide.txt'), output_mode: 'content' }).code, 0);
+    assert.equal(call('Grep', { pattern: 'x', path: 'C:/elsewhere/notes.ts', output_mode: 'content' }).code, 0, 'outside the repo is not implementation');
+
+    // unscoped content sweeps fail closed (P5): pathless, repo root, dir-scoped source
+    assert.equal(call('Grep', { pattern: 'x', output_mode: 'content' }).code, 2, 'pathless content grep = repo-wide read');
+    assert.equal(call('Grep', { pattern: 'x', path: dir, output_mode: 'content' }).code, 2, 'repo-root content grep');
+    assert.equal(call('Grep', { pattern: 'x', path: '.', output_mode: 'content' }).code, 2, 'relative-root content grep');
+    assert.equal(call('Grep', { pattern: 'x', path: join(dir, 'src'), output_mode: 'content' }).code, 2, 'dir-scoped content grep over source');
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- H7 ---------------------------
 
 test('H7 [pipeline]: owning articles land on run.reconcile_needed, idempotently', () => {
