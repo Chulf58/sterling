@@ -209,6 +209,39 @@ test('knowledge_promote refuses what §3.3 forbids: non-project scope, unpromota
   }
 });
 
+test('maintenance_enqueue → board_remove lifecycle completes by id WITH a domain mounted (regression: todo b6fb321f)', () => {
+  // The queue is PROJECT-LOCAL, but a system todo is created scope:project through
+  // knowledgeCreate, so with a domain mounted the by-id paths (get/remove) must
+  // still resolve it. The 2026-07-03 report of an unremovable item ('no record')
+  // was a stale running MCP server predating the get/remove mount-fan; this pins
+  // the whole create→find→remove cycle through the tool surface so it can't
+  // silently regress. (§3.2.7 / §3.3)
+  const { store, tools, cleanup } = harness();
+  try {
+    const item = tools.maintenanceEnqueue({ reason: 'capture_owed', text: 'stuck-item probe' }).record;
+    assert.equal(item.scope, 'project', 'a maintenance item is project-scoped');
+    assert.ok(store.project.get(item.id), 'it lives in the PROJECT store, not a domain');
+
+    // query fans and finds it; the by-id paths must too, with the domain mounted
+    assert.ok(
+      tools.maintenanceQuery({ system_reason: 'capture_owed', cap: 100 }).some((t) => t.id === item.id),
+      'maintenance_query surfaces the enqueued item'
+    );
+    assert.equal(tools.knowledgeGet(item.id).id, item.id, 'knowledge_get resolves it by id across mounts');
+
+    // the lifecycle completes: board_remove by id succeeds and it leaves the queue
+    assert.equal(tools.boardRemove(item.id).removed, item.id, 'board_remove removes it by id');
+    assert.equal(
+      tools.maintenanceQuery({ system_reason: 'capture_owed', cap: 100 }).filter((t) => t.id === item.id).length,
+      0,
+      'the item is gone from the queue after removal'
+    );
+    assert.equal(store.project.get(item.id), undefined, 'and gone from the project store');
+  } finally {
+    cleanup();
+  }
+});
+
 test('§3.3 resolveDomainMounts: stack_tags ARE the mount manifest; default per-user root + per-tag domain_paths override', () => {
   // each stack tag mounts one store at the per-user root by default
   const def = resolveDomainMounts(parseConfig({ stack_tags: ['genesys', 'node'] }));
