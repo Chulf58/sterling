@@ -14,9 +14,12 @@ if (!config?.toolchains?.length) {
 const command = String(input.tool_input?.command ?? '').trim();
 
 // Shell control operators would let an allowed prefix smuggle a second command
-// ('node --test && …'). The declared run commands never need them.
-if (/[;&|`\n]|\$\(/.test(command)) {
-  deny(`H14: shell control operators are not allowed in agent commands: '${command}'`);
+// ('node --test && …') OR redirect an allowed command's output to write an
+// arbitrary path ('node --test > src/x.ts'). The declared run commands and the
+// read-only search commands never need chaining OR redirection, so both are
+// denied outright here — one place, before any allow path is considered.
+if (/[;&|`\n<>]|\$\(/.test(command)) {
+  deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
 }
 
 const runCommandPrefixes = config.toolchains.flatMap((tc) => Object.values(tc.run_commands ?? {}));
@@ -28,10 +31,11 @@ const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.
 // 2026-07-04): the platform silently drops the dedicated Grep/Glob tools from
 // the coder's served grant (research_finding 12b5b741), leaving it searchless.
 // grep and ls are the standalone substitutes: neither has an execute or write
-// flag, control operators are denied above, and redirection is refused here so
-// the pair stays read-only. find/sed/awk remain denied (-exec / e / system()
-// execute). RETIRE this allowance when a probe shows Grep/Glob served again.
-const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command) && !/[<>]/.test(command);
+// flag, and chaining/redirection are already denied above (the operator gate),
+// so a bare grep/ls cannot become a writer. find/sed/awk remain denied
+// (-exec / e / system() execute). RETIRE this allowance when a probe shows
+// Grep/Glob served again.
+const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
 
 const allowed =
   runCommandPrefixes.some((p) => command === p || command.startsWith(p + ' ')) || isFsHelper || isReadOnlySearch;
