@@ -62,13 +62,18 @@ function articleFields(briefId, { traceAC = true, fulfills = [] } = {}) {
   };
 }
 
-function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mountDomain = false, decisionInDecisionsMade = false } = {}) {
+function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mountDomain = false, decisionInDecisionsMade = false, phaseInterfaces = [], splitThreshold = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-loop-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   const config = {
     toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }],
     prep_cap: 10,
   };
+  // AC2 breadth backstop: an optional custom split_interface_threshold, on the SAME
+  // config field the gate flag and H8 read (difficulty.split_interface_threshold).
+  // Omitted → the schema default (3) governs and existing callers write no difficulty
+  // block, so their behavior is byte-identical.
+  if (splitThreshold != null) config.difficulty = { split_interface_threshold: splitThreshold };
   // opt-in domain mount (read-side wiring test): stack_tags ARE the mount
   // manifest (§3.3); domain_paths pins the shared store inside the temp dir so
   // the test never touches the real ~/.sterling/domains.
@@ -110,7 +115,7 @@ function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mount
     user_stated: { criteria: ['user said: integers must work'], constraints: [] },
     conductor_proposals: [],
     acceptance_criteria: [{ ac_id: 'AC1', text: 'add(2,3) returns 5 end to end', verifiable_at: 'final' }],
-    technical_design: { approach: 'single module', interfaces: [], shared_structures: [] },
+    technical_design: { approach: 'single module', interfaces: phaseInterfaces.map((n) => ({ name: n, contract: `${n}() -> void` })), shared_structures: [] },
     blast_radius: {
       files: [
         { path: 'src/calc.mjs', owning_articles: [] },
@@ -122,7 +127,7 @@ function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mount
     incidental_scope: [],
     out_of_scope: [],
     phases: [
-      { phase_id: 'p1', goal: 'implement add', subtasks: ['write add'], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet', rank_terms: ['calc'] },
+      { phase_id: 'p1', goal: 'implement add', subtasks: ['write add'], ac_ids: ['AC1'], interfaces: phaseInterfaces, difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet', rank_terms: ['calc'] },
     ],
     // required_by_contract (AC3) = staged ids ∩ brief.decisions_made — the seeded
     // decision is staged (file-keyed to the phase file), so opting it into
@@ -763,5 +768,93 @@ test('AC5: undispositioned_mandatory is EMPTY when a genuine reviewer-role hando
     assert.deepEqual(gs.summaries.undispositioned_mandatory, [], 'merge-gate prints an empty undispositioned_mandatory when coverage was complete');
   } finally {
     fix.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC2 (run r-68eb phase 2) — prep breadth backstop: prep REFUSES to stage a phase
+// whose interface count STRICTLY EXCEEDS config.difficulty.split_interface_threshold
+// (default 3). Refusal is a HARD backstop: non-zero exit; nothing staged — no
+// knowledge_pack, no dispatch_slice files, no review_mandatory stamp; the message
+// names phase/count/threshold and the split remedy. The check sits immediately after
+// phase resolution, BEFORE prep's first write. A within-threshold phase stages
+// exactly as today. Probe interface counts are chosen distinct (5, 4, 3) so an
+// off-by-one (>= vs >) mutant is caught by the exactly-at-threshold boundary.
+// ---------------------------------------------------------------------------
+
+// The over-wide-run artefact paths prep would otherwise create.
+const packPath = (dir) => join(RUN_DIR(dir), 'knowledge_pack-p1.json');
+const reviewerSlicePath = (dir) => join(RUN_DIR(dir), 'dispatch_slice-p1-reviewer.md');
+const builderSlicePath = (dir) => join(RUN_DIR(dir), 'dispatch_slice-p1-builder.md');
+const p1ReviewMandatory = (store) => (store.getRun('r-loop').review_mandatory ?? []).filter((m) => m.phase_id === 'p1');
+
+function assertPrepStagedNothing(dir, store) {
+  assert.equal(existsSync(packPath(dir)), false, 'a breadth-refused phase writes NO knowledge_pack');
+  assert.equal(existsSync(reviewerSlicePath(dir)), false, 'a breadth-refused phase writes NO reviewer dispatch slice');
+  assert.equal(existsSync(builderSlicePath(dir)), false, 'a breadth-refused phase writes NO builder dispatch slice');
+  assert.deepEqual(p1ReviewMandatory(store), [], 'a breadth-refused phase stamps NO review_mandatory for the phase');
+}
+
+test('AC2: prep REFUSES an over-wide phase — non-zero exit, names phase/count/threshold + split remedy, and stages NOTHING (no pack, no slices, no review_mandatory)', () => {
+  // 5 interfaces on p1 > default threshold 3 → over-wide
+  const fix = makeLoopProject({ phaseInterfaces: ['iface_a', 'iface_b', 'iface_c', 'iface_d', 'iface_e'] });
+  const { dir, store } = fix;
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.notEqual(prep.code, 0, 'prep must exit non-zero on an over-wide phase (hard backstop)');
+    const msg = prep.stderr + prep.stdout;
+    assert.match(msg, /p1/, 'the refusal names the offending phase');
+    assert.match(msg, /\b5\b/, 'the refusal names the interface count (5)');
+    assert.match(msg, /\b3\b/, 'the refusal names the threshold in effect (default 3)');
+    assert.match(msg, /split/i, 'the refusal names the split remedy');
+    assertPrepStagedNothing(dir, store);
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('AC2: prep breadth refusal is STRICTLY greater — a phase with interfaces exactly AT the threshold (3) stages normally; one over (4) is refused, staging nothing', () => {
+  // exactly-at-threshold (3): NOT over-wide → stages exactly as today
+  const at = makeLoopProject({ phaseInterfaces: ['iface_a', 'iface_b', 'iface_c'] });
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', at.dir], at.dir);
+    assert.equal(prep.code, 0, 'interfaces.length === threshold is within bounds — prep stages');
+    assert.equal(existsSync(packPath(at.dir)), true, 'the within-threshold phase writes its knowledge_pack');
+    assert.equal(existsSync(reviewerSlicePath(at.dir)), true, 'and its reviewer dispatch slice');
+    assert.equal(existsSync(builderSlicePath(at.dir)), true, 'and its builder dispatch slice');
+  } finally {
+    at.cleanup();
+  }
+  // one over the threshold (4): refused, nothing staged
+  const over = makeLoopProject({ phaseInterfaces: ['iface_a', 'iface_b', 'iface_c', 'iface_d'] });
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', over.dir], over.dir);
+    assert.notEqual(prep.code, 0, 'one interface over the threshold IS refused');
+    assert.match(prep.stderr + prep.stdout, /\b4\b/, 'the refusal names the interface count (4)');
+    assertPrepStagedNothing(over.dir, over.store);
+  } finally {
+    over.cleanup();
+  }
+});
+
+test('AC2: the SAME config field governs — a custom difficulty.split_interface_threshold widens and tightens the prep breadth gate', () => {
+  // 5 interfaces is within a custom threshold of 10 → prep stages
+  const wide = makeLoopProject({ phaseInterfaces: ['a', 'b', 'c', 'd', 'e'], splitThreshold: 10 });
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', wide.dir], wide.dir);
+    assert.equal(prep.code, 0, '5 interfaces is within a custom threshold of 10 — prep reads difficulty.split_interface_threshold');
+    assert.equal(existsSync(packPath(wide.dir)), true, 'the within-custom-threshold phase stages its pack');
+  } finally {
+    wide.cleanup();
+  }
+  // 3 interfaces exceeds a custom threshold of 2 → refused (proves the field, not a hardcoded 3)
+  const tight = makeLoopProject({ phaseInterfaces: ['a', 'b', 'c'], splitThreshold: 2 });
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', tight.dir], tight.dir);
+    assert.notEqual(prep.code, 0, '3 interfaces exceeds a custom threshold of 2 — refused');
+    assert.match(prep.stderr + prep.stdout, /\b2\b/, 'the refusal reports the custom threshold in effect (2), not the default 3');
+    assertPrepStagedNothing(tight.dir, tight.store);
+  } finally {
+    tight.cleanup();
   }
 });

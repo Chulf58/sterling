@@ -18,6 +18,23 @@ const brief = requireBrief(store, run);
 const phaseId = arg('--phase') ?? run.phases.find((p) => p.status === 'in_progress')?.id;
 const phase = brief.phases.find((p) => p.phase_id === phaseId);
 if (!phase) fail(`prep: no phase '${phaseId}' in brief '${brief.id}'`);
+
+// Breadth backstop (two-axis phase discipline, decision 288936ab): an over-wide
+// phase is a decomposition failure (P7), never absorbed by prep or the agents
+// it dispatches. Checked immediately after phase resolution, BEFORE prep's
+// first write/stamp — a refused phase stages nothing (no knowledge_pack, no
+// dispatch slices, no review_mandatory). Strictly-greater: exactly-at-threshold
+// stages normally.
+const splitThreshold = config.difficulty?.split_interface_threshold ?? 3;
+const interfaceCount = (phase.interfaces ?? []).length;
+if (interfaceCount > splitThreshold) {
+  fail(
+    `prep: phase '${phaseId}' is over-wide — ${interfaceCount} interfaces exceeds the split threshold (${splitThreshold}). ` +
+      `An over-wide phase is a decomposition failure (P7): split it into narrower phases at planning (each within the ` +
+      `threshold), then re-run prep. Nothing was staged.`
+  );
+}
+
 const role = arg('--role') ?? 'coder';
 
 // Planning outputs are prep's inputs (§7.6); one-phase spine falls back to the blast radius.

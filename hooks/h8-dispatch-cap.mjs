@@ -4612,9 +4612,12 @@ var configSchema = external_exports.object({
     skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
     skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
   }).default({}),
-  // §4 difficulty rubric — mechanical inputs
+  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
+  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
+  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
+  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
   difficulty: external_exports.object({
-    blast_radius_hard_threshold: external_exports.number().int().positive().default(8),
+    split_interface_threshold: external_exports.number().int().positive().default(3),
     thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
@@ -5305,6 +5308,19 @@ function sliceDenial(agentType2, prompt) {
   if (SLICE_MARKER_RE.test(text) || SLICE_WAIVER_RE.test(text)) return null;
   return `H8: pipeline dispatch of '${agentType2}' during an active run carries no knowledge slice. Every guarded dispatch must include, on its own line, either the prep-stamped marker 'STERLING-SLICE run=<id> phase=<id> role=<role> staged=<ISO>' (paste the reviewer/builder dispatch_slice prep wrote), or 'SLICE-WAIVED: <reason>' to waive by convention (fixer-mode). Neither was present \u2014 spawning is denied (\xA77.4). A slice-denied dispatch consumes no cap slot.`;
 }
+var BREADTH_MARKER_RE = /^STERLING-SLICE run=\S+ phase=(\S+) role=\S+ staged=\S+$/m;
+function breadthDenial(prompt, brief, config) {
+  const text = typeof prompt === "string" ? prompt : "";
+  const match = BREADTH_MARKER_RE.exec(text);
+  if (!match) return null;
+  const phaseId = match[1];
+  const phase = brief?.phases?.find((p) => p.phase_id === phaseId);
+  if (!phase) return null;
+  const threshold = config?.difficulty?.split_interface_threshold ?? 3;
+  const count = (phase.interfaces ?? []).length;
+  if (count <= threshold) return null;
+  return `H8: pipeline dispatch names phase '${phaseId}', which is over-wide \u2014 ${count} interfaces exceeds the split threshold (${threshold}). An over-wide phase is a decomposition failure (P7): split it into narrower phases at planning, then re-dispatch. Spawning is denied \u2014 a breadth-denied dispatch consumes no cap slot.`;
+}
 var input = readStdin();
 var agentType = input.tool_input?.subagent_type;
 if (!agentType) allow();
@@ -5313,9 +5329,14 @@ if (!store) allow();
 try {
   const run = store.getRun();
   if (!run || run.machine_state !== "running") allow();
-  const sliceDeny = sliceDenial(agentType, input.tool_input?.prompt);
+  const prompt = input.tool_input?.prompt;
+  const sliceDeny = sliceDenial(agentType, prompt);
   if (sliceDeny) deny(sliceDeny);
-  const cap = loadConfig(input.cwd)?.caps?.dispatch_per_agent_type ?? 25;
+  const config = loadConfig(input.cwd);
+  const brief = run.brief_ref ? store.get(run.brief_ref) : null;
+  const breadthDeny = breadthDenial(prompt, brief, config);
+  if (breadthDeny) deny(breadthDeny);
+  const cap = config?.caps?.dispatch_per_agent_type ?? 25;
   const current = run.dispatch_counts[agentType] ?? 0;
   if (current + 1 > cap) {
     store.appendRunEscalation(run.id, {
@@ -5334,5 +5355,6 @@ try {
   store.close();
 }
 export {
+  breadthDenial,
   sliceDenial
 };

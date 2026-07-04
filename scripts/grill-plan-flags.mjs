@@ -6,9 +6,10 @@
 import { matchesGlob } from '@sterling/schemas';
 import { arg, fail, openProject } from './lib/project.mjs';
 
-export function computeDivergenceFlags(brief) {
+export function computeDivergenceFlags(brief, config) {
   const flags = [];
   const flag = (kind, detail) => flags.push({ kind, detail });
+  const splitThreshold = config?.difficulty?.split_interface_threshold ?? 3;
 
   // ACs without phases / phases without ACs — coverage must close both ways
   const phaseAcIds = new Set(brief.phases.flatMap((p) => p.ac_ids));
@@ -56,19 +57,32 @@ export function computeDivergenceFlags(brief) {
     flag('no_risk_flags', 'no risk flags proposed — confirm this plan really has no security/perf relevance (§7.6 step 3)');
   }
 
+  // a phase whose interface count strictly exceeds the split threshold is
+  // over-wide — a decomposition failure (P7): split it, don't upgrade it.
+  for (const p of brief.phases) {
+    const breadth = (p.interfaces ?? []).length;
+    if (breadth > splitThreshold) {
+      flag(
+        'phase_over_wide',
+        `phase '${p.phase_id}' declares ${breadth} interfaces, exceeding the split threshold of ${splitThreshold} ` +
+          `(${(p.subtasks ?? []).length} subtasks) — split the phase (decomposition failure, P7)`
+      );
+    }
+  }
+
   return flags;
 }
 
 const isCli = process.argv[1] && import.meta.url === (await import('node:url')).pathToFileURL(process.argv[1]).href;
 if (isCli) {
   const target = arg('--target') ?? process.cwd();
-  const { store } = openProject(target);
+  const { store, config } = openProject(target);
   try {
     const briefId = arg('--brief');
     if (!briefId) fail('usage: grill-plan-flags.mjs --brief <id> [--target <dir>]', 2);
     const brief = store.get(briefId);
     if (!brief || brief.type !== 'brief') fail(`grill-plan-flags: '${briefId}' is not a brief in the store`, 2);
-    console.log(JSON.stringify({ brief: briefId, flags: computeDivergenceFlags(brief) }, null, 2));
+    console.log(JSON.stringify({ brief: briefId, flags: computeDivergenceFlags(brief, config) }, null, 2));
   } finally {
     store.close();
   }

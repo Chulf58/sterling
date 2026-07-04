@@ -91,3 +91,69 @@ test('templates/default-config.json carries the shipped models_catalog block and
   assert.ok(shipped.models_catalog, 'the shipped default-config carries a models_catalog block');
   assert.equal(shipped.models_catalog?.staleness_days, 45, 'the shipped models_catalog.staleness_days is 45');
 });
+
+// ------------------- difficulty.split_interface_threshold (run r-68eb, brief afd9b684, AC4 — p1 config half) -------------------
+
+// split_interface_threshold is the gate-confirmed RENAME of the dead blast_radius_hard_threshold:
+// the old key is GONE from the schema and a legacy config still carrying it must still parse
+// (configSchema objects are non-strict — unknown keys strip). Accessed through a cast so referencing
+// the not-yet-existing field does not require it at compile time — the assertions below fail cleanly
+// (not the package build) until parseConfig grows the field. The old key is intentionally typed here
+// so the "legacy key stripped from the parsed output" assertion compiles.
+type CfgWithSplit = {
+  difficulty?: {
+    split_interface_threshold?: number;
+    thin_knowledge_retrieval_threshold?: number;
+    blast_radius_hard_threshold?: number;
+  };
+};
+
+test('difficulty.split_interface_threshold: default 3 from an empty config', () => {
+  const empty = parseConfig({}) as unknown as CfgWithSplit;
+  assert.ok(empty.difficulty, 'parseConfig defaults must add a difficulty block');
+  assert.equal(empty.difficulty?.split_interface_threshold, 3, 'split_interface_threshold defaults to 3 (user-confirmed "more than 3")');
+});
+
+test('difficulty.split_interface_threshold: an explicit value is tunable; non-int / non-positive fail loud', () => {
+  const tuned = parseConfig({ difficulty: { split_interface_threshold: 5 } }) as unknown as CfgWithSplit;
+  assert.equal(tuned.difficulty?.split_interface_threshold, 5, 'an explicit split_interface_threshold overrides the default 3');
+  assert.throws(
+    () => parseConfig({ difficulty: { split_interface_threshold: 'many' } }),
+    /invalid/i,
+    'split_interface_threshold must be a number — a non-number fails loud'
+  );
+  assert.throws(
+    () => parseConfig({ difficulty: { split_interface_threshold: 0 } }),
+    'split_interface_threshold is zod-positive — 0 is rejected'
+  );
+  assert.throws(
+    () => parseConfig({ difficulty: { split_interface_threshold: -3 } }),
+    'split_interface_threshold is zod-positive — a negative is rejected'
+  );
+  assert.throws(
+    () => parseConfig({ difficulty: { split_interface_threshold: 2.5 } }),
+    'split_interface_threshold is a zod int — a fractional value is rejected'
+  );
+});
+
+test('difficulty: a legacy config carrying the dead blast_radius_hard_threshold still parses; the old key is stripped and split_interface_threshold defaults', () => {
+  const legacy = parseConfig({ difficulty: { blast_radius_hard_threshold: 7 } }) as unknown as CfgWithSplit;
+  assert.ok(legacy.difficulty, 'a legacy difficulty block survives parsing (non-strict object)');
+  assert.equal(legacy.difficulty?.split_interface_threshold, 3, 'the new field is present and defaulted even when only the legacy key was supplied');
+  assert.equal(
+    legacy.difficulty?.blast_radius_hard_threshold,
+    undefined,
+    'the renamed-away blast_radius_hard_threshold is stripped — it is gone from the parsed output'
+  );
+});
+
+test('difficulty.thin_knowledge_retrieval_threshold is untouched by the rename (stays default 2)', () => {
+  const empty = parseConfig({}) as unknown as CfgWithSplit;
+  assert.equal(empty.difficulty?.thin_knowledge_retrieval_threshold, 2, 'thin_knowledge_retrieval_threshold is untouched — default 2');
+});
+
+test('templates/default-config.json ships difficulty.split_interface_threshold (3) and still parses', () => {
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithSplit;
+  assert.ok(shipped.difficulty, 'the shipped default-config carries a difficulty block');
+  assert.equal(shipped.difficulty?.split_interface_threshold, 3, 'the shipped split_interface_threshold is 3');
+});

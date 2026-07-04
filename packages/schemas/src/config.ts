@@ -91,10 +91,13 @@ export const configSchema = z.object({
       skeptic_new_export_threshold: z.number().int().positive().default(5),
     })
     .default({}),
-  // §4 difficulty rubric — mechanical inputs
+  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
+  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
+  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
+  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
   difficulty: z
     .object({
-      blast_radius_hard_threshold: z.number().int().positive().default(8),
+      split_interface_threshold: z.number().int().positive().default(3),
       thin_knowledge_retrieval_threshold: z.number().int().nonnegative().default(2),
     })
     .default({}),
