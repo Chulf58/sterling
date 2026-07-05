@@ -114,6 +114,7 @@ test('skills ship with live file references and pass the skill linter', () => {
   const skills = collectSkills(join(root, 'skills'));
   assert.deepEqual(skills.map((s) => s.file).sort(), [
     'cleanup/SKILL.md',
+    'council/SKILL.md',
     'debug/SKILL.md',
     'drain/SKILL.md',
     'grill-intent/SKILL.md',
