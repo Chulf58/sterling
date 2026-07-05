@@ -247,7 +247,7 @@ test('stale-at-read (§3.4): research findings get both clocks + flag; platform 
   }
 });
 
-test('dedup-merge (§3.2.2): overlapping anti_pattern merges evidence into the existing record, never duplicates', () => {
+test('dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED naming the match — the author merges via knowledge_update or stores with dedup_override', () => {
   const { tools, cleanup } = harness();
   try {
     const first = tools.knowledgeCreate('anti_pattern', {
@@ -259,8 +259,8 @@ test('dedup-merge (§3.2.2): overlapping anti_pattern merges evidence into the e
       source_evidence: 'run r-1, src/db.ts:10',
       file_keys: ['src/db.ts'],
     });
-    assert.equal(first.merged_into, undefined);
-    const second = tools.knowledgeCreate('anti_pattern', {
+    // a genuine restatement (strong token overlap + shared key) is refused loudly, never silently merged
+    const restatement = {
       title: 'SQL concatenation strikes again',
       trigger: 'queries from user input',
       guidance: 'parameterize',
@@ -268,18 +268,29 @@ test('dedup-merge (§3.2.2): overlapping anti_pattern merges evidence into the e
       right_way: 'prepare',
       source_evidence: 'run r-2, src/api.ts:44',
       file_keys: ['src/db.ts'],
-    });
-    assert.equal(second.merged_into, first.record.id, 'file-key overlap merges instead of duplicating');
+    };
+    assert.throws(() => tools.knowledgeCreate('anti_pattern', restatement), new RegExp(first.record.id), 'the refusal names the match');
+    assert.throws(() => tools.knowledgeCreate('anti_pattern', restatement), /dedup_override/, 'the refusal teaches the distinct-lesson verb');
+    assert.equal(tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 }).length, 1, 'a refused create writes nothing — no version bump, no new record');
+
+    // same-finding verb: the author merges evidence through knowledge_update
+    const prior = tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 })[0] as unknown as { source_evidence: string };
+    tools.knowledgeUpdate(first.record.id, { source_evidence: `${prior.source_evidence}\n${restatement.source_evidence}` });
     const active = tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 });
     assert.equal(active.length, 1);
     const evidence = (active[0] as unknown as { source_evidence: string }).source_evidence;
     assert.ok(evidence.includes('run r-1') && evidence.includes('run r-2'), 'evidence merged into the surviving record');
+
+    // distinct-lesson verb: dedup_override stores it, and the directive is never persisted
+    const overridden = tools.knowledgeCreate('anti_pattern', { ...restatement, dedup_override: true });
+    assert.equal((overridden.record as unknown as Record<string, unknown>).dedup_override, undefined, 'dedup_override is a create-time directive, not a field');
+    assert.equal(tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 }).length, 2);
   } finally {
     cleanup();
   }
 });
 
-test('dedup-merge Dice threshold (§3.2.2): strong token overlap merges; shared domain words alone do not', () => {
+test('dedup guard Dice threshold (§3.2.2): strong token overlap refuses naming the match; shared domain words alone do not', () => {
   const { tools, cleanup } = harness();
   try {
     // no file_keys → matching is purely token-based (Dice coefficient over title+trigger)
@@ -291,18 +302,21 @@ test('dedup-merge Dice threshold (§3.2.2): strong token overlap merges; shared 
       right_way: 'r',
       source_evidence: 'run r-base',
     });
-    assert.equal(base.merged_into, undefined);
 
-    // a genuine restatement of the SAME gotcha — high token overlap (Dice >= 0.5) → merges
-    const restate = tools.knowledgeCreate('anti_pattern', {
-      title: 'Power Automate apply-to-each swallows errors silently',
-      trigger: 'apply to each over a large array without concurrency',
-      guidance: 'g',
-      wrong_way: 'w',
-      right_way: 'r',
-      source_evidence: 'run r-restate',
-    });
-    assert.equal(restate.merged_into, base.record.id, 'a genuine restatement merges on strong token overlap');
+    // a genuine restatement of the SAME gotcha — high token overlap (Dice >= 0.5) → refused naming the match
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('anti_pattern', {
+          title: 'Power Automate apply-to-each swallows errors silently',
+          trigger: 'apply to each over a large array without concurrency',
+          guidance: 'g',
+          wrong_way: 'w',
+          right_way: 'r',
+          source_evidence: 'run r-restate',
+        }),
+      new RegExp(base.record.id),
+      'a genuine restatement is refused on strong token overlap'
+    );
 
     // a DIFFERENT gotcha sharing only domain words ("power","automate") — Dice < 0.5 → distinct.
     // The prior `shared >= 2` gate wrongly collapsed these same-domain findings.
@@ -314,9 +328,70 @@ test('dedup-merge Dice threshold (§3.2.2): strong token overlap merges; shared 
       right_way: 'r',
       source_evidence: 'run r-other',
     });
-    assert.equal(other.merged_into, undefined, 'shared domain words alone must not collapse distinct gotchas');
+    assert.ok(other.record.id, 'shared domain words alone must not flag distinct gotchas');
 
-    assert.equal(tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 }).length, 2, 'restatement merged; distinct gotcha stands alone');
+    assert.equal(tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 }).length, 2, 'restatement refused; distinct gotcha stands alone');
+  } finally {
+    cleanup();
+  }
+});
+
+test('dedup guard (board 3f9591e9 replay): one shared file_key never swallows a distinct lesson; the key-assist tier still flags look-alikes; validation precedes dedup', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const machineFlip = tools.knowledgeCreate('anti_pattern', {
+      title: 'Machine-context flip leaves installed agent hooks dead — sync-agents reports up_to_date',
+      trigger: 'running sessions from a machine context other than the one that last installed or synced the agents',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'r',
+      source_evidence: 'run r-ea9e, 2026-07-03',
+      file_keys: ['scripts/lib/agent-distribution.mjs'],
+    });
+
+    // the 2026-07-04 incident, replayed: a DISTINCT lesson sharing ONE busy file_key,
+    // near-zero token overlap → stores directly (the old hard key signal swallowed it)
+    const distinct = tools.knowledgeCreate('anti_pattern', {
+      title: 'Wiring a formerly-inert config field to authoritative without migrating live values silently reverts policy',
+      trigger: 'promoting a config declaration to the source of truth while gitignored configs carry stale values',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'r',
+      source_evidence: 'conductor-direct 2026-07-04',
+      file_keys: ['scripts/lib/agent-distribution.mjs'],
+    });
+    assert.ok(distinct.record.id, 'a shared file_key alone never swallows a distinct lesson');
+    assert.equal(tools.knowledgeQuery({ types: ['anti_pattern'], cap: 10 }).length, 2);
+
+    // the ASSIST tier: shared key + moderate token overlap (0.3 <= Dice < 0.5) still flags…
+    const lookAlike = {
+      title: 'Machine context flip breaks hook execution for installed agents',
+      trigger: 'agents installed by another launcher fail their hook commands at sessions',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'r',
+      source_evidence: 'probe',
+      file_keys: ['scripts/lib/agent-distribution.mjs'],
+    };
+    assert.throws(() => tools.knowledgeCreate('anti_pattern', lookAlike), new RegExp(machineFlip.record.id), 'shared key + look-alike tokens still flags the match');
+    // …and is key-driven: the same tokens WITHOUT the shared key stay below the standalone threshold
+    const noSharedKey = tools.knowledgeCreate('anti_pattern', { ...lookAlike, file_keys: ['scripts/other.mjs'] });
+    assert.ok(noSharedKey.record.id, 'the assist tier is key-driven — no shared key, no flag at moderate overlap');
+
+    // validation precedes dedup: a schema-invalid candidate that WOULD overlap gets the schema error, not a dedup refusal
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('anti_pattern', {
+          title: 'Machine-context flip leaves installed agent hooks dead — sync-agents reports up_to_date',
+          trigger: 'running sessions from a machine context other than the one that last installed or synced the agents',
+          guidance: 'g',
+          wrong_way: 'w',
+          right_way: 'r',
+          file_keys: ['scripts/lib/agent-distribution.mjs'],
+        }),
+      /source_evidence/,
+      'schema validation runs before the dedup guard'
+    );
   } finally {
     cleanup();
   }
