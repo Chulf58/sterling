@@ -146,10 +146,7 @@ export class SterlingTools {
 
   // -- knowledge CRUD ---------------------------------------------------------
 
-  knowledgeCreate(
-    type: string,
-    fields: Record<string, unknown>
-  ): { record: DurableRecord; check_skipped: SkippedCheck[]; merged_into?: string } {
+  knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
     const ts = this.now();
     const candidate: Record<string, unknown> = {
       id: this.newId(),
@@ -164,27 +161,40 @@ export class SterlingTools {
       stack_tags: fields.stack_tags ?? [],
       ...fields,
     };
+    // dedup_override is a create-time directive, never a stored field
+    const dedupOverride = candidate.dedup_override === true;
+    delete candidate.dedup_override;
     // record the owned-file content baseline at birth (server-computed, never
     // author-supplied) so the read-time drift check is content-aware (§3.2.3)
     if (type === 'feature_article' || type === 'reference_material') {
       candidate.file_baselines = this.computeBaselines(candidate);
     }
+    // validate BEFORE any dedup logic: a schema-invalid candidate gets the
+    // schema error, never a dedup refusal (board 3f9591e9 defect 3); unknown
+    // types fall through to store.create for its canonical rejection
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    if (registered) registered.schema.parse(candidate);
     const skipped: SkippedCheck[] = [];
 
     if (type === 'anti_pattern') {
-      // dedup-merge (§3.2.2, mechanical): keyword/tag overlap against existing
-      // records merges evidence into the existing record instead of duplicating.
-      const match = this.findAntiPatternOverlap(candidate);
-      if (match) {
-        skipped.push(this.skip('noise-gate', this.activeRunId()));
-        const merged = this.knowledgeUpdate(match.id, {
-          source_evidence: `${(match as { source_evidence: string }).source_evidence}\n${String(fields.source_evidence ?? '')}`,
-        });
-        return { record: merged, check_skipped: skipped, merged_into: match.id };
+      // dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED LOUD, never
+      // silently merged — a wrong merge costs the whole lesson (2026-07-04: a
+      // distinct lesson was swallowed on one shared file_key, board 3f9591e9);
+      // a refusal costs one round-trip. The author decides: same finding →
+      // knowledge_update the match (append source_evidence); distinct lesson →
+      // re-submit with dedup_override: true.
+      if (!dedupOverride) {
+        const match = this.findAntiPatternOverlap(candidate);
+        if (match) {
+          throw new Error(
+            `knowledge_create: this anti_pattern overlaps existing '${match.id}' — "${(match as { title?: string }).title ?? ''}". ` +
+              `Same finding: knowledge_update that record, appending your source_evidence. Distinct lesson: re-submit with dedup_override: true.`
+          );
+        }
       }
       skipped.push(this.skip('noise-gate', this.activeRunId()));
     } else {
-      // evidence-merging is defined for anti_patterns; other types skip loudly
+      // dedup guarding is defined for anti_patterns; other types skip loudly
       skipped.push(this.skip('dedup-merge', this.activeRunId()));
     }
 
@@ -253,23 +263,26 @@ export class SterlingTools {
       );
     const candTokens = tokens(candidate);
     // Dice coefficient over the significant-token sets (2·|A∩B| / (|A|+|B|)):
-    // merge only on STRONG overlap — a genuine restatement of the same
+    // flag only on STRONG overlap — a genuine restatement of the same
     // anti-pattern — not on a couple of shared domain words. The prior
     // `shared >= 2` absolute gate collapsed distinct same-domain gotchas: any
     // two "Genesys Cloud …" titles share genesys+cloud, any two Power Automate
-    // gotchas share power+automate. file_key overlap stays a hard merge signal
-    // (two records about the same file are the same finding).
-    const DICE_MERGE_THRESHOLD = 0.5;
+    // gotchas share power+automate. file_key overlap is an ASSIST, not a hard
+    // signal — a busy multi-concern file (e.g. agent-distribution.mjs) hosts
+    // many distinct lessons (board 3f9591e9, 2026-07-04); a shared key only
+    // lowers the token bar for records that already sound alike.
+    const DICE_OVERLAP_THRESHOLD = 0.5;
+    const DICE_KEY_ASSISTED_THRESHOLD = 0.3;
     return existing.find((e) => {
       const rec = e as unknown as Record<string, unknown>;
-      const keyOverlap = ((rec.file_keys as string[]) ?? []).some((k) => candKeys.has(k));
-      if (keyOverlap) return true;
       const recTokens = tokens(rec);
       const denom = candTokens.size + recTokens.size;
       if (denom === 0) return false;
       let shared = 0;
       for (const t of recTokens) if (candTokens.has(t)) shared++;
-      return (2 * shared) / denom >= DICE_MERGE_THRESHOLD;
+      const dice = (2 * shared) / denom;
+      const keyOverlap = ((rec.file_keys as string[]) ?? []).some((k) => candKeys.has(k));
+      return dice >= DICE_OVERLAP_THRESHOLD || (keyOverlap && dice >= DICE_KEY_ASSISTED_THRESHOLD);
     });
   }
 
