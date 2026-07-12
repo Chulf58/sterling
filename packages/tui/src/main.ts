@@ -132,7 +132,9 @@ function loadRoster(): AgentRosterSnapshot {
       entries: ((rec as { catalog?: { entries?: CatalogStatusView['entries'] } })?.catalog?.entries ?? []),
     };
   } catch (err) {
-    console.error(`sterling-tui: catalog unavailable — ${(err as Error).message}`);
+    // console.error here would paint into the alternate screen and be discarded
+    // (audit finding 41/43) — surface it as a visible System-tab notice instead.
+    ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
   }
   return { agents, configModels, catalog };
 }
@@ -190,8 +192,10 @@ async function applySwap(e: ModelSwapEffect): Promise<void> {
       alternatives_rejected: [],
     });
   } catch (err) {
-    // P5: never silent — the next activation's drift marker backstops a partial write
-    console.error(`sterling-tui: model swap for '${e.key}' failed partway — ${(err as Error).message}`);
+    // P5: never silent. A console.error into the alternate screen is lost (audit
+    // finding 41/43); surface a visible notice. The next activation's drift marker
+    // still backstops a partial write.
+    ui = { ...ui, notice: `model swap for '${e.key}' failed partway — ${(err as Error).message}` };
   }
 }
 
@@ -226,15 +230,42 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   for (const e of swaps) await applySwap(e);
   if (swaps.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {
-    term.grabInput(false);
-    term.hideCursor(false);
-    term.fullscreen(false); // leave the alternate screen buffer, restoring the shell
-    stores.close();
-    releaseTuiLock(lockPath, process.pid);
+    restoreTerminal();
     process.exit(0);
   }
   redraw();
 }
+
+// Idempotent terminal + resource restore (audit finding 23/43): the ONLY prior
+// teardown lived in the quit path, so any throw during the 1 Hz redraw or an
+// event handler killed the process mid-fullscreen — grabInput on, alternate
+// screen active, TUI lock held — corrupting the user's shell. Every exit path
+// now routes through here; each step is best-effort so one failure can't strand
+// the rest.
+let terminalRestored = false;
+function restoreTerminal(): void {
+  if (terminalRestored) return;
+  terminalRestored = true;
+  try { term.grabInput(false); } catch { /* best effort */ }
+  try { term.hideCursor(false); } catch { /* best effort */ }
+  try { term.fullscreen(false); } catch { /* best effort */ } // leave the alternate screen, restoring the shell
+  try { stores.close(); } catch { /* best effort */ }
+  try { releaseTuiLock(lockPath, process.pid); } catch { /* best effort */ }
+}
+
+// Any uncaught throw (a store read error mid-redraw, a rejected handler) must
+// restore the terminal and report LOUD on the restored shell — never a silent
+// corrupt exit (P5). Both handlers, since handle() runs as a floating promise.
+process.on('uncaughtException', (err) => {
+  restoreTerminal();
+  console.error(`sterling-tui: fatal — ${(err as Error)?.stack ?? err}`);
+  process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  restoreTerminal();
+  console.error(`sterling-tui: fatal (unhandled rejection) — ${(err as Error)?.stack ?? err}`);
+  process.exit(1);
+});
 
 // Alternate screen buffer (§11 dashboard): no scrollback, so the 1 Hz redraw
 // can never grow the scrollbar or push the view down. The cursor stays hidden

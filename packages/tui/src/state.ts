@@ -3,6 +3,7 @@
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
 import type { SterlingStore, MountedStores } from '@sterling/store';
+import { MAX_RANK_TERMS } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
 import { bannerLines } from './banner.js';
@@ -34,6 +35,11 @@ export interface UiState {
    *  Absent → the plain roster is shown; present → a picker is open on
    *  ui.selector.key (model stage, then effort stage). ESCAPE clears it. */
   selector?: SystemSelector;
+  /** Transient System-tab notice (audit findings 24/43, 41/43): a refusal or a
+   *  degraded-loud message shown as a ⚠ banner row, so a silently-refused model
+   *  swap or a catalog/roster failure is VISIBLE (not lost to the alternate
+   *  screen). Cleared on the next navigation / tab switch / selector open. */
+  notice?: string;
 }
 
 /** The System-tab inline selector (run r-f9a7). `key` is the config.models key
@@ -253,7 +259,10 @@ function rankTermsOf(query: string): string[] {
     .trim()
     .split(/\s+/)
     .filter((t) => t.length > 0 && t.length < 64)
-    .map((t) => `${t.replace(/\*+$/, '')}*`);
+    .map((t) => `${t.replace(/\*+$/, '')}*`)
+    // clamp to the store's rank_terms cap so a long query never throws a ZodError
+    // in the live search path and crashes the TUI every frame (audit finding 9/43)
+    .slice(0, MAX_RANK_TERMS);
 }
 
 /**
@@ -448,7 +457,11 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   // rows (and their config values, e.g. coder_hard's xhigh) are hidden so the
   // open picker's offered set is the only model/effort text on screen.
   const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
-  return { rows: shown, banner: catalogBanner(snap.catalog, width) };
+  // transient notice as a ⚠ banner line (audit findings 24/43, 41/43): a refusal
+  // or a catalog/roster failure is visible above the roster, not lost.
+  const catBanner = catalogBanner(snap.catalog, width);
+  const banner = ui.notice ? [clip(`⚠ ${ui.notice}`), ...catBanner] : catBanner;
+  return { rows: shown, banner };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -473,6 +486,8 @@ function systemDashboardState(
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows: Row[] = [];
   let screenRow = 0;
+  // the ⚠ notice (findings 24/43, 41/43) rides view.banner from buildSystemTab, so
+  // it renders here through the normal banner loop below.
   for (const text of view.banner) {
     rows.push({ id: `sysbanner:${screenRow}`, type: 'system-banner', selected: false, expanded: false, lines: [{ text, kind: 'meta' }], screenRow });
     screenRow += 1;
@@ -653,7 +668,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
   const effects: Effect[] = [];
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined });
 
   // the queue/run tabs have fixed layouts; only the card tabs scroll
   const scrollable = ui.tab !== QUEUE_TAB && ui.tab !== RUN_TAB;
@@ -737,8 +752,14 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
             const key = sysKeys[cursor];
             if (!key) return { ui, effects };
             if (!sel) {
+              // do NOT open a picker on an empty/invalid catalog (audit finding
+              // 24/43): the selector would show zero rows and every commit would
+              // be silently refused — surface a notice instead.
+              if (roster.catalog.entries.length === 0) {
+                return { ui: { ...ui, cursor, notice: 'model catalog empty or invalid — nothing to pick; refresh the catalog first' }, effects };
+              }
               // open the MODEL picker on the key under the cursor (highlight 0)
-              return { ui: { ...ui, cursor, selector: { key, stage: 'model', highlight: 0 } }, effects };
+              return { ui: { ...ui, cursor, selector: { key, stage: 'model', highlight: 0 }, notice: undefined }, effects };
             }
             if (sel.stage === 'model') {
               // confirm the highlighted model → advance to the EFFORT picker
@@ -760,9 +781,14 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
                 agents,
                 decisionTitle: `Model swap: ${sel.key} ${config.model}→${model} (System tab)`,
               });
+              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
             }
-            // a non-claude model is refused (no effect); either way the picker closes
-            return { ui: { ...ui, selector: undefined }, effects };
+            // a non-claude model is REFUSED — surface it (audit finding 24/43); a
+            // silent close was indistinguishable from a successful swap.
+            return {
+              ui: { ...ui, selector: undefined, notice: `model swap refused: '${model || '(none)'}' is not a valid claude-* model id` },
+              effects,
+            };
           }
         }
       }
@@ -807,6 +833,14 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       if (ch === 'q') {
         effects.push({ type: 'quit' });
         return { ui, effects };
+      }
+      // A real space key arrives as a CHAR (terminal-kit names printable keys by
+      // their character, so a 'SPACE' key-name never reaches the reducer from a
+      // real terminal). On the System tab, activate() no-ops (no card nodes), so
+      // route space to the same selector logic as ENTER — otherwise the picker's
+      // SPACE handling was reachable only by tests (audit finding 39/43).
+      if (ch === ' ' && ui.tab === SYSTEM_TAB) {
+        return reduce(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster);
       }
       if (ch === ' ') return { ui: activate(clamp(ui.cursor)), effects };
       if (/^[1-9]$/.test(ch)) {

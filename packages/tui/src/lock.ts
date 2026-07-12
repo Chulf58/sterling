@@ -5,7 +5,7 @@
 // OS has reassigned to an unrelated process, or garbage content are all taken
 // over — no stale-lock lockout, no duplicate panes. Platforms without /proc
 // (native Windows) have no token and fall back to pid-liveness alone.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export function pidIsAlive(pid: number): boolean {
@@ -50,14 +50,40 @@ export function acquireTuiLock(
   isAlive: (pid: number) => boolean = pidIsAlive,
   startTimeOf: (pid: number) => string | null = procStartTime,
 ): number | null {
-  if (existsSync(lockPath)) {
-    const [ownerStr, ownerToken] = readFileSync(lockPath, 'utf8').trim().split(/\s+/);
-    const owner = Number(ownerStr);
-    if (owner !== pid && isAlive(owner) && ownerStillHolds(ownerToken, startTimeOf(owner))) return owner;
-  }
   mkdirSync(dirname(lockPath), { recursive: true });
   const token = startTimeOf(pid);
-  writeFileSync(lockPath, token ? `${pid} ${token}` : String(pid));
+  const content = token ? `${pid} ${token}` : String(pid);
+  // Atomic exclusive create (audit finding 40/43): the prior existsSync-then-write
+  // let two simultaneous launches both pass the check and both write, producing two
+  // live TUIs on one store (AC7 breach). 'wx' fails if the file exists, so exactly
+  // one racer creates it; the loser falls to the honor-check and either backs off
+  // to the live owner or takes over a dead/recycled one and retries the create.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(lockPath, content, { flag: 'wx' });
+      return null; // we created it — we own it
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    }
+    let parts: string[];
+    try {
+      parts = readFileSync(lockPath, 'utf8').trim().split(/\s+/);
+    } catch {
+      continue; // vanished between our create and read — retry the exclusive create
+    }
+    const owner = Number(parts[0]);
+    if (owner === pid) return null; // re-entrant: this pid already holds it
+    if (isAlive(owner) && ownerStillHolds(parts[1], startTimeOf(owner))) return owner; // live, same-identity owner
+    rmSync(lockPath, { force: true }); // dead / recycled / garbage — take over, then retry
+  }
+  // Lost the create race twice (a live owner appeared each time): report it rather
+  // than falsely claim the lock.
+  try {
+    const owner = Number(readFileSync(lockPath, 'utf8').trim().split(/\s+/)[0]);
+    if (owner !== pid && isAlive(owner)) return owner;
+  } catch {
+    /* gone — treat as acquired */
+  }
   return null;
 }
 

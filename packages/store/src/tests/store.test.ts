@@ -266,6 +266,28 @@ test('remove() deletes INBOUND link edges, not just outbound — no dangling rev
   }
 });
 
+test('query source filter is applied BEFORE the cap — matching items are not lost past the cap (audit finding 38/43)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const todo = (source: string, reason: string, at: string) => ({
+      ...envelope('todo', at), text: `${source} ${reason}`, source,
+      ...(source === 'system' ? { system_reason: reason } : { priority: 'normal' }),
+    });
+    // 1 old user todo, then many newer system todos (updated_at DESC ordering
+    // would push the user todo past a small cap if the filter ran after)
+    store.create(todo('user', 'x', '2026-06-01T00:00:00.000Z'));
+    for (let i = 0; i < 30; i++) store.create(todo('system', 'reconcile_needed', `2026-06-10T00:00:${String(i).padStart(2, '0')}.000Z`));
+    const users = store.query({ types: ['todo'], source: 'user', cap: 5 });
+    assert.equal(users.length, 1, 'the lone user todo is found despite 30 newer system todos and cap 5');
+    assert.equal((users[0] as { source: string }).source, 'user');
+    const systems = store.query({ types: ['todo'], source: 'system', cap: 100 });
+    assert.equal(systems.length, 30, 'system filter returns only system todos');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('derived_unconfirmed is excluded by default, included on opt-in (§3.2.6)', () => {
   const { dir, store } = tempStore();
   try {

@@ -157,7 +157,13 @@ function deepReplaceString(value: unknown, from: string, to: string): unknown {
 
 // §3.4: rank_terms are plain keywords — an array of single terms with a
 // per-term length cap; a keyword array cannot smuggle in a freeform question.
-export const rankTerms = z.array(z.string().regex(/^\S{1,64}$/, 'rank_terms must be single keywords (no whitespace, ≤64 chars)')).max(16);
+// One definition of the rank-terms cap (invariant 1): the query schema enforces
+// it, and callers building rank_terms (the TUI search) clamp to it so they never
+// hand the store an over-long list that throws at parse (audit finding 9/43).
+export const MAX_RANK_TERMS = 16;
+export const rankTerms = z
+  .array(z.string().regex(/^\S{1,64}$/, 'rank_terms must be single keywords (no whitespace, ≤64 chars)'))
+  .max(MAX_RANK_TERMS);
 
 export interface QueryOptions {
   types?: string[];
@@ -167,6 +173,8 @@ export interface QueryOptions {
   include_unconfirmed?: boolean;
   cap?: number;
   match_all?: boolean;
+  /** Filter by todo body source ('user' | 'system') BEFORE the cap (finding 38/43). */
+  source?: string;
 }
 
 // The store surface the §10 tool layer drives — exactly the methods SterlingTools
@@ -247,6 +255,12 @@ export class SterlingStore {
         `EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => '?').join(',')}))`
       );
       params.push(...fileKeys);
+    }
+    // Source filter applied in the base filter (before cap/order) so a capped
+    // query never drops matching items of the wanted source (audit finding 38/43).
+    if (opts.source) {
+      where.push("json_extract(r.body, '$.source') = ?");
+      params.push(opts.source);
     }
     return { where, params, fileKeys };
   }
