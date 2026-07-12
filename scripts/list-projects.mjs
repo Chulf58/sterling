@@ -38,7 +38,7 @@ try {
   }
   const missing = rows.filter((p) => !existsSync(p.repo_path)).length;
   if (missing && !prune) {
-    console.log(`\n${missing} project${missing === 1 ? '' : 's'} MISSING (path gone). Prune with: node scripts/list-projects.mjs --prune-missing`);
+    console.log(`\n${missing} project${missing === 1 ? '' : 's'} MISSING (path gone). Prune with: node "\${CLAUDE_PLUGIN_ROOT}/scripts/list-projects.mjs" --prune-missing`);
   }
 } finally {
   registry.close();
