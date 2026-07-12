@@ -825,6 +825,70 @@ test('H3/H8: an unreadable store denies (fail closed) instead of voiding the blo
   }
 });
 
+// --------------------------- H18 (test-writer write wall, audit finding 6/43) ---------------------------
+
+test('H18 test-write wall: the test-writer writes ONLY test files; source / enforcement-surface / outside-repo denied; fails closed with no toolchains', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const w = (file_path, tool = 'Write') =>
+      runHook('h18-test-write-wall.mjs', hookInput(dir, { agent_id: 'tw-1', hook_event_name: 'PreToolUse', tool_name: tool, tool_input: { file_path } }), dir);
+
+    // ALLOWED — test files, per config test_globs (tests/**, **/*.test.mjs)
+    assert.equal(w(join(dir, 'tests', 'export.test.mjs')).code, 0, 'a test under tests/ is allowed');
+    assert.equal(w(join(dir, 'packages', 'store', 'src', 'foo.test.mjs')).code, 0, '**/*.test.mjs anywhere is allowed');
+
+    // DENIED — implementation source (the core gap: the test-writer could write ANY file)
+    const src = w(join(dir, 'src', 'index.mjs'));
+    assert.equal(src.code, 2, 'a source file is denied');
+    assert.match(src.stderr, /only test files|not a test file/i);
+
+    // DENIED — enforcement surface (self-protection, unconditional)
+    assert.equal(w(join(dir, '.claude', 'agents', 'coder.md')).code, 2, 'installed agents (enforcement surface) denied');
+    assert.equal(w(join(dir, '.sterling', 'config.json')).code, 2, 'config (enforcement surface) denied');
+
+    // DENIED — outside the repository
+    assert.equal(w('/etc/passwd').code, 2, 'a path outside the repo is denied');
+
+    // MultiEdit is gated identically
+    assert.equal(w(join(dir, 'src', 'x.mjs'), 'MultiEdit').code, 2, 'MultiEdit to source is denied too');
+  } finally {
+    cleanup();
+  }
+
+  // fail closed: no toolchains → cannot resolve test globs → deny (P5)
+  const bare = mkdtempSync(join(tmpdir(), 'sterling-h18-'));
+  mkdirSync(join(bare, '.sterling'), { recursive: true });
+  writeFileSync(join(bare, '.sterling', 'config.json'), JSON.stringify({}));
+  try {
+    const r = runHook(
+      'h18-test-write-wall.mjs',
+      hookInput(bare, { agent_id: 'tw-1', hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: join(bare, 'tests', 'a.test.mjs') } }),
+      bare
+    );
+    assert.equal(r.code, 2, 'no toolchains → fail closed, even for a would-be test path');
+    assert.match(r.stderr, /failing closed|toolchains/);
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+
+  // fail closed on a CORRUPT config (loadConfig JSON.parse throws) — a voided
+  // gate would let the write through (the F5 fail-open class)
+  const corrupt = mkdtempSync(join(tmpdir(), 'sterling-h18c-'));
+  mkdirSync(join(corrupt, '.sterling'), { recursive: true });
+  writeFileSync(join(corrupt, '.sterling', 'config.json'), '{ not json');
+  try {
+    const r = runHook(
+      'h18-test-write-wall.mjs',
+      hookInput(corrupt, { agent_id: 'tw-1', hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: join(corrupt, 'src', 'x.mjs') } }),
+      corrupt
+    );
+    assert.equal(r.code, 2, 'a corrupt config denies (fail closed), never a non-blocking exit 1');
+    assert.match(r.stderr, /failing closed/);
+  } finally {
+    rmSync(corrupt, { recursive: true, force: true });
+  }
+});
+
 // --------------------------- H11 ---------------------------
 
 test('H11: extraction lands as derived_unconfirmed citing the note; failure degrades loudly', () => {
