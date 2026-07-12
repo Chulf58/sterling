@@ -18,7 +18,7 @@ import { join, dirname, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { matchesGlob } from '@sterling/schemas';
-import { readStdin, allow, deny, openStore } from './lib/common.mjs';
+import { readStdin, allow, deny, openStore, withRetry } from './lib/common.mjs';
 import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 
 // The (B) gitignored baseline set (v3.1: settings*.json added — the gitignored
@@ -32,28 +32,6 @@ function baselineFile(runId) {
 
 function toRel(cwd, abs) {
   return relative(cwd, abs).replace(/\\/g, '/');
-}
-
-// Synchronous sleep for the store busy-retry (no async in a hook body).
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-// Retry a store op past a transient SQLITE_BUSY (the live MCP server can hold a
-// brief lock); a persistent / non-busy throw (corrupt db) propagates → deny.
-function withRetry(fn) {
-  let last;
-  for (let i = 0; i < 5; i++) {
-    try {
-      return fn();
-    } catch (e) {
-      const msg = String((e && e.message) || e);
-      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
-      last = e;
-      sleepMs(25 * (i + 1));
-    }
-  }
-  throw last;
 }
 
 // Snapshot every existing (B)-set file as { repoRelPath -> bytes }.

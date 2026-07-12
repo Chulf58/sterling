@@ -769,6 +769,41 @@ test('H15 store guard: shell references to the store are denied naming the §10 
   }
 });
 
+// H3/H8 fail-closed (audit finding 5/43, board ea2742e0): a BLOCKING gate whose
+// store access throws must DENY (exit 2), never void itself via an uncaught
+// exit 1 (decision 2422e76a's rule, previously applied only to H17/H15).
+test('H3/H8: an unreadable store denies (fail closed) instead of voiding the blocking gate', () => {
+  // Built by hand (no real store ever opened on the db path, so no WAL sidecar
+  // holds a valid schema): the garbage file genuinely fails to open, forcing the
+  // gate's store access to throw — which must surface as a deny, not a void.
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-failclosed-'));
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+    writeFileSync(join(dir, 'src.mjs'), 'export {};');
+    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'not a sqlite database — corrupt on purpose. '.repeat(100));
+
+    const h3 = runHook(
+      'h3-contract-gate.mjs',
+      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'src.mjs') } }),
+      dir
+    );
+    assert.equal(h3.code, 2, 'H3 denies when it cannot evaluate the contract');
+    assert.match(h3.stderr, /failing closed/);
+
+    const h8 = runHook(
+      'h8-dispatch-cap.mjs',
+      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type: 'coder', prompt: 'SLICE-WAIVED: test' } }),
+      dir
+    );
+    assert.equal(h8.code, 2, 'H8 denies when it cannot evaluate the cap');
+    assert.match(h8.stderr, /failing closed/);
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- H11 ---------------------------
 
 test('H11: extraction lands as derived_unconfirmed citing the note; failure degrades loudly', () => {

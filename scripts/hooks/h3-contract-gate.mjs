@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesGlob } from '@sterling/schemas';
-import { readStdin, deny, allow, openStore, repoRel } from './lib/common.mjs';
+import { readStdin, deny, allow, openStore, repoRel, withRetry } from './lib/common.mjs';
 import { ledgerPath, hasRead } from './lib/ledger.mjs';
 import { scopeCheck, readDebugScope, ENFORCEMENT_SURFACE } from './lib/contract.mjs';
 
@@ -33,18 +33,23 @@ if (input.agent_id && toolPath) {
   }
 }
 
-const store = openStore(cwd);
-if (!store) deny('H3: no Sterling store at .sterling/ — the contract gate cannot evaluate scope; failing closed (P5)');
-
+// A BLOCKING gate that cannot verify must DENY, never void itself: an uncaught
+// throw exits 1, which the platform treats as non-blocking (decision 2422e76a's
+// fail-closed rule, applied here per audit finding 5/43). Busy throws retry;
+// everything else denies in the catch below.
+let store;
 try {
-  const run = store.getRun();
+  store = openStore(cwd);
+  if (!store) deny('H3: no Sterling store at .sterling/ — the contract gate cannot evaluate scope; failing closed (P5)');
+
+  const run = withRetry(() => store.getRun());
   const absolute = toolPath && (isAbsolute(String(toolPath)) || /^[A-Za-z]:/.test(String(toolPath)));
   const absPath = rel ? join(cwd, rel) : absolute ? String(toolPath) : undefined;
   const isCreation = absPath ? !existsSync(absPath) : false;
 
   if (run) {
     if (!rel) deny(`H3 [run mode]: '${toolPath}' is outside the repository — the run owns only the working tree; out of scope`);
-    const brief = store.get(run.brief_ref);
+    const brief = withRetry(() => store.get(run.brief_ref));
     if (!brief || brief.type !== 'brief') deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
     const scope = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope.deny) deny(`H3 [run mode]: ${scope.deny}`);
@@ -62,6 +67,8 @@ try {
     deny(`H3 [direct mode]: no read-evidence for '${rel}' — Read the exact file before editing`);
   }
   allow();
+} catch (e) {
+  deny(`H3: contract evaluation failed (${(e && e.message) || e}) — failing closed (P5); retry the edit`);
 } finally {
-  store.close();
+  store?.close();
 }
