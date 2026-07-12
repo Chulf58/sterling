@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SterlingStore } from '@sterling/store';
@@ -50,6 +52,26 @@ function payload(result: unknown): unknown {
   const content = (result as { content: { type: string; text: string }[] }).content;
   return JSON.parse(content[0].text);
 }
+
+test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom store is created (P5, research_finding e518f9e5)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-phantom-'));
+  try {
+    const mainJs = join(dirname(fileURLToPath(import.meta.url)), '..', 'main.js');
+    const r = spawnSync(
+      process.execPath,
+      [mainJs, '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'],
+      { cwd: dir, input: '', encoding: 'utf8', timeout: 15_000 }
+    );
+    assert.equal(r.status, 2, `an unexpanded placeholder must refuse boot (got status ${r.status}; stderr: ${r.stderr})`);
+    assert.match(r.stderr ?? '', /unexpanded/);
+    assert.ok(
+      !existsSync(join(dir, '${CLAUDE_PROJECT_DIR}')),
+      'no literal placeholder directory is created at the server cwd'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('MCP integration: the spine tool surface is served and callable end-to-end', async () => {
   const { client, store, cleanup } = await harness();
