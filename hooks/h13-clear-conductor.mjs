@@ -4210,7 +4210,15 @@ var referenceMaterialSchema = base.extend({
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
   catalog: modelsCatalogSchema.optional()
-}).superRefine(refineSupersession);
+}).superRefine(refineSupersession).transform((rec) => {
+  if (rec.kind !== "doc")
+    return rec;
+  try {
+    return { ...rec, location: normalizeRepoPath(rec.location) };
+  } catch {
+    return rec;
+  }
+});
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
   question: external_exports.string().min(1),
