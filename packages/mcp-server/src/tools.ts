@@ -148,18 +148,24 @@ export class SterlingTools {
 
   knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
     const ts = this.now();
+    // The envelope is SERVER-OWNED: strip these keys from caller fields before
+    // assembling the candidate, so a caller cannot override id/timestamps/status/
+    // superseded_by/type via `...fields` (audit finding 14/43 — e.g. status:
+    // 'superseded' would create an already-invisible record). knowledgeUpdate
+    // strips the identical set for the same reason.
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
     const candidate: Record<string, unknown> = {
       id: this.newId(),
       type,
       created_at: ts,
       updated_at: ts,
-      author: (fields.author as string) ?? 'conductor',
+      author: (body.author as string) ?? 'conductor',
       status: 'active',
       superseded_by: null,
-      links: fields.links ?? [],
-      scope: (fields.scope as string) ?? 'project',
-      stack_tags: fields.stack_tags ?? [],
-      ...fields,
+      links: body.links ?? [],
+      scope: (body.scope as string) ?? 'project',
+      stack_tags: body.stack_tags ?? [],
+      ...body,
     };
     // dedup_override is a create-time directive, never a stored field
     const dedupOverride = candidate.dedup_override === true;
@@ -171,9 +177,12 @@ export class SterlingTools {
     }
     // validate BEFORE any dedup logic: a schema-invalid candidate gets the
     // schema error, never a dedup refusal (board 3f9591e9 defect 3); unknown
-    // types fall through to store.create for its canonical rejection
+    // types fall through to store.create for its canonical rejection.
+    // Keep the parsed result — its repoPath transform fully normalizes file_keys
+    // ('./x'→'x'), so the dedup key-overlap compares like-for-like against stored
+    // records (audit finding 28/43); the raw candidate skipped the assist tier.
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
-    if (registered) registered.schema.parse(candidate);
+    const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
     const skipped: SkippedCheck[] = [];
 
     if (type === 'anti_pattern') {
@@ -184,7 +193,7 @@ export class SterlingTools {
       // knowledge_update the match (append source_evidence); distinct lesson →
       // re-submit with dedup_override: true.
       if (!dedupOverride) {
-        const match = this.findAntiPatternOverlap(candidate);
+        const match = this.findAntiPatternOverlap(parsed);
         if (match) {
           throw new Error(
             `knowledge_create: this anti_pattern overlaps existing '${match.id}' — "${(match as { title?: string }).title ?? ''}". ` +
@@ -502,9 +511,15 @@ export class SterlingTools {
     return this.knowledgeCreate('todo', { text, source, ...rest });
   }
 
-  boardQuery(filter: { source?: 'user' | 'system'; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
+  boardQuery(filter: { source?: 'user' | 'system'; system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
     const todos = this.store.query({ types: ['todo'], file_keys: filter.file_keys, cap: 1000 });
-    const filtered = filter.source ? todos.filter((t) => (t as { source: string }).source === filter.source) : todos;
+    // Apply EVERY filter BEFORE the cap slice (audit finding 33/43): capping the
+    // mixed set first silently dropped matching items past the cap (the store
+    // orders updated_at DESC, so long-standing reason-filtered items vanished).
+    let filtered = filter.source ? todos.filter((t) => (t as { source: string }).source === filter.source) : todos;
+    if (filter.system_reason) {
+      filtered = filtered.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason);
+    }
     return filtered.slice(0, filter.cap ?? 50);
   }
 
@@ -575,11 +590,26 @@ export class SterlingTools {
     // (every later agent_exit refuses on the full slot and consume-exit cannot
     // resolve the phase). Conductor-direct subagents hit this when a run is
     // active: their deliverable is their final text, not a run exit.
-    if (!run.phases.some((p) => p.id === args.phase_id)) {
+    const namedPhase = run.phases.find((p) => p.id === args.phase_id);
+    if (!namedPhase) {
       throw new Error(
         `agent_exit: no phase '${args.phase_id}' on run '${run.id}' — nothing was recorded. ` +
           `The run's phases: ${run.phases.map((p) => p.id).join(', ')}. A pipeline agent must exit against its dispatched phase; ` +
           `an agent working OUTSIDE the pipeline (conductor-direct) must not call agent_exit while a run is active — its final message is its deliverable.`
+      );
+    }
+    // Phase CURRENCY, not just existence (audit finding 3/43): an exit naming a
+    // real-but-not-current phase (e.g. an earlier already-complete phase) would
+    // otherwise drive the brain to re-spawn that phase's successor and corrupt
+    // phase state (two in_progress phases, or an early run completion). The
+    // dispatched phase is always the in_progress one — refuse loud, nothing
+    // recorded, naming the actual current phase.
+    if (namedPhase.status !== 'in_progress') {
+      const current = run.phases.find((p) => p.status === 'in_progress');
+      throw new Error(
+        `agent_exit: phase '${args.phase_id}' is '${namedPhase.status}', not the current (in_progress) phase — nothing was recorded. ` +
+          `Exit against the dispatched phase${current ? ` '${current.id}'` : ' (none is currently in_progress — the run may be completing)'}. ` +
+          `Naming a stale phase would corrupt phase state.`
       );
     }
     const exit: RecordedExit = {
@@ -609,6 +639,24 @@ export class SterlingTools {
    */
   runSignal(args: { run_id?: string; exit?: ResolvedExit } = {}): { action: BrainAction; machine_state: string; run_id: string } {
     const run = this.runState(args.run_id);
+    // A conductor-supplied exit must NOT silently shadow-and-destroy a recorded
+    // agent exit (audit finding 2/43): casTransition NULLs the pending slot
+    // unconditionally, so if an agent already recorded (e.g. blocked) via
+    // agent_exit and the conductor then reports agent-died{empty_output}, the
+    // real exit would vanish and the brain react to the wrong signal. Refuse
+    // loud, nothing consumed — the conductor consumes the recorded exit (no
+    // args.exit) or investigates the mismatch (mirrors the 32fa4a05 pattern).
+    if (args.exit) {
+      const recorded = this.store.getPendingExit(run.id);
+      if (recorded) {
+        throw new Error(
+          `run_signal: an explicit exit was supplied but run '${run.id}' already has a recorded agent exit ` +
+            `(signal '${recorded.signal}', phase '${recorded.phase_id}'${recorded.agent_role ? `, role '${recorded.agent_role}'` : ''}) ` +
+            `— refusing to overwrite it (nothing consumed). Call run_signal with NO exit to react to the recorded one, ` +
+            `or resolve the mismatch (consume-exit) before reporting a different signal.`
+        );
+      }
+    }
     const exit: ResolvedExit | undefined = args.exit ?? this.store.getPendingExit(run.id);
     if (!exit) {
       throw new Error(
@@ -670,8 +718,9 @@ export class SterlingTools {
   }
 
   maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
-    const items = this.boardQuery({ source: 'system', file_keys: filter.file_keys, cap: filter.cap });
-    return filter.system_reason ? items.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason) : items;
+    // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
+    // so a reason-filtered query no longer misses matches past the cap.
+    return this.boardQuery({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------
