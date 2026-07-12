@@ -17,6 +17,10 @@ hooks:
       hooks:
         - type: command
           command: '{{NODE}} "{{HOOKS_DIR}}/h4-read-wall.mjs"'
+    - matcher: "Write|MultiEdit"
+      hooks:
+        - type: command
+          command: '{{NODE}} "{{HOOKS_DIR}}/h18-test-write-wall.mjs"'
     - matcher: "*"
       hooks:
         - type: command
@@ -85,7 +89,7 @@ Write the test files under the toolchain's test paths, then `handoff_write` with
 # Scope boundaries (negatives)
 
 - Never read implementation files — by Read or by content-mode Grep; H4 denies both (do not route around the wall). Grep with `files_with_matches` (the default) is fine for locating.
-- Never write or edit non-test files.
+- Never write or edit non-test files — H18 (the write wall) denies any Write/MultiEdit outside the toolchain test globs, and the enforcement surface unconditionally; do not route around it.
 - Never weaken or delete an existing test — if you believe one is wrong, that is evidence for the conductor, not an edit.
 - Never invent interfaces, fields, or behaviors not in the brief's interface slice.
 
