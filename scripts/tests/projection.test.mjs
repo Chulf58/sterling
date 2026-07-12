@@ -97,3 +97,38 @@ test('§15 projection: refuses outside an initialized project', () => {
     rmSync(bare, { recursive: true, force: true });
   }
 });
+
+test('§15 projection freshness check (audit finding 25/43): passes when current, FAILS loud when the file lags the store', () => {
+  const runFresh = (dir) => {
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'check-projection-fresh.mjs'), dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-fresh-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  try {
+    store.create(articleRec('brain-signal-protocol', 'g'));
+    store.close();
+    // generate the projection → freshness check passes
+    assert.equal(runScript([], dir).code, 0);
+    const pass = runFresh(dir);
+    assert.equal(pass.code, 0, `fresh projection passes: ${pass.stderr}`);
+    assert.match(pass.stdout, /projection freshness: ok/);
+
+    // a NEWER article than the file's header → the check fails loud, names the fix
+    const s2 = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    s2.create(articleRec('record-schemas-registry', 'g2')); // NOW+? — created_at NOW, but a fresh updated_at
+    s2.close();
+    // bump one article's updated_at past the file stamp via supersede
+    const s3 = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const arts = s3.query({ types: ['feature_article'], cap: 10 });
+    s3.supersede(arts[0].id, { ...articleRec(arts[0].slug, 'g3'), version: 2, updated_at: '2099-01-01T00:00:00.000Z' });
+    s3.close();
+    const stale = runFresh(dir);
+    assert.equal(stale.code, 1, 'a store newer than the committed projection fails the freshness check');
+    assert.match(stale.stderr, /stale|Regenerate/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
