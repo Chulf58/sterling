@@ -404,6 +404,42 @@ test('direct-merge.mjs: refuses during an active run; merges + sweeps when none 
   }
 });
 
+test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed files; unrelated debt does not block; merges once drained (decision 9df61181)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    git(dir, ['checkout', '-b', 'feat/debt']);
+    writeFileSync(join(dir, 'src', 'touched.mjs'), 'export const t = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'touched']);
+
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const item = store.create({
+      id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      text: "reconcile article 'x' — files it owns were touched in direct mode", source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/touched.mjs'],
+    });
+    store.create({
+      id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      text: "reconcile article 'y' — unrelated to this branch", source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/unrelated.mjs'],
+    });
+    store.close();
+
+    const refused = runDirectMerge(dir);
+    assert.notEqual(refused.status, 0, 'open debt on a changed file must refuse the merge');
+    assert.match(refused.stderr, /reconcile_needed/);
+    assert.match(refused.stderr, /src\/touched\.mjs/);
+    assert.doesNotMatch(refused.stderr, /src\/unrelated\.mjs/, 'debt off the branch does not block');
+
+    const store2 = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store2.remove(item.id, NOW);
+    store2.close();
+    const ok = runDirectMerge(dir);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(JSON.parse(ok.stdout).branch_merged, 'feat/debt');
+  } finally {
+    cleanup();
+  }
+});
+
 test('test-integrity: frozen baseline detects modification and deletion; clean baseline passes (§9.2)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ti-'));
   try {
