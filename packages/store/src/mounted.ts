@@ -181,6 +181,9 @@ export class MountedStores {
   casTransition(...args: Parameters<SterlingStore['casTransition']>): ReturnType<SterlingStore['casTransition']> {
     return this.project.casTransition(...args);
   }
+  casTransitionMerge(...args: Parameters<SterlingStore['casTransitionMerge']>): ReturnType<SterlingStore['casTransitionMerge']> {
+    return this.project.casTransitionMerge(...args);
+  }
   recordPendingExit(...args: Parameters<SterlingStore['recordPendingExit']>): ReturnType<SterlingStore['recordPendingExit']> {
     return this.project.recordPendingExit(...args);
   }

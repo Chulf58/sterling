@@ -36,9 +36,11 @@ try {
     ? run.phases.findIndex((p) => p.id === exit.phase_id)
     : run.phases.findIndex((p) => p.status === 'in_progress');
   if (idx === -1 && discardOrphan) {
-    // Orphan consumption: the run body is unchanged — the same-state CAS
-    // exists solely to clear the pending-exit slot. Loud by construction.
-    store.casTransition(run.machine_state, run);
+    // Orphan consumption: the run body is unchanged — the same-state transition
+    // exists solely to clear the pending-exit slot. Merge-safe (audit findings
+    // 1/43, 18/43): an identity mutate on the FRESH body preserves any concurrent
+    // hook write (a stale-body rewrite here would have dropped it).
+    store.casTransitionMerge(run.machine_state, run.id, (fresh) => fresh);
     console.log(
       JSON.stringify({
         discarded_orphan_exit: { signal: exit.signal, phase_id: exit.phase_id ?? null, agent_role: exit.agent_role ?? null },
@@ -51,19 +53,29 @@ try {
       2
     );
   } else {
-    const phases = run.phases.map((p, i) =>
-      i === idx
-        ? {
-            ...p,
-            signals: [
-              ...p.signals,
-              { signal: 'complete', payload: exit.payload ?? null, agent_role: exit.agent_role ?? null, intra_phase: true, step: step ?? null, at: new Date().toISOString() },
-            ],
-          }
-        : p
-    );
-    // same-state CAS: machine_state unchanged; the swap clears pending_exit
-    store.casTransition(run.machine_state, { ...run, phases });
+    // same-state transition: machine_state unchanged; it records the intra-phase
+    // signal and clears pending_exit. Merge-safe (audit findings 1/43, 18/43): the
+    // signal is appended onto the FRESH phases inside casTransitionMerge's retry
+    // loop, so a concurrent hook write (H7 reconcile mark, H6/H8 escalation) is
+    // preserved rather than clobbered by a rewrite from the stale snapshot.
+    const at = new Date().toISOString();
+    store.casTransitionMerge(run.machine_state, run.id, (fresh) => {
+      const fIdx = exit.phase_id
+        ? fresh.phases.findIndex((p) => p.id === exit.phase_id)
+        : fresh.phases.findIndex((p) => p.status === 'in_progress');
+      const phases = fresh.phases.map((p, i) =>
+        i === fIdx
+          ? {
+              ...p,
+              signals: [
+                ...p.signals,
+                { signal: 'complete', payload: exit.payload ?? null, agent_role: exit.agent_role ?? null, intra_phase: true, step: step ?? null, at },
+              ],
+            }
+          : p
+      );
+      return { ...fresh, phases };
+    });
     console.log(
       JSON.stringify({ consumed: 'complete', run_id: run.id, phase_id: run.phases[idx].id, agent_role: exit.agent_role ?? null, step: step ?? null })
     );

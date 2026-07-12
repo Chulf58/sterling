@@ -5010,6 +5010,35 @@ var SterlingStore = class {
     }
     return run;
   }
+  /**
+   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
+   * casTransition it CAS-guards machine_state, but instead of overwriting the
+   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
+   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
+   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
+   * updateRunOptimistic) landing between the caller's read and this transition is
+   * PRESERVED, not clobbered. The UPDATE guards on BOTH body and machine_state: a
+   * body change under us retries against the fresh body; a machine_state change is
+   * a stale caller and throws (casTransition's CAS-rejected semantics). Clears
+   * pending_exit — the transition consumes it. State moves through this path or
+   * casTransition, never updateRunOptimistic.
+   */
+  casTransitionMerge(observed, runId, mutate, attempts = 5) {
+    for (let i = 0; i < attempts; i++) {
+      const row = this.db.prepare("SELECT body, machine_state FROM runs WHERE id = ?").get(runId);
+      if (!row)
+        throw new Error(`casTransitionMerge: no run '${runId}'`);
+      if (row.machine_state !== observed) {
+        throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
+      }
+      const current = runRecordSchema.parse(JSON.parse(row.body));
+      const next = runRecordSchema.parse(mutate(current));
+      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed);
+      if (res.changes === 1)
+        return next;
+    }
+    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
+  }
   /** agent_exit lands here; run_signal consumes it. An unconsumed exit is never silently overwritten (P5). */
   recordPendingExit(runId, exit) {
     const existing = this.getPendingExit(runId);
