@@ -8,6 +8,7 @@
 import { join } from 'node:path';
 import { arg, argAll, fail, openProject } from './lib/project.mjs';
 import { loadAdapter } from './adapters/resolve.mjs';
+import { runTestsRouted } from './lib/test-routing.mjs';
 import { writeBaseline } from './lib/test-integrity.mjs';
 
 const expect = arg('--expect');
@@ -17,14 +18,23 @@ if (!scope.length) fail('test-check: at least one --scope is required');
 
 const target = arg('--target') ?? process.cwd();
 const { store, config } = openProject(target);
-const adapterName = arg('--adapter') ?? config.toolchains?.[0]?.adapter;
-if (!adapterName) {
-  store.close();
-  fail('test-check: no toolchain declared in config and no --adapter given');
-}
 
-const adapter = await loadAdapter(adapterName);
-const result = adapter.runTests({ cwd: target, scope });
+// Route each scope path to its owning toolchain's adapter (R2 board 641d4cae —
+// the 19/43 multi-toolchain routing previously landed only in completeness-check,
+// so a red/green check over a second toolchain's tests misclassified as crash).
+// An explicit --adapter forces that adapter for the whole scope.
+let result;
+const adapterName = arg('--adapter');
+if (adapterName) {
+  const adapter = await loadAdapter(adapterName);
+  result = adapter.runTests({ cwd: target, scope });
+} else {
+  result = await runTestsRouted({ cwd: target, config, scope });
+  if (result === undefined) {
+    store.close();
+    fail('test-check: no toolchain declared in config and no --adapter given');
+  }
+}
 const summary = { expect, overall: result.overall, results: result.results };
 
 let ok;

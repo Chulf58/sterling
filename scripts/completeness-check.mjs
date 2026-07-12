@@ -6,36 +6,12 @@
 //   node scripts/completeness-check.mjs --run <id> --phase <id> [--final] [--target <dir>]
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { matchesGlob } from '@sterling/schemas';
 import { arg, fail, openProject, requireRun, requireBrief, runDir } from './lib/project.mjs';
 import { loadAdapter } from './adapters/resolve.mjs';
+import { runTestsRouted } from './lib/test-routing.mjs';
 import { runWiringCheck } from './lib/wiring-check.mjs';
 import { compareBaseline } from './lib/test-integrity.mjs';
 import { isGitRepo, wholeRunDiffFiles } from './lib/branch-manager.mjs';
-
-// Route each test path to the adapter of the toolchain whose test_globs match it,
-// then combine (audit finding 19/43): a multi-toolchain project (e.g. node +
-// pester) otherwise ran ALL tests through toolchains[0]'s adapter, misclassifying
-// the second stack's suite as a crash. Unmatched paths fall to toolchains[0], so
-// single-toolchain projects are unchanged. Returns the combined overall, or
-// undefined when there is nothing to run / no toolchain declared.
-async function runTestsRouted({ cwd, config, scope }) {
-  const toolchains = config.toolchains ?? [];
-  if (toolchains.length === 0 || scope.length === 0) return undefined;
-  const byAdapter = new Map();
-  for (const p of scope) {
-    const tc = toolchains.find((t) => (t.test_globs ?? []).some((g) => matchesGlob(p, g))) ?? toolchains[0];
-    if (!byAdapter.has(tc.adapter)) byAdapter.set(tc.adapter, []);
-    byAdapter.get(tc.adapter).push(p);
-  }
-  const overalls = [];
-  for (const [adapterName, paths] of byAdapter) {
-    const mod = await loadAdapter(adapterName);
-    if (typeof mod?.runTests === 'function') overalls.push(mod.runTests({ cwd, scope: paths }).overall);
-  }
-  if (overalls.length === 0) return undefined;
-  return overalls.includes('crash') ? 'crash' : overalls.includes('assertion_fail') ? 'assertion_fail' : 'pass';
-}
 
 const target = arg('--target') ?? process.cwd();
 const { store, config } = openProject(target);
@@ -43,6 +19,22 @@ const run = requireRun(store, arg('--run'));
 const brief = requireBrief(store, run);
 const phaseId = arg('--phase') ?? run.phases.find((p) => p.status === 'in_progress')?.id;
 const isFinal = process.argv.includes('--final');
+
+// Fail loud on an unresolvable phase (P5, R2 board d0bdfe56 — prep and
+// test-check already refuse the same condition): with phaseId undefined the
+// handoff read degraded to ALL handoffs (so 'no handoff written' could never
+// fire) and the whole subtask-evidence half was skipped with no problem and no
+// check_skipped — exit 0 while verifying much less than invoked for. After the
+// last boundary exit no phase is in_progress, so --final callers pass --phase
+// explicitly (the documented CLI form).
+if (!phaseId) {
+  store.close();
+  fail('completeness-check: no resolvable phase — no phase is in_progress; pass --phase explicitly');
+}
+if (!brief.phases.some((p) => p.phase_id === phaseId)) {
+  store.close();
+  fail(`completeness-check: phase '${phaseId}' is not in the run's brief`);
+}
 
 const handoffs = store.readHandoffs(run.id, { phase_id: phaseId });
 const problems = [];
@@ -94,7 +86,7 @@ if (phase) {
     }
   }
   if (citedTests.size) {
-    const overall = await runTestsRouted({ cwd: target, config, scope: [...citedTests] });
+    const overall = (await runTestsRouted({ cwd: target, config, scope: [...citedTests] }))?.overall;
     if (overall !== undefined && overall !== 'pass') {
       problems.push(`subtask-evidence: cited tests are ${overall}, not green — citations must point at passing evidence`);
     }
@@ -121,7 +113,7 @@ if (isFinal) {
   // every AC has passing traced tests: route each produced test to its owning
   // toolchain's adapter, then combine (finding 19/43 — not all through toolchains[0])
   const allTests = [...new Set(store.readHandoffs(run.id).flatMap((h) => h.tests_produced))];
-  const suiteOverall = await runTestsRouted({ cwd: target, config, scope: allTests });
+  const suiteOverall = (await runTestsRouted({ cwd: target, config, scope: allTests }))?.overall;
   if (suiteOverall !== undefined && suiteOverall !== 'pass') {
     problems.push(`final completeness: the run's traced test suite is ${suiteOverall}, not green — ACs are not collectively satisfied`);
   }

@@ -671,6 +671,20 @@ test('completeness-check: a subtask citation to a run.scope_amendments path pass
 
     const r = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-ac4', '--phase', 'p1', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 120_000 });
     assert.equal(r.status, 0, `a citation to an amended (in-contract) path must pass — ${r.stderr}`);
+
+    // Unresolvable-phase refusals (R2 board d0bdfe56 — mirror of prep/test-check,
+    // P5): an off-brief --phase refuses loud, and with the phase no longer
+    // in_progress an OMITTED --phase refuses instead of silently skipping the
+    // subtask-evidence half against ALL handoffs.
+    const offBrief = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-ac4', '--phase', 'p999', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.notEqual(offBrief.status, 0, 'an off-brief phase must refuse');
+    assert.match(offBrief.stderr, /not in the run's brief/);
+    const s2 = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    s2.updateRunOptimistic('r-ac4', (run) => ({ ...run, phases: run.phases.map((p) => ({ ...p, status: 'done' })) }));
+    s2.close();
+    const noPhase = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-ac4', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.notEqual(noPhase.status, 0, 'no resolvable phase must refuse, not silently under-verify');
+    assert.match(noPhase.stderr, /no resolvable phase/);
   } finally {
     store?.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
