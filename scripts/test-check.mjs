@@ -2,7 +2,7 @@
 // All outcomes come from the toolchain adapter's classification; no agent ever
 // infers test outcomes from raw runner output.
 //   node scripts/test-check.mjs --expect red|green --scope <path> [--scope <path>...]
-//                               [--run <id>] [--target <dir>] [--adapter <name>]
+//                               [--run <id>] [--phase <id>] [--target <dir>] [--adapter <name>]
 // red:   overall must be assertion_fail (a crash-red proves nothing; a pass means no oracle)
 // green: overall must be pass; on green, the unbuilt mutation check is skipped LOUDLY.
 import { join } from 'node:path';
@@ -31,12 +31,19 @@ let ok;
 if (expect === 'red') {
   if (result.overall === 'assertion_fail') {
     ok = true;
-    // freeze the phase's oracle (§9.2): the baseline test-integrity compares against
-    const runId = arg('--run') ?? store.getRun()?.id;
-    const phaseId = arg('--phase');
+    // freeze the phase's oracle (§9.2): the baseline test-integrity compares against.
+    // phase_id binds to the run's CURRENT phase when --phase is omitted (the freeze
+    // is a red-check EVENT, not a remembered flag — P4; audit finding 16/43). Skip
+    // LOUDLY (never silently) when there is a run but no resolvable phase.
+    const run = arg('--run') ? store.getRun(arg('--run')) : store.getRun();
+    const runId = run?.id;
+    const phaseId = arg('--phase') ?? run?.phases.find((p) => p.status === 'in_progress')?.id;
     if (runId && phaseId) {
       const frozen = writeBaseline({ cwd: target, runDir: join(target, '.sterling', 'runs', runId), phaseId, testFiles: scope });
       summary.baseline_frozen = frozen;
+    } else if (runId && !phaseId) {
+      store.recordCheckSkipped('test-integrity-baseline', 'no_resolvable_phase', runId, new Date().toISOString());
+      summary.check_skipped = [{ check: 'test-integrity-baseline', reason: 'no_resolvable_phase' }];
     }
   } else if (result.overall === 'pass') summary.refusal = 'tests pass before implementation — not a valid red (no oracle)';
   else summary.refusal = 'tests crash before implementation — a crash-red proves nothing (§9.2); fix the test scaffold';

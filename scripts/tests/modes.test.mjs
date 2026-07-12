@@ -180,6 +180,30 @@ test('fs-remove: contract-checked; refuses out-of-contract in run mode; register
   }
 });
 
+test('fs-move/fs-remove: fail closed when a run is active but its brief is unresolvable (audit finding 20/43)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeFileSync(join(dir, 'src', 'victim.mjs'), 'export const x = 1;'); // dest.mjs intentionally absent
+    // run points at a brief_ref that does not resolve to a brief record
+    store.createRun({
+      id: 'r-dangle', brief_ref: randomUUID(), branch: 'b', machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW,
+    });
+
+    const rm = runScript('fs-remove.mjs', ['src/victim.mjs', '--target', dir], dir);
+    assert.equal(rm.code, 2, 'fs-remove refuses on a dangling brief_ref');
+    assert.match(rm.stderr, /failing closed/);
+    assert.ok(existsSync(join(dir, 'src', 'victim.mjs')), 'nothing deleted');
+
+    const mv = runScript('fs-move.mjs', ['src/victim.mjs', 'src/dest.mjs', '--target', dir], dir);
+    assert.equal(mv.code, 2, 'fs-move refuses on a dangling brief_ref');
+    assert.match(mv.stderr, /failing closed/);
+    assert.ok(existsSync(join(dir, 'src', 'victim.mjs')), 'nothing moved');
+  } finally {
+    cleanup();
+  }
+});
+
 test('fs-remove: a run.scope_amendments path is in-contract — out-of-brief removal allowed (scopeCheck amendments consumer)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
@@ -213,11 +237,20 @@ test('fs-move: renames AND rewrites file_keys on every owning record — knowled
     assert.ok(existsSync(join(dir, 'src', 'new-name.mjs')));
 
     assert.equal(store.query({ file_keys: ['src/old-name.mjs'], cap: 10 }).length, 0, 'old key joins nothing');
-    const byNew = store.query({ file_keys: ['src/new-name.mjs'], cap: 10 });
+    // the two knowledge owners follow the move (excluding the reconcile todo, which
+    // also carries the new key — see the direct-mode reconcile assertion below)
+    const byNew = store.query({ file_keys: ['src/new-name.mjs'], cap: 10 }).filter((r) => r.type !== 'todo');
     assert.equal(byNew.length, 2, 'both owners follow the move');
     const movedArticle = store.get(article.id);
     assert.equal(movedArticle.files[0].path, 'src/new-name.mjs');
     assert.equal(movedArticle.live_test_refs[0].test_paths[0], 'src/new-name.mjs');
+
+    // direct mode (no run): a reconcile_needed maintenance item must exist for the
+    // owning article, matching fs-remove's semantics (audit finding 36/43).
+    const reconcile = store.query({ types: ['todo'], cap: 100 })
+      .filter((t) => t.system_reason === 'reconcile_needed' && t.feature_link === article.id);
+    assert.equal(reconcile.length, 1, 'fs-move registers a direct-mode reconcile obligation like fs-remove');
+    assert.match(reconcile[0].text, /renamed/);
   } finally {
     cleanup();
   }

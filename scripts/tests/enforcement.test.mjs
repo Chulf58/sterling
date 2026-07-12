@@ -176,6 +176,47 @@ test('adapter: classifies pass | assertion_fail | crash against real node --test
   }
 });
 
+test('adapter: describe()/nested subtests classify by the LEAF, not the suite aggregate (audit finding 8/43)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-adapter-nested-'));
+  try {
+    // a failing assertion INSIDE a describe was previously read as the suite's
+    // ERR_TEST_FAILURE → crash, refusing a valid TDD red. It must classify red.
+    writeFileSync(
+      join(dir, 'nested-af.test.mjs'),
+      "import {describe,it} from 'node:test'; import assert from 'node:assert'; describe('s',()=>{ it('t',()=>assert.equal(1,2)); });"
+    );
+    const af = runTests({ cwd: dir, scope: ['nested-af.test.mjs'] });
+    assert.equal(af.overall, 'assertion_fail', 'describe-nested assertion failure is a red, not a crash');
+    assert.deepEqual(af.results.map((r) => r.outcome), ['assertion_fail'], 'only the leaf counts; the suite aggregate is skipped');
+
+    // a THROW inside a describe is still a crash (leaf carries ERR_TEST_FAILURE
+    // like the suite, so the discriminator is type:test vs type:suite, not code)
+    writeFileSync(
+      join(dir, 'nested-crash.test.mjs'),
+      "import {describe,it} from 'node:test'; describe('s',()=>{ it('t',()=>{ throw new Error('boom'); }); });"
+    );
+    assert.equal(runTests({ cwd: dir, scope: ['nested-crash.test.mjs'] }).overall, 'crash', 'a throw in a describe is still a crash');
+
+    // deeply nested (2 levels) assertion also classifies red
+    writeFileSync(
+      join(dir, 'deep.test.mjs'),
+      "import {describe,it} from 'node:test'; import assert from 'node:assert'; describe('o',()=>{ describe('i',()=>{ it('d',()=>assert.equal('a','b')); }); });"
+    );
+    assert.equal(runTests({ cwd: dir, scope: ['deep.test.mjs'] }).overall, 'assertion_fail', 'two-level nested assertion is a red');
+
+    // a passing describe stays pass and does not double-count the suite line
+    writeFileSync(
+      join(dir, 'pass.test.mjs'),
+      "import {describe,it} from 'node:test'; import assert from 'node:assert'; describe('s',()=>{ it('a',()=>assert.equal(1,1)); it('b',()=>assert.equal(2,2)); });"
+    );
+    const pass = runTests({ cwd: dir, scope: ['pass.test.mjs'] });
+    assert.equal(pass.overall, 'pass');
+    assert.equal(pass.results.length, 2, 'two leaf tests counted, the suite aggregate skipped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('adapter: TS-source package tests are built + run from dist (Node16 .js imports), classified per-test not crash', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-tsadapter-'));
   try {

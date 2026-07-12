@@ -211,6 +211,83 @@ test('flagged_stale research findings are still served by query; superseded are 
   }
 });
 
+test('supersede: a flagged_stale research finding CAN be superseded (re-verification is the advertised remedy) — audit finding 13/43', () => {
+  const { dir, store } = tempStore();
+  try {
+    const rf = (over = {}) => ({
+      ...envelope('research_finding'),
+      question: 'q', answer: 'a', source_urls: [], source_date: '2026-01-01', capture_date: '2026-01-01',
+      ...over,
+    });
+    const stale = store.create(rf({ status: 'flagged_stale' }));
+    // re-verification supersedes the stale finding — previously threw "not active"
+    const fresh = store.supersede(stale.id, rf({ answer: 're-verified' }));
+    assert.equal(store.get(stale.id)!.status, 'superseded');
+    assert.equal(store.get(fresh.id)!.status, 'active');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('renameFileKey rewrites path-keyed object KEYS (file_baselines), not just values — audit finding 11/43', () => {
+  const { dir, store } = tempStore();
+  try {
+    writeFileSync(join(dir, 'a.ts'), 'export const x = 1;');
+    // an article owning a.ts gets a server-computed file_baselines keyed by 'a.ts'
+    const a = store.create(article({ slug: 'feat', files: [{ path: 'a.ts', role: 'impl' }], file_baselines: { 'a.ts': 'deadbeef' } }));
+    store.renameFileKey('a.ts', 'b.ts');
+    const moved = store.get(a.id) as unknown as { files: { path: string }[]; file_baselines?: Record<string, string> };
+    assert.equal(moved.files[0].path, 'b.ts', 'files[].path rewritten');
+    assert.ok(moved.file_baselines && 'b.ts' in moved.file_baselines, 'baseline KEY rewritten to the new path');
+    assert.ok(!('a.ts' in (moved.file_baselines ?? {})), 'old baseline key gone (was stranded before the fix)');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('remove() deletes INBOUND link edges, not just outbound — no dangling reverse-traversal rows (audit finding 31/43)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const target = store.create(decision({ statement: 'target' }));
+    const source = store.create(decision({ statement: 'source' }));
+    store.addLink(source.id, 'informed_by', target.id);
+    // no public reverse-traversal reader exists (the latent surface the audit
+    // named), so assert the record_links index directly — a store-internal invariant
+    const links = store as unknown as { db: { prepare: (s: string) => { all: (...a: unknown[]) => unknown[] } } };
+    const inbound = () => links.db.prepare('SELECT source_id FROM record_links WHERE target_id = ?').all(target.id);
+    assert.equal(inbound().length, 1, 'inbound edge present before removal');
+    store.remove(target.id);
+    assert.equal(inbound().length, 0, 'inbound edge to a removed record is gone (was dangling before the fix)');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('query source filter is applied BEFORE the cap — matching items are not lost past the cap (audit finding 38/43)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const todo = (source: string, reason: string, at: string) => ({
+      ...envelope('todo', at), text: `${source} ${reason}`, source,
+      ...(source === 'system' ? { system_reason: reason } : { priority: 'normal' }),
+    });
+    // 1 old user todo, then many newer system todos (updated_at DESC ordering
+    // would push the user todo past a small cap if the filter ran after)
+    store.create(todo('user', 'x', '2026-06-01T00:00:00.000Z'));
+    for (let i = 0; i < 30; i++) store.create(todo('system', 'reconcile_needed', `2026-06-10T00:00:${String(i).padStart(2, '0')}.000Z`));
+    const users = store.query({ types: ['todo'], source: 'user', cap: 5 });
+    assert.equal(users.length, 1, 'the lone user todo is found despite 30 newer system todos and cap 5');
+    assert.equal((users[0] as { source: string }).source, 'user');
+    const systems = store.query({ types: ['todo'], source: 'system', cap: 100 });
+    assert.equal(systems.length, 30, 'system filter returns only system todos');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('derived_unconfirmed is excluded by default, included on opt-in (§3.2.6)', () => {
   const { dir, store } = tempStore();
   try {
@@ -236,7 +313,7 @@ test('supersede: old retained + flagged, new active with supersedes link; versio
     assert.equal(store.query({ types: ['feature_article'] }).length, 1, 'only the active version is retrieved');
     assert.equal(store.get(v1.id)!.id, v1.id, 'prior version is retained');
     assert.throws(() => store.supersede(v2.id, article({ version: 2 })), /version must increase/);
-    assert.throws(() => store.supersede(v1.id, article({ version: 3 })), /not active/);
+    assert.throws(() => store.supersede(v1.id, article({ version: 3 })), /already superseded/);
     assert.throws(() => store.supersede(v2.id, decision()), /type mismatch/);
   } finally {
     store.close();

@@ -13,12 +13,13 @@
 // (missing/corrupt baseline, restore fs-error, store/git throw, brief-unresolvable)
 // DENIES (exit 2), NEVER a non-blocking exit 1. Non-deny only: no agent_id
 // (conductor) → allow; no active run (L2) → baseline + always-set (surface|hooks/**).
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync, realpathSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { matchesGlob } from '@sterling/schemas';
-import { readStdin, allow, deny, openStore } from './lib/common.mjs';
+import { readStdin, allow, deny, openStore, withRetry } from './lib/common.mjs';
 import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 
 // The (B) gitignored baseline set (v3.1: settings*.json added — the gitignored
@@ -26,34 +27,29 @@ import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
 const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 
-function baselineFile(runId) {
-  return join(tmpdir(), 'sterling-enforce-' + runId + '.json');
+// The baseline path is PROJECT-UNIQUE (audit finding 7/43): two concurrent
+// Sterling sessions in different projects previously shared os.tmpdir()/
+// sterling-enforce-<runId>.json — and with runId='no-run' (a machine-wide
+// constant outside runs) project B's Pre snapshot could overwrite project A's,
+// so A's Post restored A's enforcement files from B's bytes. A sha256 prefix of
+// the realpath'd cwd discriminates projects; realpath so WSL/symlink aliasing
+// can't split a Pre/Post pair (both hooks pass the same input.cwd).
+function projectTag(cwd) {
+  let root = cwd;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    /* cwd unreadable — fall back to the raw path (still project-distinguishing) */
+  }
+  return createHash('sha256').update(root).digest('hex').slice(0, 16);
+}
+
+function baselineFile(cwd, runId) {
+  return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}.json`);
 }
 
 function toRel(cwd, abs) {
   return relative(cwd, abs).replace(/\\/g, '/');
-}
-
-// Synchronous sleep for the store busy-retry (no async in a hook body).
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-// Retry a store op past a transient SQLITE_BUSY (the live MCP server can hold a
-// brief lock); a persistent / non-busy throw (corrupt db) propagates → deny.
-function withRetry(fn) {
-  let last;
-  for (let i = 0; i < 5; i++) {
-    try {
-      return fn();
-    } catch (e) {
-      const msg = String((e && e.message) || e);
-      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
-      last = e;
-      sleepMs(25 * (i + 1));
-    }
-  }
-  throw last;
 }
 
 // Snapshot every existing (B)-set file as { repoRelPath -> bytes }.
@@ -148,7 +144,7 @@ if (event === 'PreToolUse') {
     } finally {
       store?.close();
     }
-    writeFileSync(baselineFile(runId), JSON.stringify(collectBaseline(cwd)));
+    writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
     allow();
   } catch (e) {
     // A snapshot failure during an active agent run cannot be verified later —
@@ -211,7 +207,7 @@ try {
   }
 
   // --- (B) gitignored BASELINE set via the Pre snapshot ---
-  const bPath = baselineFile(runId);
+  const bPath = baselineFile(cwd, runId);
   if (!existsSync(bPath)) {
     deny(`H17: baseline '${bPath}' absent at Post (no Pre snapshot) — cannot verify the enforcement surface; failing closed (P5).`);
   }

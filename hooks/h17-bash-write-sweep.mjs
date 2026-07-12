@@ -6,9 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, realpathSync } from "node:fs";
 import { join as join2, dirname as dirname2, relative } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -4090,10 +4091,13 @@ function matchesGlob(path, glob) {
     const c = g[i];
     if (c === "*") {
       if (g[i + 1] === "*") {
-        re += "(?:.*)";
         i++;
-        if (g[i + 1] === "/")
+        if (g[i + 1] === "/") {
+          re += "(?:[^/]*/)*";
           i++;
+        } else {
+          re += ".*";
+        }
       } else {
         re += "[^/]*";
       }
@@ -4237,7 +4241,15 @@ var referenceMaterialSchema = base.extend({
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
   catalog: modelsCatalogSchema.optional()
-}).superRefine(refineSupersession);
+}).superRefine(refineSupersession).transform((rec) => {
+  if (rec.kind !== "doc")
+    return rec;
+  try {
+    return { ...rec, location: normalizeRepoPath(rec.location) };
+  } catch {
+    return rec;
+  }
+});
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
   question: external_exports.string().min(1),
@@ -4799,11 +4811,12 @@ function deepReplaceString(value, from, to) {
   if (Array.isArray(value))
     return value.map((v) => deepReplaceString(v, from, to));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, deepReplaceString(v, from, to)]));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
 }
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(16);
+var MAX_RANK_TERMS = 16;
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var SterlingStore = class {
   db;
   constructor(path) {
@@ -4849,6 +4862,10 @@ var SterlingStore = class {
     if (fileKeys.length) {
       where.push(`EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => "?").join(",")}))`);
       params.push(...fileKeys);
+    }
+    if (opts.source) {
+      where.push("json_extract(r.body, '$.source') = ?");
+      params.push(opts.source);
     }
     return { where, params, fileKeys };
   }
@@ -4900,8 +4917,8 @@ var SterlingStore = class {
     const oldRecord = this.get(oldId);
     if (!oldRecord)
       throw new Error(`supersede: no record '${oldId}'`);
-    if (oldRecord.status !== "active")
-      throw new Error(`supersede: record '${oldId}' is not active`);
+    if (oldRecord.status === "superseded")
+      throw new Error(`supersede: record '${oldId}' is already superseded`);
     const candidate = { ...newInput };
     const links = Array.isArray(candidate.links) ? [...candidate.links] : [];
     if (!links.some((l) => l.rel === "supersedes" && l.target_id === oldId)) {
@@ -4918,7 +4935,10 @@ var SterlingStore = class {
     this.tx(() => {
       this.insertRecord(newRecord);
       const updatedOld = { ...oldRecord, status: "superseded", superseded_by: newRecord.id, updated_at: newRecord.updated_at };
-      this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ?").run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
+      const res = this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
+      if (res.changes === 0) {
+        throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
+      }
     });
     return newRecord;
   }
@@ -4934,11 +4954,14 @@ var SterlingStore = class {
     const record = this.get(id);
     if (!record)
       throw new Error(`retireInFavorOf: no record '${id}'`);
-    if (record.status !== "active")
-      throw new Error(`retireInFavorOf: record '${id}' is not active`);
+    if (record.status === "superseded")
+      throw new Error(`retireInFavorOf: record '${id}' is already superseded`);
     const retired = { ...record, status: "superseded", superseded_by: replacementId, updated_at: at };
     this.tx(() => {
-      this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ?").run("superseded", replacementId, at, JSON.stringify(retired), id);
+      const res = this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run("superseded", replacementId, at, JSON.stringify(retired), id);
+      if (res.changes === 0) {
+        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded \u2014 retry`);
+      }
     });
     return retired;
   }
@@ -4959,6 +4982,7 @@ var SterlingStore = class {
       this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
       this.db.prepare("DELETE FROM record_links WHERE source_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_links WHERE target_id = ?").run(id);
       this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
     });
   }
@@ -4988,11 +5012,13 @@ var SterlingStore = class {
   /** Run begins at gate approval. One active run at a time (§7.5). */
   createRun(input2) {
     const run = runRecordSchema.parse(input2);
-    const active = this.getRun();
-    if (active) {
-      throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
-    }
-    this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    this.tx(() => {
+      const active = this.getRun();
+      if (active) {
+        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
+      }
+      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    });
     return run;
   }
   /** By id, or the single active run when no id is given. */
@@ -5203,6 +5229,9 @@ var SterlingStore = class {
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason, at);
+    if (!runId) {
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
+    }
   }
   listCheckSkipped(runId) {
     return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
@@ -5319,6 +5348,23 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withRetry(fn) {
+  let last;
+  for (let i = 0; i < 5; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
+      last = e;
+      sleepMs(25 * (i + 1));
+    }
+  }
+  throw last;
+}
 function openStore(cwd2) {
   const p = join(cwd2, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -5354,28 +5400,19 @@ function scopeCheck({ brief, debugScope, rel, amendments = [] }) {
 // scripts/hooks/h17-bash-write-sweep.mjs
 var BASELINE_GLOBS = [".claude/agents/**", ".sterling/config.json", ".claude/settings*.json"];
 var NO_RUN = "no-run";
-function baselineFile(runId) {
-  return join2(tmpdir(), "sterling-enforce-" + runId + ".json");
+function projectTag(cwd2) {
+  let root = cwd2;
+  try {
+    root = realpathSync(cwd2);
+  } catch {
+  }
+  return createHash("sha256").update(root).digest("hex").slice(0, 16);
+}
+function baselineFile(cwd2, runId) {
+  return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}.json`);
 }
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
-}
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-function withRetry(fn) {
-  let last;
-  for (let i = 0; i < 5; i++) {
-    try {
-      return fn();
-    } catch (e) {
-      const msg = String(e && e.message || e);
-      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
-      last = e;
-      sleepMs(25 * (i + 1));
-    }
-  }
-  throw last;
 }
 function collectBaseline(cwd2) {
   const map = {};
@@ -5449,7 +5486,7 @@ if (event === "PreToolUse") {
     } finally {
       store?.close();
     }
-    writeFileSync(baselineFile(runId), JSON.stringify(collectBaseline(cwd)));
+    writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
     allow();
   } catch (e) {
     deny(`H17 [pre]: baseline snapshot failed (${e && e.message || e}) \u2014 failing closed (P5).`);
@@ -5495,7 +5532,7 @@ try {
       }
     }
   }
-  const bPath = baselineFile(runId);
+  const bPath = baselineFile(cwd, runId);
   if (!existsSync3(bPath)) {
     deny(`H17: baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5).`);
   }

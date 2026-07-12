@@ -43,10 +43,25 @@ export function gitTestIntegrity({ cwd, testGlobs }) {
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
+  const isTest = (p) => testGlobs.some((g) => matchesGlob(p, g));
   for (const line of (r.stdout ?? '').trim().split('\n').filter(Boolean)) {
-    const [status, file] = line.split(/\t/);
-    const rel = (file ?? '').replace(/\\/g, '/');
-    if (!testGlobs.some((g) => matchesGlob(rel, g))) continue;
+    const parts = line.split(/\t/);
+    const status = parts[0];
+    // Rename/copy (audit finding 21/43): git emits `R<score>\told\tnew` (rename
+    // detection is on by default ≥2.9). The prior code took only the OLD path and
+    // matched neither D nor M, so an R95 rename-with-edits of a test file slipped
+    // the oracle check entirely. Treat the NEW path as modified (a possibly
+    // weakened test); if the test was renamed OUT of the test set, the old path
+    // is a deletion.
+    if (status.startsWith('R') || status.startsWith('C')) {
+      const oldPath = (parts[1] ?? '').replace(/\\/g, '/');
+      const newPath = (parts[2] ?? '').replace(/\\/g, '/');
+      if (isTest(newPath)) modified.push(newPath);
+      else if (isTest(oldPath)) deleted.push(oldPath);
+      continue;
+    }
+    const rel = (parts[1] ?? '').replace(/\\/g, '/');
+    if (!isTest(rel)) continue;
     if (status.startsWith('D')) deleted.push(rel);
     else if (status.startsWith('M')) modified.push(rel);
     // additions are new tests — fine

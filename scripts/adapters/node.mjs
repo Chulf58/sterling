@@ -185,26 +185,54 @@ function walkSources(cwd, dir = cwd, out = []) {
   return out;
 }
 
+// Parse `node --test` TAP HIERARCHICALLY (audit finding 8/43, probe-verified on
+// Node 24.14): a test inside describe()/subtests emits an INDENTED `ok`/`not ok`
+// line carrying its own YAML diagnostic (type: 'test'), while the enclosing
+// describe emits a top-level aggregate line (type: 'suite', code:
+// 'ERR_TEST_FAILURE') whose failure merely means "a subtest failed". The prior
+// parser matched only unindented lines and read the suite's ERR_TEST_FAILURE, so
+// a describe-nested assertion failure (a valid TDD red) was misclassified as a
+// crash. We now classify each LEAF test from its own block and skip suite
+// aggregates. Discriminator is `type`, not `code`: a leaf THROW also carries
+// ERR_TEST_FAILURE, so code alone cannot tell a crashing leaf from a suite.
 function parseTap(stdout) {
   const lines = stdout.split(/\r?\n/);
   const results = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(not )?ok \d+ - (.+?)(?: # .*)?$/);
+    const m = lines[i].match(/^(\s*)(not )?ok \d+ - (.+?)(?: # .*)?$/);
     if (!m) continue;
-    const [, notOk, testName] = m;
+    const [, , notOk, testName] = m;
+
+    // Read this line's own YAML diagnostic block, fenced by '---' lines indented
+    // beyond the ok line. type/code inside identify a leaf vs a suite aggregate.
+    let type;
+    let code;
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim() === '') j++;
+    if (j < lines.length && lines[j].trim() === '---') {
+      const fenceIndent = lines[j].length - lines[j].trimStart().length;
+      // TAP YAML diagnostics open with '---' and CLOSE with '...' (the YAML
+      // end marker) at the same indent — not a second '---'. Reading to the
+      // wrong marker would run into the next test's block.
+      for (j++; j < lines.length; j++) {
+        const line = lines[j];
+        const trimmed = line.trim();
+        if ((trimmed === '...' || trimmed === '---') && line.length - line.trimStart().length === fenceIndent) break;
+        const t = line.match(/^\s+type:\s*'([^']+)'/);
+        if (t) type = t[1];
+        const c = line.match(/^\s+code:\s*'([^']+)'/);
+        if (c) code = c[1];
+      }
+    }
+
+    // Suite aggregates derive their outcome from children already parsed — skip
+    // them so ERR_TEST_FAILURE (pass or fail) never pollutes classification.
+    if (type === 'suite') continue;
     if (!notOk) {
       results.push({ name: testName, outcome: 'pass' });
       continue;
     }
-    let outcome = 'crash';
-    for (let j = i + 1; j < lines.length && /^\s/.test(lines[j]); j++) {
-      const code = lines[j].match(/^\s+code:\s*'([^']+)'/);
-      if (code) {
-        outcome = code[1] === 'ERR_ASSERTION' ? 'assertion_fail' : 'crash';
-        break;
-      }
-    }
-    results.push({ name: testName, outcome });
+    results.push({ name: testName, outcome: code === 'ERR_ASSERTION' ? 'assertion_fail' : 'crash' });
   }
   return results;
 }

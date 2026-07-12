@@ -189,7 +189,17 @@ if (existsSync(dbPath)) {
 
 // CLAUDE.md from the shipped template — specified content, never improvised,
 // NEVER clobbered: a differing CLAUDE.md is the human's; merging is their act.
-const expectedClaudeMd = readFileSync(join(pluginRoot, 'templates', 'target-claude-md.md'), 'utf8')
+// Dead-term check runs on each generated render IMMEDIATELY before its write, so
+// a rotted template refuses BEFORE the poisoned file lands on disk (audit finding
+// 22/43 — the check formerly ran after every write). The header's "every refusal
+// happens BEFORE any write" now holds for this check too.
+const assertNoDeadTerms = (label, content) => {
+  const hits = findDeadTerms(content);
+  if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(', ')}`, 1);
+  return content;
+};
+
+const expectedClaudeMd = assertNoDeadTerms('CLAUDE.md', readFileSync(join(pluginRoot, 'templates', 'target-claude-md.md'), 'utf8')
   .replaceAll('{{PROJECT_NAME}}', eff.projectName)
   .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
   .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.join(', ')})`).join('; '))
@@ -197,7 +207,7 @@ const expectedClaudeMd = readFileSync(join(pluginRoot, 'templates', 'target-clau
     ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — created lazily on first need (§2.3)'
     : '(none — declare stack tags to mount domain stores)')
   .replaceAll('{{BACKUP_PATH}}', eff.backupPath ? eff.backupPath : '(opted out — recorded)')
-  .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)');
+  .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)'));
 const claudeMdPath = join(target, 'CLAUDE.md');
 if (!existsSync(claudeMdPath)) {
   writeFileSync(claudeMdPath, expectedClaudeMd);
@@ -248,13 +258,13 @@ const lf = (s) => s.replace(/\r\n/g, '\n');
 const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
 
 // (1) the tmux launcher — the actual split lives here; both .bat files call it
-const expectedTmuxLauncher = lf(
+const expectedTmuxLauncher = assertNoDeadTerms('sterling-launch.sh', lf(
   readFileSync(join(pluginRoot, 'templates', 'launcher-tmux.sh'), 'utf8')
     .replaceAll('{{SESSION}}', sessionName)
     .replaceAll('{{PLUGIN_DIR}}', fwd(pluginRoot))
     .replaceAll('{{TUI_BUNDLE}}', tuiBundle)
     .replaceAll('{{SPLIT_RATIO}}', String(splitPercent))
-);
+));
 const tmuxLauncherPath = join(target, 'sterling-launch.sh');
 if (!existsSync(tmuxLauncherPath)) {
   writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
@@ -266,10 +276,10 @@ if (!existsSync(tmuxLauncherPath)) {
 }
 
 // (2) the double-click Windows entry: Windows Terminal -> WSL -> the tmux launcher
-const expectedLauncher = crlf(
+const expectedLauncher = assertNoDeadTerms('sterling.bat', crlf(
   readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
     .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
-);
+));
 const launcherPath = join(target, 'sterling.bat');
 if (!existsSync(launcherPath)) {
   writeFileSync(launcherPath, expectedLauncher);
@@ -281,10 +291,10 @@ if (!existsSync(launcherPath)) {
 }
 
 // (3) the §13 dashboard re-opener: re-adds the TUI pane to the running session
-const expectedTuiLauncher = crlf(
+const expectedTuiLauncher = assertNoDeadTerms('tui.bat', crlf(
   readFileSync(join(pluginRoot, 'templates', 'tui-win.bat'), 'utf8')
     .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
-);
+));
 const tuiLauncherPath = join(target, 'tui.bat');
 if (!existsSync(tuiLauncherPath)) {
   writeFileSync(tuiLauncherPath, expectedTuiLauncher);
@@ -307,7 +317,7 @@ if (winNode) {
   // on the WSL side (POSIX paths — it executes inside WSL bash). --win-domains-root
   // is computed AT RUNTIME from %USERPROFILE% via wslpath (no home baked in here).
   const snapshotScriptPosix = fwd(join(pluginRoot, 'scripts', 'snapshot-domains-for-windows.mjs'));
-  expectedNativeLauncher = crlf(
+  expectedNativeLauncher = assertNoDeadTerms('sterling-windows.bat', crlf(
     readFileSync(join(pluginRoot, 'templates', 'launcher-win-native.bat'), 'utf8')
       .replaceAll('{{WIN_PLUGIN_DIR}}', winPluginDir)
       .replaceAll('{{WIN_NODE}}', winNode)
@@ -315,7 +325,7 @@ if (winNode) {
       .replaceAll('{{SPLIT_RATIO}}', splitRatio01)
       .replaceAll('{{SNAPSHOT_SCRIPT}}', snapshotScriptPosix)
       .replaceAll('{{PROJECT_DIR_POSIX}}', fwd(target))
-  );
+  ));
   if (!existsSync(nativeLauncherPath)) {
     writeFileSync(nativeLauncherPath, expectedNativeLauncher);
     items.push({ item: 'sterling-windows.bat', status: 'created', detail: `native claude.exe + Windows-node TUI, ${splitRatio01} split` });
@@ -484,12 +494,8 @@ if (missing.length) {
   items.push({ item: '.gitignore', status: 'matches', detail: 'all entries present' });
 }
 
-// dead-term check over the GENERATED content (§12) — rendered expected content
-// every run (catches template rot), never the human's own files
-for (const [label, content] of [['CLAUDE.md', expectedClaudeMd], ['sterling-launch.sh', expectedTmuxLauncher], ['sterling.bat', expectedLauncher], ['tui.bat', expectedTuiLauncher], ...(expectedNativeLauncher ? [['sterling-windows.bat', expectedNativeLauncher]] : [])]) {
-  const hits = findDeadTerms(content);
-  if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(', ')}`, 1);
-}
+// (dead-term check now runs per-render before each write — see assertNoDeadTerms,
+// audit finding 22/43 — so no poisoned file reaches disk before the refusal.)
 
 // shared project registry (decision 8f9e6db2): note this project in the
 // machine-global registry so the others are aware it exists. Upsert by repo_path,

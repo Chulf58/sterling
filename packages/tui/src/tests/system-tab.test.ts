@@ -500,6 +500,34 @@ test('selector open: the plain roster (no picker) does NOT surface the unused ca
   assert.doesNotMatch(allText(view), /claude-opus-4-1|Opus 4\.1/, 'the closed roster never shows the unused catalog entry');
 });
 
+test('audit finding 24/43: ENTER on an EMPTY catalog does NOT open the picker — it surfaces a ⚠ notice', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot({ catalog: { present: true, stale: false, staleDate: null, entries: [] } });
+    const r = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER')], snap);
+    assert.equal(r.ui.selector, undefined, 'no picker opens on an empty catalog');
+    assert.match(r.ui.notice ?? '', /catalog empty|invalid|nothing to pick/i, 'a notice explains why');
+    assert.match(allText(buildSystemTab!(snap, r.ui, 80)), /⚠/, 'the notice renders as a ⚠ banner row');
+  } finally {
+    cleanup();
+  }
+});
+
+test('audit finding 24/43: committing a non-claude model is REFUSED with a visible notice (not a silent close)', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    // a catalog whose only entry is a non-claude id → the commit fails MODEL_VALUE_RE
+    const snap = baseSnapshot({ catalog: freshCatalog([{ id: 'gpt-5x', label: 'GPT 5X', tier: 'opus', status: 'active' }]) });
+    // coder row: open model picker, confirm the (only) entry, advance to effort, commit
+    const r = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER'), key('ENTER'), key('ENTER')], snap);
+    assert.equal(findSwap(r.effects), undefined, 'no model_swap effect emitted for a non-claude model');
+    assert.equal(r.ui.selector, undefined, 'the picker closed');
+    assert.match(r.ui.notice ?? '', /refused/i, 'the refusal is surfaced, not silent');
+  } finally {
+    cleanup();
+  }
+});
+
 test('selector effort rule: a subagent key (reviewers) offers efforts EXCLUDING xhigh and max', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
   const { store, cleanup } = storeFixture();

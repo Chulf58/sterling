@@ -135,7 +135,21 @@ export const referenceMaterialSchema = base
     // carries a validated modelsCatalogSchema payload.
     catalog: modelsCatalogSchema.optional(),
   })
-  .superRefine(refineSupersession);
+  .superRefine(refineSupersession)
+  // §3.2 path invariant at the boundary: a kind:doc location doubles as a
+  // file_key, so normalize it in the BODY too (audit finding 12/43) — otherwise a
+  // 'docs\spec.md' / './docs/spec.md' body diverges from the normalized index key
+  // and renameFileKey's exact-match rewrite misses it. Mirrors the fileKeys
+  // extractor: only kind:doc, and an absolute/escaping location keeps its raw
+  // value (pdf/url/external docs are never repo-relative).
+  .transform((rec) => {
+    if (rec.kind !== 'doc') return rec;
+    try {
+      return { ...rec, location: normalizeRepoPath(rec.location) };
+    } catch {
+      return rec;
+    }
+  });
 
 // §3.2.8 — refuted trails live here instead of dying; debug runs must not
 // re-litigate false trails already disproved.

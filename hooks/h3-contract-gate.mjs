@@ -4089,10 +4089,13 @@ function matchesGlob(path, glob) {
     const c = g[i];
     if (c === "*") {
       if (g[i + 1] === "*") {
-        re += "(?:.*)";
         i++;
-        if (g[i + 1] === "/")
+        if (g[i + 1] === "/") {
+          re += "(?:[^/]*/)*";
           i++;
+        } else {
+          re += ".*";
+        }
       } else {
         re += "[^/]*";
       }
@@ -4110,7 +4113,10 @@ function toRepoRelative(absolutePath, repoRoot) {
   const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
   const abs = norm(absolutePath);
   const root = norm(repoRoot);
-  if (!(abs === root || abs.toLowerCase().startsWith(root.toLowerCase() + "/"))) {
+  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
+  const a = drivePrefixed ? abs.toLowerCase() : abs;
+  const r = drivePrefixed ? root.toLowerCase() : root;
+  if (!(a === r || a.startsWith(r + "/"))) {
     throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
   }
   return normalizeRepoPath(abs.slice(root.length + 1));
@@ -4245,7 +4251,15 @@ var referenceMaterialSchema = base.extend({
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
   catalog: modelsCatalogSchema.optional()
-}).superRefine(refineSupersession);
+}).superRefine(refineSupersession).transform((rec) => {
+  if (rec.kind !== "doc")
+    return rec;
+  try {
+    return { ...rec, location: normalizeRepoPath(rec.location) };
+  } catch {
+    return rec;
+  }
+});
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
   question: external_exports.string().min(1),
@@ -4807,11 +4821,12 @@ function deepReplaceString(value, from, to) {
   if (Array.isArray(value))
     return value.map((v) => deepReplaceString(v, from, to));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, deepReplaceString(v, from, to)]));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
 }
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(16);
+var MAX_RANK_TERMS = 16;
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var SterlingStore = class {
   db;
   constructor(path) {
@@ -4857,6 +4872,10 @@ var SterlingStore = class {
     if (fileKeys.length) {
       where.push(`EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => "?").join(",")}))`);
       params.push(...fileKeys);
+    }
+    if (opts.source) {
+      where.push("json_extract(r.body, '$.source') = ?");
+      params.push(opts.source);
     }
     return { where, params, fileKeys };
   }
@@ -4908,8 +4927,8 @@ var SterlingStore = class {
     const oldRecord = this.get(oldId);
     if (!oldRecord)
       throw new Error(`supersede: no record '${oldId}'`);
-    if (oldRecord.status !== "active")
-      throw new Error(`supersede: record '${oldId}' is not active`);
+    if (oldRecord.status === "superseded")
+      throw new Error(`supersede: record '${oldId}' is already superseded`);
     const candidate = { ...newInput };
     const links = Array.isArray(candidate.links) ? [...candidate.links] : [];
     if (!links.some((l) => l.rel === "supersedes" && l.target_id === oldId)) {
@@ -4926,7 +4945,10 @@ var SterlingStore = class {
     this.tx(() => {
       this.insertRecord(newRecord);
       const updatedOld = { ...oldRecord, status: "superseded", superseded_by: newRecord.id, updated_at: newRecord.updated_at };
-      this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ?").run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
+      const res = this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
+      if (res.changes === 0) {
+        throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
+      }
     });
     return newRecord;
   }
@@ -4942,11 +4964,14 @@ var SterlingStore = class {
     const record = this.get(id);
     if (!record)
       throw new Error(`retireInFavorOf: no record '${id}'`);
-    if (record.status !== "active")
-      throw new Error(`retireInFavorOf: record '${id}' is not active`);
+    if (record.status === "superseded")
+      throw new Error(`retireInFavorOf: record '${id}' is already superseded`);
     const retired = { ...record, status: "superseded", superseded_by: replacementId, updated_at: at };
     this.tx(() => {
-      this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ?").run("superseded", replacementId, at, JSON.stringify(retired), id);
+      const res = this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run("superseded", replacementId, at, JSON.stringify(retired), id);
+      if (res.changes === 0) {
+        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded \u2014 retry`);
+      }
     });
     return retired;
   }
@@ -4967,6 +4992,7 @@ var SterlingStore = class {
       this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
       this.db.prepare("DELETE FROM record_links WHERE source_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_links WHERE target_id = ?").run(id);
       this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
     });
   }
@@ -4996,11 +5022,13 @@ var SterlingStore = class {
   /** Run begins at gate approval. One active run at a time (§7.5). */
   createRun(input2) {
     const run = runRecordSchema.parse(input2);
-    const active = this.getRun();
-    if (active) {
-      throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
-    }
-    this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    this.tx(() => {
+      const active = this.getRun();
+      if (active) {
+        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
+      }
+      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    });
     return run;
   }
   /** By id, or the single active run when no id is given. */
@@ -5211,6 +5239,9 @@ var SterlingStore = class {
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason, at);
+    if (!runId) {
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
+    }
   }
   listCheckSkipped(runId) {
     return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
@@ -5327,6 +5358,23 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withRetry(fn) {
+  let last;
+  for (let i = 0; i < 5; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
+      last = e;
+      sleepMs(25 * (i + 1));
+    }
+  }
+  throw last;
+}
 function openStore(cwd2) {
   const p = join(cwd2, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -5405,16 +5453,17 @@ if (input.agent_id && toolPath) {
     deny(`H3 [self-protection]: '${rel}' is enforcement surface (${ENFORCEMENT_SURFACE.join(", ")}) \u2014 never agent-editable, in any mode (\xA76 H3); if enforcement is misbehaving, exit blocked and report it`);
   }
 }
-var store = openStore(cwd);
-if (!store) deny("H3: no Sterling store at .sterling/ \u2014 the contract gate cannot evaluate scope; failing closed (P5)");
+var store;
 try {
-  const run = store.getRun();
+  store = openStore(cwd);
+  if (!store) deny("H3: no Sterling store at .sterling/ \u2014 the contract gate cannot evaluate scope; failing closed (P5)");
+  const run = withRetry(() => store.getRun());
   const absolute = toolPath && (isAbsolute(String(toolPath)) || /^[A-Za-z]:/.test(String(toolPath)));
   const absPath = rel ? join4(cwd, rel) : absolute ? String(toolPath) : void 0;
   const isCreation = absPath ? !existsSync5(absPath) : false;
   if (run) {
     if (!rel) deny(`H3 [run mode]: '${toolPath}' is outside the repository \u2014 the run owns only the working tree; out of scope`);
-    const brief = store.get(run.brief_ref);
+    const brief = withRetry(() => store.get(run.brief_ref));
     if (!brief || brief.type !== "brief") deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
     const scope2 = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope2.deny) deny(`H3 [run mode]: ${scope2.deny}`);
@@ -5430,6 +5479,8 @@ try {
     deny(`H3 [direct mode]: no read-evidence for '${rel}' \u2014 Read the exact file before editing`);
   }
   allow();
+} catch (e) {
+  deny(`H3: contract evaluation failed (${e && e.message || e}) \u2014 failing closed (P5); retry the edit`);
 } finally {
-  store.close();
+  store?.close();
 }

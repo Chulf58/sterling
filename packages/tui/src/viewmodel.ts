@@ -256,8 +256,7 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
 
 export function todoCards(store: SterlingStore): Card[] {
   return store
-    .query({ types: ['todo'], cap: 200 })
-    .filter((t) => (t as { source: string }).source === 'user')
+    .query({ types: ['todo'], source: 'user', cap: 200 })
     .map((t) => {
       const todo = t as unknown as { id: string; text: string; priority?: string; file_keys?: string[] };
       return {
@@ -274,8 +273,7 @@ export function todoCards(store: SterlingStore): Card[] {
 
 export function queueCards(store: SterlingStore): Card[] {
   return store
-    .query({ types: ['todo'], cap: 200 })
-    .filter((t) => (t as { source: string }).source === 'system')
+    .query({ types: ['todo'], source: 'system', cap: 200 })
     .map((t) => {
       const item = t as unknown as { id: string; text: string; system_reason?: string; file_keys?: string[] };
       return {

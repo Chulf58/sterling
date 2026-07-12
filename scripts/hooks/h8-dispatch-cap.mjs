@@ -4,7 +4,7 @@
 // current docs claim otherwise (SubagentStart-only); the probe wins.
 // Increment the per-agent-type run counter; over cap → deny + escalate.
 // Respawns count under this cap (§5.1).
-import { readStdin, deny, allow, loadConfig, openStore } from './lib/common.mjs';
+import { readStdin, deny, allow, loadConfig, openStore, withRetry } from './lib/common.mjs';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
 // The guarded pipeline agent types = the registered Sterling roster (the keys of
@@ -61,11 +61,14 @@ const input = readStdin();
 const agentType = input.tool_input?.subagent_type;
 if (!agentType) allow();
 
-const store = openStore(input.cwd);
-if (!store) allow();
-
+// A BLOCKING gate that cannot verify must DENY, never void itself via an
+// uncaught exit-1 (decision 2422e76a's fail-closed rule; audit finding 5/43).
+let store;
 try {
-  const run = store.getRun();
+  store = openStore(input.cwd);
+  if (!store) allow();
+
+  const run = withRetry(() => store.getRun());
   if (!run || run.machine_state !== 'running') allow(); // the cap is per-run
 
   // Slice-presence check ORDERED BEFORE the cap increment: a denied dispatch
@@ -79,25 +82,29 @@ try {
   // Breadth check: needs the run's brief to see the named phase's interface
   // count. Loaded only here (not in the slice-denied path above), and it must
   // still run BEFORE the cap increment (decision 628c4b7f (e) extended).
-  const brief = run.brief_ref ? store.get(run.brief_ref) : null;
+  const brief = run.brief_ref ? withRetry(() => store.get(run.brief_ref)) : null;
   const breadthDeny = breadthDenial(prompt, brief, config);
   if (breadthDeny) deny(breadthDeny);
 
   const cap = config?.caps?.dispatch_per_agent_type ?? 25;
   const current = run.dispatch_counts[agentType] ?? 0;
   if (current + 1 > cap) {
-    store.appendRunEscalation(run.id, {
-      kind: 'dispatch_cap_exceeded',
-      agent_type: agentType,
-      cap,
-      at: new Date().toISOString(),
-    });
+    withRetry(() =>
+      store.appendRunEscalation(run.id, {
+        kind: 'dispatch_cap_exceeded',
+        agent_type: agentType,
+        cap,
+        at: new Date().toISOString(),
+      })
+    );
     deny(
       `H8: dispatch cap exceeded — '${agentType}' has been dispatched ${current}x this run (cap ${cap}). This run is looping; escalate to the human instead of spawning again (§5.1).`
     );
   }
-  store.incrementDispatchCount(run.id, agentType);
+  withRetry(() => store.incrementDispatchCount(run.id, agentType));
   allow();
+} catch (e) {
+  deny(`H8: dispatch gate failed (${(e && e.message) || e}) — failing closed (P5); retry the dispatch`);
 } finally {
-  store.close();
+  store?.close();
 }

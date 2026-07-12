@@ -717,6 +717,27 @@ test('H10: a touched file deleted before Stop is skipped — no demand, no artic
   }
 });
 
+test('H10: an internal throw (corrupt config) degrades loud via check_skipped, not a silent exit-1 (audit finding 34/43)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // a touch gives H10 a reason to proceed past the empty-register early-out
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'x.mjs'), 'export {};');
+    writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'src/x.mjs', at: NOW }]));
+    // config that PARSES as JSON but FAILS the zod parseConfig (min_unowned_files must be a number)
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, article_demand: { min_unowned_files: 'three' } }));
+
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 1, 'internal failure exits non-blocking (lets the session end) — not a hard block');
+    assert.match(r.stderr, /session-end duties skipped/);
+    const skipped = store.listCheckSkipped().filter((c) => c.check_name === 'h10-stop-duties');
+    assert.equal(skipped.length, 1, 'the skip was recorded as a durable check_skipped trail (AC4)');
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- H15 ---------------------------
 
 test('H15 store guard: shell references to the store are denied naming the §10 tools; sanctioned scripts and unrelated commands pass', () => {
@@ -733,6 +754,13 @@ test('H15 store guard: shell references to the store are denied naming the §10 
 
     assert.equal(run('sqlite3 .sterling/sterling.db "SELECT * FROM records"').code, 2, 'reads are denied too — use knowledge_query');
     assert.equal(run('Get-Content .sterling\\config.json').code, 2, 'backslash store paths are caught');
+
+    // bare `.sterling` — the whole-store command class (audit finding 4/43, board 1aba8ace)
+    assert.equal(run('rm -rf .sterling').code, 2, 'whole-store delete names no separator but is still gated');
+    assert.equal(run('mv .sterling .sterling.bak').code, 2, 'whole-store rename is gated');
+    assert.equal(run('tar czf x.tgz .sterling').code, 2, 'whole-store archive is gated');
+    assert.equal(run('rm -rf .sterling-backups').code, 0, 'suffixed sibling names stay out of the gate');
+    assert.equal(run('echo .sterlingfoo').code, 0, 'word-joined mentions stay out of the gate');
 
     assert.equal(run('node scripts/dispose-run.mjs r-0001 --store .sterling/sterling.db').code, 0, 'sanctioned script passes');
     assert.equal(run('node scripts/init.mjs --backup-path .sterling/backups').code, 0, 'init passes');
@@ -759,6 +787,41 @@ test('H15 store guard: shell references to the store are denied naming the §10 
     assert.equal(r.code, 0, 'no ceremony outside Sterling projects');
   } finally {
     rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+// H3/H8 fail-closed (audit finding 5/43, board ea2742e0): a BLOCKING gate whose
+// store access throws must DENY (exit 2), never void itself via an uncaught
+// exit 1 (decision 2422e76a's rule, previously applied only to H17/H15).
+test('H3/H8: an unreadable store denies (fail closed) instead of voiding the blocking gate', () => {
+  // Built by hand (no real store ever opened on the db path, so no WAL sidecar
+  // holds a valid schema): the garbage file genuinely fails to open, forcing the
+  // gate's store access to throw — which must surface as a deny, not a void.
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-failclosed-'));
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+    writeFileSync(join(dir, 'src.mjs'), 'export {};');
+    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'not a sqlite database — corrupt on purpose. '.repeat(100));
+
+    const h3 = runHook(
+      'h3-contract-gate.mjs',
+      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'src.mjs') } }),
+      dir
+    );
+    assert.equal(h3.code, 2, 'H3 denies when it cannot evaluate the contract');
+    assert.match(h3.stderr, /failing closed/);
+
+    const h8 = runHook(
+      'h8-dispatch-cap.mjs',
+      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type: 'coder', prompt: 'SLICE-WAIVED: test' } }),
+      dir
+    );
+    assert.equal(h8.code, 2, 'H8 denies when it cannot evaluate the cap');
+    assert.match(h8.stderr, /failing closed/);
+  } finally {
+    cleanup();
   }
 });
 

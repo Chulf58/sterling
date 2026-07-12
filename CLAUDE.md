@@ -10,7 +10,7 @@ Sterling is built and self-hosted in this repo. The build is complete; this file
   - why it is the way it is · rejected alternatives → **`decision`**
   - what not to do → **`anti_pattern`** · findings with currency (two clocks + staleness) → **`research_finding`** · external / pointer docs → **`reference_material`**
   - live run · board · maintenance queue → **`run_state`**, **`board_query`**, the **TUI**
-  - **SOPs** → `skills/` (grill-intent, planning, grill-plan, debug, cleanup, council)
+  - **SOPs** → `skills/` (grill-intent, planning, grill-plan, debug, drain, cleanup, council)
   - **generated architecture overview** → `architecture.md` (read-only projection from the articles — never hand-edit)
 - **`STERLING-SPEC.md` is retired.** It was the initial build specification; it now lives in `docs/historical/` and is **not authoritative**. Where it and the knowledge base differ, the **knowledge base wins** — it reflects what was actually built and has since changed. Its still-live forward-looking content was migrated to decisions: `f6283a11` (deferred / optional register), `0956a464` (verify-at-build register), `9950dfff` (inline-retrieval enforcement, deferred).
 - **Ambiguity → query the knowledge base, then ask.** If the store is silent or self-contradictory, **stop and ask** — never improvise around a gap.
@@ -107,9 +107,9 @@ Sterling is initialized in its own repo (`/sterling:init`). The sections below a
 
 ## Project facts (generated)
 
-- Stack tags (= domain mount manifest, §3.3): node, typescript
+- Stack tags (= domain mount manifest, §3.3): node, typescript, sterling
 - Toolchains: node (**/*.mjs, **/*.ts)  <!-- path globs → adapter; test-path globs; run commands -->
-- Domain stores (one shared store per stack tag): ~/.sterling/domains/node/, ~/.sterling/domains/typescript/ — created lazily on first need (§2.3)
+- Domain stores (one shared store per stack tag): ~/.sterling/domains/node/, ~/.sterling/domains/typescript/, ~/.sterling/domains/sterling/ — created lazily on first need (§2.3)
 - Backup path: C:/Users/cuj/.sterling-backups/sterling
 
 ## Conventions (lean — grows only via architecture-altering decision records)

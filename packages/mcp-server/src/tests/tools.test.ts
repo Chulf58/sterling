@@ -205,7 +205,7 @@ test('board tools: add/query separates board from maintenance queue; remove is t
 });
 
 test('stale-at-read (§3.4): research findings get both clocks + flag; platform basis gets verify_before_use', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const mk = (over: Record<string, unknown>) =>
       tools.knowledgeCreate('research_finding', {
@@ -229,7 +229,21 @@ test('stale-at-read (§3.4): research findings get both clocks + flag; platform 
     assert.match(old.staleness.note!, /re-verify/);
     assert.equal(typeof old.staleness.source_age_days, 'number');
 
-    tools.knowledgeCreate('reference_material', {
+    // Seed the aged record at the STORE layer: knowledge_create now (correctly)
+    // owns the envelope and strips caller-supplied created_at/updated_at (audit
+    // finding 14/43), so an old record is seeded directly with a full envelope —
+    // the annotation logic under test still keys verify_before_use off updated_at.
+    store.create({
+      id: randomUUID(),
+      type: 'reference_material',
+      created_at: '2025-01-01T00:00:00.000Z',
+      updated_at: '2025-01-01T00:00:00.000Z',
+      author: 'conductor',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
       title: 'old platform doc',
       kind: 'url',
       location: 'https://x',
@@ -237,8 +251,6 @@ test('stale-at-read (§3.4): research findings get both clocks + flag; platform 
       source_date: '2025-01-01',
       capture_date: '2025-01-01',
       basis: 'platform',
-      created_at: '2025-01-01T00:00:00.000Z',
-      updated_at: '2025-01-01T00:00:00.000Z',
     });
     const refs = tools.knowledgeQuery({ types: ['reference_material'], cap: 10 }) as unknown as { verify_before_use?: boolean }[];
     assert.equal(refs[0].verify_before_use, true, 'wrong old knowledge is worse than no knowledge');
@@ -502,6 +514,93 @@ test('run_signal: conductor-reported agent-died, respawn then death cap; no exit
     const r2 = tools.runSignal({ exit: { ...died, payload: { observed: 'empty_output' } } });
     assert.equal(r2.action.action, 'judgment_needed');
     assert.equal(tools.runState().escalations.length, 1, 'escalation recorded on the run record');
+  } finally {
+    cleanup();
+  }
+});
+
+test('agent_exit: a real-but-not-current phase is refused (currency, not just existence) — audit finding 3/43', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    // advance p1 → complete, p2 → in_progress
+    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
+    tools.runSignal();
+    assert.equal(tools.runState().phases[0].status, 'complete');
+    // exit naming the already-complete p1 must refuse — it EXISTS but is not current
+    assert.throws(
+      () => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/again' } }),
+      /is 'complete', not the current \(in_progress\) phase.*'p2'/s,
+      'stale-but-existing phase refused, current phase named'
+    );
+    assert.equal(store.getPendingExit('r-0001'), undefined, 'nothing recorded');
+    // the current phase (p2) still records exactly as before
+    const { recorded } = tools.agentExit({ phase_id: 'p2', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p2/coder' } });
+    assert.equal(recorded.phase_id, 'p2', 'the current phase still records');
+  } finally {
+    cleanup();
+  }
+});
+
+test('run_signal: an explicit exit refuses to overwrite an unconsumed recorded exit — audit finding 2/43', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    // agent recorded a valid exit
+    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'blocked', payload: { reason: 'stuck' } });
+    // conductor reports a DIFFERENT signal explicitly — must refuse, nothing consumed
+    assert.throws(
+      () => tools.runSignal({ exit: { signal: 'agent-died', phase_id: 'p1', payload: { observed: 'empty_output' } } }),
+      /already has a recorded agent exit \(signal 'blocked'.*refusing to overwrite/s,
+      'the recorded exit is protected'
+    );
+    assert.equal(store.getPendingExit('r-0001')!.signal, 'blocked', 'recorded exit survives the refusal');
+    // reacting to the recorded exit (no explicit exit) still works
+    const r = tools.runSignal();
+    assert.equal(r.run_id, 'r-0001');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_create: caller cannot override the server-owned envelope (id/timestamps/status) — audit finding 14/43', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const forgedId = randomUUID();
+    const { record } = tools.knowledgeCreate('decision', {
+      title: 'envelope test',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+      id: forgedId,
+      status: 'superseded',
+      superseded_by: randomUUID(),
+      created_at: '2000-01-01T00:00:00.000Z',
+      updated_at: '2000-01-01T00:00:00.000Z',
+    });
+    assert.notEqual(record.id, forgedId, 'server assigns the id');
+    assert.equal(record.status, 'active', 'born active regardless of caller status');
+    assert.equal(record.superseded_by, null, 'not born superseded');
+    assert.notEqual(record.created_at, '2000-01-01T00:00:00.000Z', 'server owns created_at');
+    // the record is actually served (a caller-forged status:superseded would have hidden it)
+    const served = tools.knowledgeQuery({ types: ['decision'], cap: 10 });
+    assert.ok(served.some((r) => r.id === record.id), 'the created record is visible to default queries');
+  } finally {
+    cleanup();
+  }
+});
+
+test('maintenance_query: system_reason is filtered BEFORE the cap — matches past the cap are not missed (audit finding 33/43)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // 55 newer reconcile_needed items, then 3 older promotion_review items
+    for (let i = 0; i < 55; i++) tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `r${i}` });
+    for (let i = 0; i < 3; i++) tools.maintenanceEnqueue({ reason: 'promotion_review', text: `p${i}` });
+    // default cap (50): the 3 promotion_review items must still be found, though
+    // they are the oldest and would fall outside a cap-first slice
+    const found = tools.maintenanceQuery({ system_reason: 'promotion_review' });
+    assert.equal(found.length, 3, 'reason-filtered query finds all matches regardless of cap');
+    assert.ok(found.every((t) => (t as { system_reason?: string }).system_reason === 'promotion_review'));
   } finally {
     cleanup();
   }

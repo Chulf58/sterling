@@ -16,7 +16,9 @@ const input = readStdin();
 if (!input.cwd || !existsSync(join(input.cwd, '.sterling'))) allow(); // not a Sterling project — no ceremony (P1)
 
 const command = String(input.tool_input?.command ?? '');
-if (!/\.sterling[\\/]|sterling\.db/i.test(command)) allow();
+// Bare `.sterling` (rm -rf/mv/tar of the whole store dir) must trip the gate too;
+// the lookahead keeps suffixed names (.sterling-backups, .sterling2) out of it.
+if (!/\.sterling(?![\w.-])|sterling\.db/i.test(command)) allow();
 
 // a malformed config must fail CLOSED on the protected branch — an uncaught
 // throw exits non-2, which the platform treats as non-blocking (a voided gate)

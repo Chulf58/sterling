@@ -30,6 +30,31 @@ export function loadConfig(cwd) {
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
 }
 
+/** Synchronous sleep for the store busy-retry (no async in a hook body). */
+export function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Retry a store op past a transient SQLITE_BUSY (the live MCP server can hold a
+ * brief lock); a persistent / non-busy throw (corrupt db) propagates — the
+ * caller decides the terminal state (blocking gates deny, P5).
+ */
+export function withRetry(fn) {
+  let last;
+  for (let i = 0; i < 5; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
+      last = e;
+      sleepMs(25 * (i + 1));
+    }
+  }
+  throw last;
+}
+
 /** Open the project store if the project is Sterling-initialized; null otherwise. */
 export function openStore(cwd) {
   const p = join(cwd, '.sterling', 'sterling.db');

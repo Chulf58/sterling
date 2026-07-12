@@ -161,20 +161,36 @@ const hatOpts = (hat, phaseTitle, tag) => ({
   phase: phaseTitle,
 })
 
+// Partial-hat failure is a QUALITY signal, not just a >0 gate (audit finding
+// 37/43): a round where most hats fail (e.g. black — the risks voice — never
+// speaks) proceeds on a minority, and the synthesis reads as full-council. Track
+// which colors reported each round (parallel preserves HATS order, so a null at
+// index i = that hat failed), and mark the result degraded when a round drops
+// below the quorum. Below quorum on ALL surviving-but-thin rounds is not fatal,
+// but the caller must be able to see it.
+const MIN_HATS_QUORUM = 3
+const survivors = (raw) => HATS.filter((_, i) => raw[i]).map((h) => h.color)
+
 phase('Round 1 — blind')
-const r1 = (await parallel(HATS.map((h) => () => agent(blindPrompt(h), hatOpts(h, 'Round 1 — blind', 'r1'))))).filter(Boolean)
+const r1raw = await parallel(HATS.map((h) => () => agent(blindPrompt(h), hatOpts(h, 'Round 1 — blind', 'r1'))))
+const r1 = r1raw.filter(Boolean)
+const r1colors = survivors(r1raw)
 if (r1.length === 0) throw new Error('council: round 1 produced no hat output — aborting rather than deliberating on silence (P5)')
-log(`round 1 complete — ${r1.length}/5 hats`)
+log(`round 1 complete — ${r1.length}/5 hats (${r1colors.join(', ')})`)
 
 phase('Round 2 — rebut')
-const r2 = (await parallel(HATS.map((h) => () => agent(rebutPrompt(h, r1), hatOpts(h, 'Round 2 — rebut', 'r2'))))).filter(Boolean)
+const r2raw = await parallel(HATS.map((h) => () => agent(rebutPrompt(h, r1), hatOpts(h, 'Round 2 — rebut', 'r2'))))
+const r2 = r2raw.filter(Boolean)
+const r2colors = survivors(r2raw)
 if (r2.length === 0) throw new Error('council: round 2 produced no hat output — the deliberation collapsed mid-way; aborting (P5)')
-log(`round 2 complete — ${r2.length}/5 hats`)
+log(`round 2 complete — ${r2.length}/5 hats (${r2colors.join(', ')})`)
 
 phase('Round 3 — converge')
-const r3 = (await parallel(HATS.map((h) => () => agent(convergePrompt(h, r2), hatOpts(h, 'Round 3 — converge', 'r3'))))).filter(Boolean)
+const r3raw = await parallel(HATS.map((h) => () => agent(convergePrompt(h, r2), hatOpts(h, 'Round 3 — converge', 'r3'))))
+const r3 = r3raw.filter(Boolean)
+const r3colors = survivors(r3raw)
 if (r3.length === 0) throw new Error('council: round 3 produced no hat output — the deliberation collapsed mid-way; aborting (P5)')
-log(`round 3 complete — ${r3.length}/5 hats`)
+log(`round 3 complete — ${r3.length}/5 hats (${r3colors.join(', ')})`)
 
 phase('Synthesis')
 // blue rides the read-only explorer type too — transience is structural for all
@@ -182,4 +198,12 @@ phase('Synthesis')
 const council = await agent(synthPrompt(r1, r2, r3), { schema: COUNCIL_SCHEMA, model: 'opus', agentType: 'explorer', label: 'blue', phase: 'Synthesis' })
 if (!council) throw new Error('council: blue synthesis returned nothing — the deliberation is lost; re-run (P5)')
 
-return council
+// Deterministic, script-computed participation trail so a thinned deliberation
+// can never silently pose as full-council (finding 37/43).
+const participation = { r1: r1colors, r2: r2colors, r3: r3colors }
+const thinnest = Math.min(r1.length, r2.length, r3.length)
+const degraded = thinnest < MIN_HATS_QUORUM
+const missing_voices = HATS.map((h) => h.color).filter((c) => !(r1colors.includes(c) && r2colors.includes(c) && r3colors.includes(c)))
+if (degraded) log(`council DEGRADED — thinnest round had ${thinnest}/${HATS.length} hats (quorum ${MIN_HATS_QUORUM}); missing across rounds: ${missing_voices.join(', ') || 'none'}`)
+
+return { ...council, participation, degraded, missing_voices }

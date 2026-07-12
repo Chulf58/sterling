@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, deny, allow, openStore, loadConfig } from './lib/common.mjs';
+import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking } from './lib/common.mjs';
 import { selectReviewers } from '../lib/reviewer-selection.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
@@ -280,6 +280,17 @@ try {
   }
   clearRegisters();
   allow();
+} catch (e) {
+  // A throw here (config parse, store read) would otherwise skip every session-end
+  // duty silently on a non-blocking exit-1. Degrade LOUD instead (AC4): record a
+  // check_skipped trail best-effort, then warn. deny()/allow() exit the process,
+  // so reaching this catch means an UNEXPECTED failure, not a duty nag.
+  try {
+    store.recordCheckSkipped('h10-stop-duties', String((e && e.message) || e), undefined, new Date().toISOString());
+  } catch {
+    // store itself is the casualty — the warn below is the remaining loud signal
+  }
+  warnNonBlocking(`H10: session-end duties skipped — ${(e && e.message) || e} (recorded check_skipped h10-stop-duties; fix and re-run before relying on capture/article demand)`);
 } finally {
   store.close();
 }

@@ -4084,10 +4084,13 @@ function matchesGlob(path, glob) {
     const c = g[i];
     if (c === "*") {
       if (g[i + 1] === "*") {
-        re += "(?:.*)";
         i++;
-        if (g[i + 1] === "/")
+        if (g[i + 1] === "/") {
+          re += "(?:[^/]*/)*";
           i++;
+        } else {
+          re += ".*";
+        }
       } else {
         re += "[^/]*";
       }
@@ -4105,7 +4108,10 @@ function toRepoRelative(absolutePath, repoRoot) {
   const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
   const abs = norm(absolutePath);
   const root = norm(repoRoot);
-  if (!(abs === root || abs.toLowerCase().startsWith(root.toLowerCase() + "/"))) {
+  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
+  const a = drivePrefixed ? abs.toLowerCase() : abs;
+  const r = drivePrefixed ? root.toLowerCase() : root;
+  if (!(a === r || a.startsWith(r + "/"))) {
     throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
   }
   return normalizeRepoPath(abs.slice(root.length + 1));
@@ -4240,7 +4246,15 @@ var referenceMaterialSchema = base.extend({
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
   catalog: modelsCatalogSchema.optional()
-}).superRefine(refineSupersession);
+}).superRefine(refineSupersession).transform((rec) => {
+  if (rec.kind !== "doc")
+    return rec;
+  try {
+    return { ...rec, location: normalizeRepoPath(rec.location) };
+  } catch {
+    return rec;
+  }
+});
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
   question: external_exports.string().min(1),
@@ -4641,7 +4655,8 @@ import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(16);
+var MAX_RANK_TERMS = 16;
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 
 // scripts/hooks/lib/common.mjs
 function readStdin() {

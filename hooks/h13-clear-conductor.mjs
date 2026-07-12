@@ -4210,7 +4210,15 @@ var referenceMaterialSchema = base.extend({
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
   catalog: modelsCatalogSchema.optional()
-}).superRefine(refineSupersession);
+}).superRefine(refineSupersession).transform((rec) => {
+  if (rec.kind !== "doc")
+    return rec;
+  try {
+    return { ...rec, location: normalizeRepoPath(rec.location) };
+  } catch {
+    return rec;
+  }
+});
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
   question: external_exports.string().min(1),
@@ -4607,7 +4615,8 @@ import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(16);
+var MAX_RANK_TERMS = 16;
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 
 // scripts/hooks/lib/common.mjs
 function readStdin() {
