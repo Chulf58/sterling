@@ -734,6 +734,13 @@ test('H15 store guard: shell references to the store are denied naming the §10 
     assert.equal(run('sqlite3 .sterling/sterling.db "SELECT * FROM records"').code, 2, 'reads are denied too — use knowledge_query');
     assert.equal(run('Get-Content .sterling\\config.json').code, 2, 'backslash store paths are caught');
 
+    // bare `.sterling` — the whole-store command class (audit finding 4/43, board 1aba8ace)
+    assert.equal(run('rm -rf .sterling').code, 2, 'whole-store delete names no separator but is still gated');
+    assert.equal(run('mv .sterling .sterling.bak').code, 2, 'whole-store rename is gated');
+    assert.equal(run('tar czf x.tgz .sterling').code, 2, 'whole-store archive is gated');
+    assert.equal(run('rm -rf .sterling-backups').code, 0, 'suffixed sibling names stay out of the gate');
+    assert.equal(run('echo .sterlingfoo').code, 0, 'word-joined mentions stay out of the gate');
+
     assert.equal(run('node scripts/dispose-run.mjs r-0001 --store .sterling/sterling.db').code, 0, 'sanctioned script passes');
     assert.equal(run('node scripts/init.mjs --backup-path .sterling/backups').code, 0, 'init passes');
     assert.equal(run('node packages/tui/bundle/sterling-tui.mjs --store .sterling/sterling.db').code, 0, 'TUI launcher passes');
