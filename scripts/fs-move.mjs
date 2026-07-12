@@ -18,6 +18,13 @@ const { store } = openProject(target);
 try {
   const run = store.getRun();
   const brief = run ? store.get(run.brief_ref) : undefined;
+  // Fail CLOSED when a run is active but its brief is unresolvable: without a
+  // brief AND with debugScope forced undefined during a run, scopeCheck returns
+  // allow — the least-guarded state at the exact moment run state is broken (P5
+  // inversion; audit finding 20/43). Refuse before any move.
+  if (run && (!brief || brief.type !== 'brief')) {
+    fail(`fs-move REFUSED (nothing moved): run '${run.id}' active but brief '${run.brief_ref}' not found or not a brief — cannot evaluate scope; failing closed (P5)`, 2);
+  }
   const debugScope = run ? undefined : readDebugScope(target);
   const amendments = (run?.scope_amendments ?? []).map((a) => a.path);
   for (const rel of [from, to]) {

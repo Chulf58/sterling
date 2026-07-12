@@ -180,6 +180,30 @@ test('fs-remove: contract-checked; refuses out-of-contract in run mode; register
   }
 });
 
+test('fs-move/fs-remove: fail closed when a run is active but its brief is unresolvable (audit finding 20/43)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeFileSync(join(dir, 'src', 'victim.mjs'), 'export const x = 1;'); // dest.mjs intentionally absent
+    // run points at a brief_ref that does not resolve to a brief record
+    store.createRun({
+      id: 'r-dangle', brief_ref: randomUUID(), branch: 'b', machine_state: 'running',
+      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }], dispatch_counts: {}, escalations: [], started_at: NOW,
+    });
+
+    const rm = runScript('fs-remove.mjs', ['src/victim.mjs', '--target', dir], dir);
+    assert.equal(rm.code, 2, 'fs-remove refuses on a dangling brief_ref');
+    assert.match(rm.stderr, /failing closed/);
+    assert.ok(existsSync(join(dir, 'src', 'victim.mjs')), 'nothing deleted');
+
+    const mv = runScript('fs-move.mjs', ['src/victim.mjs', 'src/dest.mjs', '--target', dir], dir);
+    assert.equal(mv.code, 2, 'fs-move refuses on a dangling brief_ref');
+    assert.match(mv.stderr, /failing closed/);
+    assert.ok(existsSync(join(dir, 'src', 'victim.mjs')), 'nothing moved');
+  } finally {
+    cleanup();
+  }
+});
+
 test('fs-remove: a run.scope_amendments path is in-contract — out-of-brief removal allowed (scopeCheck amendments consumer)', () => {
   const { dir, store, cleanup } = makeProject();
   try {

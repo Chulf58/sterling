@@ -16,6 +16,13 @@ if (!paths.length) fail('usage: fs-remove.mjs <repo-relative path>... [--target 
 const { store } = openProject(target);
 const run = store.getRun();
 const brief = run ? store.get(run.brief_ref) : undefined;
+// Fail CLOSED when a run is active but its brief is unresolvable — otherwise
+// scopeCheck (no brief, no debugScope during a run) returns allow, deleting any
+// file with no contract exactly when run state is broken (P5; finding 20/43).
+if (run && (!brief || brief.type !== 'brief')) {
+  store.close();
+  fail(`fs-remove REFUSED (nothing deleted): run '${run.id}' active but brief '${run.brief_ref}' not found or not a brief — cannot evaluate scope; failing closed (P5)`, 2);
+}
 const debugScope = run ? undefined : readDebugScope(target);
 const now = new Date().toISOString();
 
