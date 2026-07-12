@@ -52,6 +52,11 @@ export function resetToLastPhaseCommit({ cwd }) {
   git(cwd, ['clean', '-fd']);
 }
 
+/** Does a local branch exist? Used by the gate to make a post-wedge retry idempotent. */
+export function branchExists(cwd, branch) {
+  return git(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { allowFail: true }) !== '';
+}
+
 /** Merge gate approval: --no-ff merge into the base branch, then delete the run branch. */
 export function mergeRun({ cwd, store, runId }) {
   const run = store.getRun(runId);

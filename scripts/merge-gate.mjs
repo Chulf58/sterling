@@ -5,7 +5,7 @@
 // manager — skipped loudly here.
 //   node scripts/merge-gate.mjs --run <id> [--decision merge|reject] [--target <dir>]
 import { arg, fail, openProject, requireRun } from './lib/project.mjs';
-import { isGitRepo, mergeRun, discardRun } from './lib/branch-manager.mjs';
+import { isGitRepo, mergeRun, discardRun, branchExists } from './lib/branch-manager.mjs';
 
 const target = arg('--target') ?? process.cwd();
 const { store } = openProject(target);
@@ -42,9 +42,18 @@ if (decision !== 'merge' && decision !== 'reject') {
 }
 
 // Branch operations through the §8.1 branch manager; non-git projects degrade loud.
+// A branch that is ALREADY GONE is skipped loudly instead of thrown on: the branch
+// ops run before the CAS, so a CAS rejection after a successful merge/discard used
+// to leave a retry that re-ran mergeRun on the deleted branch and could never pass
+// the gate (R2 board e2069f68) — the retry is now idempotent.
 let branchNote;
 if (isGitRepo(target) && run.base_branch) {
-  branchNote = decision === 'merge' ? mergeRun({ cwd: target, store, runId: run.id }) : discardRun({ cwd: target, store, runId: run.id });
+  if (branchExists(target, run.branch)) {
+    branchNote = decision === 'merge' ? mergeRun({ cwd: target, store, runId: run.id }) : discardRun({ cwd: target, store, runId: run.id });
+  } else {
+    console.error(`merge-gate: run branch '${run.branch}' no longer exists — branch ops already performed (wedged retry); proceeding to the state transition`);
+    branchNote = { skipped: decision === 'merge' ? 'branch-merge' : 'branch-discard', reason: 'branch_already_absent' };
+  }
 } else {
   const check = decision === 'merge' ? 'branch-merge' : 'branch-discard';
   store.recordCheckSkipped(check, run.base_branch ? 'no_git' : 'no_base_branch', run.id, new Date().toISOString());
@@ -56,5 +65,9 @@ if (isGitRepo(target) && run.base_branch) {
 // unlikely, but the seam is uniform).
 const targetState = decision === 'merge' ? 'merged' : 'rejected';
 store.casTransitionMerge('awaiting_merge_gate', run.id, (fresh) => ({ ...fresh, machine_state: targetState }));
+// The run is terminal — purge any row recorded AFTER disposal (e.g. the gate's
+// own no_git/no_base_branch skip above), which otherwise outlives the run
+// forever (P4, R2 board 82f04007). The skip is preserved in stdout + branchNote.
+store.purgeRunRows(run.id);
 store.close();
 console.log(JSON.stringify({ run_id: run.id, decision, machine_state: targetState, branch: branchNote }));
