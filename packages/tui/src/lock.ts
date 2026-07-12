@@ -58,7 +58,13 @@ export function acquireTuiLock(
   // live TUIs on one store (AC7 breach). 'wx' fails if the file exists, so exactly
   // one racer creates it; the loser falls to the honor-check and either backs off
   // to the live owner or takes over a dead/recycled one and retries the create.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  //
+  // Two invariants (group-6 review): (a) a takeover removes the lock ONLY if it
+  // STILL names the dead owner we read — never a racer's fresh live lock (re-read
+  // immediately before rmSync); (b) we return null ("acquired") ONLY after a
+  // successful create OR when a lock file demonstrably EXISTS (an EEXIST we cannot
+  // take over) — never with no file written.
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       writeFileSync(lockPath, content, { flag: 'wx' });
       return null; // we created it — we own it
@@ -71,18 +77,36 @@ export function acquireTuiLock(
     } catch {
       continue; // vanished between our create and read — retry the exclusive create
     }
-    const owner = Number(parts[0]);
+    const ownerRaw = parts[0];
+    const owner = Number(ownerRaw);
     if (owner === pid) return null; // re-entrant: this pid already holds it
     if (isAlive(owner) && ownerStillHolds(parts[1], startTimeOf(owner))) return owner; // live, same-identity owner
-    rmSync(lockPath, { force: true }); // dead / recycled / garbage — take over, then retry
+    // dead / recycled / garbage → take over, but remove ONLY if the file's owner
+    // field is UNCHANGED since our read (a racer may have replaced it with a fresh
+    // LIVE lock between our read and now — never delete that). Raw-string compare
+    // so garbage content ('not-a-pid') matches itself (Number(garbage) is NaN,
+    // and NaN !== NaN would wrongly skip the takeover).
+    try {
+      const cur = readFileSync(lockPath, 'utf8').trim().split(/\s+/)[0];
+      if (cur === ownerRaw) rmSync(lockPath, { force: true });
+      // else: replaced since our read — loop and re-evaluate the new owner
+    } catch {
+      /* vanished — loop retries the exclusive create */
+    }
   }
-  // Lost the create race twice (a live owner appeared each time): report it rather
-  // than falsely claim the lock.
+  // Retries exhausted (a live owner kept winning the create race, or the file kept
+  // churning). A file EXISTS here — never claim acquired without one: report a live
+  // owner if present, else honor the existing file as the single instance.
   try {
     const owner = Number(readFileSync(lockPath, 'utf8').trim().split(/\s+/)[0]);
     if (owner !== pid && isAlive(owner)) return owner;
   } catch {
-    /* gone — treat as acquired */
+    // the file genuinely vanished at the last moment — one final atomic claim
+    try {
+      writeFileSync(lockPath, content, { flag: 'wx' });
+    } catch {
+      /* someone else just created it — they own it, we proceed as the honored one */
+    }
   }
   return null;
 }
