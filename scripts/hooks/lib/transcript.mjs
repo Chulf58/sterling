@@ -1,14 +1,33 @@
 // H6 transcript machinery (spec §6 H6, resolved by Layer 0 probe):
 // in-subagent transcript_path is the PARENT session's; the agent's own
 // transcript is derived as <session>/subagents/agent-<agent_id>.jsonl.
-// Usage is tail-read (last ~64KB) from the most recent assistant entry —
+// Usage is tail-read (last ~1MB) from the most recent assistant entry —
 // the API's own accounting; no tokenizer, no cumulative state.
-import { openSync, readSync, closeSync, fstatSync, existsSync } from 'node:fs';
+import { openSync, readSync, closeSync, fstatSync, existsSync, statSync, readdirSync } from 'node:fs';
 
-const TAIL_BYTES = 64 * 1024;
+// 1MB tail: real transcripts routinely carry single JSONL lines past the old
+// 64KB (563KB observed live; 163 subagent lines >64KB measured 2026-07-12), so
+// the window was blind at exactly the context-heavy calls (R2 board d9754b59).
+const TAIL_BYTES = 1024 * 1024;
 
 export function deriveAgentTranscript(parentTranscriptPath, agentId) {
-  return parentTranscriptPath.replace(/\.jsonl$/, '') + `/subagents/agent-${agentId}.jsonl`;
+  const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, '');
+  const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
+  if (existsSync(flat)) return flat;
+  // Workflow-spawned subagents live one level deeper (observed 2026-07-12:
+  // <session>/subagents/workflows/wf_<id>/agent-<id>.jsonl) — scan-fallback so
+  // a platform migration of Task agents to that layout degrades gracefully
+  // instead of reporting transcript_missing forever (R2 board 774d86c6).
+  const wfRoot = `${sessionDir}/subagents/workflows`;
+  try {
+    for (const d of readdirSync(wfRoot)) {
+      const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
+      if (existsSync(candidate)) return candidate;
+    }
+  } catch {
+    // no workflows dir — fall through to the flat path (caller reports missing)
+  }
+  return flat;
 }
 
 export function readTail(path, bytes = TAIL_BYTES) {
@@ -47,7 +66,12 @@ export function latestUsage(path) {
       return { usage, model: entry.message?.model, reason: null };
     }
   }
-  return { usage: null, reason: sawAssistant ? 'format_unparseable' : 'no_assistant_entries' };
+  if (sawAssistant) return { usage: null, reason: 'format_unparseable' };
+  // Distinguish a window that did not reach any assistant entry (older bytes
+  // exist beyond the tail) from a transcript that genuinely has none — the
+  // former is a coverage gap, not a fresh file (R2 board d9754b59).
+  const exhausted = statSync(path).size > TAIL_BYTES;
+  return { usage: null, reason: exhausted ? 'window_exhausted' : 'no_assistant_entries' };
 }
 
 /** fill = (input + cache_creation + cache_read) / window — §6 H6 formula. */

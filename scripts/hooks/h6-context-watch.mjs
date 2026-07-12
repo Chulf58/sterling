@@ -9,8 +9,23 @@ import { readStdin, allow, deny, loadConfig, openStore } from './lib/common.mjs'
 import { deriveAgentTranscript, latestUsage, fillPct } from './lib/transcript.mjs';
 
 const input = readStdin();
-// The conductor's own fill comes from the native statusline (§6 H6) — H6 watches spawned agents.
-if (!input.agent_id) allow();
+// context-watch rides ONLY roster-agent frontmatter (never global hooks.json),
+// so every legitimate invocation carries agent_id — a missing one is PLATFORM
+// DRIFT of the undocumented field, not the conductor (R2 board 0a9c77d4):
+// record the degradation loudly before allowing, never a silent no-op (the
+// conductor's own fill comes from the native statusline and never reaches here).
+if (!input.agent_id) {
+  const s = openStore(input.cwd);
+  if (s) {
+    try {
+      s.recordCheckSkipped('context-watch', 'agent_id_missing', s.getRun()?.id, new Date().toISOString());
+    } finally {
+      s.close();
+    }
+  }
+  process.stderr.write('H6 degraded loudly: agent_id missing from hook input (platform drift?) — recorded check_skipped {context-watch}');
+  allow();
+}
 
 const config = loadConfig(input.cwd);
 const cw = {

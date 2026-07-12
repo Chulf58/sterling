@@ -1,3 +1,10 @@
+> **RETIRED 2026-07-12** (R2-AUDIT board c7053df5, the b7ce8798 precedent): build-era
+> document, NOT authoritative — the knowledge base is king. The milestone it stages
+> ran long ago (r-0001 onward); its `.mcp.json` wiring was superseded by decision
+> c825ae8f (option D — plugin-manifest MCP declaration, no per-project .mcp.json)
+> and its `mcp__sterling__*` tool naming by decision 097851ed
+> (`mcp__plugin_sterling_sterling__*`). Kept verbatim below for history only.
+
 # §16.1 First-feature milestone — PREPARED, NOT RUN
 
 The spine's first real feature runs interactively with the human at the two

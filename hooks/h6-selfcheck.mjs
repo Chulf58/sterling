@@ -5,6 +5,9 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h6-selfcheck.mjs
+import { statSync as statSync2 } from "node:fs";
+
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { join } from "node:path";
@@ -5369,8 +5372,8 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3 } from "node:fs";
-var TAIL_BYTES = 64 * 1024;
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync3(path)) return null;
   const fd = openSync(path, "r");
@@ -5405,13 +5408,24 @@ function latestUsage(path) {
       return { usage: usage2, model: entry.message?.model, reason: null };
     }
   }
-  return { usage: null, reason: sawAssistant ? "format_unparseable" : "no_assistant_entries" };
+  if (sawAssistant) return { usage: null, reason: "format_unparseable" };
+  const exhausted = statSync(path).size > TAIL_BYTES;
+  return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 
 // scripts/hooks/h6-selfcheck.mjs
+var SUBSTANTIAL_BYTES = 256 * 1024;
 var input = readStdin();
 var { usage, reason } = latestUsage(input.transcript_path);
-if (!usage && reason === "format_unparseable") {
+var substantialNoAssistant = false;
+if (!usage && reason === "no_assistant_entries") {
+  try {
+    substantialNoAssistant = statSync2(input.transcript_path).size > SUBSTANTIAL_BYTES;
+  } catch {
+    substantialNoAssistant = false;
+  }
+}
+if (!usage && (reason === "format_unparseable" || reason === "window_exhausted" || substantialNoAssistant)) {
   const store = openStore(input.cwd);
   if (store) {
     try {

@@ -5381,10 +5381,21 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3 } from "node:fs";
-var TAIL_BYTES = 64 * 1024;
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
-  return parentTranscriptPath.replace(/\.jsonl$/, "") + `/subagents/agent-${agentId}.jsonl`;
+  const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
+  const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
+  if (existsSync3(flat)) return flat;
+  const wfRoot = `${sessionDir}/subagents/workflows`;
+  try {
+    for (const d of readdirSync(wfRoot)) {
+      const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
+      if (existsSync3(candidate)) return candidate;
+    }
+  } catch {
+  }
+  return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync3(path)) return null;
@@ -5420,7 +5431,9 @@ function latestUsage(path) {
       return { usage, model: entry.message?.model, reason: null };
     }
   }
-  return { usage: null, reason: sawAssistant ? "format_unparseable" : "no_assistant_entries" };
+  if (sawAssistant) return { usage: null, reason: "format_unparseable" };
+  const exhausted = statSync(path).size > TAIL_BYTES;
+  return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
   const used = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
@@ -5429,7 +5442,18 @@ function fillPct(usage, windowSize) {
 
 // scripts/hooks/h6-context-watch.mjs
 var input = readStdin();
-if (!input.agent_id) allow();
+if (!input.agent_id) {
+  const s2 = openStore(input.cwd);
+  if (s2) {
+    try {
+      s2.recordCheckSkipped("context-watch", "agent_id_missing", s2.getRun()?.id, (/* @__PURE__ */ new Date()).toISOString());
+    } finally {
+      s2.close();
+    }
+  }
+  process.stderr.write("H6 degraded loudly: agent_id missing from hook input (platform drift?) \u2014 recorded check_skipped {context-watch}");
+  allow();
+}
 var config = loadConfig(input.cwd);
 var cw = {
   warn_pct: 60,
