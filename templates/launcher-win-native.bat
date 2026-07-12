@@ -31,5 +31,4 @@ rem The WSL launcher is invoked BARE (it lives in System32, reliably on PATH -
 rem unlike Windows Terminal it must NOT be given an absolute path, anti_pattern
 rem e7a46e35).
 wsl.exe -- bash -lic "node '{{SNAPSHOT_SCRIPT}}' --target '{{PROJECT_DIR_POSIX}}' --win-domains-root \"$(wslpath '%USERPROFILE%')/.sterling/domains\""
-set STERLING_SPLIT=1
 "%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe" -d "%CD%" "%USERPROFILE%\.local\bin\claude.exe" --plugin-dir "{{WIN_PLUGIN_DIR}}" --mcp-config "{{WIN_PLUGIN_DIR}}\.claude-plugin\sterling-mcp-win.json" --strict-mcp-config ; split-pane -V --size {{SPLIT_RATIO}} -d "%CD%" "{{WIN_NODE}}" "{{WIN_TUI_BUNDLE}}" --store "%CD%\.sterling\sterling.db" ; move-focus left
