@@ -143,7 +143,14 @@ function deepReplaceString(value: unknown, from: string, to: string): unknown {
   if (typeof value === 'string') return value === from ? to : value;
   if (Array.isArray(value)) return value.map((v) => deepReplaceString(v, from, to));
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, deepReplaceString(v, from, to)]));
+    // Remap object KEYS as well as values (audit finding 11/43): path-keyed maps
+    // like feature_article.file_baselines are keyed by repo-relative path, so a
+    // rename that only rewrote values left the baseline keyed by the OLD path —
+    // the read-time drift check then abstained forever. Exact-match, mirroring
+    // the string-value branch.
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)])
+    );
   }
   return value;
 }
@@ -301,7 +308,11 @@ export class SterlingStore {
   supersede(oldId: string, newInput: unknown): DurableRecord {
     const oldRecord = this.get(oldId);
     if (!oldRecord) throw new Error(`supersede: no record '${oldId}'`);
-    if (oldRecord.status !== 'active') throw new Error(`supersede: record '${oldId}' is not active`);
+    // A flagged_stale research finding is superseded by re-verification — that is
+    // the ADVERTISED remedy (retrieval tells the reader "re-verification supersedes
+    // this finding"); only a terminal (already-superseded) record is refused
+    // (audit finding 13/43). The in-tx guard below closes the check-then-act race.
+    if (oldRecord.status === 'superseded') throw new Error(`supersede: record '${oldId}' is already superseded`);
     const candidate = { ...(newInput as Record<string, unknown>) };
     const links = Array.isArray(candidate.links) ? [...(candidate.links as { rel: string; target_id: string }[])] : [];
     if (!links.some((l) => l.rel === 'supersedes' && l.target_id === oldId)) {
@@ -320,9 +331,17 @@ export class SterlingStore {
     this.tx(() => {
       this.insertRecord(newRecord);
       const updatedOld = { ...oldRecord, status: 'superseded', superseded_by: newRecord.id, updated_at: newRecord.updated_at };
-      this.db
-        .prepare('UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ?')
+      // Guard the UPDATE on the observed status INSIDE the BEGIN IMMEDIATE tx
+      // (audit finding 29/43): the pre-tx status read is check-then-act, so a
+      // concurrent supersede (server + note worker / TUI on the shared WAL file)
+      // could otherwise leave two active successors. changes===0 → the row moved
+      // out from under us → roll back loud (the inserted newRecord is undone).
+      const res = this.db
+        .prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'")
         .run('superseded', newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
+      if (res.changes === 0) {
+        throw new Error(`supersede: record '${oldId}' was concurrently superseded — retry against the current version`);
+      }
     });
     return newRecord;
   }
@@ -338,12 +357,18 @@ export class SterlingStore {
   retireInFavorOf(id: string, replacementId: string, at: string): DurableRecord {
     const record = this.get(id);
     if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
-    if (record.status !== 'active') throw new Error(`retireInFavorOf: record '${id}' is not active`);
+    // Same relaxation + in-tx guard as supersede (audit findings 13/43 + 29/43):
+    // only a terminal (already-superseded) record is refused; the status guard on
+    // the UPDATE closes the check-then-act race.
+    if (record.status === 'superseded') throw new Error(`retireInFavorOf: record '${id}' is already superseded`);
     const retired = { ...record, status: 'superseded' as const, superseded_by: replacementId, updated_at: at };
     this.tx(() => {
-      this.db
-        .prepare('UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ?')
+      const res = this.db
+        .prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'")
         .run('superseded', replacementId, at, JSON.stringify(retired), id);
+      if (res.changes === 0) {
+        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded — retry`);
+      }
     });
     return retired;
   }
@@ -370,6 +395,10 @@ export class SterlingStore {
       this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
       this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
       this.db.prepare('DELETE FROM record_links WHERE source_id = ?').run(id);
+      // ALSO delete inbound edges (audit finding 31/43): a record that linked TO
+      // the removed one kept a record_links row pointing at a nonexistent id, so
+      // the idx_links_target reverse-traversal surface accrued dangling edges.
+      this.db.prepare('DELETE FROM record_links WHERE target_id = ?').run(id);
       this.db.prepare('DELETE FROM records_fts WHERE record_id = ?').run(id);
     });
   }
@@ -406,13 +435,19 @@ export class SterlingStore {
   /** Run begins at gate approval. One active run at a time (§7.5). */
   createRun(input: unknown): RunRecord {
     const run = runRecordSchema.parse(input);
-    const active = this.getRun();
-    if (active) {
-      throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) — one active run at a time`);
-    }
-    this.db
-      .prepare('INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)')
-      .run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    // The active-run check and the INSERT run inside one BEGIN IMMEDIATE tx
+    // (audit finding 29/43): otherwise two concurrent createRuns both see no
+    // active run and both insert, breaking the one-active-run invariant. The
+    // write lock serializes them; the loser sees the winner's run and throws.
+    this.tx(() => {
+      const active = this.getRun();
+      if (active) {
+        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) — one active run at a time`);
+      }
+      this.db
+        .prepare('INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)')
+        .run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    });
     return run;
   }
 
@@ -668,6 +703,17 @@ export class SterlingStore {
     this.db
       .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
       .run(runId ?? null, check, reason, at);
+    // Run-scoped rows are disposed with the run (disposeRunRows). NULL-run rows
+    // (direct-mode knowledge_create/board_remove) have no disposal event, so cap
+    // them like queue_drain_log — else they accrete unbounded (audit finding
+    // 30/43, P4). Keep the 50 newest NULL-run rows as the audit tail.
+    if (!runId) {
+      this.db
+        .prepare(
+          'DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)'
+        )
+        .run();
+    }
   }
 
   listCheckSkipped(runId?: string): { run_id: string | null; check_name: string; reason: string; at: string }[] {
