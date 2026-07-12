@@ -4686,19 +4686,23 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/h5-frozen-tests.mjs
 var input = readStdin();
-var config = loadConfig(input.cwd);
-if (!config?.toolchains?.length) {
-  deny("H5: no toolchains in .sterling/config.json \u2014 the frozen-test gate cannot resolve test globs; failing closed (P5)");
-}
-var rel = repoRel(input.tool_input?.file_path, input.cwd);
-if (!rel) allow();
-for (const tc of config.toolchains) {
-  for (const glob of tc.test_globs ?? []) {
-    if (matchesGlob(rel, glob)) {
-      deny(
-        `H5: '${rel}' is a test path ('${glob}', ${tc.adapter} toolchain) \u2014 tests are frozen during the fix loop. If you believe a test is wrong, exit tests-invalid with evidence; never edit it silently.`
-      );
+try {
+  const config = loadConfig(input.cwd);
+  if (!config?.toolchains?.length) {
+    deny("H5: no toolchains in .sterling/config.json \u2014 the frozen-test gate cannot resolve test globs; failing closed (P5)");
+  }
+  const rel = repoRel(input.tool_input?.file_path, input.cwd);
+  if (!rel) allow();
+  for (const tc of config.toolchains) {
+    for (const glob of tc.test_globs ?? []) {
+      if (matchesGlob(rel, glob)) {
+        deny(
+          `H5: '${rel}' is a test path ('${glob}', ${tc.adapter} toolchain) \u2014 tests are frozen during the fix loop. If you believe a test is wrong, exit tests-invalid with evidence; never edit it silently.`
+        );
+      }
     }
   }
+  allow();
+} catch (e) {
+  deny(`H5: frozen-test evaluation failed (${e && e.message || e}) \u2014 failing closed (P5)`);
 }
-allow();

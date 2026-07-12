@@ -4637,23 +4637,27 @@ function loadConfig(cwd) {
 
 // scripts/hooks/h14-bash-allowlist.mjs
 var input = readStdin();
-var config = loadConfig(input.cwd);
-if (!config?.toolchains?.length) {
-  deny("H14: no toolchains in .sterling/config.json \u2014 the Bash allowlist cannot resolve run commands; failing closed (P5)");
+try {
+  const config = loadConfig(input.cwd);
+  if (!config?.toolchains?.length) {
+    deny("H14: no toolchains in .sterling/config.json \u2014 the Bash allowlist cannot resolve run commands; failing closed (P5)");
+  }
+  const command = String(input.tool_input?.command ?? "").trim();
+  if (/[;&|`\n<>]|\$\(/.test(command)) {
+    deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
+  }
+  const runCommandPrefixes = config.toolchains.flatMap((tc) => Object.values(tc.run_commands ?? {}));
+  const firstArg = command.match(/^node\s+(?:"([^"]+)"|(\S+))/);
+  const helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
+  const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
+  const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
+  const allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper || isReadOnlySearch;
+  if (!allowed) {
+    deny(
+      `H14: command not on the allowlist: '${command}'. Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
+    );
+  }
+  allow();
+} catch (e) {
+  deny(`H14: allowlist evaluation failed (${e && e.message || e}) \u2014 failing closed (P5)`);
 }
-var command = String(input.tool_input?.command ?? "").trim();
-if (/[;&|`\n<>]|\$\(/.test(command)) {
-  deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
-}
-var runCommandPrefixes = config.toolchains.flatMap((tc) => Object.values(tc.run_commands ?? {}));
-var firstArg = command.match(/^node\s+(?:"([^"]+)"|(\S+))/);
-var helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
-var isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
-var isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
-var allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper || isReadOnlySearch;
-if (!allowed) {
-  deny(
-    `H14: command not on the allowlist: '${command}'. Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
-  );
-}
-allow();

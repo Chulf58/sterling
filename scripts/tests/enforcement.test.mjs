@@ -543,6 +543,23 @@ test('H5: denies test-path edits per adapter test globs; allows source; fails cl
   }
 });
 
+test('H5: a corrupt config denies (fail closed), never a voided frozen-test gate (F5 class)', () => {
+  const corrupt = mkdtempSync(join(tmpdir(), 'sterling-h5c-'));
+  mkdirSync(join(corrupt, '.sterling'), { recursive: true });
+  writeFileSync(join(corrupt, '.sterling', 'config.json'), '{ not json');
+  try {
+    const r = runHook(
+      'h5-frozen-tests.mjs',
+      hookInput(corrupt, { tool_name: 'Edit', tool_input: { file_path: join(corrupt, 'tests', 'x.test.mjs') } }),
+      corrupt
+    );
+    assert.equal(r.code, 2, 'a corrupt config denies (fail closed), never a non-blocking exit 1 that unfreezes tests');
+    assert.match(r.stderr, /failing closed/);
+  } finally {
+    rmSync(corrupt, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // H14 Bash allowlist
 // ---------------------------------------------------------------------------
@@ -598,6 +615,23 @@ test('H14: standalone read-only grep/ls are allowed; chaining, redirection, find
     assert.equal(bash('grepx foo').code, 2, 'allowance needs a word boundary (grepx is not grep)');
   } finally {
     cleanup();
+  }
+});
+
+test('H14: a corrupt config denies (fail closed), never a voided allowlist (F5 class)', () => {
+  const corrupt = mkdtempSync(join(tmpdir(), 'sterling-h14c-'));
+  mkdirSync(join(corrupt, '.sterling'), { recursive: true });
+  writeFileSync(join(corrupt, '.sterling', 'config.json'), '{ not json');
+  try {
+    const r = runHook(
+      'h14-bash-allowlist.mjs',
+      hookInput(corrupt, { tool_name: 'Bash', tool_input: { command: 'git push --force' } }),
+      corrupt
+    );
+    assert.equal(r.code, 2, 'a corrupt config denies (fail closed), never a non-blocking exit 1 that runs arbitrary Bash');
+    assert.match(r.stderr, /failing closed/);
+  } finally {
+    rmSync(corrupt, { recursive: true, force: true });
   }
 });
 
