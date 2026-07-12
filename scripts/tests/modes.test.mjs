@@ -237,11 +237,20 @@ test('fs-move: renames AND rewrites file_keys on every owning record — knowled
     assert.ok(existsSync(join(dir, 'src', 'new-name.mjs')));
 
     assert.equal(store.query({ file_keys: ['src/old-name.mjs'], cap: 10 }).length, 0, 'old key joins nothing');
-    const byNew = store.query({ file_keys: ['src/new-name.mjs'], cap: 10 });
+    // the two knowledge owners follow the move (excluding the reconcile todo, which
+    // also carries the new key — see the direct-mode reconcile assertion below)
+    const byNew = store.query({ file_keys: ['src/new-name.mjs'], cap: 10 }).filter((r) => r.type !== 'todo');
     assert.equal(byNew.length, 2, 'both owners follow the move');
     const movedArticle = store.get(article.id);
     assert.equal(movedArticle.files[0].path, 'src/new-name.mjs');
     assert.equal(movedArticle.live_test_refs[0].test_paths[0], 'src/new-name.mjs');
+
+    // direct mode (no run): a reconcile_needed maintenance item must exist for the
+    // owning article, matching fs-remove's semantics (audit finding 36/43).
+    const reconcile = store.query({ types: ['todo'], cap: 100 })
+      .filter((t) => t.system_reason === 'reconcile_needed' && t.feature_link === article.id);
+    assert.equal(reconcile.length, 1, 'fs-move registers a direct-mode reconcile obligation like fs-remove');
+    assert.match(reconcile[0].text, /renamed/);
   } finally {
     cleanup();
   }
