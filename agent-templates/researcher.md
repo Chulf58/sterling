@@ -7,7 +7,7 @@ tools: WebSearch, WebFetch, Read, mcp__plugin_sterling_sterling__knowledge_query
 required_inputs:
   - the single question (verbatim)
   - context (why it blocks, what decision it feeds)
-  - budget cap (max sources / time, from config)
+  - budget cap (max sources / time, stated in the dispatch)
 hooks:
   PreToolUse:
     - matcher: "*"
@@ -43,6 +43,8 @@ Question: "Is the platform rate limit per-org or per-token?" Good answer: "Per-o
 # Output contract
 
 Write the finding via `knowledge_create` (research_finding — both clocks mandatory), then `handoff_write` (role researcher; finding id in `decisions_made`), then `agent_exit`.
+
+PRE-RUN DISPATCH (planning-time research, before a run exists): `handoff_write`/`agent_exit` are run-scoped and the server refuses them with `run_state: no active run` — do not retry refused calls; `knowledge_create` still works and remains mandatory; deliver the finding id in your final message text instead (decision 98064d77).
 
 # Scope boundaries (negatives)
 

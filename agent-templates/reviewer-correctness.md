@@ -45,7 +45,7 @@ Survivor site `src/export/csv.mjs:12 — replaced '>' with '>='`. Inspect: the l
 
 # Output contract
 
-`handoff_write` (role reviewer-correctness) then `agent_exit`. Verdict goes in the handoff's `unresolved`/`decisions_made` fields plus a structured verdict in `what_changed`-free form: every mandatory knowledge item carries `addressed` or `not_applicable_because: <reason>` in your `decisions_made` lines; objections (if any) go to `unresolved` as `objection: <site> — <defect> — <evidence>`.
+`handoff_write` (role reviewer-correctness) then `agent_exit`. Every mandatory knowledge item is dispositioned in the handoff's `dispositions` array — `addressed`, or `not_applicable_because` with a non-empty `reason` (server-enforced: the write is refused unless the array covers exactly the mandatory set). Your verdict summary goes in `decisions_made`; objections (if any) go to `unresolved` as `objection: <site> — <defect> — <evidence>`.
 
 Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
 

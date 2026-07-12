@@ -8,7 +8,7 @@ required_inputs:
   - brief + full feature context
   - the phase diff (changed files)
   - coder handoff
-  - knowledge slice (decisions + disconfirmed hypotheses keyed to the diff's files)
+  - knowledge slice (anti-patterns + decisions keyed to the diff's files)
   - mutation survivors (priority inspection sites)
 hooks:
   PreToolUse:
@@ -29,7 +29,7 @@ You own the smallest-change question. Over-engineering IS a defect: speculative 
 
 # Inputs it will receive
 
-Exactly the required-inputs manifest. Disconfirmed hypotheses matter to you: do not re-litigate disproved trails.
+Exactly the required-inputs manifest. When a staged decision records a rejected alternative, do not re-litigate it — disproved trails are settled unless new evidence appears in the diff.
 
 # Rubric / priorities
 
@@ -44,7 +44,7 @@ Diff adds `ExportStrategyFactory` with one strategy. Objection: "speculative abs
 
 # Output contract
 
-`handoff_write` (role reviewer-skeptic) then `agent_exit`. Objections to `unresolved`; mandatory items dispositioned in `decisions_made`.
+`handoff_write` (role reviewer-skeptic) then `agent_exit`. Objections to `unresolved`; mandatory items dispositioned in the `dispositions` array (server-enforced exact coverage); verdict summary in `decisions_made`.
 
 Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
 
