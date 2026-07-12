@@ -5327,6 +5327,23 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withRetry(fn) {
+  let last;
+  for (let i = 0; i < 5; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
+      last = e;
+      sleepMs(25 * (i + 1));
+    }
+  }
+  throw last;
+}
 function openStore(cwd2) {
   const p = join(cwd2, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -5405,16 +5422,17 @@ if (input.agent_id && toolPath) {
     deny(`H3 [self-protection]: '${rel}' is enforcement surface (${ENFORCEMENT_SURFACE.join(", ")}) \u2014 never agent-editable, in any mode (\xA76 H3); if enforcement is misbehaving, exit blocked and report it`);
   }
 }
-var store = openStore(cwd);
-if (!store) deny("H3: no Sterling store at .sterling/ \u2014 the contract gate cannot evaluate scope; failing closed (P5)");
+var store;
 try {
-  const run = store.getRun();
+  store = openStore(cwd);
+  if (!store) deny("H3: no Sterling store at .sterling/ \u2014 the contract gate cannot evaluate scope; failing closed (P5)");
+  const run = withRetry(() => store.getRun());
   const absolute = toolPath && (isAbsolute(String(toolPath)) || /^[A-Za-z]:/.test(String(toolPath)));
   const absPath = rel ? join4(cwd, rel) : absolute ? String(toolPath) : void 0;
   const isCreation = absPath ? !existsSync5(absPath) : false;
   if (run) {
     if (!rel) deny(`H3 [run mode]: '${toolPath}' is outside the repository \u2014 the run owns only the working tree; out of scope`);
-    const brief = store.get(run.brief_ref);
+    const brief = withRetry(() => store.get(run.brief_ref));
     if (!brief || brief.type !== "brief") deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
     const scope2 = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope2.deny) deny(`H3 [run mode]: ${scope2.deny}`);
@@ -5430,6 +5448,8 @@ try {
     deny(`H3 [direct mode]: no read-evidence for '${rel}' \u2014 Read the exact file before editing`);
   }
   allow();
+} catch (e) {
+  deny(`H3: contract evaluation failed (${e && e.message || e}) \u2014 failing closed (P5); retry the edit`);
 } finally {
-  store.close();
+  store?.close();
 }

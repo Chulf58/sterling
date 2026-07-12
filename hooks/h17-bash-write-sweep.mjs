@@ -5319,6 +5319,23 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withRetry(fn) {
+  let last;
+  for (let i = 0; i < 5; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
+      last = e;
+      sleepMs(25 * (i + 1));
+    }
+  }
+  throw last;
+}
 function openStore(cwd2) {
   const p = join(cwd2, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -5359,23 +5376,6 @@ function baselineFile(runId) {
 }
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
-}
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-function withRetry(fn) {
-  let last;
-  for (let i = 0; i < 5; i++) {
-    try {
-      return fn();
-    } catch (e) {
-      const msg = String(e && e.message || e);
-      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
-      last = e;
-      sleepMs(25 * (i + 1));
-    }
-  }
-  throw last;
 }
 function collectBaseline(cwd2) {
   const map = {};

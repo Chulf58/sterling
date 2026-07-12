@@ -5293,6 +5293,23 @@ function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withRetry(fn) {
+  let last;
+  for (let i = 0; i < 5; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
+      last = e;
+      sleepMs(25 * (i + 1));
+    }
+  }
+  throw last;
+}
 function openStore(cwd) {
   const p = join(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -5324,35 +5341,40 @@ function breadthDenial(prompt, brief, config) {
 var input = readStdin();
 var agentType = input.tool_input?.subagent_type;
 if (!agentType) allow();
-var store = openStore(input.cwd);
-if (!store) allow();
+var store;
 try {
-  const run = store.getRun();
+  store = openStore(input.cwd);
+  if (!store) allow();
+  const run = withRetry(() => store.getRun());
   if (!run || run.machine_state !== "running") allow();
   const prompt = input.tool_input?.prompt;
   const sliceDeny = sliceDenial(agentType, prompt);
   if (sliceDeny) deny(sliceDeny);
   const config = loadConfig(input.cwd);
-  const brief = run.brief_ref ? store.get(run.brief_ref) : null;
+  const brief = run.brief_ref ? withRetry(() => store.get(run.brief_ref)) : null;
   const breadthDeny = breadthDenial(prompt, brief, config);
   if (breadthDeny) deny(breadthDeny);
   const cap = config?.caps?.dispatch_per_agent_type ?? 25;
   const current = run.dispatch_counts[agentType] ?? 0;
   if (current + 1 > cap) {
-    store.appendRunEscalation(run.id, {
-      kind: "dispatch_cap_exceeded",
-      agent_type: agentType,
-      cap,
-      at: (/* @__PURE__ */ new Date()).toISOString()
-    });
+    withRetry(
+      () => store.appendRunEscalation(run.id, {
+        kind: "dispatch_cap_exceeded",
+        agent_type: agentType,
+        cap,
+        at: (/* @__PURE__ */ new Date()).toISOString()
+      })
+    );
     deny(
       `H8: dispatch cap exceeded \u2014 '${agentType}' has been dispatched ${current}x this run (cap ${cap}). This run is looping; escalate to the human instead of spawning again (\xA75.1).`
     );
   }
-  store.incrementDispatchCount(run.id, agentType);
+  withRetry(() => store.incrementDispatchCount(run.id, agentType));
   allow();
+} catch (e) {
+  deny(`H8: dispatch gate failed (${e && e.message || e}) \u2014 failing closed (P5); retry the dispatch`);
 } finally {
-  store.close();
+  store?.close();
 }
 export {
   breadthDenial,

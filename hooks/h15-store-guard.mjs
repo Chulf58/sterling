@@ -4637,7 +4637,7 @@ function loadConfig(cwd) {
 var input = readStdin();
 if (!input.cwd || !existsSync2(join2(input.cwd, ".sterling"))) allow();
 var command = String(input.tool_input?.command ?? "");
-if (!/\.sterling[\\/]|sterling\.db/i.test(command)) allow();
+if (!/\.sterling(?![\w.-])|sterling\.db/i.test(command)) allow();
 var allowScripts;
 try {
   allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;

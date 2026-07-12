@@ -5322,6 +5322,10 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function warnNonBlocking(message) {
+  process.stderr.write(message);
+  process.exit(1);
+}
 function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -5588,6 +5592,12 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
   }
   clearRegisters();
   allow();
+} catch (e) {
+  try {
+    store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
+  } catch {
+  }
+  warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (recorded check_skipped h10-stop-duties; fix and re-run before relying on capture/article demand)`);
 } finally {
   store.close();
 }
