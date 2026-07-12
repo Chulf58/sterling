@@ -50,7 +50,11 @@ if (isGitRepo(target) && run.base_branch) {
   store.recordCheckSkipped(check, run.base_branch ? 'no_git' : 'no_base_branch', run.id, new Date().toISOString());
   branchNote = { skipped: check };
 }
-const next = { ...run, machine_state: decision === 'merge' ? 'merged' : 'rejected' };
-store.casTransition('awaiting_merge_gate', next);
+// Merge-safe transition (audit findings 1/43, 18/43): apply the state change onto
+// the FRESH body so any concurrent write is preserved (consistency with the other
+// transition seams; at the merge gate the run is post-disposal so races are
+// unlikely, but the seam is uniform).
+const targetState = decision === 'merge' ? 'merged' : 'rejected';
+store.casTransitionMerge('awaiting_merge_gate', run.id, (fresh) => ({ ...fresh, machine_state: targetState }));
 store.close();
-console.log(JSON.stringify({ run_id: run.id, decision, machine_state: next.machine_state, branch: branchNote }));
+console.log(JSON.stringify({ run_id: run.id, decision, machine_state: targetState, branch: branchNote }));

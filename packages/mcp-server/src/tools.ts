@@ -663,27 +663,37 @@ export class SterlingTools {
         `run_signal: no exit recorded for run '${run.id}' — if the Task returned without an exit, report {signal: 'agent-died', payload: {observed: 'empty_output'}} (§5.2)`
       );
     }
+    // The reaction depends only on machine_state + phases + the exit — none of
+    // which hooks touch — so it is computed ONCE from the observed run and stays
+    // valid across merge retries.
     const { action, nextState } = react(run, exit, {
       phase_death_cap: this.config.caps.phase_death_cap,
       research_resume_per_phase: this.config.caps.research_resume_per_phase,
     });
-    const phases = run.phases.map((p) => ({ ...p, signals: [...p.signals] }));
-    const idx = exit.phase_id ? phases.findIndex((p) => p.id === exit.phase_id) : phases.findIndex((p) => p.status === 'in_progress');
-    if (idx !== -1) {
-      phases[idx].signals.push({ signal: exit.signal, payload: exit.payload ?? null, agent_role: exit.agent_role ?? null, at: this.now() });
-      if (action.action === 'complete_run') phases[idx].status = 'complete';
-      if (action.action === 'spawn' && !('respawn' in action && action.respawn)) {
-        phases[idx].status = 'complete';
-        const nextIdx = phases.findIndex((p) => p.id === (action as { phase_id: string }).phase_id);
-        if (nextIdx !== -1) phases[nextIdx].status = 'in_progress';
+    const at = this.now(); // stamp once — the mutate may re-run on a merge retry
+    // Apply the brain reaction onto the FRESH run body (audit findings 1/43, 18/43):
+    // casTransitionMerge re-reads inside its retry loop, so a concurrent hook write
+    // (H7 reconcile marks, H6/H8 escalations) is preserved instead of clobbered by
+    // a stale-body rewrite. The phase/escalation edits are re-derived from `fresh`
+    // (identical to the observed run — hooks change neither phases nor state).
+    this.store.casTransitionMerge(run.machine_state, run.id, (fresh) => {
+      const phases = fresh.phases.map((p) => ({ ...p, signals: [...p.signals] }));
+      const idx = exit.phase_id ? phases.findIndex((p) => p.id === exit.phase_id) : phases.findIndex((p) => p.status === 'in_progress');
+      if (idx !== -1) {
+        phases[idx].signals.push({ signal: exit.signal, payload: exit.payload ?? null, agent_role: exit.agent_role ?? null, at });
+        if (action.action === 'complete_run') phases[idx].status = 'complete';
+        if (action.action === 'spawn' && !('respawn' in action && action.respawn)) {
+          phases[idx].status = 'complete';
+          const nextIdx = phases.findIndex((p) => p.id === (action as { phase_id: string }).phase_id);
+          if (nextIdx !== -1) phases[nextIdx].status = 'in_progress';
+        }
       }
-    }
-    const escalations = [...run.escalations];
-    if (action.action === 'judgment_needed' || action.action === 'halt') {
-      escalations.push({ kind: action.action, reason: (action as { reason: string }).reason, at: this.now() });
-    }
-    const next: RunRecord = { ...run, machine_state: nextState, phases, escalations };
-    this.store.casTransition(run.machine_state, next);
+      const escalations = [...fresh.escalations];
+      if (action.action === 'judgment_needed' || action.action === 'halt') {
+        escalations.push({ kind: action.action, reason: (action as { reason: string }).reason, at });
+      }
+      return { ...fresh, machine_state: nextState, phases, escalations };
+    });
     return { action, machine_state: nextState, run_id: run.id };
   }
 

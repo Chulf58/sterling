@@ -563,6 +563,27 @@ test('run_signal: an explicit exit refuses to overwrite an unconsumed recorded e
   }
 });
 
+test('run_signal: a reconcile mark written concurrently (H7) SURVIVES the transition — merge-safe (audit findings 1/43, 18/43)', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    startRun(store);
+    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
+    // an H7 file-touch lands a reconcile mark on the run body AFTER the conductor's
+    // conceptual read but BEFORE run_signal commits — the old casTransition rebuilt
+    // the body from the stale read and dropped it, weakening dispose-run's refusal.
+    const article = randomUUID();
+    store.appendRunReconcileNeeded('r-0001', article);
+    const r = tools.runSignal();
+    assert.deepEqual(r.action, { action: 'spawn', phase_id: 'p2', respawn: false }, 'the phase still advances');
+    const after = tools.runState('r-0001');
+    assert.equal(after.phases[0].status, 'complete');
+    assert.equal(after.phases[1].status, 'in_progress');
+    assert.deepEqual(after.reconcile_needed, [article], 'the concurrent reconcile mark survived run_signal (dispose-run will still refuse on it)');
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_create: caller cannot override the server-owned envelope (id/timestamps/status) — audit finding 14/43', () => {
   const { tools, cleanup } = harness();
   try {

@@ -80,6 +80,69 @@ test('casTransition: stale observed state is rejected loudly and changes nothing
   }
 });
 
+test('casTransitionMerge: transitions machine_state while PRESERVING a concurrent body write; clears the pending exit (audit findings 1/43, 18/43)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    const artA = randomUUID();
+    store.recordPendingExit(run.id, { signal: 'complete', phase_id: 'p1', agent_role: 'coder', at: NOW });
+    // the race: a hook appends a reconcile mark AFTER the caller conceptually read
+    // the run but BEFORE the transition commits. casTransitionMerge re-reads the
+    // FRESH body inside its loop, so the mark must survive the state transition —
+    // the old casTransition rebuilt the whole body from the stale read and dropped it.
+    store.appendRunReconcileNeeded(run.id, artA);
+    const applied = store.casTransitionMerge('running', run.id, (fresh) => ({ ...fresh, machine_state: 'completing' }));
+    assert.equal(applied.machine_state, 'completing', 'state transitioned');
+    const after = store.getRun(run.id)!;
+    assert.equal(after.machine_state, 'completing');
+    assert.deepEqual(after.reconcile_needed, [artA], 'the concurrent reconcile mark SURVIVED the transition (not clobbered)');
+    assert.equal(store.getPendingExit(run.id), undefined, 'the transition consumed the pending exit');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('casTransitionMerge: a stale observed machine_state is rejected loudly, nothing changes (§5.2 preserved)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    store.casTransitionMerge('running', run.id, (fresh) => ({ ...fresh, machine_state: 'completing' }));
+    assert.throws(
+      () => store.casTransitionMerge('running', run.id, (fresh) => ({ ...fresh, machine_state: 'halted' })),
+      /CAS rejected/,
+      'observed state no longer matches → loud reject'
+    );
+    assert.equal(store.getRun(run.id)!.machine_state, 'completing', 'rejected transition changed nothing');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('casTransitionMerge: RETRIES on a body change under it and still commits, merging the concurrent write (retry path)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    const artA = randomUUID();
+    let injected = false;
+    const applied = store.casTransitionMerge('running', run.id, (fresh) => {
+      // on the FIRST pass only, land a concurrent hook write after this read so the
+      // primitive's body-guarded UPDATE misses and must retry against the fresh body
+      if (!injected) {
+        injected = true;
+        store.appendRunReconcileNeeded(run.id, artA);
+      }
+      return { ...fresh, machine_state: 'completing' };
+    });
+    assert.equal(applied.machine_state, 'completing');
+    assert.deepEqual(store.getRun(run.id)!.reconcile_needed, [artA], 'the write that forced the retry is preserved, not lost');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('pending exit: recorded once, never silently overwritten, consumed by transition (§5.2)', () => {
   const { dir, store } = tempStore();
   try {
