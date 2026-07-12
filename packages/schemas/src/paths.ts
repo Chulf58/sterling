@@ -51,9 +51,16 @@ export function matchesGlob(path: string, glob: string): boolean {
     const c = g[i];
     if (c === '*') {
       if (g[i + 1] === '*') {
-        re += '(?:.*)';
-        i++;
-        if (g[i + 1] === '/') i++;
+        i++; // consume the second '*'
+        // '**/' matches zero or more COMPLETE segments; a bare/trailing '**'
+        // matches anything. The prior '(?:.*)' was unanchored, so '**/foo.ts'
+        // wrongly matched inside a segment ('barfoo.ts') — audit finding 10/43.
+        if (g[i + 1] === '/') {
+          re += '(?:[^/]*/)*';
+          i++; // consume the '/'
+        } else {
+          re += '.*';
+        }
       } else {
         re += '[^/]*';
       }
@@ -73,7 +80,14 @@ export function toRepoRelative(absolutePath: string, repoRoot: string): string {
   const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
   const abs = norm(absolutePath);
   const root = norm(repoRoot);
-  if (!(abs === root || abs.toLowerCase().startsWith(root.toLowerCase() + '/'))) {
+  // Containment is CASE-SENSITIVE except for genuinely case-insensitive
+  // drive-prefixed (NTFS) paths: whole-path case-folding wrongly relativized a
+  // differently-cased SIBLING directory on a case-sensitive FS — audit finding
+  // 32/43 (the company runs WSL-primary, ext4 case-sensitive).
+  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
+  const a = drivePrefixed ? abs.toLowerCase() : abs;
+  const r = drivePrefixed ? root.toLowerCase() : root;
+  if (!(a === r || a.startsWith(r + '/'))) {
     throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
   }
   return normalizeRepoPath(abs.slice(root.length + 1));

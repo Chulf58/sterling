@@ -72,12 +72,46 @@ test('matchesGlob: ** crosses segments, * stays within, ? single char', () => {
   assert.equal(matchesGlob('src\\b.ts', 'src/*.ts'), true, 'backslash input normalized');
   assert.equal(matchesGlob('axts', 'a?ts'), true);
   assert.equal(matchesGlob('a/ts', 'a?ts'), false, '? never matches a separator');
+  // audit finding 10/43: '**/' must match COMPLETE segments, never inside one
+  assert.equal(matchesGlob('barfoo.ts', '**/foo.ts'), false, "'**/' does not match inside a segment");
+  assert.equal(matchesGlob('foo.ts', '**/foo.ts'), true, "'**/' matches zero segments");
+  assert.equal(matchesGlob('a/foo.ts', '**/foo.ts'), true);
+  assert.equal(matchesGlob('a/b/foo.ts', '**/foo.ts'), true);
+  assert.equal(matchesGlob('a/xb', 'a/**/b'), false, "mid-path '**' respects segment boundaries");
+  assert.equal(matchesGlob('a/b', 'a/**/b'), true, "'**' matches zero segments between");
+  assert.equal(matchesGlob('a/x/b', 'a/**/b'), true);
+  assert.equal(matchesGlob('hooks/lib/x.mjs', 'hooks/**'), true, "trailing '**' still matches deeply");
 });
 
 test('toRepoRelative relativizes against repo root', () => {
   assert.equal(toRepoRelative('C:\\repo\\src\\a.ts', 'C:\\repo'), 'src/a.ts');
   assert.equal(toRepoRelative('C:/repo/src/a.ts', 'C:/repo/'), 'src/a.ts');
   assert.throws(() => toRepoRelative('C:/elsewhere/a.ts', 'C:/repo'), /not under repo root/);
+  // drive-prefixed (NTFS) stays case-insensitive
+  assert.equal(toRepoRelative('C:/Repo/src/a.ts', 'c:/repo'), 'src/a.ts', 'Windows drive paths fold case');
+  // audit finding 32/43: on a case-sensitive FS (POSIX / WSL ext4) a differently
+  // cased sibling directory must NOT be relativized as if under the root
+  assert.throws(
+    () => toRepoRelative('/home/u/Sterling/x.ts', '/home/u/sterling'),
+    /not under repo root/,
+    'case-sensitive containment rejects a differently-cased sibling'
+  );
+  assert.equal(toRepoRelative('/home/u/sterling/x.ts', '/home/u/sterling'), 'x.ts', 'exact-case POSIX still relativizes');
+});
+
+test('reference_material kind:doc normalizes its location in the body (it doubles as a file_key) — audit finding 12/43', () => {
+  const referenceMaterialSchema = RECORD_TYPES.reference_material.schema;
+  const base = {
+    ...envelope('reference_material'),
+    title: 't', summary: 's', source_date: '2026-01-01', capture_date: '2026-01-01', basis: 'codebase',
+  };
+  const doc = referenceMaterialSchema.parse({ ...base, kind: 'doc', location: 'docs\\spec.md' }) as { location: string };
+  assert.equal(doc.location, 'docs/spec.md', 'doc location normalized in the body, matching its index key');
+  const dotted = referenceMaterialSchema.parse({ ...base, kind: 'doc', location: './docs/spec.md' }) as { location: string };
+  assert.equal(dotted.location, 'docs/spec.md', "'./'-prefix stripped");
+  // a URL location (kind:url) is NOT a repo path and must be left verbatim
+  const url = referenceMaterialSchema.parse({ ...base, kind: 'url', location: 'https://x/y' }) as { location: string };
+  assert.equal(url.location, 'https://x/y', 'url location untouched');
 });
 
 test('record schemas normalize file paths at the boundary', () => {
