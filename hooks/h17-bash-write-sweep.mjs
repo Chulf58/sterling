@@ -4814,7 +4814,8 @@ function deepReplaceString(value, from, to) {
   }
   return value;
 }
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(16);
+var MAX_RANK_TERMS = 16;
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var SterlingStore = class {
   db;
   constructor(path) {
@@ -4860,6 +4861,10 @@ var SterlingStore = class {
     if (fileKeys.length) {
       where.push(`EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => "?").join(",")}))`);
       params.push(...fileKeys);
+    }
+    if (opts.source) {
+      where.push("json_extract(r.body, '$.source') = ?");
+      params.push(opts.source);
     }
     return { where, params, fileKeys };
   }
