@@ -15,7 +15,7 @@
     "sterling-mcp": "dist/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ../../scripts/build-stamp.mjs",
     "test": "node --test \"dist/tests/*.test.js\""
   },
   "dependencies": {
