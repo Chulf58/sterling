@@ -717,6 +717,27 @@ test('H10: a touched file deleted before Stop is skipped — no demand, no artic
   }
 });
 
+test('H10: an internal throw (corrupt config) degrades loud via check_skipped, not a silent exit-1 (audit finding 34/43)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // a touch gives H10 a reason to proceed past the empty-register early-out
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'x.mjs'), 'export {};');
+    writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'src/x.mjs', at: NOW }]));
+    // config that PARSES as JSON but FAILS the zod parseConfig (min_unowned_files must be a number)
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, article_demand: { min_unowned_files: 'three' } }));
+
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 1, 'internal failure exits non-blocking (lets the session end) — not a hard block');
+    assert.match(r.stderr, /session-end duties skipped/);
+    const skipped = store.listCheckSkipped().filter((c) => c.check_name === 'h10-stop-duties');
+    assert.equal(skipped.length, 1, 'the skip was recorded as a durable check_skipped trail (AC4)');
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- H15 ---------------------------
 
 test('H15 store guard: shell references to the store are denied naming the §10 tools; sanctioned scripts and unrelated commands pass', () => {
