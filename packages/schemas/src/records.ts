@@ -40,6 +40,8 @@ export const featureArticleSchema = base
     // reconcile_needed items (decision 65222971 → its baseline successor).
     file_baselines: z.record(z.string(), z.string()).optional(),
     current_ac: z.array(z.object({ ac_id: z.string().min(1), text: z.string().min(1), verifiable_at: verifiableAt })),
+    // relies_on/relied_by name other articles by SLUG — slugs survive version
+    // supersession, record ids do not (decision 474b1c71).
     dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }),
     steps_runbook: z.string().optional(),
     state: z.enum(['planned', 'built', 'wired_in', 'active', 'dormant', 'deprecated']),
