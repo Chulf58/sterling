@@ -416,11 +416,18 @@ if (fwd(target) === fwd(pluginRoot)) {
   // sterling-windows.bat launches claude.exe with `--mcp-config <this> --strict-mcp-config`
   // so NATIVE claude runs the MCP server on the WINDOWS node — the plugin's WSL-node
   // sterling-mcp.json cannot run under native claude (-32000). Generated only here (the
-  // plugin repo), referenced by every project's launcher; store stays ${CLAUDE_PROJECT_DIR}.
-  // Skipped loudly (P5) when no Windows node resolved.
+  // plugin repo), referenced by every project's launcher. Skipped loudly (P5) when no
+  // Windows node resolved.
+  // STORE ARG EXPANSION differs by scope (verified 2026-07-12, code.claude.com/docs/en/mcp):
+  // a --mcp-config file gets project-scope ${VAR} env expansion — CLAUDE_PROJECT_DIR is set
+  // in the SERVER's env, not the parse-time shell, so the bare form passes through literally
+  // and the server mkdirs a literal '${CLAUDE_PROJECT_DIR}/' store at its cwd (the phantom
+  // store, 2026-06-24). The documented idiom is the ${CLAUDE_PROJECT_DIR:-.} default: '.'
+  // resolves against the server's cwd = the project dir. The PLUGIN config (above) keeps the
+  // bare form — plugin-scope configs substitute it unconditionally, no default needed.
   const winMcpConfigPath = join(target, '.claude-plugin', 'sterling-mcp-win.json');
   if (winNode) {
-    const desiredWin = { mcpServers: { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'] } } };
+    const desiredWin = { mcpServers: { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'] } } };
     if (!existsSync(winMcpConfigPath)) {
       mkdirSync(dirname(winMcpConfigPath), { recursive: true });
       writeFileSync(winMcpConfigPath, JSON.stringify(desiredWin, null, 2));

@@ -309,6 +309,26 @@ test('contradicting flags on a re-run are reported, never applied; consuming .mc
   }
 });
 
+// The plugin-repo branch (win MCP config generation) only runs when target ===
+// pluginRoot, which no temp-dir fixture can reach — pin the two store-arg forms
+// at the source instead. The asymmetry is deliberate (verified 2026-07-12,
+// code.claude.com/docs/en/mcp): plugin-scope configs substitute
+// ${CLAUDE_PROJECT_DIR} unconditionally (bare form correct), but a --mcp-config
+// file gets project-scope env expansion where the var is unset at parse time —
+// without the :-. default the literal passes through and the server mkdirs a
+// phantom '${CLAUDE_PROJECT_DIR}/' store at its cwd (observed 2026-06-24).
+test('MCP store args: plugin config stays bare ${CLAUDE_PROJECT_DIR}; the --mcp-config win config carries the :-. default (phantom-store regression)', () => {
+  const src = readFileSync(join(root, 'scripts', 'init.mjs'), 'utf8');
+  assert.ok(
+    src.includes("args: [fwd(mcpServerEntry), '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db']"),
+    'plugin-scope entry keeps the bare form — plugin configs substitute it unconditionally'
+  );
+  assert.ok(
+    src.includes("'--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'"),
+    'the native-claude win config uses the ${CLAUDE_PROJECT_DIR:-.} default — bare form passes through --mcp-config literally (the phantom store)'
+  );
+});
+
 test('init notes the project in the shared registry (decision 8f9e6db2)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
