@@ -13,9 +13,10 @@
 // (missing/corrupt baseline, restore fs-error, store/git throw, brief-unresolvable)
 // DENIES (exit 2), NEVER a non-blocking exit 1. Non-deny only: no agent_id
 // (conductor) → allow; no active run (L2) → baseline + always-set (surface|hooks/**).
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync, realpathSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { matchesGlob } from '@sterling/schemas';
 import { readStdin, allow, deny, openStore, withRetry } from './lib/common.mjs';
@@ -26,8 +27,25 @@ import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
 const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 
-function baselineFile(runId) {
-  return join(tmpdir(), 'sterling-enforce-' + runId + '.json');
+// The baseline path is PROJECT-UNIQUE (audit finding 7/43): two concurrent
+// Sterling sessions in different projects previously shared os.tmpdir()/
+// sterling-enforce-<runId>.json — and with runId='no-run' (a machine-wide
+// constant outside runs) project B's Pre snapshot could overwrite project A's,
+// so A's Post restored A's enforcement files from B's bytes. A sha256 prefix of
+// the realpath'd cwd discriminates projects; realpath so WSL/symlink aliasing
+// can't split a Pre/Post pair (both hooks pass the same input.cwd).
+function projectTag(cwd) {
+  let root = cwd;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    /* cwd unreadable — fall back to the raw path (still project-distinguishing) */
+  }
+  return createHash('sha256').update(root).digest('hex').slice(0, 16);
+}
+
+function baselineFile(cwd, runId) {
+  return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}.json`);
 }
 
 function toRel(cwd, abs) {
@@ -126,7 +144,7 @@ if (event === 'PreToolUse') {
     } finally {
       store?.close();
     }
-    writeFileSync(baselineFile(runId), JSON.stringify(collectBaseline(cwd)));
+    writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
     allow();
   } catch (e) {
     // A snapshot failure during an active agent run cannot be verified later —
@@ -189,7 +207,7 @@ try {
   }
 
   // --- (B) gitignored BASELINE set via the Pre snapshot ---
-  const bPath = baselineFile(runId);
+  const bPath = baselineFile(cwd, runId);
   if (!existsSync(bPath)) {
     deny(`H17: baseline '${bPath}' absent at Post (no Pre snapshot) — cannot verify the enforcement surface; failing closed (P5).`);
   }

@@ -6,9 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, realpathSync } from "node:fs";
 import { join as join2, dirname as dirname2, relative } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -5399,8 +5400,16 @@ function scopeCheck({ brief, debugScope, rel, amendments = [] }) {
 // scripts/hooks/h17-bash-write-sweep.mjs
 var BASELINE_GLOBS = [".claude/agents/**", ".sterling/config.json", ".claude/settings*.json"];
 var NO_RUN = "no-run";
-function baselineFile(runId) {
-  return join2(tmpdir(), "sterling-enforce-" + runId + ".json");
+function projectTag(cwd2) {
+  let root = cwd2;
+  try {
+    root = realpathSync(cwd2);
+  } catch {
+  }
+  return createHash("sha256").update(root).digest("hex").slice(0, 16);
+}
+function baselineFile(cwd2, runId) {
+  return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}.json`);
 }
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
@@ -5477,7 +5486,7 @@ if (event === "PreToolUse") {
     } finally {
       store?.close();
     }
-    writeFileSync(baselineFile(runId), JSON.stringify(collectBaseline(cwd)));
+    writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
     allow();
   } catch (e) {
     deny(`H17 [pre]: baseline snapshot failed (${e && e.message || e}) \u2014 failing closed (P5).`);
@@ -5523,7 +5532,7 @@ try {
       }
     }
   }
-  const bPath = baselineFile(runId);
+  const bPath = baselineFile(cwd, runId);
   if (!existsSync3(bPath)) {
     deny(`H17: baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5).`);
   }
