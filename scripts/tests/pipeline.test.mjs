@@ -442,6 +442,28 @@ test('test-integrity [direct]: vs git HEAD — modified/deleted test files flagg
   } finally {
     cleanup();
   }
+});
+
+test('test-integrity [direct]: a git RENAME of a test file is caught, not slipped (audit finding 21/43)', () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    // a test with enough content that a rename+edit stays above git's rename threshold
+    writeFileSync(join(dir, 'tests', 'orig.test.mjs'), 'export const cases = [1,2,3,4,5,6,7,8,9,10];\n// assertions below\n'.repeat(3));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'tests']);
+
+    // rename WITH a weakening edit — git reports `R<score>\told\tnew`
+    git(dir, ['mv', 'tests/orig.test.mjs', 'tests/renamed.test.mjs']);
+    writeFileSync(join(dir, 'tests', 'renamed.test.mjs'), 'export const cases = [1,2,3,4,5,6,7,8,9,10];\n// assertions below\n'.repeat(3) + '// WEAKENED\n');
+    git(dir, ['add', '-A']);
+    const ti = gitTestIntegrity({ cwd: dir, testGlobs: ['tests/**'] });
+    assert.equal(ti.no_git, false);
+    assert.deepEqual(ti.modified, ['tests/renamed.test.mjs'], 'the renamed test surfaces as modified (was silently skipped before)');
+    assert.deepEqual(ti.deleted, [], 'the old path is not double-counted as a deletion when the new path is a test');
+  } finally {
+    cleanup();
+  }
   const bare = mkdtempSync(join(tmpdir(), 'sterling-nogit-'));
   try {
     assert.equal(gitTestIntegrity({ cwd: bare, testGlobs: ['tests/**'] }).no_git, true);

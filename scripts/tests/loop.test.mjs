@@ -465,6 +465,27 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
   }
 });
 
+test('test-check red freezes the baseline even when --phase is OMITTED (resolves the run\'s in-progress phase) — audit finding 16/43', () => {
+  const fix = makeLoopProject();
+  const { dir } = fix;
+  try {
+    // an assertion-red without --phase: previously the freeze was silently skipped
+    writeFileSync(join(dir, 'src', 'calc.mjs'), 'export const add = () => 0;\n');
+    writeFileSync(
+      join(dir, 'tests', 'calc.test.mjs'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from '../src/calc.mjs';\ntest('AC1', () => assert.equal(add(2, 3), 5));\n"
+    );
+    const red = runScript('test-check.mjs', ['--expect', 'red', '--scope', 'tests/calc.test.mjs', '--run', 'r-loop', '--target', dir], dir);
+    assert.equal(red.code, 0, red.stdout + red.stderr);
+    const out = JSON.parse(red.stdout);
+    assert.equal(out.overall, 'assertion_fail');
+    assert.equal(out.baseline_frozen, 1, 'phase resolved from the run\'s in_progress phase; oracle frozen without --phase');
+    assert.ok(existsSync(join(dir, '.sterling', 'runs', 'r-loop', 'test-baseline-p1.json')), 'baseline file written for the resolved phase');
+  } finally {
+    fix.cleanup();
+  }
+});
+
 test('dispose-run success is reachable from the ready fixture (control for the refusal tests)', () => {
   const fix = makeReadyToDispose();
   try {

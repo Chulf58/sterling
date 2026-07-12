@@ -32,6 +32,11 @@ try {
     registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
     targetAgentsDir: join(target, '.claude', 'agents'),
     sessionStartedAt,
+    // probe baked hook command paths (audit finding 17/43): agents installed for
+    // the OTHER machine context read as present/up_to_date while every baked hook
+    // node path is unresolvable — a run would start with all enforcement dead. The
+    // CLI gate (check-agents-visible.mjs) already probes; the run-start gate must too.
+    probeExecutability: true,
   });
   if (!visibility.visible) {
     fail(
