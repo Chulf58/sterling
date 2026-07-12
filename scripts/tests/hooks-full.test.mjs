@@ -365,6 +365,19 @@ test('H4: test-writer read wall — denies implementation, allows tests/docs/out
   } finally {
     cleanup();
   }
+  // fail closed on a CORRUPT config (loadConfig JSON.parse throws): the read wall
+  // must DENY, never void itself via a non-blocking exit 1 (the F5 class; found
+  // during the F6 review — audit's F5 scoped only H3/H8).
+  const corrupt = mkdtempSync(join(tmpdir(), 'sterling-h4c-'));
+  mkdirSync(join(corrupt, '.sterling'), { recursive: true });
+  writeFileSync(join(corrupt, '.sterling', 'config.json'), '{ not json');
+  try {
+    const r = runHook('h4-read-wall.mjs', hookInput(corrupt, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: join(corrupt, 'src', 'impl.mjs') } }), corrupt);
+    assert.equal(r.code, 2, 'a corrupt config denies (fail closed), never a voided read wall');
+    assert.match(r.stderr, /failing closed/);
+  } finally {
+    rmSync(corrupt, { recursive: true, force: true });
+  }
 });
 
 test('H4: content-mode Grep hits the same wall — the r-ea9e bypass replay (denied Read, denied content Grep, allowed locate Grep)', () => {

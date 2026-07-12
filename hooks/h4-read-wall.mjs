@@ -4704,15 +4704,19 @@ var rel = repoRel(target, input.cwd);
 if (!rel) allow();
 var DOC_RE = /\.(md|txt|rst|adoc)$/i;
 if (DOC_RE.test(rel) || rel.startsWith("docs/")) allow();
-var config = loadConfig(input.cwd);
-if (!config?.toolchains?.length) {
-  deny("H4: no toolchains in .sterling/config.json \u2014 the read wall cannot resolve test globs; failing closed (P5)");
-}
-for (const tc of config.toolchains) {
-  for (const glob of tc.test_globs ?? []) {
-    if (matchesGlob(rel, glob)) allow();
+try {
+  const config = loadConfig(input.cwd);
+  if (!config?.toolchains?.length) {
+    deny("H4: no toolchains in .sterling/config.json \u2014 the read wall cannot resolve test globs; failing closed (P5)");
   }
+  for (const tc of config.toolchains) {
+    for (const glob of tc.test_globs ?? []) {
+      if (matchesGlob(rel, glob)) allow();
+    }
+  }
+  deny(
+    `H4: '${rel}' is implementation \u2014 the test-writer never reads code (\xA76 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
+  );
+} catch (e) {
+  deny(`H4: read-wall evaluation failed (${e && e.message || e}) \u2014 failing closed (P5)`);
 }
-deny(
-  `H4: '${rel}' is implementation \u2014 the test-writer never reads code (\xA76 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
-);
