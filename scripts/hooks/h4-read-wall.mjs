@@ -34,15 +34,25 @@ if (!rel) allow(); // outside the repo (platform docs, references) is not implem
 const DOC_RE = /\.(md|txt|rst|adoc)$/i;
 if (DOC_RE.test(rel) || rel.startsWith('docs/')) allow();
 
-const config = loadConfig(input.cwd);
-if (!config?.toolchains?.length) {
-  deny('H4: no toolchains in .sterling/config.json — the read wall cannot resolve test globs; failing closed (P5)');
-}
-for (const tc of config.toolchains) {
-  for (const glob of tc.test_globs ?? []) {
-    if (matchesGlob(rel, glob)) allow(); // prior tests are fair game
+// A BLOCKING gate that cannot evaluate must DENY, not void itself: loadConfig's
+// JSON.parse throws on a corrupt .sterling/config.json, and an uncaught throw
+// exits 1 — non-blocking — which would let the test-writer read source (the read
+// wall silently voided). Any unexpected error → fail-closed deny (the F5 class,
+// which the audit's F5 scoped only to H3/H8; deny()/allow() process.exit before
+// reaching the catch, so control flow is unaffected).
+try {
+  const config = loadConfig(input.cwd);
+  if (!config?.toolchains?.length) {
+    deny('H4: no toolchains in .sterling/config.json — the read wall cannot resolve test globs; failing closed (P5)');
   }
+  for (const tc of config.toolchains) {
+    for (const glob of tc.test_globs ?? []) {
+      if (matchesGlob(rel, glob)) allow(); // prior tests are fair game
+    }
+  }
+  deny(
+    `H4: '${rel}' is implementation — the test-writer never reads code (§6 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
+  );
+} catch (e) {
+  deny(`H4: read-wall evaluation failed (${(e && e.message) || e}) — failing closed (P5)`);
 }
-deny(
-  `H4: '${rel}' is implementation — the test-writer never reads code (§6 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
-);
