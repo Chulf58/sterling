@@ -1,3 +1,16 @@
+> **RETIRED 2026-07-13** (R2-AUDIT board ddc1d1c4): build-era probe record, NOT
+> authoritative — the knowledge base is king. Everything below is a dated snapshot
+> verified on Claude Code CLI **2.1.170** (2026-06-10), not current platform truth;
+> the CLI has moved on and at least one adjacent seam (PostToolUse-on-MCP) has
+> demonstrably changed since. The still-live facts were promoted to
+> `research_finding` records with staleness clocks on 2026-07-13:
+> probes verdict `1c526e6d-2d32-4993-a483-1885daf23479`, Windows git-bash hook-command
+> mangling `def21c99-1bd7-4e64-89fe-3778c4ba04f6`, silent hook failure
+> `8c9edff9-588a-40f5-8fc2-e2fa1bb96d5a`, headless hook debugging
+> `7cb79024-9c7c-4a75-90fe-bcfa04504b3f`. The re-verification discipline lives in the
+> verify-at-build register (decision `fe543519-4dda-46cd-8694-79cf7528d8c8`).
+> Kept verbatim below for history only.
+
 # PROBES.md — §16.0 Layer 0 platform probe findings
 
 Committed once per spec §16.0. Probe scripts were throwaway and have been deleted; this file is the durable record.
