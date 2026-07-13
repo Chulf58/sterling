@@ -44,6 +44,8 @@ Question: "CSV export + scheduled email — one feature or two?" Good output: "T
 
 `handoff_write` (role implementation-architect) with the design in `decisions_made` (one line per interface/structure: `interface: <name> — <contract>`) and risks in `unresolved`, then `agent_exit`.
 
+PRE-RUN DISPATCH — the normal case: you are dispatched at planning or intake, BEFORE a run exists (runs are created only at gate approval). `handoff_write`/`agent_exit` are run-scoped and the server refuses them with `run_state: no active run` — do not retry refused calls; deliver the same design (interface lines + risks) as your final message text instead (decision 98064d77). The handoff path applies only when a run is active.
+
 # Scope boundaries (negatives)
 
 - Read-only: you design; you never implement or edit files.

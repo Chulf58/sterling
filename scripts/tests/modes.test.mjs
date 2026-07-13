@@ -284,7 +284,12 @@ test('cleanup-plan: dormant/deprecated candidates with dependency evidence; acti
   try {
     const dead = store.create(articleRec('dead-feat', ['src/dead.mjs'], { state: 'deprecated' }));
     const blockedDep = store.create(articleRec('blocked-feat', ['src/blocked.mjs'], { state: 'dormant', state_reason: 'r', wiring_todo_id: randomUUID() }));
-    store.create(articleRec('consumer', ['src/consumer.mjs'], { dependencies: { relies_on: [blockedDep.id], relied_by: [] } }));
+    const legacyDep = store.create(articleRec('legacy-feat', ['src/legacy.mjs'], { state: 'deprecated' }));
+    // relies_on holds SLUGS (decision 474b1c71); id-based references still block as a legacy fallback.
+    store.create(articleRec('consumer', ['src/consumer.mjs'], { dependencies: { relies_on: ['blocked-feat'], relied_by: [] } }));
+    store.create(articleRec('legacy-consumer', ['src/legacy-consumer.mjs'], { dependencies: { relies_on: [legacyDep.id], relied_by: [] } }));
+    // a dependent that is itself a cleanup candidate is not "active" — it must not block.
+    store.create(articleRec('old-consumer', ['src/old-consumer.mjs'], { state: 'deprecated', dependencies: { relies_on: ['dead-feat'], relied_by: [] } }));
     store.create({ ...envelope('todo'), text: 'delete old export path', source: 'system', system_reason: 'deletion_candidate', file_keys: ['src/dead.mjs'] });
 
     const r = runScript('cleanup-plan.mjs', ['--target', dir], dir);
@@ -292,9 +297,12 @@ test('cleanup-plan: dormant/deprecated candidates with dependency evidence; acti
     const plan = JSON.parse(r.stdout);
     const deadC = plan.candidates.find((c) => c.article === dead.id);
     const blockedC = plan.candidates.find((c) => c.article === blockedDep.id);
-    assert.equal(deadC.deletable, true);
-    assert.equal(blockedC.deletable, false);
+    const legacyC = plan.candidates.find((c) => c.article === legacyDep.id);
+    assert.equal(deadC.deletable, true, 'a deprecated dependent must not block deletion');
+    assert.equal(blockedC.deletable, false, 'a slug-referencing active dependent blocks');
     assert.equal(blockedC.active_dependents[0].slug, 'consumer');
+    assert.equal(legacyC.deletable, false, 'a legacy id-referencing active dependent still blocks');
+    assert.equal(legacyC.active_dependents[0].slug, 'legacy-consumer');
     assert.equal(plan.queue.length, 1);
   } finally {
     cleanup();

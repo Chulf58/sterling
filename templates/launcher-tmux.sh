@@ -32,14 +32,12 @@ command -v tmux >/dev/null || { echo "sterling-launch: 'tmux' not installed" >&2
 [ -f "$TUI_BUNDLE" ] || { echo "sterling-launch: TUI bundle missing: $TUI_BUNDLE" >&2; exit 1; }
 [ -f "$STORE" ]      || { echo "sterling-launch: store missing: $STORE (run from a project root)" >&2; exit 1; }
 
-export STERLING_SPLIT=1
-
 # Re-split the TUI as a right pane in the session's active window.
 # -d: create the pane WITHOUT focusing it, so the keyboard stays on the claude
 # pane (terminal-kit otherwise grabs all input and you can't type to claude).
 add_tui_pane() {
   tmux split-window -h -d -t "$SESSION" -c "$WORKDIR" -l "${SPLIT_RATIO}%" \
-    -e STERLING_SPLIT=1 "$NODE_BIN" "$TUI_BUNDLE" --store "$STORE"
+    "$NODE_BIN" "$TUI_BUNDLE" --store "$STORE"
 }
 
 case "$MODE" in

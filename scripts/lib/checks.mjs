@@ -41,16 +41,27 @@ export function checkSpawnContract(content, label) {
   return [];
 }
 
-// §6 skill linter: stale file references in SKILL.md files.
+// §6 skill linter: stale file references in SKILL.md (and commands/*.md) files.
+// Prefix/extension coverage widened by R2 board 72807b1f: skills|commands
+// prefixes (cross-skill references were previously unlinted) + sh|bat.
 export function lintSkill(content, label, rootDir) {
   const violations = [];
-  const refs = content.match(/(?<![\w:])(?:scripts|templates|agent-templates|hooks|packages)\/[\w./-]+\.(?:mjs|md|json|ts)\b/g) ?? [];
+  const refs =
+    content.match(/(?<![\w:])(?:scripts|templates|agent-templates|hooks|packages|skills|commands)\/[\w./-]+\.(?:mjs|md|json|ts|sh|bat)\b/g) ?? [];
   for (const ref of new Set(refs)) {
     if (!existsSync(join(rootDir, ref))) {
       violations.push({ kind: 'stale_file_reference', detail: `${label}: '${ref}' does not exist` });
     }
   }
   return violations;
+}
+
+// commands/*.md — linted through the same reference grammar (R2 72807b1f).
+export function collectCommands(commandsDir) {
+  if (!existsSync(commandsDir)) return [];
+  return readdirSync(commandsDir)
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => ({ file: `commands/${f}`, content: readFileSync(join(commandsDir, f), 'utf8') }));
 }
 
 export function collectAgentTemplates(templatesDir) {

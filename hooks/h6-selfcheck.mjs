@@ -5,6 +5,9 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h6-selfcheck.mjs
+import { statSync as statSync2 } from "node:fs";
+
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { join } from "node:path";
@@ -4141,6 +4144,8 @@ var featureArticleSchema = base.extend({
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  // relies_on/relied_by name other articles by SLUG — slugs survive version
+  // supersession, record ids do not (decision 474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -5221,6 +5226,28 @@ var SterlingStore = class {
     });
     return next;
   }
+  /**
+   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
+   * rows of a run that has already reached a TERMINAL state ('rejected' via
+   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
+   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
+   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
+   * rows previously had no disposal event and accreted forever, and the merge
+   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
+   * Refuses on a non-terminal run — never a back door around disposal.
+   */
+  purgeRunRows(runId) {
+    const run = this.getRun(runId);
+    if (!run)
+      throw new Error(`purgeRunRows: no run '${runId}'`);
+    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
+      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
+    }
+    this.tx(() => {
+      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
+    });
+  }
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason2, runId, at) {
     this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason2, at);
@@ -5345,8 +5372,8 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3 } from "node:fs";
-var TAIL_BYTES = 64 * 1024;
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync3(path)) return null;
   const fd = openSync(path, "r");
@@ -5381,13 +5408,24 @@ function latestUsage(path) {
       return { usage: usage2, model: entry.message?.model, reason: null };
     }
   }
-  return { usage: null, reason: sawAssistant ? "format_unparseable" : "no_assistant_entries" };
+  if (sawAssistant) return { usage: null, reason: "format_unparseable" };
+  const exhausted = statSync(path).size > TAIL_BYTES;
+  return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 
 // scripts/hooks/h6-selfcheck.mjs
+var SUBSTANTIAL_BYTES = 256 * 1024;
 var input = readStdin();
 var { usage, reason } = latestUsage(input.transcript_path);
-if (!usage && reason === "format_unparseable") {
+var substantialNoAssistant = false;
+if (!usage && reason === "no_assistant_entries") {
+  try {
+    substantialNoAssistant = statSync2(input.transcript_path).size > SUBSTANTIAL_BYTES;
+  } catch {
+    substantialNoAssistant = false;
+  }
+}
+if (!usage && (reason === "format_unparseable" || reason === "window_exhausted" || substantialNoAssistant)) {
   const store = openStore(input.cwd);
   if (store) {
     try {

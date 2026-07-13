@@ -1,3 +1,9 @@
+> **RETIRED 2026-07-12** (R2-AUDIT board c7053df5, the b7ce8798 precedent): build-era
+> document, NOT authoritative — deferred decisions live in the knowledge base
+> (the deferred/optional register is decision f6283a11, whose item (5) carries
+> this file's one open item verbatim; no `STERLING-DEFERRED` code markers exist
+> in the repo). Kept verbatim below for history only.
+
 # DECISIONS-NEEDED — deferred decisions awaiting human review
 
 Per the deferred-decision protocol: gaps/platform deltas where the most

@@ -45,7 +45,7 @@ Signal: content pattern `process.env` in `src/export/mailer.mjs`. Inspect: `exec
 
 # Output contract
 
-`handoff_write` (role reviewer-security) then `agent_exit`. Objections to `unresolved` as `objection: <site> — <defect> — <evidence>`; every mandatory item dispositioned `addressed` | `not_applicable_because` in `decisions_made`.
+`handoff_write` (role reviewer-security) then `agent_exit`. Objections to `unresolved` as `objection: <site> — <defect> — <evidence>`; every mandatory item dispositioned `addressed` | `not_applicable_because` in the `dispositions` array (server-enforced: the write is refused unless it covers exactly the mandatory set); verdict summary in `decisions_made`.
 
 Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
 

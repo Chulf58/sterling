@@ -4171,6 +4171,8 @@ var featureArticleSchema = base.extend({
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  // relies_on/relied_by name other articles by SLUG — slugs survive version
+  // supersession, record ids do not (decision 474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -5254,6 +5256,28 @@ var SterlingStore = class {
       this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
     });
     return next;
+  }
+  /**
+   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
+   * rows of a run that has already reached a TERMINAL state ('rejected' via
+   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
+   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
+   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
+   * rows previously had no disposal event and accreted forever, and the merge
+   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
+   * Refuses on a non-terminal run — never a back door around disposal.
+   */
+  purgeRunRows(runId) {
+    const run = this.getRun(runId);
+    if (!run)
+      throw new Error(`purgeRunRows: no run '${runId}'`);
+    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
+      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
+    }
+    this.tx(() => {
+      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
+    });
   }
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {

@@ -11,9 +11,12 @@ export const meta = {
 
 // Council — six-hats pre-build deliberation (SOP: skills/council/SKILL.md).
 // Sterling's first Workflow-tool script. Hats are EPHEMERAL prompts riding the
-// registered read-only explorer agent (Read/Grep/Glob + knowledge_query/
-// knowledge_get; no Bash, no Edit/Write) — never roster members; invariant 3
-// does not bind them (same category as the platform's unregistered agents).
+// registered explorer agent (Read/Grep/Glob + knowledge_query/knowledge_get;
+// no Bash, no Edit/Write — but the grant DOES include the run-scoped
+// handoff_write/agent_exit, decision 4ca6d43f: the hats' prompts forbid them
+// and the SOP's no-active-run guard keeps them inert) — never roster members;
+// invariant 3 does not bind them (same category as the platform's unregistered
+// agents).
 // The deliberation is TRANSIENT: nothing here writes to the store; a decision
 // is captured downstream only on explicit user commitment. All agents ride the
 // platform 'opus' alias — the Workflow tool's model enum has no exact-pin form

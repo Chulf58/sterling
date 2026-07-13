@@ -404,6 +404,42 @@ test('direct-merge.mjs: refuses during an active run; merges + sweeps when none 
   }
 });
 
+test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed files; unrelated debt does not block; merges once drained (decision 9df61181)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    git(dir, ['checkout', '-b', 'feat/debt']);
+    writeFileSync(join(dir, 'src', 'touched.mjs'), 'export const t = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'touched']);
+
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const item = store.create({
+      id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      text: "reconcile article 'x' — files it owns were touched in direct mode", source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/touched.mjs'],
+    });
+    store.create({
+      id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      text: "reconcile article 'y' — unrelated to this branch", source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/unrelated.mjs'],
+    });
+    store.close();
+
+    const refused = runDirectMerge(dir);
+    assert.notEqual(refused.status, 0, 'open debt on a changed file must refuse the merge');
+    assert.match(refused.stderr, /reconcile_needed/);
+    assert.match(refused.stderr, /src\/touched\.mjs/);
+    assert.doesNotMatch(refused.stderr, /src\/unrelated\.mjs/, 'debt off the branch does not block');
+
+    const store2 = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store2.remove(item.id, NOW);
+    store2.close();
+    const ok = runDirectMerge(dir);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(JSON.parse(ok.stdout).branch_merged, 'feat/debt');
+  } finally {
+    cleanup();
+  }
+});
+
 test('test-integrity: frozen baseline detects modification and deletion; clean baseline passes (§9.2)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ti-'));
   try {
@@ -635,6 +671,20 @@ test('completeness-check: a subtask citation to a run.scope_amendments path pass
 
     const r = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-ac4', '--phase', 'p1', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 120_000 });
     assert.equal(r.status, 0, `a citation to an amended (in-contract) path must pass — ${r.stderr}`);
+
+    // Unresolvable-phase refusals (R2 board d0bdfe56 — mirror of prep/test-check,
+    // P5): an off-brief --phase refuses loud, and with the phase no longer
+    // in_progress an OMITTED --phase refuses instead of silently skipping the
+    // subtask-evidence half against ALL handoffs.
+    const offBrief = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-ac4', '--phase', 'p999', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.notEqual(offBrief.status, 0, 'an off-brief phase must refuse');
+    assert.match(offBrief.stderr, /not in the run's brief/);
+    const s2 = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    s2.updateRunOptimistic('r-ac4', (run) => ({ ...run, phases: run.phases.map((p) => ({ ...p, status: 'done' })) }));
+    s2.close();
+    const noPhase = spawnSync(process.execPath, [join(root, 'scripts', 'completeness-check.mjs'), '--run', 'r-ac4', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.notEqual(noPhase.status, 0, 'no resolvable phase must refuse, not silently under-verify');
+    assert.match(noPhase.stderr, /no resolvable phase/);
   } finally {
     store?.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

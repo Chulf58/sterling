@@ -44,7 +44,7 @@ Signal: `.map(async …)` in `src/board/load.mjs`. Inspect: per-todo `knowledge_
 
 # Output contract
 
-`handoff_write` (role reviewer-performance) then `agent_exit`. Objections to `unresolved`; mandatory items dispositioned in `decisions_made`.
+`handoff_write` (role reviewer-performance) then `agent_exit`. Objections to `unresolved`; mandatory items dispositioned in the `dispositions` array (server-enforced exact coverage); verdict summary in `decisions_made`.
 
 Worked handoff — copy this shape (it kills the recurring first-write schema failure). You change no files, so `what_changed`, `wired`, and `deferred` are empty `[]`; `dispositions` carries exactly one entry per mandatory review item — `addressed`, or `not_applicable_because` with a non-empty `reason`:
 

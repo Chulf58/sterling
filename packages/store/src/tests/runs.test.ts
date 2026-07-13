@@ -315,3 +315,30 @@ test('setRunReviewMandatory: replace-by-phase under optimistic update; never tou
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("purgeRunRows: deletes a TERMINAL run's handoff + check_skipped rows; refuses on a live run (P4, R2 82f04007)", () => {
+  const { dir, store } = tempStore();
+  try {
+    store.createRun(runRecord() as never);
+    store.writeHandoff('r-0001', handoff() as never, NOW);
+    store.recordCheckSkipped('branch-discard', 'no_base_branch', 'r-0001', NOW);
+    store.recordCheckSkipped('gate-check', 'no_git', undefined, NOW); // NULL-run row must survive
+
+    // live run → refuse (rows of a live run are disposed only by disposeRunRows)
+    assert.throws(() => store.purgeRunRows('r-0001'), /not terminal/);
+    assert.equal(store.readHandoffs('r-0001').length, 1, 'refusal deletes nothing');
+
+    // terminal (rejected) → purge deletes the run-scoped rows only
+    store.casTransitionMerge('running', 'r-0001', (fresh) => ({ ...fresh, machine_state: 'rejected' }));
+    store.purgeRunRows('r-0001');
+    assert.deepEqual(store.readHandoffs('r-0001'), [], 'handoff rows purged');
+    assert.deepEqual(store.listCheckSkipped('r-0001'), [], 'run-scoped check_skipped rows purged');
+    assert.equal(store.listCheckSkipped().filter((s) => s.run_id === null).length, 1, 'NULL-run rows untouched');
+
+    // unknown run → loud
+    assert.throws(() => store.purgeRunRows('r-none'), /no run/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

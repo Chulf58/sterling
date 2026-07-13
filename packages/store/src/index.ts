@@ -751,6 +751,28 @@ export class SterlingStore {
     return next;
   }
 
+  /**
+   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
+   * rows of a run that has already reached a TERMINAL state ('rejected' via
+   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
+   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
+   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
+   * rows previously had no disposal event and accreted forever, and the merge
+   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
+   * Refuses on a non-terminal run — never a back door around disposal.
+   */
+  purgeRunRows(runId: string): void {
+    const run = this.getRun(runId);
+    if (!run) throw new Error(`purgeRunRows: no run '${runId}'`);
+    if (run.machine_state !== 'rejected' && run.machine_state !== 'merged') {
+      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal — rows of a live run are disposed only by disposeRunRows`);
+    }
+    this.tx(() => {
+      this.db.prepare('DELETE FROM handoffs WHERE run_id = ?').run(runId);
+      this.db.prepare('DELETE FROM check_skipped WHERE run_id = ?').run(runId);
+    });
+  }
+
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
     this.db

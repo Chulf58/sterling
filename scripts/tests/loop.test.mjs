@@ -544,6 +544,13 @@ test('dispose-run --abort: a pre-green run normal-disposal REFUSES is torn down 
     // durable knowledge captured during the run is NOT touched by abort
     assert.ok(fix.store.get(fix.decision.id), 'seeded decision survives abort');
 
+    // P4 purge (R2 board 82f04007): the abort event ends the run's life — its
+    // handoff + check_skipped rows go with it (incl. the branch-discard skip
+    // recorded during this very abort; previously only disposeRunRows deleted
+    // rows and it refuses non-'completing' runs, so aborted runs leaked forever).
+    assert.deepEqual(fix.store.readHandoffs('r-loop'), [], 'no handoff rows survive an abort');
+    assert.deepEqual(fix.store.listCheckSkipped('r-loop'), [], 'no check_skipped rows survive an abort');
+
     // abort refuses a second time — the run is now terminal
     const again = runScript('dispose-run.mjs', ['--abort', '--run', 'r-loop', '--target', fix.dir], fix.dir);
     assert.equal(again.code, 1);

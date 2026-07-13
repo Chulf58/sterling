@@ -4145,6 +4145,8 @@ var featureArticleSchema = base.extend({
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  // relies_on/relied_by name other articles by SLUG — slugs survive version
+  // supersession, record ids do not (decision 474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -5225,6 +5227,28 @@ var SterlingStore = class {
     });
     return next;
   }
+  /**
+   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
+   * rows of a run that has already reached a TERMINAL state ('rejected' via
+   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
+   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
+   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
+   * rows previously had no disposal event and accreted forever, and the merge
+   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
+   * Refuses on a non-terminal run — never a back door around disposal.
+   */
+  purgeRunRows(runId) {
+    const run2 = this.getRun(runId);
+    if (!run2)
+      throw new Error(`purgeRunRows: no run '${runId}'`);
+    if (run2.machine_state !== "rejected" && run2.machine_state !== "merged") {
+      throw new Error(`purgeRunRows: run '${runId}' is '${run2.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
+    }
+    this.tx(() => {
+      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
+    });
+  }
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason, at);
@@ -5357,10 +5381,21 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3 } from "node:fs";
-var TAIL_BYTES = 64 * 1024;
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
-  return parentTranscriptPath.replace(/\.jsonl$/, "") + `/subagents/agent-${agentId}.jsonl`;
+  const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
+  const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
+  if (existsSync3(flat)) return flat;
+  const wfRoot = `${sessionDir}/subagents/workflows`;
+  try {
+    for (const d of readdirSync(wfRoot)) {
+      const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
+      if (existsSync3(candidate)) return candidate;
+    }
+  } catch {
+  }
+  return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync3(path)) return null;
@@ -5396,7 +5431,9 @@ function latestUsage(path) {
       return { usage, model: entry.message?.model, reason: null };
     }
   }
-  return { usage: null, reason: sawAssistant ? "format_unparseable" : "no_assistant_entries" };
+  if (sawAssistant) return { usage: null, reason: "format_unparseable" };
+  const exhausted = statSync(path).size > TAIL_BYTES;
+  return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
   const used = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
@@ -5405,7 +5442,18 @@ function fillPct(usage, windowSize) {
 
 // scripts/hooks/h6-context-watch.mjs
 var input = readStdin();
-if (!input.agent_id) allow();
+if (!input.agent_id) {
+  const s2 = openStore(input.cwd);
+  if (s2) {
+    try {
+      s2.recordCheckSkipped("context-watch", "agent_id_missing", s2.getRun()?.id, (/* @__PURE__ */ new Date()).toISOString());
+    } finally {
+      s2.close();
+    }
+  }
+  process.stderr.write("H6 degraded loudly: agent_id missing from hook input (platform drift?) \u2014 recorded check_skipped {context-watch}");
+  allow();
+}
 var config = loadConfig(input.cwd);
 var cw = {
   warn_pct: 60,

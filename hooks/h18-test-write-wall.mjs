@@ -4180,6 +4180,8 @@ var featureArticleSchema = base.extend({
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  // relies_on/relied_by name other articles by SLUG — slugs survive version
+  // supersession, record ids do not (decision 474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),

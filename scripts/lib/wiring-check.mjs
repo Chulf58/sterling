@@ -19,8 +19,14 @@ export function runWiringCheck({ adapterModule, cwd, scope, article, store, now 
   if (offenders.length === 0) return { violations: [], skipped: null };
 
   if (article?.state === 'dormant') {
-    // deliberate dormancy: declared + tracked, never silent (§3.2.3)
-    let todoId = article.wiring_todo_id;
+    // deliberate dormancy: declared + tracked, never silent (§3.2.3).
+    // Dedupe by QUERY, not only the article's wiring_todo_id pointer: the
+    // minted id is never written back to the article, so a dangling pointer
+    // minted a duplicate on every --final rerun (R2 board 6308d805).
+    const tracked = store
+      .query({ types: ['todo'], cap: 1000 })
+      .find((t) => t.source === 'system' && t.system_reason === 'wire_in_dormant' && t.feature_link === article.id);
+    let todoId = tracked?.id ?? article.wiring_todo_id;
     const exists = todoId && store.get(todoId);
     if (!exists) {
       todoId = randomUUID();

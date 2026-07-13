@@ -49,11 +49,20 @@ test('skill linter: flags stale file references, accepts live ones', () => {
   assert.deepEqual(lintSkill('Run scripts/dispose-run.mjs then check templates/default-config.json.', 's', root), []);
   const stale = lintSkill('See scripts/does-not-exist.mjs for details.', 'debug/SKILL.md', root);
   assert.deepEqual(stale.map((v) => v.kind), ['stale_file_reference']);
+  // R2 72807b1f: the grammar covers skills/ + commands/ prefixes (cross-skill
+  // references were previously unlinted) and sh/bat extensions
+  assert.deepEqual(lintSkill('See skills/drain/SKILL.md and commands/merge.md.', 's', root), []);
+  const staleSkill = lintSkill('See skills/gone/SKILL.md and templates/gone.sh.', 's', root);
+  assert.equal(staleSkill.length, 2, 'skills/ and .sh references are existence-checked');
 });
 
 test('all day-one check scripts pass on the current repo (empty sets pass — invariant 3)', () => {
-  for (const script of ['check-agent-registry.mjs', 'check-totality.mjs', 'check-spawn-contracts.mjs', 'check-agent-prompts.mjs', 'check-skills.mjs']) {
-    const r = spawnSync(process.execPath, [join(root, 'scripts', script)], { encoding: 'utf8', cwd: root, timeout: 60_000 });
+  // check-bundles-fresh joined the list with R2 7cde1448 (bundle freshness is a
+  // tree invariant). check-projection-fresh stays gate-bound only (direct-merge
+  // runs the full battery, R2 2e443375): the projection legitimately lags the
+  // store mid-work, so it is a pre-merge duty, not a test invariant.
+  for (const script of ['check-agent-registry.mjs', 'check-totality.mjs', 'check-spawn-contracts.mjs', 'check-agent-prompts.mjs', 'check-skills.mjs', 'check-bundles-fresh.mjs']) {
+    const r = spawnSync(process.execPath, [join(root, 'scripts', script)], { encoding: 'utf8', cwd: root, timeout: 120_000 });
     assert.equal(r.status, 0, `${script}: ${r.stderr}`);
   }
 });

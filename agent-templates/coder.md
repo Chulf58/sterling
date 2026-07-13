@@ -92,9 +92,9 @@ Then run the allowlisted test command and confirm green before handing off.
   "exit_signal": "complete",
   "unresolved": []
 }
+```
 
 Cite EVERY phase subtask in `subtask_evidence` — the completeness check verifies each citation's files and tests exist and that cited tests pass; an uncited subtask fails the phase.
-```
 
 # Scope boundaries (negatives)
 
