@@ -266,6 +266,23 @@ test('remove() deletes INBOUND link edges, not just outbound — no dangling rev
   }
 });
 
+test('addLink: a standalone store still rejects a missing target by default, and an identical edge dedups', () => {
+  // The mounted layer passes targetValidated after its cross-store resolution;
+  // standalone usage must keep the local existence check (no regression).
+  const { dir, store } = tempStore();
+  try {
+    const source = store.create(decision({ statement: 'source' }));
+    const target = store.create(decision({ statement: 'target' }));
+    assert.throws(() => store.addLink(source.id, 'cites', randomUUID()), /no target record/);
+    store.addLink(source.id, 'cites', target.id);
+    const again = store.addLink(source.id, 'cites', target.id);
+    assert.equal(again.links.filter((l) => l.rel === 'cites' && l.target_id === target.id).length, 1, 'identical edge dedups — source unchanged');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('query source filter is applied BEFORE the cap — matching items are not lost past the cap (audit finding 38/43)', () => {
   const { dir, store } = tempStore();
   try {
