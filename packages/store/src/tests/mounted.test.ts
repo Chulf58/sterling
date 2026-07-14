@@ -292,6 +292,64 @@ test('MountedStores: a domain record written through one project mount is read b
   }
 });
 
+// ------------------- cross-store link targets (Deepdots bug report 2026-07-14) -------------------
+// addLink routes on the SOURCE id but must validate the TARGET mount-wide: promotion
+// itself writes cross-store edges (supersedes / informed_by across project↔domain),
+// so knowledge_link refusing that edge shape was a validation asymmetry, not policy.
+
+const dec = (title: string) => ({ ...env('decision'), title, statement: 's', alternatives_rejected: [], rationale: 'r' });
+
+test('addLink: a project-scoped source links a domain-scoped target — the edge shape promotion itself writes', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    const source = stores.create(dec('project source'));
+    const target = stores.create(ref('domain:genesys'));
+    const updated = stores.addLink(source.id, 'cites', target.id);
+    assert.ok(updated.links.some((l) => l.rel === 'cites' && l.target_id === target.id), 'cross-store edge recorded on the source');
+    // the edge lives with its SOURCE, in the source's holding (project) store
+    assert.ok(stores.project.get(source.id)!.links.some((l) => l.target_id === target.id), 'edge persisted in the project store');
+  } finally {
+    cleanup();
+  }
+});
+
+test('addLink: a domain-scoped source links a project-scoped target (reverse direction)', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    const source = stores.create(ref('domain:genesys'));
+    const target = stores.create(dec('project target'));
+    const updated = stores.addLink(source.id, 'cites', target.id);
+    assert.ok(updated.links.some((l) => l.rel === 'cites' && l.target_id === target.id), 'domain→project edge recorded');
+    // the edge lives with its SOURCE, in the domain store — never the project store
+    assert.ok(!stores.project.get(source.id), 'the domain source stays out of the project store');
+  } finally {
+    cleanup();
+  }
+});
+
+test('addLink: a target in NO mounted store is still rejected loudly', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    const source = stores.create(dec('project source'));
+    assert.throws(() => stores.addLink(source.id, 'cites', randomUUID()), /no target record/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('addLink: an existing identical cross-store edge dedups — source returned unchanged', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    const source = stores.create(dec('project source'));
+    const target = stores.create(ref('domain:genesys'));
+    stores.addLink(source.id, 'cites', target.id);
+    const again = stores.addLink(source.id, 'cites', target.id);
+    assert.equal(again.links.filter((l) => l.rel === 'cites' && l.target_id === target.id).length, 1, 'no duplicate edge');
+  } finally {
+    cleanup();
+  }
+});
+
 // ------------------- reviewer knowledge loop v2 (run r-d630, phase 1 — AC1) -------------------
 
 test('MountedStores forwards setRunReviewMandatory to the project store; loud on missing run (AC1)', () => {

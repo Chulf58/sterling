@@ -137,7 +137,8 @@ export class MountedStores {
   // A record's scope decided where it lives at create time; a later change has to
   // land in that same store, so these route by where the id actually is — never
   // by the caller. (knowledge_update gets the record first, so supersede always
-  // finds it; addLink/remove route on the source/target id the same way.)
+  // finds it; remove routes on its id the same way. addLink routes on the SOURCE
+  // id — the edge lives with its source — and validates the TARGET mount-wide.)
 
   /** Versioned change in the holding store (a domain record supersedes in its domain store). */
   supersede(...args: Parameters<SterlingStore['supersede']>): ReturnType<SterlingStore['supersede']> {
@@ -156,9 +157,15 @@ export class MountedStores {
     return this.storeHolding(args[0]).remove(...args);
   }
 
-  /** Typed link edge, added on the source record in its holding store. */
-  addLink(...args: Parameters<SterlingStore['addLink']>): ReturnType<SterlingStore['addLink']> {
-    return this.storeHolding(args[0]).addLink(...args);
+  /** Typed link edge, added on the source record in its holding store. The TARGET
+   *  is resolved across ALL mounted stores (cross-store get, like get()) before
+   *  delegating: cross-store edges are a legitimate shape — promotion itself writes
+   *  them (supersedes / informed_by across project↔domain) — and the holding
+   *  store's local check cannot see a target mounted elsewhere, so it is told the
+   *  target is already validated. */
+  addLink(sourceId: string, rel: string, targetId: string): DurableRecord {
+    if (!this.get(targetId)) throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain`);
+    return this.storeHolding(sourceId).addLink(sourceId, rel, targetId, true);
   }
 
   private storeHolding(id: string): SterlingStore {

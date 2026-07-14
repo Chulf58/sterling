@@ -709,11 +709,15 @@ export class SterlingStore {
     return rows.length;
   }
 
-  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4). */
-  addLink(sourceId: string, rel: string, targetId: string): DurableRecord {
+  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
+   *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
+   *  the target across every mounted store — cross-store edges are a legitimate shape
+   *  (promotion itself writes them: supersedes / informed_by across project↔domain)
+   *  that a store-local get cannot see. Standalone usage keeps the local check. */
+  addLink(sourceId: string, rel: string, targetId: string, targetValidated = false): DurableRecord {
     const source = this.get(sourceId);
     if (!source) throw new Error(`addLink: no record '${sourceId}'`);
-    if (!this.get(targetId)) throw new Error(`addLink: no target record '${targetId}'`);
+    if (!targetValidated && !this.get(targetId)) throw new Error(`addLink: no target record '${targetId}'`);
     const parsedRel = linkSchema.shape.rel.parse(rel);
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
     const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
