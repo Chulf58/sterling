@@ -56,12 +56,18 @@ const conceptPool = pool.filter(isConcept);
 const conceptSlice = conceptPool.slice(0, Math.min(conceptCap, cap));
 const generalPool = pool.filter((r) => !isConcept(r));
 const generalSlice = generalPool.slice(0, cap - conceptSlice.length);
+// Backfill: when the general pool cannot fill the cap, idle slots go to the
+// concept tail — the sub-cap RESERVES capacity, it never wastes it (a scarce
+// general pool must not strand concept articles below an empty cap;
+// correctness review 2026-07-17).
+const spare = cap - conceptSlice.length - generalSlice.length;
+const conceptBackfill = spare > 0 ? conceptPool.slice(conceptSlice.length, conceptSlice.length + spare) : [];
 // Preserve pool rank order in the staged set (concept + general interleaved as ranked).
-const stagedIds = new Set([...conceptSlice, ...generalSlice].map((r) => r.id));
+const stagedIds = new Set([...conceptSlice, ...conceptBackfill, ...generalSlice].map((r) => r.id));
 const returned = pool.filter((r) => stagedIds.has(r.id));
 const totalMatching = pool.length;
 const capOmissions = Math.max(0, totalMatching - returned.length);
-const capOmissionsConcept = Math.max(0, conceptPool.length - conceptSlice.length);
+const capOmissionsConcept = Math.max(0, conceptPool.length - conceptSlice.length - conceptBackfill.length);
 
 // Mandatory items (§3.7): known_gaps on returned articles touching the phase's
 // files — a mechanically proven map of prior blind spots. severity_block

@@ -410,6 +410,33 @@ test('prep [S] reserves the concept slice (decision 7208729b): concept articles 
   } finally {
     fix.cleanup();
   }
+
+  // Backfill direction (correctness review 2026-07-17): a SCARCE general pool
+  // must not strand concept articles below an unfilled cap — idle slots
+  // backfill from the concept tail and a pool smaller than the cap omits nothing.
+  const scarce = makeLoopProject();
+  try {
+    const config = JSON.parse(readFileSync(join(scarce.dir, '.sterling', 'config.json'), 'utf8'));
+    writeFileSync(join(scarce.dir, '.sterling', 'config.json'), JSON.stringify({ ...config, prep_cap: 8, prep_concept_cap: 1 }));
+    for (const family of ['calc-ops', 'calc-display', 'calc-input']) {
+      scarce.store.create({
+        ...envelope('feature_article', BEFORE_RUN),
+        ...articleFields(randomUUID()),
+        slug: `${family}-concept`,
+        title: `${family} (concept)`,
+        concept_family: family,
+        links: [],
+        history: [{ date: BEFORE_RUN, event: 'concept article created' }],
+      });
+    }
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', scarce.dir], scarce.dir);
+    assert.equal(prep.code, 0, prep.stderr);
+    const pack = JSON.parse(readFileSync(join(scarce.dir, '.sterling', 'runs', 'r-loop', 'knowledge_pack-p1.json'), 'utf8'));
+    assert.equal(pack.cap_omissions, 0, 'a pool smaller than the cap omits nothing — the sub-cap never strands concept articles below an empty cap');
+    assert.equal(pack.cap_omissions_concept, 0, 'all concept articles staged via backfill when slots are idle');
+  } finally {
+    scarce.cleanup();
+  }
 });
 
 // ---------------------------------------------------------------------------
