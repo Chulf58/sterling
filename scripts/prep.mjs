@@ -43,9 +43,25 @@ const rankTerms = phase.rank_terms ?? [];
 const cap = config.prep_cap ?? 20;
 
 const queryInputs = { file_keys: files, rank_terms: rankTerms.length ? rankTerms : undefined, cap };
-const returned = store.query(queryInputs);
-const totalMatching = store.query({ ...queryInputs, cap: cap + 1000 }).length;
+// Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
+// concept articles (feature_article.concept_family) get up to prep_concept_cap
+// of the cap's slots, ranked among themselves; the remaining slots go to the
+// general ranking. Neither class silently displaces the other; the split is
+// computed from the same ranked pool the omission count already needed, so
+// staging stays one retrieval pass. No concept articles → identical to before.
+const conceptCap = config.prep_concept_cap ?? 5;
+const pool = store.query({ ...queryInputs, cap: cap + 1000 });
+const isConcept = (r) => r.type === 'feature_article' && r.concept_family;
+const conceptPool = pool.filter(isConcept);
+const conceptSlice = conceptPool.slice(0, Math.min(conceptCap, cap));
+const generalPool = pool.filter((r) => !isConcept(r));
+const generalSlice = generalPool.slice(0, cap - conceptSlice.length);
+// Preserve pool rank order in the staged set (concept + general interleaved as ranked).
+const stagedIds = new Set([...conceptSlice, ...generalSlice].map((r) => r.id));
+const returned = pool.filter((r) => stagedIds.has(r.id));
+const totalMatching = pool.length;
 const capOmissions = Math.max(0, totalMatching - returned.length);
+const capOmissionsConcept = Math.max(0, conceptPool.length - conceptSlice.length);
 
 // Mandatory items (§3.7): known_gaps on returned articles touching the phase's
 // files — a mechanically proven map of prior blind spots. severity_block
@@ -94,6 +110,10 @@ const pack = {
   returned_record_ids: returned.map((r) => r.id),
   mandatory,
   cap_omissions: capOmissions,
+  // Slice-distinguished omission count (AC11, concept-article-layer-wiring):
+  // concept articles dropped by the concept sub-cap. Additive pack field —
+  // dispose-run's summary fold picks its known fields and is unaffected.
+  cap_omissions_concept: capOmissionsConcept,
   prior_handoffs: priorHandoffs.map((h) => ({ phase_id: h.phase_id, agent_role: h.agent_role })),
   staged_at: new Date().toISOString(),
 };
@@ -180,4 +200,4 @@ writeFileSync(join(dir, `dispatch_slice-${phaseId}-builder.md`), builderLines.jo
 store.setRunReviewMandatory(run.id, phaseId, mandatoryUnion.map((m) => ({ record_id: m.record_id, reason: m.reason })));
 
 store.close();
-console.log(JSON.stringify({ written: `knowledge_pack-${phaseId}.json`, returned: returned.length, mandatory: mandatory.length, cap_omissions: capOmissions }));
+console.log(JSON.stringify({ written: `knowledge_pack-${phaseId}.json`, returned: returned.length, mandatory: mandatory.length, cap_omissions: capOmissions, cap_omissions_concept: capOmissionsConcept }));

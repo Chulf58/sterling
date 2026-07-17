@@ -4174,6 +4174,12 @@ var featureArticleSchema = base.extend({
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // standard): set ONLY on concept articles — one per recurring domain concept
+  // FAMILY (items, weapons, …). Enables class/family enumeration without
+  // overloading stack_tags (the domain-mount manifest) and lets prep reserve
+  // the concept slice. Optional — owning articles and legacy records omit it.
+  concept_family: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
   // supersession, record ids do not (decision 474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
@@ -4280,8 +4286,10 @@ var SYSTEM_REASONS = [
   // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   "article_missing",
   // §6 H10: direct-mode work in unowned territory ended without its owning article
-  "research_owed"
+  "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
+  "concept_article_missing"
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4413,7 +4421,9 @@ var RECORD_TYPES = {
   feature_article: {
     schema: featureArticleSchema,
     immutable: false,
-    fts: (r) => [s(r.slug), s(r.title), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
+    // concept_family joins the FTS text so a family query ranks its concept
+    // article (class enumeration stays a consumer-side filter on the field).
+    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
     fileKeys: (r) => (r.files ?? []).map((f) => f.path)
   },
   note: {
@@ -4521,7 +4531,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4616,6 +4626,11 @@ var configSchema = external_exports.object({
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
   prep_cap: external_exports.number().int().positive().default(20),
+  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
+  // prep reserves up to this many of prep_cap's slots for concept articles
+  // (feature_article with concept_family) so the two classes never silently
+  // displace each other under the shared cap. A sub-cap, never additive.
+  prep_concept_cap: external_exports.number().int().positive().default(5),
   // §5.1: caps that convert loops into signals
   caps: external_exports.object({
     inner_loop_n: external_exports.number().int().positive().default(3),
@@ -5531,9 +5546,16 @@ try {
   const researchEvents = sessionEvents.filter(
     (e) => e.kind === "research_tool" || e.kind === "agent_dispatch" && researchAgents.has(e.detail)
   );
+  const conceptEvents = sessionEvents.filter((e) => e.kind === "concept_designed" && e.detail);
+  const conceptFamilies = /* @__PURE__ */ new Map();
+  for (const e of conceptEvents) {
+    const at = e.at ?? now;
+    if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
+  }
   const hasCaptureDuty = paths.length > 0 || debugEvents.length > 0;
   const hasResearchDuty = researchEvents.length > 0;
-  if (!hasCaptureDuty && !hasResearchDuty) {
+  const hasConceptDuty = conceptFamilies.size > 0;
+  if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     clearRegisters();
     allow();
   }
@@ -5547,6 +5569,14 @@ try {
     earliestResearch = rts.length ? rts[0] : now;
     researchSatisfied = store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }).some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
   }
+  let unmetFamilies = [];
+  if (hasConceptDuty) {
+    const articles = store.query({ types: ["feature_article"], cap: 1e3, include_unconfirmed: true });
+    unmetFamilies = [...conceptFamilies.entries()].filter(
+      ([family, since]) => !articles.some((a) => a.concept_family === family && (a.created_at >= since || a.updated_at >= since))
+    ).map(([family]) => family);
+  }
+  const conceptSatisfied = unmetFamilies.length === 0;
   const unowned = paths.filter(
     (p) => store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 1 }).length === 0
   );
@@ -5566,7 +5596,7 @@ try {
   }
   const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
   const captureSatisfied = !hasCaptureDuty || captured;
-  if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && !articleDemand) {
+  if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     clearRegisters();
     allow();
   }
@@ -5611,6 +5641,12 @@ Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}
         `H10: research in this session was not followed by a durable capture (no research_finding/decision/anti_pattern since ${earliestResearch}).
 Queries/agents: ${queryTexts}
 Capture the research findings now (knowledge_create type research_finding), or state explicitly that nothing durable was learned.`
+      );
+    }
+    if (!conceptSatisfied) {
+      parts.push(
+        `H10 concept demand: design settled this session for concept famil${unmetFamilies.length === 1 ? "y" : "ies"} ${JSON.stringify(unmetFamilies)} but no concept article was created or updated since.
+Create/update the family article(s) NOW (knowledge_create/knowledge_update type feature_article with concept_family set) \u2014 what the concept IS + members, INTENT + INTERACTIONS cross-referenced by sibling slug, owning code files; general capture does not satisfy this.`
       );
     }
     if (articleDemand) {
@@ -5660,6 +5696,27 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
         source: "system",
         system_reason: "article_missing",
         file_keys: unowned.slice(0, 20)
+      });
+    }
+  }
+  if (!conceptSatisfied) {
+    const openConcept = store.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "concept_article_missing");
+    for (const family of unmetFamilies) {
+      if (openConcept.some((t) => t.text.includes(`'${family}'`))) continue;
+      store.create({
+        id: randomUUID2(),
+        type: "todo",
+        created_at: now,
+        updated_at: now,
+        author: "system",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article \u2014 create/update the feature_article with concept_family '${family}' (decision 7208729b)`,
+        source: "system",
+        system_reason: "concept_article_missing"
       });
     }
   }

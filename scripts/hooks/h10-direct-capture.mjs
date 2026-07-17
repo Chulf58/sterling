@@ -12,10 +12,14 @@
 // does NOT satisfy the demand — only ownership does (the unowned set
 // recomputes per Stop, so creating the article clears it mechanically).
 // Session-event register (run r-a6cf): H10 also reads session-events.json
-// (written by H16/debug-scope). Dual-register entry: proceeds if touches OR
-// events are non-empty. Capture duty: touches ∪ debug_scope events. Research
-// duty: research_tool ∪ configured agent_dispatch events not followed by a
-// durable capture → nag once (shared marker), then research_owed on release.
+// (written by H16/debug-scope/concept-designed). Dual-register entry: proceeds
+// if touches OR events are non-empty. Capture duty: touches ∪ debug_scope
+// events. Research duty: research_tool ∪ configured agent_dispatch events not
+// followed by a durable capture → nag once (shared marker), then research_owed
+// on release. Concept duty (decision 7208729b): concept_designed events (detail
+// = family slug) not followed by that family's concept article
+// (feature_article.concept_family) → shared nag, then one
+// concept_article_missing item per family on release.
 // All terminal paths clear both registers + the nag marker together (P4).
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -83,13 +87,23 @@ try {
   const researchEvents = sessionEvents.filter(
     (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
   );
+  // Concept duty (decision 7208729b): concept_designed events, deduped to the
+  // EARLIEST event per family — detail is the concept FAMILY slug.
+  const conceptEvents = sessionEvents.filter((e) => e.kind === 'concept_designed' && e.detail);
+  const conceptFamilies = new Map(); // family -> earliest at
+  for (const e of conceptEvents) {
+    const at = e.at ?? now;
+    if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
+  }
 
   // Capture duty: triggered by file-touching work OR debug-scope events.
   const hasCaptureDuty = paths.length > 0 || debugEvents.length > 0;
   // Research duty: triggered by research events (research_tool or configured agent).
   const hasResearchDuty = researchEvents.length > 0;
+  // Concept duty: a settled design must produce/refresh its concept article.
+  const hasConceptDuty = conceptFamilies.size > 0;
 
-  if (!hasCaptureDuty && !hasResearchDuty) {
+  if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     // No duties to enforce (e.g. only non-research dispatches recorded) — clear and release.
     clearRegisters();
     allow();
@@ -114,6 +128,22 @@ try {
       .query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
       .some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
   }
+
+  // Concept duty satisfaction (decision 7208729b): per FAMILY, a feature_article
+  // carrying concept_family === family created/updated since that family's
+  // earliest concept_designed event. General capture does NOT satisfy it — only
+  // the family's concept article does (mirrors the article-demand semantics).
+  let unmetFamilies = [];
+  if (hasConceptDuty) {
+    const articles = store.query({ types: ['feature_article'], cap: 1000, include_unconfirmed: true });
+    unmetFamilies = [...conceptFamilies.entries()]
+      .filter(
+        ([family, since]) =>
+          !articles.some((a) => a.concept_family === family && (a.created_at >= since || a.updated_at >= since))
+      )
+      .map(([family]) => family);
+  }
+  const conceptSatisfied = unmetFamilies.length === 0;
 
   // §6 H10 article demand: touched files nothing owns, at threshold or any new
   // unowned file (vs git HEAD; no-git degrades loud to threshold-only).
@@ -141,7 +171,7 @@ try {
 
   // All duties satisfied → clear registers and release.
   const captureSatisfied = !hasCaptureDuty || captured;
-  if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && !articleDemand) {
+  if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     clearRegisters();
     allow();
   }
@@ -193,6 +223,14 @@ try {
         `H10: research in this session was not followed by a durable capture (no research_finding/decision/anti_pattern since ${earliestResearch}).\n` +
           `Queries/agents: ${queryTexts}\n` +
           `Capture the research findings now (knowledge_create type research_finding), or state explicitly that nothing durable was learned.`
+      );
+    }
+
+    // Concept demand nag (decision 7208729b): design settled, article owed NOW.
+    if (!conceptSatisfied) {
+      parts.push(
+        `H10 concept demand: design settled this session for concept famil${unmetFamilies.length === 1 ? 'y' : 'ies'} ${JSON.stringify(unmetFamilies)} but no concept article was created or updated since.\n` +
+          `Create/update the family article(s) NOW (knowledge_create/knowledge_update type feature_article with concept_family set) — what the concept IS + members, INTENT + INTERACTIONS cross-referenced by sibling slug, owning code files; general capture does not satisfy this.`
       );
     }
 
@@ -252,6 +290,31 @@ try {
         source: 'system',
         system_reason: 'article_missing',
         file_keys: unowned.slice(0, 20),
+      });
+    }
+  }
+  if (!conceptSatisfied) {
+    // One item PER family, deduped on an open item naming the same family — a
+    // family's article is one drain action ('created'), independent per family.
+    const openConcept = store
+      .query({ types: ['todo'], cap: 1000 })
+      .filter((t) => t.source === 'system' && t.system_reason === 'concept_article_missing');
+    for (const family of unmetFamilies) {
+      if (openConcept.some((t) => t.text.includes(`'${family}'`))) continue;
+      store.create({
+        id: randomUUID(),
+        type: 'todo',
+        created_at: now,
+        updated_at: now,
+        author: 'system',
+        status: 'active',
+        superseded_by: null,
+        links: [],
+        scope: 'project',
+        stack_tags: [],
+        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article — create/update the feature_article with concept_family '${family}' (decision 7208729b)`,
+        source: 'system',
+        system_reason: 'concept_article_missing',
       });
     }
   }

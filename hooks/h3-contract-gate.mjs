@@ -4181,6 +4181,12 @@ var featureArticleSchema = base.extend({
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // standard): set ONLY on concept articles — one per recurring domain concept
+  // FAMILY (items, weapons, …). Enables class/family enumeration without
+  // overloading stack_tags (the domain-mount manifest) and lets prep reserve
+  // the concept slice. Optional — owning articles and legacy records omit it.
+  concept_family: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
   // supersession, record ids do not (decision 474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
@@ -4287,8 +4293,10 @@ var SYSTEM_REASONS = [
   // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   "article_missing",
   // §6 H10: direct-mode work in unowned territory ended without its owning article
-  "research_owed"
+  "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
+  "concept_article_missing"
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4420,7 +4428,9 @@ var RECORD_TYPES = {
   feature_article: {
     schema: featureArticleSchema,
     immutable: false,
-    fts: (r) => [s(r.slug), s(r.title), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
+    // concept_family joins the FTS text so a family query ranks its concept
+    // article (class enumeration stays a consumer-side filter on the field).
+    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
     fileKeys: (r) => (r.files ?? []).map((f) => f.path)
   },
   note: {
@@ -4528,7 +4538,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4623,6 +4633,11 @@ var configSchema = external_exports.object({
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
   prep_cap: external_exports.number().int().positive().default(20),
+  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
+  // prep reserves up to this many of prep_cap's slots for concept articles
+  // (feature_article with concept_family) so the two classes never silently
+  // displace each other under the shared cap. A sub-cap, never additive.
+  prep_concept_cap: external_exports.number().int().positive().default(5),
   // §5.1: caps that convert loops into signals
   caps: external_exports.object({
     inner_loop_n: external_exports.number().int().positive().default(3),

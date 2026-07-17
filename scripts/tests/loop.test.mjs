@@ -345,6 +345,57 @@ test('prep [S] fans the knowledge_pack across mounted domain stores (read-side d
   }
 });
 
+test('prep [S] reserves the concept slice (decision 7208729b): concept articles stage within prep_concept_cap, never displaced by the general ranking, with slice-distinguished omissions', () => {
+  const fix = makeLoopProject();
+  const { dir, store } = fix;
+  try {
+    // Tighten the caps so the split is observable: 3 total slots, 1 reserved for concepts.
+    const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...config, prep_cap: 3, prep_concept_cap: 1 }));
+
+    // Two concept articles + three extra decisions on the phase file — the pool
+    // (with the fixture's decision, gap article, and file-keyed brief) far
+    // exceeds the cap, so without the reserved slice concept articles could
+    // silently lose the head-to-head ranking.
+    const conceptIds = ['calc-ops', 'calc-display'].map(
+      (family) =>
+        store.create({
+          ...envelope('feature_article', BEFORE_RUN),
+          ...articleFields(randomUUID()),
+          slug: `${family}-concept`,
+          title: `${family} (concept)`,
+          concept_family: family,
+          links: [],
+          history: [{ date: BEFORE_RUN, event: 'concept article created' }],
+        }).id
+    );
+    for (let i = 0; i < 3; i++) {
+      store.create({
+        ...envelope('decision', BEFORE_RUN),
+        title: `filler decision ${i}`,
+        statement: 'calc calc calc filler statement.',
+        alternatives_rejected: [],
+        rationale: 'filler',
+        file_keys: ['src/calc.mjs'],
+      });
+    }
+
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.equal(prep.code, 0, prep.stderr);
+    const out = JSON.parse(prep.stdout);
+    const pack = JSON.parse(readFileSync(join(dir, '.sterling', 'runs', 'r-loop', 'knowledge_pack-p1.json'), 'utf8'));
+
+    assert.equal(pack.returned_record_ids.length, 3, 'the total cap holds — the concept slice is a sub-cap, never additive');
+    const stagedConcepts = pack.returned_record_ids.filter((id) => conceptIds.includes(id));
+    assert.equal(stagedConcepts.length, 1, 'exactly prep_concept_cap concept articles staged — reserved, not displaced');
+    assert.equal(pack.cap_omissions_concept, 1, 'the concept article dropped by the sub-cap is counted in its own lane');
+    assert.equal(out.cap_omissions_concept, 1, 'stdout reports the concept omissions too');
+    assert.ok(pack.cap_omissions >= pack.cap_omissions_concept, 'total omissions include the concept lane');
+  } finally {
+    fix.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // the loop, end to end — spine acceptance (§16.1)
 // ---------------------------------------------------------------------------
