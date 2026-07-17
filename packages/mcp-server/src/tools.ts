@@ -138,6 +138,19 @@ export class SterlingTools {
     return { root: join(this.repoRoot, mapped), unresolved: false };
   }
 
+  /**
+   * Is `rel` registered as a generated projection (config.generated_projections)?
+   * A generated file changes on every regen by design, so the drift check's
+   * CONTENT-change arm skips it — its currency is guarded by
+   * check-projection-fresh at the merge gate, not by article baselines (the
+   * regen↔baseline circularity: draining the false item required an article
+   * write, whose regen re-armed the detector, forever). Deletion still flags:
+   * a vanished committed deliverable is real drift however it is produced.
+   */
+  private isGeneratedProjection(rel: string): boolean {
+    return this.config.generated_projections.includes(rel);
+  }
+
   /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read. */
   private hashFile(rel: string, root: string | undefined = this.repoRoot): string | undefined {
     if (!root) return undefined;
@@ -364,8 +377,11 @@ export class SterlingTools {
           const stat = statSync(join(tree.root, rel), { throwIfNoEntry: false });
           // mtime > source_date is the cheap pre-filter; confirm a real content
           // change against the baseline before flagging (an mtime-only bump from
-          // a merge is not an out-of-band edit). No baseline → abstain.
-          if (stat && stat.mtimeMs > Date.parse(r.source_date) && this.contentChanged(rel, r.file_baselines, tree.root)) {
+          // a merge is not an out-of-band edit). No baseline → abstain. A
+          // registered generated projection never content-flags (regen churn is
+          // by design; this wire has no deletion arm — that is the feature-
+          // article check's job for files an article owns).
+          if (stat && stat.mtimeMs > Date.parse(r.source_date) && !this.isGeneratedProjection(rel) && this.contentChanged(rel, r.file_baselines, tree.root)) {
             const open = this.maintenanceQuery({ system_reason: 'refresh_reference', file_keys: [rel], cap: 1000 });
             if (open.length === 0) {
               this.maintenanceEnqueue({
@@ -403,7 +419,10 @@ export class SterlingTools {
           // mtime newer than updated_at is the cheap pre-filter; confirm a real
           // content change against the baseline before flagging, so a git
           // merge/checkout's mtime reset is not mistaken for an out-of-band edit.
-          if (stat.mtimeMs > Date.parse(record.updated_at) && this.contentChanged(f.path, a.file_baselines, treeRoot)) {
+          // A registered generated projection never content-flags — every regen
+          // changes it by design and the merge gate's check-projection-fresh
+          // guards its currency; its DELETION still lands in the missing arm above.
+          if (stat.mtimeMs > Date.parse(record.updated_at) && !this.isGeneratedProjection(f.path) && this.contentChanged(f.path, a.file_baselines, treeRoot)) {
             drift = { path: f.path, missing: false };
             break;
           }

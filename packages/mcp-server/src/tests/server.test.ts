@@ -394,6 +394,95 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
   }
 });
 
+test('generated projections (regen↔baseline circularity): a config-registered generated file never content-flags — regen churn is not drift; deletion still flags; unregistered files unaffected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-genproj-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({
+    store,
+    repoRoot: dir,
+    config: parseConfig({ generated_projections: ['architecture.md', 'gen-doc.md'] }),
+  });
+  const article = (slug: string, path: string) =>
+    tools.knowledgeCreate('feature_article', {
+      slug,
+      title: slug,
+      what_it_does: 'x',
+      intended_behavior: 'x',
+      files: [{ path, role: 'impl' }],
+      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: '2026-06-01T00:00:00.000Z', event: 'originating brief' }],
+      live_test_refs: [],
+    }).record;
+  const items = (slug: string) =>
+    tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter((t) => new RegExp(`'${slug}'`).test((t as { text: string }).text));
+  try {
+    const old = new Date('2026-01-01T00:00:00Z');
+    const future = new Date(Date.now() + 3_600_000);
+
+    // the projection article owns the generated file (baseline = sha256('as of v1'))
+    const projPath = join(dir, 'architecture.md');
+    writeFileSync(projPath, 'as of v1');
+    utimesSync(projPath, old, old);
+    const proj = article('projection', 'architecture.md');
+
+    // 1. regen churn: content changes AND mtime moves past updated_at — the exact
+    // sequence that re-armed the detector after every drain (the circularity).
+    // Registered generated file → no flag, nothing enqueued, on repeated reads.
+    writeFileSync(projPath, 'as of v2');
+    utimesSync(projPath, future, future);
+    for (let i = 0; i < 3; i++) {
+      const arts = tools.knowledgeQuery({ types: ['feature_article'] });
+      assert.equal(arts.find((r) => r.id === proj.id)?.verify_before_use, undefined, `regen churn not flagged (read ${i + 1})`);
+    }
+    assert.equal(items('projection').length, 0, 'regen churn enqueues nothing');
+
+    // 2. deletion is STILL drift — the exemption covers only the content arm
+    rmSync(projPath);
+    const arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === proj.id)?.verify_before_use, true, 'deleted generated file still flags');
+    assert.match((items('projection')[0] as { text: string }).text, /no longer exists/);
+
+    // 3. path-scoped, not config-global: an unregistered file in the same store
+    // still content-flags
+    const srcPath = join(dir, 'src', 'a.mjs');
+    writeFileSync(srcPath, 'v1');
+    utimesSync(srcPath, old, old);
+    const plain = article('plain', 'src/a.mjs');
+    writeFileSync(srcPath, 'v2');
+    utimesSync(srcPath, future, future);
+    const arts2 = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts2.find((r) => r.id === plain.id)?.verify_before_use, true, 'unregistered file still content-flags');
+    assert.match((items('plain')[0] as { text: string }).text, /out-of-band edit/);
+
+    // 4. the reference_material wire honors the same registration: a generated
+    // doc's content churn neither flags nor enqueues refresh_reference
+    const genDocPath = join(dir, 'gen-doc.md');
+    writeFileSync(genDocPath, 'v1');
+    utimesSync(genDocPath, old, old);
+    const { record: genDoc } = tools.knowledgeCreate('reference_material', {
+      title: 'Gen Doc',
+      kind: 'doc',
+      location: 'gen-doc.md',
+      summary: 'generated',
+      source_date: '2026-06-01T00:00:00.000Z',
+      capture_date: '2026-06-01T00:00:00.000Z',
+    });
+    writeFileSync(genDocPath, 'v2');
+    utimesSync(genDocPath, future, future);
+    const refs = tools.knowledgeQuery({ types: ['reference_material'] });
+    assert.equal(refs.find((r) => r.id === genDoc.id)?.verify_before_use, undefined, 'generated doc churn not refresh-flagged');
+    assert.equal(tools.maintenanceQuery({ system_reason: 'refresh_reference' }).length, 0, 'generated doc churn enqueues nothing');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('working_tree resolution (comsoft-juiced incident): copy files resolve against the mapped tree, not the project root; unmapped name abstains loud; the false-deletion item drains BY the fix', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-root-'));
   const copy = mkdtempSync(join(tmpdir(), 'sterling-copy-'));
