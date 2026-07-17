@@ -4609,6 +4609,14 @@ var configSchema = external_exports.object({
   // specific paths live here, in per-project config — never inside store
   // records (invariant 2).
   working_trees: external_exports.record(external_exports.string(), external_exports.string()).default({}),
+  // Generated projection files (regen↔baseline circularity, 2026-07-17):
+  // repo-relative POSIX paths of files REGENERATED from the store
+  // (architecture.md). Content churn on these is a regen, not out-of-band
+  // drift, so the read-time drift check skips its CONTENT-change arm for them
+  // — their currency is guarded by check-projection-fresh at the merge gate,
+  // not by article baselines. DELETION still flags (a vanished committed
+  // deliverable is real drift regardless of how the file is produced).
+  generated_projections: external_exports.array(external_exports.string()).default([]),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: external_exports.string().optional(),
