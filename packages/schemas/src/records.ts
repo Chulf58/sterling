@@ -40,6 +40,12 @@ export const featureArticleSchema = base
     // reconcile_needed items (decision 65222971 → its baseline successor).
     file_baselines: z.record(z.string(), z.string()).optional(),
     current_ac: z.array(z.object({ ac_id: z.string().min(1), text: z.string().min(1), verifiable_at: verifiableAt })),
+    // Concept-article marker (domain decision 7208729b, concept-article-layer
+    // standard): set ONLY on concept articles — one per recurring domain concept
+    // FAMILY (items, weapons, …). Enables class/family enumeration without
+    // overloading stack_tags (the domain-mount manifest) and lets prep reserve
+    // the concept slice. Optional — owning articles and legacy records omit it.
+    concept_family: z.string().min(1).optional(),
     // relies_on/relied_by name other articles by SLUG — slugs survive version
     // supersession, record ids do not (decision 474b1c71).
     dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }),
@@ -186,6 +192,7 @@ export const SYSTEM_REASONS = [
   'refresh_reference', // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
   'research_owed', // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
+  'concept_article_missing', // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
 ] as const;
 
 // §11 queue drain verbs: draining means the fulfilling artifact was written,
@@ -201,6 +208,7 @@ export const DRAIN_VERBS = {
   refresh_reference: 'refreshed',
   article_missing: 'created',
   research_owed: 'captured',
+  concept_article_missing: 'created',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:
@@ -376,7 +384,9 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
   feature_article: {
     schema: featureArticleSchema,
     immutable: false,
-    fts: (r) => [s(r.slug), s(r.title), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join('\n'),
+    // concept_family joins the FTS text so a family query ranks its concept
+    // article (class enumeration stays a consumer-side filter on the field).
+    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join('\n'),
     fileKeys: (r) => ((r.files as { path: string }[] | undefined) ?? []).map((f) => f.path),
   },
   note: {

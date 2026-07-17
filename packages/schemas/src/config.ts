@@ -42,6 +42,11 @@ export const configSchema = z.object({
   // §11 launcher split ratio
   tui_split_ratio: z.number().positive().max(1).default(0.35),
   prep_cap: z.number().int().positive().default(20),
+  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
+  // prep reserves up to this many of prep_cap's slots for concept articles
+  // (feature_article with concept_family) so the two classes never silently
+  // displace each other under the shared cap. A sub-cap, never additive.
+  prep_concept_cap: z.number().int().positive().default(5),
   // §5.1: caps that convert loops into signals
   caps: z
     .object({

@@ -106,10 +106,12 @@ export type MachineState = z.infer<typeof machineState>;
 
 // Session-event register shape (run r-0501, interface slice 1). A run-scoped
 // append log at .sterling/transient/session-events.json; defined ONCE here
-// (invariant 1); written by H16 (research_tool, agent_dispatch) and
-// debug-scope.mjs (debug_scope). Never a durable store record.
+// (invariant 1); written by H16 (research_tool, agent_dispatch),
+// debug-scope.mjs (debug_scope), and concept-designed.mjs (concept_designed —
+// detail carries the concept FAMILY slug; decision 7208729b). Never a durable
+// store record.
 export const sessionEventSchema = z.object({
-  kind: z.enum(['research_tool', 'agent_dispatch', 'debug_scope']),
+  kind: z.enum(['research_tool', 'agent_dispatch', 'debug_scope', 'concept_designed']),
   detail: z.string().min(1),
   at: z.string().min(1),
 });

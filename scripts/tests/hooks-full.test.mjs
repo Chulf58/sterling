@@ -1588,6 +1588,135 @@ test('H10 AC7 (SOP half): the drain skill text routes the research_owed lane (fu
   assert.match(skill, /research_owed[\s\S]{0,400}quer/i, 'the lane routes to writing the durable record from the cited queries');
 });
 
+// ---- H10 concept duty (decision 7208729b, concept-article-layer-wiring) ----
+// A concept_designed event (detail = FAMILY slug, appended by concept-designed.mjs
+// the moment a design settles) demands that family's concept article — a
+// feature_article with concept_family === family created/updated since the event.
+// General capture does NOT satisfy it; a wrong-family article does not either.
+const cEvent = (family, at = R_EVENT_AT) => ({ kind: 'concept_designed', detail: family, at });
+function conceptArticle(store, family, at = CAPTURE_AT) {
+  return store.create({
+    ...envelope('feature_article', at),
+    slug: `${family}-concept`,
+    title: `${family} (concept)`,
+    what_it_does: `what ${family} IS + members`,
+    intended_behavior: 'INTENT + INTERACTIONS',
+    concept_family: family,
+    files: [],
+    current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'concept article created' }],
+    live_test_refs: [],
+  });
+}
+
+test('H10 concept duty AC9: a fileless design session (concept_designed, no article) soft-blocks once naming the family, then enqueues one concept_article_missing per family and ends', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    writeSessionEvents(dir, [cEvent('weapons'), cEvent('turrets')]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'concept events alone (no touches) must soft-block at Stop — the fileless design window closes');
+    assert.match(nag.stderr, /weapons/, 'the nag names the unmet family verbatim');
+    assert.match(nag.stderr, /turrets/, 'every unmet family is named');
+    assert.match(nag.stderr, /concept_family/, 'the nag teaches the satisfying artifact (feature_article with concept_family)');
+
+    const second = stop();
+    assert.equal(second.code, 0, 'soft-blocked exactly once — the second Stop releases');
+    const items = owed(store, 'concept_article_missing');
+    assert.equal(items.length, 2, 'one concept_article_missing per unmet family');
+    assert.ok(items.some((t) => t.text.includes("'weapons'")) && items.some((t) => t.text.includes("'turrets'")), 'each item carries its family');
+    assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared once the session ends (P4)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 concept duty: the family concept article satisfies it; general capture or a wrong-family article does NOT', () => {
+  // satisfied: article with concept_family === family created after the event
+  const met = makeProject();
+  try {
+    seedEventsConfig(met.dir);
+    writeSessionEvents(met.dir, [cEvent('weapons')]);
+    conceptArticle(met.store, 'weapons');
+    const r = runHook('h10-direct-capture.mjs', hookInput(met.dir, { hook_event_name: 'Stop' }), met.dir);
+    assert.equal(r.code, 0, 'the family concept article created since the event satisfies the duty');
+    assert.equal(owed(met.store, 'concept_article_missing').length, 0, 'nothing owed when met');
+    assert.equal(existsSync(eventsPath(met.dir)), false, 'register cleared on the satisfied path');
+  } finally {
+    met.cleanup();
+  }
+  // NOT satisfied by general capture (a decision) — the concept lane mirrors article-demand semantics
+  const unmet = makeProject();
+  try {
+    seedEventsConfig(unmet.dir);
+    writeSessionEvents(unmet.dir, [cEvent('weapons')]);
+    decisionAfter(unmet.store);
+    const nag = runHook('h10-direct-capture.mjs', hookInput(unmet.dir, { hook_event_name: 'Stop' }), unmet.dir);
+    assert.equal(nag.code, 2, 'a decision does not satisfy the concept duty — only the family article does');
+    assert.match(nag.stderr, /weapons/);
+  } finally {
+    unmet.cleanup();
+  }
+  // NOT satisfied by a different family's article
+  const wrong = makeProject();
+  try {
+    seedEventsConfig(wrong.dir);
+    writeSessionEvents(wrong.dir, [cEvent('weapons')]);
+    conceptArticle(wrong.store, 'turrets');
+    const nag = runHook('h10-direct-capture.mjs', hookInput(wrong.dir, { hook_event_name: 'Stop' }), wrong.dir);
+    assert.equal(nag.code, 2, 'a wrong-family concept article does not satisfy the weapons duty');
+    assert.match(nag.stderr, /weapons/);
+  } finally {
+    wrong.cleanup();
+  }
+});
+
+test('H10 concept duty: concept_article_missing is deduped per family — an open item for the same family suppresses a duplicate; a new family still enqueues', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    // pre-existing open item for weapons (a prior session's release)
+    store.create({
+      ...envelope('todo'),
+      text: "concept article missing: design settled for concept family 'weapons' and the session ended without its concept article — create/update the feature_article with concept_family 'weapons' (decision 7208729b)",
+      source: 'system',
+      system_reason: 'concept_article_missing',
+    });
+    writeSessionEvents(dir, [cEvent('weapons'), cEvent('shields')]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    stop(); // nag
+    const second = stop(); // release + enqueue
+    assert.equal(second.code, 0);
+    const items = owed(store, 'concept_article_missing');
+    assert.equal(items.length, 2, 'weapons deduped against the open item; shields enqueued fresh');
+    assert.equal(items.filter((t) => t.text.includes("'weapons'")).length, 1, 'no duplicate weapons item');
+    assert.equal(items.filter((t) => t.text.includes("'shields'")).length, 1, 'the new family got its item');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 concept duty (SOP half): concept-designed.mjs appends the event, and the drain skill routes the concept_article_missing lane', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'concept-designed.mjs'), '--family', 'weapons', '--family', 'turrets', '--target', dir], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `concept-designed.mjs exits 0: ${r.stderr}`);
+    const events = JSON.parse(readFileSync(eventsPath(dir), 'utf8'));
+    assert.equal(events.length, 2, 'one event per --family');
+    assert.ok(events.every((e) => e.kind === 'concept_designed' && e.at), 'kind + timestamp present');
+    assert.deepEqual(events.map((e) => e.detail).sort(), ['turrets', 'weapons'], 'detail carries the family slug');
+  } finally {
+    cleanup();
+  }
+  const skill = readFileSync(join(root, 'skills', 'drain', 'SKILL.md'), 'utf8');
+  assert.match(skill, /concept_article_missing/, 'the drain SOP must name the concept_article_missing lane');
+});
+
 // --------------------------- H17 (bash write sweep — coder-frontmatter registration + bundled) ---------------------------
 test('H17 is registered on the coder frontmatter Pre AND Post ToolUse Bash matchers (matcher-coverage; H11 silent-dead lesson)', () => {
   const coder = readFileSync(join(root, 'agent-templates', 'coder.md'), 'utf8');

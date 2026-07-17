@@ -367,9 +367,11 @@ test('sessionEventSchema: the three register kinds parse; unknown kind + missing
 
   assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'researcher', at: NOW }).kind, 'agent_dispatch');
   assert.equal(s.parse({ kind: 'debug_scope', detail: 'src/a.mjs', at: NOW }).kind, 'debug_scope');
+  // concept_designed (decision 7208729b): detail carries the concept FAMILY slug
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'weapons', at: NOW }).kind, 'concept_designed');
 
-  // kind is a closed enum of exactly the three register writers
-  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the three writers is rejected');
+  // kind is a closed enum of exactly the four register writers
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the four writers is rejected');
   // detail is a required string; at is required
   assert.throws(() => s.parse({ kind: 'research_tool', at: NOW }), 'detail is required');
   assert.throws(() => s.parse({ kind: 'research_tool', detail: 42, at: NOW }), 'detail must be a string');
@@ -386,6 +388,42 @@ test('research_owed is a registered SYSTEM_REASONS member draining under "captur
     assert.ok(verbs[reason].length > 0, `verb for '${reason}' must not be blank`);
   }
   assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...reasons].sort(), 'DRAIN_VERBS and SYSTEM_REASONS stay 1:1');
+});
+
+// ---- concept-article layer (decision 7208729b, brief concept-article-layer-wiring) ----
+
+test('feature_article.concept_family: optional marker round-trips; legacy articles omit it; it joins the FTS text; concept_article_missing drains under "created"', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const fa = (RECORD_TYPES as Record<string, { schema: { parse: (v: unknown) => Record<string, unknown> }; fts: (r: Record<string, unknown>) => string }>)['feature_article'];
+  const bodyBase = {
+    ...envelope('feature_article'),
+    slug: 'weapons-concept',
+    title: 'weapons (concept)',
+    what_it_does: 'what weapons ARE + members',
+    intended_behavior: 'INTENT + INTERACTIONS',
+    files: [],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active' as const,
+    version: 1,
+    history: [],
+    live_test_refs: [],
+  };
+  // marker round-trips
+  const marked = fa.schema.parse({ ...bodyBase, concept_family: 'weapons' });
+  assert.equal(marked.concept_family, 'weapons', 'concept_family survives parse');
+  // legacy articles (no marker) round-trip unchanged
+  const legacy = fa.schema.parse(bodyBase);
+  assert.equal(legacy.concept_family, undefined, 'omitted marker stays omitted');
+  // empty-string marker is rejected (min 1)
+  assert.throws(() => fa.schema.parse({ ...bodyBase, concept_family: '' }), 'empty concept_family rejected');
+  // the family joins the FTS text so a family rank-term surfaces the article
+  assert.match(fa.fts({ ...bodyBase, concept_family: 'weapons' }), /weapons/, 'concept_family is FTS-indexed');
+  // the durable lane is registered with its drain verb
+  const reasons = SYSTEM_REASONS as readonly string[];
+  assert.ok(reasons.includes('concept_article_missing'), 'concept_article_missing must join SYSTEM_REASONS');
+  assert.equal((DRAIN_VERBS as Record<string, string>)['concept_article_missing'], 'created', 'a concept demand drains by CREATING the family article');
+  assert.ok(mod, 'schemas index loads');
 });
 
 // ------------------- mid-run scope amendment (run r-1417) -------------------

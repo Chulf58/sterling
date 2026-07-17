@@ -345,6 +345,100 @@ test('prep [S] fans the knowledge_pack across mounted domain stores (read-side d
   }
 });
 
+test('prep [S] reserves the concept slice (decision 7208729b): concept articles stage within prep_concept_cap, never displaced by the general ranking, with slice-distinguished omissions', () => {
+  const fix = makeLoopProject();
+  const { dir, store } = fix;
+  try {
+    // Tighten the caps so the split is observable: 3 total slots, 1 reserved for concepts.
+    const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...config, prep_cap: 3, prep_concept_cap: 1 }));
+
+    // Two concept articles + three extra decisions on the phase file — the pool
+    // (with the fixture's decision, gap article, and file-keyed brief) far
+    // exceeds the cap, so without the reserved slice concept articles could
+    // silently lose the head-to-head ranking.
+    const conceptIds = ['calc-ops', 'calc-display'].map(
+      (family) =>
+        store.create({
+          ...envelope('feature_article', BEFORE_RUN),
+          ...articleFields(randomUUID()),
+          slug: `${family}-concept`,
+          title: `${family} (concept)`,
+          concept_family: family,
+          links: [],
+          history: [{ date: BEFORE_RUN, event: 'concept article created' }],
+        }).id
+    );
+    for (let i = 0; i < 3; i++) {
+      store.create({
+        ...envelope('decision', BEFORE_RUN),
+        title: `filler decision ${i}`,
+        statement: 'calc calc calc filler statement.',
+        alternatives_rejected: [],
+        rationale: 'filler',
+        file_keys: ['src/calc.mjs'],
+      });
+    }
+    // AC5 honesty: a FILELESS concept article (design-only, no owning code yet)
+    // that merely INTERACTS with staged concepts is NOT auto-staged — the
+    // file_keys join has nothing to join on and its family is no rank term.
+    // The interaction slice is one slug/family query away, never pre-staged.
+    const fileless = store.create({
+      ...envelope('feature_article', BEFORE_RUN),
+      ...articleFields(randomUUID()),
+      slug: 'shields-concept',
+      title: 'shields (concept)',
+      concept_family: 'shields',
+      files: [],
+      intended_behavior: 'INTENT + INTERACTIONS: interacts with calc-ops (sibling slug calc-ops-concept)',
+      links: [],
+      history: [{ date: BEFORE_RUN, event: 'concept article created (design-only)' }],
+    });
+
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.equal(prep.code, 0, prep.stderr);
+    const out = JSON.parse(prep.stdout);
+    const pack = JSON.parse(readFileSync(join(dir, '.sterling', 'runs', 'r-loop', 'knowledge_pack-p1.json'), 'utf8'));
+
+    assert.equal(pack.returned_record_ids.length, 3, 'the total cap holds — the concept slice is a sub-cap, never additive');
+    const stagedConcepts = pack.returned_record_ids.filter((id) => conceptIds.includes(id));
+    assert.equal(stagedConcepts.length, 1, 'exactly prep_concept_cap concept articles staged — reserved, not displaced');
+    assert.equal(pack.cap_omissions_concept, 1, 'the concept article dropped by the sub-cap is counted in its own lane');
+    assert.equal(out.cap_omissions_concept, 1, 'stdout reports the concept omissions too');
+    assert.ok(pack.cap_omissions >= pack.cap_omissions_concept, 'total omissions include the concept lane');
+    assert.ok(!pack.returned_record_ids.includes(fileless.id), 'a fileless interacting concept article is NOT auto-staged — the interaction slice is one family query away, never pre-staged (AC5 honesty)');
+  } finally {
+    fix.cleanup();
+  }
+
+  // Backfill direction (correctness review 2026-07-17): a SCARCE general pool
+  // must not strand concept articles below an unfilled cap — idle slots
+  // backfill from the concept tail and a pool smaller than the cap omits nothing.
+  const scarce = makeLoopProject();
+  try {
+    const config = JSON.parse(readFileSync(join(scarce.dir, '.sterling', 'config.json'), 'utf8'));
+    writeFileSync(join(scarce.dir, '.sterling', 'config.json'), JSON.stringify({ ...config, prep_cap: 8, prep_concept_cap: 1 }));
+    for (const family of ['calc-ops', 'calc-display', 'calc-input']) {
+      scarce.store.create({
+        ...envelope('feature_article', BEFORE_RUN),
+        ...articleFields(randomUUID()),
+        slug: `${family}-concept`,
+        title: `${family} (concept)`,
+        concept_family: family,
+        links: [],
+        history: [{ date: BEFORE_RUN, event: 'concept article created' }],
+      });
+    }
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', scarce.dir], scarce.dir);
+    assert.equal(prep.code, 0, prep.stderr);
+    const pack = JSON.parse(readFileSync(join(scarce.dir, '.sterling', 'runs', 'r-loop', 'knowledge_pack-p1.json'), 'utf8'));
+    assert.equal(pack.cap_omissions, 0, 'a pool smaller than the cap omits nothing — the sub-cap never strands concept articles below an empty cap');
+    assert.equal(pack.cap_omissions_concept, 0, 'all concept articles staged via backfill when slots are idle');
+  } finally {
+    scarce.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // the loop, end to end — spine acceptance (§16.1)
 // ---------------------------------------------------------------------------
