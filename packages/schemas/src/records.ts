@@ -46,6 +46,13 @@ export const featureArticleSchema = base
     // overloading stack_tags (the domain-mount manifest) and lets prep reserve
     // the concept slice. Optional — owning articles and legacy records omit it.
     concept_family: z.string().min(1).optional(),
+    // Detached-working-tree resolution (comsoft-juiced incident 2026-07-17):
+    // the SYMBOLIC name of the working tree this record's file paths resolve
+    // against — a key into config.working_trees (name → tree path). Unset =
+    // the project root. Machine-specific paths live in config, never in the
+    // record (invariant 2); consumers (read-time drift, baselines, H7/H10
+    // ownership) resolve per record or abstain LOUD on an unmapped name.
+    working_tree: z.string().min(1).optional(),
     // relies_on/relied_by name other articles by SLUG — slugs survive version
     // supersession, record ids do not (decision 474b1c71).
     dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }),
@@ -142,6 +149,9 @@ export const referenceMaterialSchema = base
     // unchanged (field_baselines optional-field precedent); a catalog-bearing record
     // carries a validated modelsCatalogSchema payload.
     catalog: modelsCatalogSchema.optional(),
+    // Detached-working-tree resolution for a repo-located kind:doc — same
+    // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
+    working_tree: z.string().min(1).optional(),
   })
   .superRefine(refineSupersession)
   // §3.2 path invariant at the boundary: a kind:doc location doubles as a

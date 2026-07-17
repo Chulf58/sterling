@@ -4150,6 +4150,13 @@ var featureArticleSchema = base.extend({
   // overloading stack_tags (the domain-mount manifest) and lets prep reserve
   // the concept slice. Optional — owning articles and legacy records omit it.
   concept_family: external_exports.string().min(1).optional(),
+  // Detached-working-tree resolution (comsoft-juiced incident 2026-07-17):
+  // the SYMBOLIC name of the working tree this record's file paths resolve
+  // against — a key into config.working_trees (name → tree path). Unset =
+  // the project root. Machine-specific paths live in config, never in the
+  // record (invariant 2); consumers (read-time drift, baselines, H7/H10
+  // ownership) resolve per record or abstain LOUD on an unmapped name.
+  working_tree: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
   // supersession, record ids do not (decision 474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
@@ -4221,7 +4228,10 @@ var referenceMaterialSchema = base.extend({
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
-  catalog: modelsCatalogSchema.optional()
+  catalog: modelsCatalogSchema.optional(),
+  // Detached-working-tree resolution for a repo-located kind:doc — same
+  // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
+  working_tree: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession).transform((rec) => {
   if (rec.kind !== "doc")
     return rec;
@@ -4590,6 +4600,14 @@ var configSchema = external_exports.object({
   // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
   // override; default is the per-user root above. tag → absolute db path (POSIX).
   domain_paths: external_exports.record(external_exports.string(), external_exports.string()).default({}),
+  // Named detached working trees (comsoft-juiced incident 2026-07-17): map of
+  // SYMBOLIC tree name → tree path (absolute POSIX, or relative to the project
+  // root). Records carrying working_tree: <name> resolve their file paths
+  // against the mapped tree instead of the project root; an unmapped name makes
+  // every consumer abstain LOUD (verify_before_use), never guess. Machine-
+  // specific paths live here, in per-project config — never inside store
+  // records (invariant 2).
+  working_trees: external_exports.record(external_exports.string(), external_exports.string()).default({}),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: external_exports.string().optional(),

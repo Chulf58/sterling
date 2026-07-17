@@ -36,6 +36,14 @@ export const configSchema = z.object({
   // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
   // override; default is the per-user root above. tag → absolute db path (POSIX).
   domain_paths: z.record(z.string(), z.string()).default({}),
+  // Named detached working trees (comsoft-juiced incident 2026-07-17): map of
+  // SYMBOLIC tree name → tree path (absolute POSIX, or relative to the project
+  // root). Records carrying working_tree: <name> resolve their file paths
+  // against the mapped tree instead of the project root; an unmapped name makes
+  // every consumer abstain LOUD (verify_before_use), never guess. Machine-
+  // specific paths live here, in per-project config — never inside store
+  // records (invariant 2).
+  working_trees: z.record(z.string(), z.string()).default({}),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: z.string().optional(),

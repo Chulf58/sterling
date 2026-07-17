@@ -21,7 +21,12 @@ if (!store) allow();
 try {
   // §3.2.5: repo-located reference docs (kind: doc) join the reconcile economy —
   // their location doubles as a file_key, so the same join finds them here.
-  const owners = store.query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 });
+  // Records declaring a working_tree describe a DIFFERENT tree (comsoft-juiced
+  // 2026-07-17): a same-named path in this session's root is not their file —
+  // they never receive a touch-driven reconcile from here.
+  const owners = store
+    .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
+    .filter((r) => !r.working_tree);
   const run = store.getRun();
 
   if (run) {

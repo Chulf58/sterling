@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { parseConfig } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { createSterlingServer } from '../server.js';
 import { SterlingTools } from '../tools.js';
@@ -390,5 +391,105 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('working_tree resolution (comsoft-juiced incident): copy files resolve against the mapped tree, not the project root; unmapped name abstains loud; the false-deletion item drains BY the fix', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-root-'));
+  const copy = mkdtempSync(join(tmpdir(), 'sterling-copy-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  mkdirSync(join(copy, 'src'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, repoRoot: dir, config: parseConfig({ working_trees: { juiced: copy } }) });
+  const article = (slug: string, path: string, extra: Record<string, unknown> = {}) =>
+    tools.knowledgeCreate('feature_article', {
+      slug,
+      title: slug,
+      what_it_does: 'x',
+      intended_behavior: 'x',
+      files: [{ path, role: 'impl' }],
+      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: '2026-06-01T00:00:00.000Z', event: 'originating brief' }],
+      live_test_refs: [],
+      ...extra,
+    }).record;
+  const items = (slug: string) =>
+    tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter((t) => new RegExp(`'${slug}'`).test((t as { text: string }).text));
+  const old = new Date('2026-01-01T00:00:00Z');
+  const future = new Date(Date.now() + 3_600_000);
+  try {
+    // 1. COPY-ONLY file (the incident): exists in the mapped tree, absent from the
+    // project root. With working_tree declared, the article reads CLEAN — no false
+    // "out-of-band deletion", no queue item — and its baseline hashes the COPY's bytes.
+    writeFileSync(join(copy, 'src', 'juice.mjs'), 'jv1');
+    utimesSync(join(copy, 'src', 'juice.mjs'), old, old);
+    const j = article('juice-feel', 'src/juice.mjs', { working_tree: 'juiced' });
+    assert.ok((j as unknown as { file_baselines?: Record<string, string> }).file_baselines?.['src/juice.mjs'], 'baseline computed from the mapped tree even though the root lacks the file');
+    let arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === j.id)?.verify_before_use, undefined, 'copy-only file is NOT a deletion');
+    assert.equal(items('juice-feel').length, 0, 'no false deletion item');
+
+    // 2. SAME-NAMED file in both trees, different content: the baseline is the
+    // COPY's — an out-of-band edit to the ROOT file must NOT flag the copy article,
+    // an edit to the COPY file must.
+    writeFileSync(join(dir, 'src', 'modules.mjs'), 'root-v');
+    writeFileSync(join(copy, 'src', 'modules.mjs'), 'copy-v');
+    utimesSync(join(dir, 'src', 'modules.mjs'), old, old);
+    utimesSync(join(copy, 'src', 'modules.mjs'), old, old);
+    const m = article('mods', 'src/modules.mjs', { working_tree: 'juiced' });
+    writeFileSync(join(dir, 'src', 'modules.mjs'), 'root-v2');
+    utimesSync(join(dir, 'src', 'modules.mjs'), future, future);
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === m.id)?.verify_before_use, undefined, 'a ROOT edit never flags a copy article');
+    writeFileSync(join(copy, 'src', 'modules.mjs'), 'copy-v2');
+    utimesSync(join(copy, 'src', 'modules.mjs'), future, future);
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === m.id)?.verify_before_use, true, 'a COPY edit flags the copy article');
+    assert.match((items('mods')[0] as { text: string }).text, /out-of-band edit/);
+
+    // 3. Deletion IN THE COPY is real drift — the tree-aware check still catches it.
+    rmSync(join(copy, 'src', 'juice.mjs'));
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === j.id)?.verify_before_use, true, 'a file deleted in ITS tree still flags');
+    assert.match((items('juice-feel')[0] as { text: string }).text, /no longer exists/);
+
+    // 4. UNMAPPED tree name: abstain LOUD — verify_before_use, no queue item, no
+    // resolution against the wrong tree.
+    const g = article('ghost-tree', 'src/whatever.mjs', { working_tree: 'ghost' });
+    assert.equal((g as unknown as { file_baselines?: unknown }).file_baselines, undefined, 'no baseline fabricated for an unmapped tree');
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === g.id)?.verify_before_use, true, 'unmapped tree name reads loud');
+    assert.equal(items('ghost-tree').length, 0, 'and enqueues nothing');
+
+    // 5. ACCEPTANCE REPLAY — the incident's nine false todos drain BY the fix:
+    // an article WITHOUT working_tree owning a copy-only path gets the false
+    // deletion item (the bug); knowledge_update adding working_tree re-baselines
+    // against the right tree AND auto-drains the item through the supersede chain.
+    writeFileSync(join(copy, 'src', 'hull.mjs'), 'hv1');
+    utimesSync(join(copy, 'src', 'hull.mjs'), old, old);
+    const h = article('hull-traits', 'src/hull.mjs'); // no working_tree → resolves against root → false deletion
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(items('hull-traits').length, 1, 'the incident: root resolution mints a false deletion item');
+    const healed = tools.knowledgeUpdate(h.id, { working_tree: 'juiced' });
+    assert.equal(items('hull-traits').length, 0, 'the fix drains the item — knowledge_update auto-drain, no manual deletion');
+    assert.ok((healed as unknown as { file_baselines?: Record<string, string> }).file_baselines?.['src/hull.mjs'], 're-baselined against the correct tree');
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((r) => r.id === healed.id)?.verify_before_use, undefined, 'healed article reads clean');
+
+    // 6. A root-tree deletion still flags (the mechanism is scoped, not weakened).
+    writeFileSync(join(dir, 'src', 'rootfile.mjs'), 'rv1');
+    utimesSync(join(dir, 'src', 'rootfile.mjs'), old, old);
+    const r = article('root-feat', 'src/rootfile.mjs');
+    rmSync(join(dir, 'src', 'rootfile.mjs'));
+    arts = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts.find((x) => x.id === r.id)?.verify_before_use, true, 'root deletions still flag');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(copy, { recursive: true, force: true });
   }
 });
