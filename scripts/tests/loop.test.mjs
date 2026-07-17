@@ -379,6 +379,21 @@ test('prep [S] reserves the concept slice (decision 7208729b): concept articles 
         file_keys: ['src/calc.mjs'],
       });
     }
+    // AC5 honesty: a FILELESS concept article (design-only, no owning code yet)
+    // that merely INTERACTS with staged concepts is NOT auto-staged — the
+    // file_keys join has nothing to join on and its family is no rank term.
+    // The interaction slice is one slug/family query away, never pre-staged.
+    const fileless = store.create({
+      ...envelope('feature_article', BEFORE_RUN),
+      ...articleFields(randomUUID()),
+      slug: 'shields-concept',
+      title: 'shields (concept)',
+      concept_family: 'shields',
+      files: [],
+      intended_behavior: 'INTENT + INTERACTIONS: interacts with calc-ops (sibling slug calc-ops-concept)',
+      links: [],
+      history: [{ date: BEFORE_RUN, event: 'concept article created (design-only)' }],
+    });
 
     const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
     assert.equal(prep.code, 0, prep.stderr);
@@ -391,6 +406,7 @@ test('prep [S] reserves the concept slice (decision 7208729b): concept articles 
     assert.equal(pack.cap_omissions_concept, 1, 'the concept article dropped by the sub-cap is counted in its own lane');
     assert.equal(out.cap_omissions_concept, 1, 'stdout reports the concept omissions too');
     assert.ok(pack.cap_omissions >= pack.cap_omissions_concept, 'total omissions include the concept lane');
+    assert.ok(!pack.returned_record_ids.includes(fileless.id), 'a fileless interacting concept article is NOT auto-staged — the interaction slice is one family query away, never pre-staged (AC5 honesty)');
   } finally {
     fix.cleanup();
   }
