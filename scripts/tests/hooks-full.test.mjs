@@ -458,6 +458,49 @@ test('H7 [direct]: maintenance queue item (deduped) + transient touch register f
   }
 });
 
+test('working_tree records are invisible to root-session ownership (comsoft-juiced): H7 never flags them on a root touch; H10 does not count them as owners', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // a detached-copy article owning the same rel path a root session touches
+    store.create({
+      ...envelope('feature_article'),
+      slug: 'juiced-mods',
+      title: 'juiced-mods',
+      what_it_does: 'x',
+      intended_behavior: 'x',
+      working_tree: 'juiced',
+      files: [{ path: 'src/a.mjs', role: 'impl' }, { path: 'src/b.mjs', role: 'impl' }, { path: 'src/c.mjs', role: 'impl' }],
+      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'copy article' }],
+      live_test_refs: [],
+    });
+    // H7: a root touch of src/a.mjs must NOT reconcile-flag the copy article
+    const edit = runHook('h7-file-touch.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'a.mjs') } }), dir);
+    assert.equal(edit.code, 0);
+    assert.equal(
+      store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'reconcile_needed').length,
+      0,
+      'a same-named root path is not the copy article’s file — no reconcile item'
+    );
+    // H10: the copy article grants NO ownership — three root touches in its
+    // declared paths are UNOWNED at threshold and the article demand fires
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    for (const f of ['src/a.mjs', 'src/b.mjs', 'src/c.mjs']) writeFileSync(join(dir, f), 'x');
+    writeFileSync(
+      join(dir, '.sterling', 'transient', 'touches.json'),
+      JSON.stringify(['src/a.mjs', 'src/b.mjs', 'src/c.mjs'].map((path) => ({ path, at: NOW })))
+    );
+    const stop = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(stop.code, 2, 'unowned at threshold — the copy article does not satisfy root ownership');
+    assert.match(stop.stderr, /article demand/i);
+  } finally {
+    cleanup();
+  }
+});
+
 function referenceDoc(store, title, kind, location) {
   return store.create({
     ...envelope('reference_material'),

@@ -5,7 +5,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import type { QueryOptions, RecordedExit, ToolStore } from '@sterling/store';
@@ -107,19 +107,42 @@ export class SterlingTools {
     if (!this.repoRoot) return undefined;
     const type = record.type as string;
     if (type !== 'feature_article' && type !== 'reference_material') return undefined;
+    // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a record
+    // declaring working_tree hashes against ITS tree, never the project root —
+    // the root's same-named files previously leaked into copy-article baselines.
+    // Unmapped tree name → NO baselines (abstain; the read path flags loud).
+    const { root, unresolved } = this.treeRootFor(record);
+    if (unresolved || !root) return undefined;
     const baselines: Record<string, string> = {};
     for (const rel of RECORD_TYPES[type].fileKeys(record)) {
-      const hash = this.hashFile(rel);
+      const hash = this.hashFile(rel, root);
       if (hash !== undefined) baselines[rel] = hash;
     }
     return Object.keys(baselines).length ? baselines : undefined;
   }
 
-  /** sha256 of a repo-relative file's bytes, or undefined if it cannot be read. */
-  private hashFile(rel: string): string | undefined {
-    if (!this.repoRoot) return undefined;
+  /**
+   * Resolve the working tree a record's file paths live in: no working_tree →
+   * the project root; a name mapped in config.working_trees → that path
+   * (absolute, or joined to the project root); an UNMAPPED name → unresolved,
+   * and every consumer abstains LOUD rather than resolving against the wrong
+   * tree (the comsoft-juiced false-deletion class).
+   */
+  private treeRootFor(record: Record<string, unknown>): { root?: string; unresolved: boolean } {
+    const name = (record as { working_tree?: string }).working_tree;
+    if (!name) return { root: this.repoRoot, unresolved: false };
+    const mapped = this.config.working_trees?.[name];
+    if (!mapped) return { root: undefined, unresolved: true };
+    if (isAbsolute(mapped)) return { root: mapped, unresolved: false };
+    if (!this.repoRoot) return { root: undefined, unresolved: true };
+    return { root: join(this.repoRoot, mapped), unresolved: false };
+  }
+
+  /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read. */
+  private hashFile(rel: string, root: string | undefined = this.repoRoot): string | undefined {
+    if (!root) return undefined;
     try {
-      return createHash('sha256').update(readFileSync(join(this.repoRoot, rel))).digest('hex');
+      return createHash('sha256').update(readFileSync(join(root, rel))).digest('hex');
     } catch {
       return undefined;
     }
@@ -136,10 +159,10 @@ export class SterlingTools {
    * established on the next create/reconcile; H7 covers every governed edit
    * meanwhile. An unreadable file also abstains (no fabricated flag).
    */
-  private contentChanged(rel: string, baselines: Record<string, string> | undefined): boolean {
+  private contentChanged(rel: string, baselines: Record<string, string> | undefined, root: string | undefined = this.repoRoot): boolean {
     const baseline = baselines?.[rel];
     if (baseline === undefined) return false;
-    const current = this.hashFile(rel);
+    const current = this.hashFile(rel, root);
     if (current === undefined) return false;
     return current !== baseline;
   }
@@ -326,18 +349,23 @@ export class SterlingTools {
       // refresh_reference maintenance item (a hundred stale reads, one queue entry).
       if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot) {
         const r = record as unknown as { id: string; title: string; location: string; source_date: string; file_baselines?: Record<string, string> };
+        // Detached-working-tree resolution (comsoft-juiced 2026-07-17): resolve
+        // against the record's declared tree; an unmapped name abstains LOUD —
+        // never checked against the wrong tree, never a fabricated queue item.
+        const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
+        if (tree.unresolved) return { ...record, verify_before_use: true };
         let rel: string | undefined;
         try {
           rel = normalizeRepoPath(r.location);
         } catch {
           rel = undefined; // absolute/escaping location: not repo-located
         }
-        if (rel) {
-          const stat = statSync(join(this.repoRoot, rel), { throwIfNoEntry: false });
+        if (rel && tree.root) {
+          const stat = statSync(join(tree.root, rel), { throwIfNoEntry: false });
           // mtime > source_date is the cheap pre-filter; confirm a real content
           // change against the baseline before flagging (an mtime-only bump from
           // a merge is not an out-of-band edit). No baseline → abstain.
-          if (stat && stat.mtimeMs > Date.parse(r.source_date) && this.contentChanged(rel, r.file_baselines)) {
+          if (stat && stat.mtimeMs > Date.parse(r.source_date) && this.contentChanged(rel, r.file_baselines, tree.root)) {
             const open = this.maintenanceQuery({ system_reason: 'refresh_reference', file_keys: [rel], cap: 1000 });
             if (open.length === 0) {
               this.maintenanceEnqueue({
@@ -358,9 +386,16 @@ export class SterlingTools {
       // dedup as H7 — one drain surface regardless of trigger).
       if (record.type === 'feature_article' && this.repoRoot) {
         const a = record as unknown as { id: string; slug: string; files?: { path: string }[]; file_baselines?: Record<string, string> };
+        // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a copy-
+        // describing article's files are stat'd against ITS tree — resolving
+        // against the project root produced false "out-of-band deletion" items
+        // for every copy-only file. An unmapped tree name abstains LOUD.
+        const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
+        if (tree.unresolved) return { ...record, verify_before_use: true };
+        const treeRoot = tree.root ?? this.repoRoot;
         let drift: { path: string; missing: boolean } | undefined;
         for (const f of a.files ?? []) {
-          const stat = statSync(join(this.repoRoot, f.path), { throwIfNoEntry: false });
+          const stat = statSync(join(treeRoot, f.path), { throwIfNoEntry: false });
           if (!stat) {
             drift = { path: f.path, missing: true };
             break;
@@ -368,7 +403,7 @@ export class SterlingTools {
           // mtime newer than updated_at is the cheap pre-filter; confirm a real
           // content change against the baseline before flagging, so a git
           // merge/checkout's mtime reset is not mistaken for an out-of-band edit.
-          if (stat.mtimeMs > Date.parse(record.updated_at) && this.contentChanged(f.path, a.file_baselines)) {
+          if (stat.mtimeMs > Date.parse(record.updated_at) && this.contentChanged(f.path, a.file_baselines, treeRoot)) {
             drift = { path: f.path, missing: false };
             break;
           }

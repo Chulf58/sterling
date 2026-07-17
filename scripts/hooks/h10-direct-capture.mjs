@@ -150,8 +150,10 @@ try {
   // Ownership joins feature_article AND repo-located reference docs (§3.2.5) —
   // same join as H7; a governing document's owner is its reference_material
   // record, never a forced feature article (adjudicated 2026-06-12).
+  // A record declaring a working_tree owns files in a DIFFERENT tree — it never
+  // grants ownership of this root's same-named path (comsoft-juiced 2026-07-17).
   const unowned = paths.filter(
-    (p) => store.query({ types: ['feature_article', 'reference_material'], file_keys: [p], cap: 1 }).length === 0
+    (p) => !store.query({ types: ['feature_article', 'reference_material'], file_keys: [p], cap: 25 }).some((r) => !r.working_tree)
   );
   let newUnowned = [];
   if (unowned.length) {
