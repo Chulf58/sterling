@@ -477,6 +477,47 @@ test('generated projections (regen↔baseline circularity): a config-registered 
     const refs = tools.knowledgeQuery({ types: ['reference_material'] });
     assert.equal(refs.find((r) => r.id === genDoc.id)?.verify_before_use, undefined, 'generated doc churn not refresh-flagged');
     assert.equal(tools.maintenanceQuery({ system_reason: 'refresh_reference' }).length, 0, 'generated doc churn enqueues nothing');
+
+    // 5. per-path within ONE article (correctness-review observation A): the
+    // exemption neither suppresses a normal sibling nor promotes drift itself.
+    // Registered file FIRST in files[] — the loop must continue past it and
+    // still flag the normal sibling's content change:
+    const mixedArticle = (slug: string, paths: string[]) =>
+      tools.knowledgeCreate('feature_article', {
+        slug,
+        title: slug,
+        what_it_does: 'x',
+        intended_behavior: 'x',
+        files: paths.map((path) => ({ path, role: 'impl' })),
+        current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+        dependencies: { relies_on: [], relied_by: [] },
+        state: 'active',
+        version: 1,
+        history: [{ date: '2026-06-01T00:00:00.000Z', event: 'originating brief' }],
+        live_test_refs: [],
+      }).record;
+    const mixPath = join(dir, 'src', 'mix.mjs');
+    writeFileSync(mixPath, 'v1');
+    utimesSync(mixPath, old, old);
+    const mixed = mixedArticle('mixed', ['gen-doc.md', 'src/mix.mjs']);
+    writeFileSync(genDocPath, 'v3');
+    utimesSync(genDocPath, future, future);
+    writeFileSync(mixPath, 'v2');
+    utimesSync(mixPath, future, future);
+    const arts3 = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts3.find((r) => r.id === mixed.id)?.verify_before_use, true, 'normal sibling still content-flags past the exempted projection');
+    assert.match((items('mixed')[0] as { text: string }).text, /src\/mix\.mjs/);
+    // Reverse composition — normal sibling UNCHANGED, registered file churned:
+    // the exemption must not promote drift; the article reads clean.
+    const mix2Path = join(dir, 'src', 'mix2.mjs');
+    writeFileSync(mix2Path, 'v1');
+    utimesSync(mix2Path, old, old);
+    const mixed2 = mixedArticle('mixed2', ['src/mix2.mjs', 'gen-doc.md']);
+    writeFileSync(genDocPath, 'v4');
+    utimesSync(genDocPath, future, future);
+    const arts4 = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(arts4.find((r) => r.id === mixed2.id)?.verify_before_use, undefined, 'projection churn alone never flags a mixed article');
+    assert.equal(items('mixed2').length, 0, 'projection churn alone enqueues nothing');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
