@@ -169,6 +169,17 @@ export const configSchema = z.object({
       staleness_days: z.number().int().positive().default(45),
     })
     .default({}),
+  // H19 knowledge delivery (decision fe62546f). injection_rung is PROBE-SET
+  // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
+  // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
+  // 'read' (PostToolUse injects directly at the touch), 'edit' (only
+  // PreToolUse injection works; Read touches fall back to the queue).
+  delivery: z
+    .object({
+      injection_rung: z.enum(['prompt', 'read', 'edit']).default('prompt'),
+      payload_char_cap: z.number().int().positive().default(2400),
+    })
+    .default({}),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;

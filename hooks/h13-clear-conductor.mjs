@@ -4618,6 +4618,15 @@ var configSchema = external_exports.object({
   // findings and platform docs, not the models catalog).
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
+  }).default({}),
+  // H19 knowledge delivery (decision fe62546f). injection_rung is PROBE-SET
+  // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
+  // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
+  // 'read' (PostToolUse injects directly at the touch), 'edit' (only
+  // PreToolUse injection works; Read touches fall back to the queue).
+  delivery: external_exports.object({
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    payload_char_cap: external_exports.number().int().positive().default(2400)
   }).default({})
 });
 
