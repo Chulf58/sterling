@@ -105,6 +105,5 @@ try {
   allow();
 } catch (e) {
   deny(`H8: dispatch gate failed (${(e && e.message) || e}) — failing closed (P5); retry the dispatch`);
-} finally {
-  store?.close();
 }
+// no close: every path above exits the process, which releases the handle (board f81b1987)

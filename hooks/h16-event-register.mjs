@@ -5457,6 +5457,4 @@ try {
   allow();
 } catch (e) {
   warnNonBlocking(`H16: session-event registration failed: ${e.message}`);
-} finally {
-  store.close();
 }

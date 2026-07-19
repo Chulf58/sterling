@@ -5498,6 +5498,4 @@ try {
   allow();
 } catch (e) {
   warnNonBlocking(`H7: file-touch registration failed for '${rel}': ${e.message}`);
-} finally {
-  store.close();
 }

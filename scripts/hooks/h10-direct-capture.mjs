@@ -356,6 +356,5 @@ try {
     // store itself is the casualty — the warn below is the remaining loud signal
   }
   warnNonBlocking(`H10: session-end duties skipped — ${(e && e.message) || e} (recorded check_skipped h10-stop-duties; fix and re-run before relying on capture/article demand)`);
-} finally {
-  store.close();
 }
+// no close: every path above exits the process, which releases the handle (board f81b1987)

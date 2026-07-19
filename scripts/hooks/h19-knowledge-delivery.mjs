@@ -112,6 +112,5 @@ try {
   // Delivery is an aid, never a gate: internal failure is loud but NON-blocking
   // (P5 visibility without an AC7 violation).
   warnNonBlocking(`H19: knowledge delivery failed for '${rel}': ${(e && e.message) || e}`);
-} finally {
-  store.close();
 }
+// no close: every path above exits the process, which releases the handle (board f81b1987)

@@ -5582,6 +5582,4 @@ try {
   allow();
 } catch (e) {
   warnNonBlocking(`H19: knowledge delivery failed for '${rel}': ${e && e.message || e}`);
-} finally {
-  store.close();
 }

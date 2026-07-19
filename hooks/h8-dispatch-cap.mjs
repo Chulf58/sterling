@@ -5505,8 +5505,6 @@ try {
   allow();
 } catch (e) {
   deny(`H8: dispatch gate failed (${e && e.message || e}) \u2014 failing closed (P5); retry the dispatch`);
-} finally {
-  store?.close();
 }
 export {
   breadthDenial,
