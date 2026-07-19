@@ -1,0 +1,18 @@
+{
+  "id": "6045b856-38e3-4501-92e1-6b7f9d1b6dc1",
+  "type": "research_finding",
+  "created_at": "2026-07-19T08:11:02.323Z",
+  "updated_at": "2026-07-19T08:11:02.323Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [{ "rel": "informed_by", "target_id": "2abbeb80-bc19-45fb-a0ce-a2caba458720" }],
+  "scope": "domain:sterling",
+  "stack_tags": ["sterling"],
+  "question": "AC1 probe (brief retrieval-first-knowledge-delivery): on THIS machine's Claude Code (v2.1.215, Windows), does hookSpecificOutput.additionalContext inject into model context from PostToolUse (Read) and PreToolUse (Edit)? Which H19 injection rung is proven?",
+  "answer": "PASS on both surfaces — rung 'read' (the preferred rung 1) is PROVEN. Method (PROBES.md discipline, artifact evidence not just self-report): scratch project with settings.json hooks logging their own stdin to an evidence file AND emitting unique additionalContext sentinels; driver: headless `claude -p` (claude-haiku-4-5, bypassPermissions). Evidence: probe-evidence.log shows PostToolUse/Read and PreToolUse/Edit both FIRED; the model echoed BOTH sentinels verbatim (SENTINEL-POST-READ-91427, SENTINEL-PRE-EDIT-73519), proving the injected context reached the model. Notable: this also contradicts GitHub issue #40506 (PreToolUse silent in -p mode) on this version — it fired headless. Consequence: sterling-main and Comsoft get delivery.injection_rung='read' in .sterling/config.json; the shipped default-config keeps 'prompt' (platform-proven fallback) for unprobed machines. Mode caveat recorded honestly: probed in -p mode; interactive is Sterling's primary mode and -p is the historically MORE broken mode, so a headless PASS is strong but re-probe on CC upgrades per the verify-at-build register (0956a464).",
+  "source_urls": ["https://github.com/anthropics/claude-code/issues/40506"],
+  "source_date": "2026-07-19",
+  "capture_date": "2026-07-19",
+  "volatility_hint": "fast"
+}

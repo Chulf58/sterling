@@ -1,0 +1,20 @@
+{
+  "id": "cc71012a-af29-4cb9-b008-e3edb01ddd3f",
+  "type": "anti_pattern",
+  "created_at": "2026-07-19T08:07:41.849Z",
+  "updated_at": "2026-07-19T08:07:41.849Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [],
+  "scope": "project",
+  "stack_tags": ["sterling"],
+  "title": "Long StructuredOutput payloads lose parameters in transport — never schema-require what a hat can lose",
+  "trigger": "Designing any Workflow agent({schema}) output shape, or debugging an agent that dies on 'StructuredOutput retry cap exceeded' / 'must have required property X' when the transcript shows the field WAS emitted.",
+  "guidance": "The platform's StructuredOutput transport mis-parses long tool-call payloads (observed CC 2.1.215, council run wf_fefe782d-698, 3 of 16 agents lost): parameters after the first fuse into the first string value as literal parameter markup, or the whole input lands as truncated __unparsedToolInput. Failure probability correlates with multi-KB string parameters. Design rule: (1) require ONLY the fields the consumer cannot proceed without; (2) normalize optional fields with code-side defaults after agent() returns; (3) put an explicit length discipline in the agent prompt (~3500 chars per big string field); (4) when diagnosing, read the agent transcript's failed tool_use input — the content usually survives there and can be hand-recovered.",
+  "wrong_way": "HAT_SCHEMA with required: [color, position, cited_record_ids, cited_files, research_needed] plus unbounded position length — a hat that wrote a thorough multi-KB position lost its whole round when the transport fused its citation fields into the position string and validation demanded them.",
+  "right_way": "required: [color, position]; normHat() supplies [] for absent arrays; prompts carry the 3500-char cap; blue's COUNCIL_SCHEMA requires only summary+interview_agenda+advisory_lean with defaults for the rest (commit fa3ac54).",
+  "source_evidence": "Council run wf_fefe782d-698 (2026-07-19): black r1 transcript agent-aa980279cc15b7f5d.jsonl (parameter markup leaked into position string, two failed validations); white r2 agent-ad8646e73bac3859b.jsonl (__unparsedToolInput, raw truncated at len 5093); blue agent-a782ba8d5cdaec015.jsonl (self-diagnosis 'Only the first parameter is registering regardless of size', 8 required fields read missing). Board 99b0c04d; fix commit fa3ac54 merged 0562579.",
+  "severity": "warn",
+  "basis": "platform"
+}

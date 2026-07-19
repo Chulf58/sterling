@@ -1,0 +1,19 @@
+{
+  "id": "4a281791-a79e-461c-850b-06cd314cddba",
+  "type": "reference_material",
+  "created_at": "2026-07-19T08:16:47.557Z",
+  "updated_at": "2026-07-19T08:16:47.557Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [{ "rel": "informed_by", "target_id": "71b7a281-bcd4-4207-846c-488277b8c8f9" }],
+  "scope": "domain:sterling",
+  "stack_tags": ["sterling"],
+  "title": "Sterling install update procedure for this machine (chulf, Windows)",
+  "kind": "doc",
+  "location": "C:/Users/chulf/.claude/projects/C--Users-chulf-sterling-main/memory/sterling-update-procedure.md",
+  "summary": "How to update the C:/Users/chulf/sterling-main install — it is a ZIP EXTRACTION, NOT a git repo; the repo of record is github.com/Chulf58/sterling (developed cross-machine, user cuj). Procedure: clone to scratch WITH -c core.autocrlf=false (post-clone config is too late for the checkout), copy tracked files over the install, restore the chulf backup path in CLAUDE.md project facts (repo carries cuj's), npm install + build + build:hooks + build:tui, sync-agents, regenerate stale init artifacts. Machine quirks: SYSTEM-level git core.autocrlf=true (Git-for-Windows default; global unset) breaks byte-comparing tests — neutralize BOTH $env:GIT_CONFIG_GLOBAL and $env:GIT_CONFIG_SYSTEM to an empty file for test runs. Local state never in git: .sterling/, .claude/, .pipeline/, generated launchers. Captures the 2026-07-18 CLAUDE.md-touch session's durable value (board 8a9b3d9c) — that session performed the 80fa66c update; the pointed-to memory doc is the maintained source.",
+  "source_date": "2026-07-19",
+  "capture_date": "2026-07-19",
+  "basis": "external"
+}

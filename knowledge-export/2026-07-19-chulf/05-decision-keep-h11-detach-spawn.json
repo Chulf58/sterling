@@ -1,0 +1,26 @@
+{
+  "id": "92e4bb25-98b5-40e2-ae24-439d419f7c18",
+  "type": "decision",
+  "created_at": "2026-07-19T08:11:28.129Z",
+  "updated_at": "2026-07-19T08:11:28.129Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [],
+  "scope": "project",
+  "stack_tags": ["sterling"],
+  "title": "Keep H11's server-side detach-spawn despite the lifted MCP-hook constraint",
+  "statement": "H11 (note-structure extraction) STAYS on the server-side detach-spawn architecture even though the platform constraint that forced it — 'PostToolUse never fires on MCP tool calls' (CC 2.1.198, research_finding 5e7d0a78, Comsoft store) — is DISPROVEN on CC 2.1.215 by live probe (domain research_finding 72fa8697: PreToolUse and PostToolUse both fire on MCP tools, PostToolUse carries tool_response, and MCP-matched additionalContext injects). The lifted constraint is recorded knowledge, not a migration trigger. Hook-side MCP observation becomes a sanctioned OPTION for future designs that need it (e.g. the deferred delivered-evidence ledger behind the toothed gate, decision fe62546f) — each such design re-probes at build per the verify-at-build register (0956a464).",
+  "alternatives_rejected": [
+    {
+      "option": "Migrate H11 back to a registered PostToolUse hook now that the platform supports it",
+      "reason": "No current pain: the detach-spawn works, is mode-independent (immune to any residual headless/interactive hook quirks — issue #40506's class), and reverting is churn on a proven seam with zero outcome change (P1). The platform fact is volatile (changed at least once unlogged between 2.1.198 and 2.1.215); the server seam does not ride it."
+    },
+    {
+      "option": "Leave the contradiction uninvestigated until H11 is next touched",
+      "reason": "The probe was nearly free (the harness existed from the H19 AC1 probe) and the contradiction was already surfaced — leaving a known docs-vs-KB conflict unresolved keeps the store lying (anti-drift)."
+    }
+  ],
+  "rationale": "Board 00845d07 disposition executed 2026-07-19: live probe (stdio MCP server + MCP-matched hooks, artifact evidence) resolved the docs-vs-KB contradiction decisively in favor of current docs. The architecture question the probe was gating is answered conservatively: keep what works, record what changed, let future needs opt in. Comsoft's store still holds the outdated 5e7d0a78 — supersede it from a Comsoft session; the promoted domain finding carries the correction to both projects meanwhile.",
+  "file_keys": ["scripts/hooks/h11-note-structure.mjs", "packages/mcp-server/src/tools.ts"]
+}
