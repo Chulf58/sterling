@@ -39,23 +39,43 @@ const HATS = [
   { color: 'green', emoji: '🟢', concern: 'alternatives — other ways to get the same value', retrieval: "decisions' alternatives_rejected for roads already weighed; code for existing patterns that already solve it" },
 ]
 
+// Schema-tolerance (board 99b0c04d, council run wf_fefe782d-698, 2026-07-19):
+// the platform's StructuredOutput transport mis-parses LONG tool-call payloads
+// — parameters after the first fuse into the first string value, or the whole
+// input lands unparsed — so a hat with a multi-KB position failed 'required'
+// validation until the retry cap killed it (3 of 16 agents in one run). The
+// mitigation is layered: only the fields the deliberation cannot proceed
+// without are required; the array fields are normalized in code (normHat); and
+// the prompts cap position length to keep payloads under the failure zone.
 const HAT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['color', 'position', 'cited_record_ids', 'cited_files', 'research_needed'],
+  required: ['color', 'position'],
   properties: {
     color: { type: 'string', description: 'your hat color' },
-    position: { type: 'string', description: 'your deliberation for this round, from your concern alone' },
+    position: { type: 'string', description: 'your deliberation for this round, from your concern alone — under 3500 characters' },
     cited_record_ids: { type: 'array', items: { type: 'string' }, description: 'knowledge-record UUIDs you actually relied on (empty for the red hat)' },
     cited_files: { type: 'array', items: { type: 'string' }, description: 'repo-relative file paths you actually relied on (empty for the red hat)' },
     research_needed: { type: 'array', items: { type: 'string' }, description: 'external/web questions you could not answer from KB+code — surfaced, never chased' },
   },
 }
 
+// Normalize a hat result: absent/mangled optional arrays become empty — a
+// survivable hat position is never lost to a citation-field parse casualty.
+const normHat = (h) =>
+  h && {
+    ...h,
+    cited_record_ids: Array.isArray(h.cited_record_ids) ? h.cited_record_ids : [],
+    cited_files: Array.isArray(h.cited_files) ? h.cited_files : [],
+    research_needed: Array.isArray(h.research_needed) ? h.research_needed : [],
+  }
+
 const COUNCIL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'hat_positions', 'interview_agenda', 'top_risks', 'best_alternative', 'red_hunch', 'research_questions', 'advisory_lean', 'confidence'],
+  // Same transport tolerance as HAT_SCHEMA: only the fields the conductor
+  // cannot proceed without are required; the rest normalize after return.
+  required: ['summary', 'interview_agenda', 'advisory_lean'],
   properties: {
     summary: { type: 'string', description: 'the deliberation in a short paragraph' },
     hat_positions: {
@@ -108,6 +128,7 @@ function preamble(hat, roundName) {
     'GROUND RULES:',
     '- READ-ONLY, TRANSIENT: never create, update, or remove any record or file. Do NOT call handoff_write or agent_exit — no pipeline run is active and they will be refused; your structured output is your only deliverable.',
     '- If answering well would need EXTERNAL/web research: do not guess, do not chase it — surface the question in research_needed.',
+    '- LENGTH DISCIPLINE: keep position under 3500 characters — sharpest points only. Long structured outputs fail in transport (verified 2026-07-19, board 99b0c04d); an over-long position risks losing your entire round.',
   ]
   if (hat.retrieval) {
     lines.splice(4, 0, `- Retrieval-first: query the knowledge base BEFORE reading code — knowledge_query (rank_terms are single keywords; articles first), knowledge_get for detail; consult ${hat.retrieval}. Then read the codebase (Read/Grep/Glob) where your concern needs ground truth. Cite ONLY record ids and file paths you actually relied on.`)
@@ -176,21 +197,21 @@ const survivors = (raw) => HATS.filter((_, i) => raw[i]).map((h) => h.color)
 
 phase('Round 1 — blind')
 const r1raw = await parallel(HATS.map((h) => () => agent(blindPrompt(h), hatOpts(h, 'Round 1 — blind', 'r1'))))
-const r1 = r1raw.filter(Boolean)
+const r1 = r1raw.filter(Boolean).map(normHat)
 const r1colors = survivors(r1raw)
 if (r1.length === 0) throw new Error('council: round 1 produced no hat output — aborting rather than deliberating on silence (P5)')
 log(`round 1 complete — ${r1.length}/5 hats (${r1colors.join(', ')})`)
 
 phase('Round 2 — rebut')
 const r2raw = await parallel(HATS.map((h) => () => agent(rebutPrompt(h, r1), hatOpts(h, 'Round 2 — rebut', 'r2'))))
-const r2 = r2raw.filter(Boolean)
+const r2 = r2raw.filter(Boolean).map(normHat)
 const r2colors = survivors(r2raw)
 if (r2.length === 0) throw new Error('council: round 2 produced no hat output — the deliberation collapsed mid-way; aborting (P5)')
 log(`round 2 complete — ${r2.length}/5 hats (${r2colors.join(', ')})`)
 
 phase('Round 3 — converge')
 const r3raw = await parallel(HATS.map((h) => () => agent(convergePrompt(h, r2), hatOpts(h, 'Round 3 — converge', 'r3'))))
-const r3 = r3raw.filter(Boolean)
+const r3 = r3raw.filter(Boolean).map(normHat)
 const r3colors = survivors(r3raw)
 if (r3.length === 0) throw new Error('council: round 3 produced no hat output — the deliberation collapsed mid-way; aborting (P5)')
 log(`round 3 complete — ${r3.length}/5 hats (${r3colors.join(', ')})`)
@@ -198,8 +219,19 @@ log(`round 3 complete — ${r3.length}/5 hats (${r3colors.join(', ')})`)
 phase('Synthesis')
 // blue rides the read-only explorer type too — transience is structural for all
 // six voices, not prompt-only for the synthesis (reviewer-correctness 2026-07-05)
-const council = await agent(synthPrompt(r1, r2, r3), { schema: COUNCIL_SCHEMA, model: 'opus', agentType: 'explorer', label: 'blue', phase: 'Synthesis' })
-if (!council) throw new Error('council: blue synthesis returned nothing — the deliberation is lost; re-run (P5)')
+const councilRaw = await agent(synthPrompt(r1, r2, r3), { schema: COUNCIL_SCHEMA, model: 'opus', agentType: 'explorer', label: 'blue', phase: 'Synthesis' })
+if (!councilRaw) throw new Error('council: blue synthesis returned nothing — the deliberation is lost; re-run (P5)')
+// Transport tolerance mirror of normHat: a synthesis that survived with its
+// required core intact is not discarded over an optional field lost in parse.
+const council = {
+  hat_positions: [],
+  top_risks: [],
+  research_questions: [],
+  best_alternative: '(lost in transport — see hat transcripts)',
+  red_hunch: '(lost in transport — see the red hat transcripts)',
+  confidence: 'low',
+  ...councilRaw,
+}
 
 // Deterministic, script-computed participation trail so a thinned deliberation
 // can never silently pose as full-council (finding 37/43).
