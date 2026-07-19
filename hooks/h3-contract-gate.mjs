@@ -5588,6 +5588,4 @@ try {
   allow();
 } catch (e) {
   deny(`H3: contract evaluation failed (${e && e.message || e}) \u2014 failing closed (P5); retry the edit`);
-} finally {
-  store?.close();
 }

@@ -69,6 +69,5 @@ try {
   allow();
 } catch (e) {
   deny(`H3: contract evaluation failed (${(e && e.message) || e}) — failing closed (P5); retry the edit`);
-} finally {
-  store?.close();
 }
+// no close: every path above exits the process, which releases the handle (board f81b1987)

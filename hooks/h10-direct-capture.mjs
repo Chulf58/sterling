@@ -5784,6 +5784,4 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
   } catch {
   }
   warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (recorded check_skipped h10-stop-duties; fix and re-run before relying on capture/article demand)`);
-} finally {
-  store.close();
 }

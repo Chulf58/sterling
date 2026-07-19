@@ -70,6 +70,5 @@ try {
   allow();
 } catch (e) {
   warnNonBlocking(`H7: file-touch registration failed for '${rel}': ${e.message}`);
-} finally {
-  store.close();
 }
+// no close: every path above exits the process, which releases the handle (board f81b1987)
