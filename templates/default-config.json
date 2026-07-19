@@ -53,5 +53,9 @@
   },
   "models_catalog": {
     "staleness_days": 45
+  },
+  "delivery": {
+    "injection_rung": "prompt",
+    "payload_char_cap": 2400
   }
 }

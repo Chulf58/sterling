@@ -5,14 +5,9 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h1-session-start.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync } from "node:fs";
-import { dirname as dirname4, join as join4 } from "node:path";
-import { fileURLToPath } from "node:url";
-
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { join } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4086,6 +4081,18 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
+function toRepoRelative(absolutePath, repoRoot) {
+  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const abs = norm(absolutePath);
+  const root = norm(repoRoot);
+  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
+  const a = drivePrefixed ? abs.toLowerCase() : abs;
+  const r = drivePrefixed ? root.toLowerCase() : root;
+  if (!(a === r || a.startsWith(r + "/"))) {
+    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
+  }
+  return normalizeRepoPath(abs.slice(root.length + 1));
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
@@ -4741,99 +4748,21 @@ var projectRegistrationSchema = external_exports.object({
 });
 
 // packages/schemas/dist/staleness.js
-import { dirname, join } from "node:path";
-var BUILD_ID_FILE = ".build-id";
 var runtimeMarkerSchema = external_exports.object({
   /** the content build-id the running server loaded at boot */
   build_id: external_exports.string(),
   pid: external_exports.number().int(),
   booted_at: external_exports.string()
 }).strict();
-function buildIdPath(serverDir) {
-  return join(serverDir, BUILD_ID_FILE);
-}
-function runtimeMarkerPath(storePath) {
-  return join(dirname(storePath), "transient", "mcp-runtime.json");
-}
-function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
-  if (!currentBuildId || !marker)
-    return { state: "unknown" };
-  if (markerPidAlive === false)
-    return { state: "unknown" };
-  return marker.build_id === currentBuildId ? { state: "fresh", running: marker.build_id, current: currentBuildId } : { state: "stale", running: marker.build_id, current: currentBuildId };
-}
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync2, existsSync } from "node:fs";
-import { dirname as dirname3 } from "node:path";
+import { mkdirSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname as dirname2, join as join2 } from "node:path";
-var REGISTRY_DDL = `
-CREATE TABLE IF NOT EXISTS projects (
-  repo_path TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  stack_tags TEXT NOT NULL,
-  toolchains TEXT NOT NULL,
-  sterling_version TEXT,
-  first_init_at TEXT NOT NULL,
-  last_init_at TEXT NOT NULL,
-  last_seen_at TEXT
-);`;
-function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join2(homedir(), ".sterling", "registry.db");
-}
-var ProjectRegistry = class {
-  db;
-  constructor(path = registryPath()) {
-    mkdirSync(dirname2(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode=WAL");
-    this.db.exec("PRAGMA busy_timeout=5000");
-    this.db.exec(REGISTRY_DDL);
-  }
-  /** Upsert by repo_path (init event, P4): create on first init
-   *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
-   *  on re-init while preserving first_init_at. */
-  register(input2) {
-    this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(repo_path) DO UPDATE SET
-           name = excluded.name,
-           stack_tags = excluded.stack_tags,
-           toolchains = excluded.toolchains,
-           sterling_version = excluded.sterling_version,
-           last_init_at = excluded.last_init_at`).run(input2.repo_path, input2.name, JSON.stringify(input2.stack_tags), JSON.stringify(input2.toolchains), input2.sterling_version, input2.at, input2.at);
-  }
-  /** Session-activity touch (H1 SessionStart): update last_seen_at for an
-   *  EXISTING row only — never create (registration is init's job). Returns
-   *  whether a row was updated. */
-  touchLastSeen(repoPath2, at) {
-    return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
-  }
-  /** All registered projects, name-ordered. Stale-at-read (existence of
-   *  repo_path) is the caller's lazy check — the registry stores no liveness. */
-  list() {
-    return this.db.prepare("SELECT * FROM projects ORDER BY name").all().map((r) => projectRegistrationSchema.parse({
-      ...r,
-      stack_tags: JSON.parse(r.stack_tags),
-      toolchains: JSON.parse(r.toolchains)
-    }));
-  }
-  /** Human-gated removal (the /sterling:projects prune of a missing project) —
-   *  never automatic. Returns whether a row was removed. */
-  remove(repoPath2) {
-    return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
-  }
-  close() {
-    this.db.close();
-  }
-};
 
 // packages/store/dist/index.js
 var DDL = `
@@ -5098,7 +5027,7 @@ var SterlingStore = class {
     if (existsSync(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync2(dirname3(target), { recursive: true });
+    mkdirSync(dirname(target), { recursive: true });
     this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
   }
   close() {
@@ -5318,13 +5247,13 @@ var SterlingStore = class {
    *  the target across every mounted store — cross-store edges are a legitimate shape
    *  (promotion itself writes them: supersedes / informed_by across project↔domain)
    *  that a store-local get cannot see. Standalone usage keeps the local check. */
-  addLink(sourceId, rel, targetId, targetValidated = false) {
+  addLink(sourceId, rel2, targetId, targetValidated = false) {
     const source = this.get(sourceId);
     if (!source)
       throw new Error(`addLink: no record '${sourceId}'`);
     if (!targetValidated && !this.get(targetId))
       throw new Error(`addLink: no target record '${targetId}'`);
-    const parsedRel = linkSchema.shape.rel.parse(rel);
+    const parsedRel = linkSchema.shape.rel.parse(rel2);
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
       return source;
     const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
@@ -5500,182 +5429,159 @@ function readStdin() {
 function allow() {
   process.exit(0);
 }
+function warnNonBlocking(message) {
+  process.stderr.write(message);
+  process.exit(1);
+}
+function loadConfig(cwd) {
+  const p = join(cwd, ".sterling", "config.json");
+  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
 function openStore(cwd) {
-  const p = join3(cwd, ".sterling", "sterling.db");
+  const p = join(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
-
-// scripts/lib/agent-distribution.mjs
-var normalize = (s2) => s2.replace(/\r\n/g, "\n");
-var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
-function parseInstalledHeader(content) {
-  const m = normalize(content).match(HEADER_RE);
-  if (!m) return null;
-  const [line, pluginVersion2, template, templateHash, contentHash, installedAt] = m;
-  return { headerLine: line, pluginVersion: pluginVersion2, template, templateHash, contentHash, installedAt };
-}
-function extractHookCommandLines(content) {
-  const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
-  if (!m) return [];
-  return [...m[1].matchAll(/^\s*command:\s*(.+)$/gm)].map((x) => x[1].trim());
-}
-function extractBakedCommandPaths(content) {
-  const paths = /* @__PURE__ */ new Set();
-  for (const line of extractHookCommandLines(content)) {
-    for (const m of line.matchAll(/"([^"]+)"/g)) paths.add(m[1]);
-  }
-  return [...paths];
-}
-var RESTART_INSTRUCTION = [
-  "================================================================",
-  "RESTART REQUIRED \u2014 project subagents load at session start.",
-  "Agents installed into .claude/agents/ are NOT visible to a",
-  "session that was already running. Restart Claude Code in this",
-  "project before the first pipeline run; the run is blocked until",
-  "the runtime visibility check confirms the installed agent set.",
-  "================================================================"
-].join("\n");
-
-// scripts/hooks/h1-session-start.mjs
-var CONVENTIONS = [
-  "Sterling conventions (injected by H1):",
-  `- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don't know, checking" and check.`,
-  "- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.",
-  "- Canonical naming: one name per concept, from the registries; phase execution, intake, steps \u2014 kill synonyms on sight."
-].join("\n");
-var BANNER_ROWS = [
-  "\u2584\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588   \u2580\u2588\u2580 \u2588\u2584 \u2588 \u2584\u2580\u2580\u2584",
-  "\u2580\u2580\u2584  \u2588  \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588    \u2588  \u2588 \u2580\u2588 \u2588 \u2584\u2584",
-  "\u2580\u2580\u2580  \u2580  \u2580\u2580\u2580 \u2580 \u2580 \u2580\u2580\u2580 \u2580\u2580\u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580"
-];
-var GRADIENT = [
-  [255, 255, 255],
-  [192, 192, 200],
-  [70, 100, 130]
-];
-function colorAt(t) {
-  const [from, to, u] = t <= 0.5 ? [GRADIENT[0], GRADIENT[1], t * 2] : [GRADIENT[1], GRADIENT[2], (t - 0.5) * 2];
-  return from.map((v, i) => Math.round(v + (to[i] - v) * u));
-}
-function paint(rows) {
-  if (process.env.NO_COLOR) return rows.join("\n");
-  const width = Math.max(...rows.map((r) => r.length));
-  return rows.map(
-    (row) => [...row].map((ch, x) => {
-      if (ch === " ") return ch;
-      const [r, g, b] = colorAt(width <= 1 ? 0 : x / (width - 1));
-      return `\x1B[38;2;${r};${g};${b}m${ch}`;
-    }).join("") + "\x1B[0m"
-  ).join("\n");
-}
-function pluginRoot() {
-  let dir = dirname4(fileURLToPath(import.meta.url));
-  for (let i = 0; i < 4; i++) {
-    if (existsSync3(join4(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname4(dir);
-  }
-  return null;
-}
-function pluginVersion() {
+function repoRel(toolPath, cwd) {
+  if (!toolPath) return null;
+  const fwd = String(toolPath).replace(/\\/g, "/");
   try {
-    const root = pluginRoot();
-    if (!root) return null;
-    const v = JSON.parse(readFileSync2(join4(root, ".claude-plugin", "plugin.json"), "utf8")).version;
-    return typeof v === "string" && v.length ? v : null;
+    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
+    return normalizeRepoPath(fwd);
   } catch {
+    return null;
   }
-  return null;
 }
+
+// scripts/hooks/lib/delivery.mjs
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
+import { join as join2, dirname as dirname2 } from "node:path";
+function deliveryDir(cwd) {
+  return join2(cwd, ".sterling", "transient", "delivery");
+}
+function guardPath(cwd, agentId) {
+  return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+}
+function pendingPath(cwd) {
+  return join2(deliveryDir(cwd), "pending.json");
+}
+function readGuard(path) {
+  try {
+    return existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : { records: [], frontier_files: [] };
+  } catch {
+    process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
+`);
+    return { records: [], frontier_files: [] };
+  }
+}
+function writeGuard(path, guard) {
+  mkdirSync2(dirname2(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(guard));
+}
+function enqueuePending(path, entry) {
+  const entries = existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
+  entries.push(entry);
+  mkdirSync2(dirname2(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(entries));
+}
+function clip(text, cap) {
+  const s2 = String(text ?? "");
+  return s2.length > cap ? `${s2.slice(0, cap)}\u2026` : s2;
+}
+function pointerLine(store2, kind, slug) {
+  let head = "(not in store)";
+  try {
+    const match = store2.query({ types: ["feature_article"], rank_terms: [slug], cap: 5 }).find((r) => r.slug === slug && !r.working_tree);
+    if (match) head = clip(match.what_it_does, 140);
+  } catch {
+    head = "(lookup failed)";
+  }
+  return `  \u2192 ${kind} [[${slug}]]: ${head}`;
+}
+function renderArticle(store2, article, charCap) {
+  const lines = [
+    `\u25B8 article '${article.slug}' (${article.state}${article.concept_family ? `, concept family '${article.concept_family}'` : ""})`,
+    `WHAT IT DOES: ${clip(article.what_it_does, charCap)}`,
+    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
+  ];
+  if (article.current_ac?.length) {
+    lines.push(`ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => `${a.ac_id}: ${a.text}`).join(" | ")}`);
+  }
+  const relies = article.dependencies?.relies_on ?? [];
+  const relied = article.dependencies?.relied_by ?? [];
+  if (relies.length || relied.length) {
+    lines.push("ONE-HOP (follow with knowledge_get/knowledge_query when it matters):");
+    for (const slug of relies) lines.push(pointerLine(store2, "relies_on", slug));
+    for (const slug of relied) lines.push(pointerLine(store2, "relied_by", slug));
+  }
+  return lines.join("\n");
+}
+function renderReference(ref) {
+  return `\u25B8 reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? "", 200)} \u2014 refresh via knowledge_get ${ref.id}`;
+}
+function renderPayload(rel2, blocks) {
+  return [
+    `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
+    ...blocks
+  ].join("\n\n");
+}
+function renderFrontier(rel2) {
+  return `STERLING FRONTIER SIGNAL (H19): territory '${rel2}' is UNOWNED \u2014 no owning article exists in the store. There is no knowledge to deliver; H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
+}
+
+// scripts/hooks/h19-knowledge-delivery.mjs
 var input = readStdin();
+var rel = repoRel(input.tool_input?.file_path, input.cwd);
+if (!rel) allow();
+if (rel === ".git" || rel.startsWith(".git/")) allow();
+if (rel.startsWith(".sterling/")) allow();
 var store = openStore(input.cwd);
 if (!store) allow();
-var counts = { todos: 0, maintenance: 0 };
 try {
-  const todos = store.query({ types: ["todo"], cap: 1e3 });
-  counts.todos = todos.filter((t) => t.source === "user").length;
-  counts.maintenance = todos.filter((t) => t.source === "system").length;
+  const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
+  const rung = ["prompt", "read", "edit"].includes(rawRung) ? rawRung : "prompt";
+  const event = input.hook_event_name;
+  let mode;
+  if (event === "PreToolUse") {
+    mode = rung === "edit" ? "inject" : null;
+  } else {
+    if (rung === "read") mode = "inject";
+    else if (rung === "prompt") mode = "enqueue";
+    else mode = input.tool_name === "Read" ? "enqueue" : null;
+  }
+  if (!mode) allow();
+  if (mode === "enqueue" && input.agent_id) allow();
+  const run = store.getRun();
+  if (run && input.agent_id) allow();
+  const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+  const gPath = guardPath(input.cwd, input.agent_id);
+  const guard = readGuard(gPath);
+  if (owners.length === 0) {
+    if (guard.frontier_files.includes(rel)) allow();
+    guard.frontier_files.push(rel);
+    const notice = renderFrontier(rel);
+    writeGuard(gPath, guard);
+    if (mode === "enqueue") {
+      enqueuePending(pendingPath(input.cwd), { kind: "frontier", rel, payload: notice, agent_id: input.agent_id ?? "conductor" });
+      allow();
+    }
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: notice } }));
+    allow();
+  }
+  const fresh = owners.filter((r) => !guard.records.includes(r.id));
+  if (fresh.length === 0) allow();
+  const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+  const blocks = fresh.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap));
+  const payload = renderPayload(rel, blocks);
+  guard.records.push(...fresh.map((r) => r.id));
+  writeGuard(gPath, guard);
+  if (mode === "enqueue") {
+    enqueuePending(pendingPath(input.cwd), { kind: "delivery", rel, payload, agent_id: input.agent_id ?? "conductor" });
+    allow();
+  }
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
+  allow();
+} catch (e) {
+  warnNonBlocking(`H19: knowledge delivery failed for '${rel}': ${e && e.message || e}`);
 } finally {
   store.close();
 }
-var registryContext = "";
-if (existsSync3(registryPath())) {
-  const cwdPosix = input.cwd.replace(/\\/g, "/");
-  const registry = new ProjectRegistry(registryPath());
-  try {
-    registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync3(p.repo_path));
-    if (siblings.length) {
-      registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
-    }
-  } finally {
-    registry.close();
-  }
-}
-function markerWriterAlive(pid) {
-  if (!Number.isInteger(pid)) return null;
-  try {
-    process.kill(pid, 0);
-  } catch (err) {
-    if (err?.code === "ESRCH") return false;
-    if (err?.code !== "EPERM") return null;
-  }
-  if (process.platform !== "linux") return true;
-  try {
-    const cmdline = readFileSync2(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
-    if (cmdline && !cmdline.includes("mcp-server")) return false;
-  } catch (err) {
-    if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
-  }
-  return true;
-}
-var staleWarning = "";
-try {
-  const root = pluginRoot();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join4(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync3(buildIdPath(serverDist)) ? readFileSync2(buildIdPath(serverDist), "utf8").trim() || null : null;
-  let marker = null;
-  const markerPath = runtimeMarkerPath(join4(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync3(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync2(markerPath, "utf8")));
-    if (parsed.success) marker = parsed.data;
-  }
-  const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
-  if (verdict.state === "stale") {
-    staleWarning = `\u26A0 Sterling MCP server is STALE \u2014 running build ${verdict.running}, current ${verdict.current}. RESTART THE SESSION to load the current server (a stale server silently mis-stores domain writes). `;
-  }
-} catch {
-}
-var machineWarning = "";
-var machineContext = "";
-try {
-  const agentsDir = join4(input.cwd, ".claude", "agents");
-  if (existsSync3(agentsDir)) {
-    const dead = [];
-    for (const f of readdirSync(agentsDir).filter((n) => n.endsWith(".md"))) {
-      const content = readFileSync2(join4(agentsDir, f), "utf8");
-      if (!parseInstalledHeader(content)) continue;
-      const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync3(p));
-      if (unresolved) dead.push({ agent: f, node: unresolved });
-    }
-    if (dead.length) {
-      machineWarning = `\u26A0 ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context (e.g. ${dead[0].agent} \u2192 ${dead[0].node}) \u2014 their hooks fail silently. Run /sterling:sync-agents from this context, then restart. `;
-      machineContext = `
-
-MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on this machine (${dead.map((d) => d.agent).join(", ")}). Every hook of those agents fails non-blocking \u2014 the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work until scripts/check-agents-visible.mjs passes.`;
-    }
-  }
-} catch {
-}
-if (process.env.STERLING_NO_BANNER !== "1") {
-  const width = Math.max(...BANNER_ROWS.map((r) => r.length));
-  const version = pluginVersion();
-  const versionLine = version ? `v${version}`.padStart(width) + "\n" : "";
-  process.stderr.write(`${paint(BANNER_ROWS)}
-${versionLine}`);
-}
-var output = {
-  systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + registryContext + machineContext }
-};
-process.stdout.write(JSON.stringify(output));
-allow();
