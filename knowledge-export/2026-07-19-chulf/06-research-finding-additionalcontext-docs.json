@@ -1,0 +1,25 @@
+{
+  "id": "da67878f-bb79-4cda-a562-4bda2471c367",
+  "type": "research_finding",
+  "created_at": "2026-07-19T08:10:58.255Z",
+  "updated_at": "2026-07-19T08:10:58.255Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [{ "rel": "informed_by", "target_id": "b7d4aeac-194a-43f3-8e7a-040e794028fb" }],
+  "scope": "domain:sterling",
+  "stack_tags": ["sterling"],
+  "question": "Can a Claude Code PreToolUse hook (Edit/Write) and/or PostToolUse hook (Read) return hookSpecificOutput.additionalContext so text is injected into the model's context (we run CC 2.1.215)? Secondary: are repeated injections de-duplicated?",
+  "answer": "Docs say yes; reality unverified — live probe required before building on it. The current hooks reference (code.claude.com/docs/en/hooks) explicitly lists PreToolUse and PostToolUse as supporting hookSpecificOutput.additionalContext, placed 'next to the tool result'. But the GitHub issue record shows documented unreliability: #19432 (PreToolUse additionalContext received but never injected, closed not-planned), #18427 (PostToolUse cannot inject context, closed not-planned), #55889 (v2.1.123: all injection channels silently dropped for Bash matcher, closed not-planned), vs #40380 (Mar 2026: working PreToolUse Bash injection example, labeled 'PreToolUse:Bash hook additional context'). All bug evidence concerns the Bash matcher; no primary evidence covers Edit/Write or Read matchers. Behavior at v2.1.215 for Edit/Write/Read is UNVERIFIABLE FROM DOCS — a live probe on this machine/version is required (verify-at-build register, decision 0956a464). Secondary: no de-duplication mechanism is documented; injections accumulate verbatim (and are replayed on --continue/--resume), so any deliver-on-touch mechanism needs its own already-delivered-this-session guard. Confidence in documented behavior: LOW. Sterling context: the entire DELIVER-on-file-touch route (and the frontier-signal variant) rides on this fact; MECHANIZE-at-UserPromptSubmit is the platform-safe fallback (H2 proves that event).",
+  "source_urls": [
+    "https://code.claude.com/docs/en/hooks",
+    "https://github.com/anthropics/claude-code/issues/19432",
+    "https://github.com/anthropics/claude-code/issues/18427",
+    "https://github.com/anthropics/claude-code/issues/55889",
+    "https://github.com/anthropics/claude-code/issues/40380",
+    "https://github.com/anthropics/claude-code/issues/19115"
+  ],
+  "source_date": "2026-07-19",
+  "capture_date": "2026-07-19",
+  "volatility_hint": "fast"
+}

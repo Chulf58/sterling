@@ -1,0 +1,39 @@
+{
+  "id": "fe62546f-8dbc-4d5c-b2f3-a7f121daf739",
+  "type": "decision",
+  "created_at": "2026-07-19T06:56:10.383Z",
+  "updated_at": "2026-07-19T06:56:10.383Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [],
+  "scope": "project",
+  "stack_tags": ["sterling"],
+  "title": "Retrieval-first enforcement: deliver + mechanize, no blocking gate",
+  "statement": "The front half of the learning loop (knowledge in view before acting) is enforced by DELIVERY and MECHANIZATION, not by blocking gates. Shape: (a) file-touch injection of the owning article per the approved fallback ladder — rung 1: inject at first Read of governed territory; rung 2: at first Edit/Write if only PreToolUse injection works; rung 3: mechanized knowledge_pack staging at UserPromptSubmit/territory entry only (platform-proven) — a live probe at build start decides the rung (verify-at-build, 0956a464); (b) payload = owning article substance + one-hop relies_on/relied_by pointers (slug + one-liner), never full neighbor bodies; (c) frontier signal: a governed touch with NO owning article injects a loud unowned-territory notice (user chose solve over accept); (d) session delivery guard: no re-injection for already-delivered territory within a session, first touch of NEW territory always delivers (re-arm via per-file keying); (e) dispatch staging for declared file_keys; pipeline runs keep prep.mjs staging, no double-delivery; (f) the mechanism NEVER denies a tool call. A toothed blocking gate (server-side delivered-evidence ledger) is DEFERRED to its own future decision, triggered only if article-skip failures recur with delivery in place. This resolves the trigger of deferred decision 9950dfff (text unreachable — Comsoft store; superseded in effect by this decision).",
+  "alternatives_rejected": [
+    {
+      "option": "Hook-only blocking gate keyed on 'a retrieval query ran' (the grill's initial shape: H3-style ledger + deny first Edit/Write per territory)",
+      "reason": "Gameable and misses the trigger: no hook can observe what a query RETURNED (PreToolUse sees args only; per recorded 2.1.198 finding PostToolUse doesn't fire on MCP calls — currently contradicted by docs but unproven either way, research_finding 93ef6349), so hook-observable evidence proves only that a query fired — which the motivating Comsoft failure satisfied by reading code as 'retrieval'. Council black/red/yellow/green converged against it; yellow (its original champion) formally withdrew it."
+    },
+    {
+      "option": "Server-side delivered-evidence ledger + blocking gates (un-gameable teeth)",
+      "reason": "Deferred, not dead: real teeth but the biggest build (mcp-server + schemas construction), plus black's cross-cutting risks — re-arm-vs-nag lifecycle tension, density inversion (silent exactly on the sparse frontier), and every new hard blocker being a new bypass surface. Revisit as its own decision only if skip-failures recur with delivery in place (P1: a gate must change outcomes)."
+    },
+    {
+      "option": "Both layered (delivery + server-side gate)",
+      "reason": "The gate would fire only where delivery already put the article in context — demanding the conductor prove what the system just did mechanically; residual ceremony with no additional outcome change (P1)."
+    },
+    {
+      "option": "Null option — keep retrieval-first as SOP prose only",
+      "reason": "Prose skipped under momentum IS the trigger (called out three times in one session); delivery strictly dominates prose because it requires zero compliance — the article arrives without the conductor having to act."
+    }
+  ],
+  "rationale": "The Comsoft trigger (2026-07-19) was retrieve-and-ignore, not never-queried: code was read as 'knowledge retrieval', articles skipped, a bad solution proposed. The failure is therefore not provable-compliance but absent-context — so the fix puts article content in context mechanically (P3: delete the skippable human step rather than police it) instead of demanding proof. Grounded by council deliberation (six-hats, 2026-07-19; advisory lean: refine) and research: additionalContext at file-touch events is documented but unverified on our CC version — hence the probe-gated fallback ladder (research_finding b7d4aeac); injections accumulate with no platform dedup — hence the session guard; no hook surface exists on assistant prose — hence grill-surface protection is mechanized staging at grill entry plus the split-out jargon/glossary item (board ef157057). Accepted limitation, solved partially: delivery cannot protect territory where no article exists; the frontier signal makes sparseness loud in the moment and H10's session-end article demand remains the durable backstop. Concept family article: 49722544 (knowledge-delivery).",
+  "file_keys": [
+    "scripts/prep.mjs",
+    "scripts/hooks/h2-selection-inject.mjs",
+    "scripts/hooks/h7-file-touch.mjs",
+    "scripts/hooks/h13-reads-ledger.mjs"
+  ]
+}

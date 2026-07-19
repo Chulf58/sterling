@@ -1,0 +1,43 @@
+{
+  "id": "2f38ebf5-bca3-46a6-ba39-2f69b77cff5e",
+  "type": "feature_article",
+  "created_at": "2026-07-19T08:22:42.051Z",
+  "updated_at": "2026-07-19T08:22:42.051Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [
+    { "rel": "supersedes", "target_id": "49722544-fd1a-456f-9590-5c8169738833" },
+    { "rel": "supersedes", "target_id": "1ab4050c-3c02-4b2d-b215-bc131e194bf3" },
+    { "rel": "supersedes", "target_id": "d208a49d-524d-4af7-b030-1fb2ea5b548b" }
+  ],
+  "scope": "project",
+  "stack_tags": ["sterling"],
+  "slug": "knowledge-delivery",
+  "title": "Knowledge delivery (concept family) — the front half of the learning loop",
+  "what_it_does": "The concept family for mechanisms that put owning-article knowledge in front of an agent BEFORE it acts, without requiring the agent to act to receive it — the front half of the learning loop (read-store -> act -> capture -> reconcile), counterpart to the reconcile economy (H7/H10/H15) that enforces the back half. Members (live inside this family): (1) file-touch injection — on first Read (preferred) or first Edit/Write of governed territory, the owning article payload is injected via hookSpecificOutput.additionalContext; (2) territory-entry mechanized staging — the direct-mode analog of prep.mjs's filter->join->rank->cap knowledge_pack, staged deterministically at UserPromptSubmit/territory entry, including grill-skill entry; (3) frontier signal — a governed touch that finds NO owning article injects a loud 'territory unowned — H10 will demand an article' notice instead of staying silent; (4) session delivery guard — an already-delivered-this-session ledger (H13-style, per-file/territory keyed) so repeat touches do not re-inject but NEW territory mid-session always delivers (scope-growth re-arm); (5) dispatch staging — a subagent dispatch with declared file_keys gets the payload staged into its brief/handoff mechanically. Delivery payload: the owning article's substance (what_it_does, intended_behavior, acceptance criteria) plus one-hop relies_on/relied_by POINTERS (slug + one-line what_it_does), not full neighbor bodies.",
+  "intended_behavior": "INTENT: delete the skippable human retrieval step rather than police it (P3) — knowledge arrives mechanically, so momentum cannot skip it; never blocks (no deny paths); zero cost where no articles exist (empty join injects only the frontier signal); value scales with KB density by design. Chosen over blocking gates by decision (deliver + mechanize fork, 2026-07-19): a hook-observable gate proves only 'a query fired' (gameable — the motivating Comsoft failure satisfied it by reading code as retrieval), and un-gameable evidence requires server-side construction; a toothed gate is DEFERRED, revisited only if skip-failures recur with delivery in place. Platform-conditional (verify-at-build, decision 0956a464): file-touch injection rides the unverified additionalContext-at-PreToolUse/PostToolUse mechanic — build follows the approved fallback ladder rung 1 (inject at first Read) -> rung 2 (inject at first Edit/Write) -> rung 3 (mechanized staging only, platform-proven at UserPromptSubmit); a live probe at build start decides the rung, recorded as a research_finding. INTERACTIONS: [reconcile-economy] (H7/H10) — delivery is read-side, reconcile is write-side; H10's unowned-territory demand is the frontier signal's durable backstop. [knowledge-pack / prep.mjs] — pipeline sibling; pipeline phases keep prep staging, no double-delivery inside runs. [h2-selection-inject] — the proven additionalContext primitive delivery reuses. [h13-reads-ledger / lib/ledger.mjs] — the machinery template for the session delivery guard; guard state is session-lifecycle-bound (P4). Research grounding: research_finding b7d4aeac (additionalContext reliability unverified; injections accumulate, no platform dedup — hence the guard), research_finding 93ef6349 (MCP hook observability contradiction; irrelevant to delivery, tracked separately). Owning code files: none yet — unbuilt; filled at build reconcile.",
+  "files": [
+    { "path": "scripts/hooks/h19-knowledge-delivery.mjs", "role": "delivery hook: file-touch join, payload/frontier, guard, rung routing" },
+    { "path": "scripts/hooks/h19-delivery-drain.mjs", "role": "prompt-rung injection surface (UserPromptSubmit drain)" },
+    { "path": "scripts/hooks/h19-clear-session.mjs", "role": "session-lifecycle clear (whole-session guard TTL, P4)" },
+    { "path": "scripts/hooks/lib/delivery.mjs", "role": "guard/queue state + payload rendering" },
+    { "path": "scripts/tests/h19-delivery.test.mjs", "role": "contract tests (rungs, guard, frontier, AC6/AC7, self-heal)" }
+  ],
+  "_export_note": "file_baselines stripped — chulf-machine hashes; the receiving server recomputes at create/reconcile.",
+  "current_ac": [],
+  "concept_family": "knowledge-delivery",
+  "dependencies": {
+    "relies_on": ["h2-selection-inject", "h7-file-touch", "h13-reads-ledger", "prep-knowledge-pack", "h10-direct-capture"],
+    "relied_by": []
+  },
+  "state": "wired_in",
+  "version": 4,
+  "history": [
+    { "date": "2026-07-19T06:55:00.000Z", "event": "Concept family created at grill time (decision 7208729b discipline): deliver + mechanize fork chosen, fallback ladder and payload approved by user." },
+    { "date": "2026-07-19T07:00:00.000Z", "event": "Registered via concept-designed.mjs; linked from brief af0bfcd9 and decision fe62546f." },
+    { "date": "2026-07-19T07:45:00.000Z", "event": "BUILT + WIRED (commit 5bbc994, merged to main 88bc219, pushed): H19 hooks implemented, 508-test suite green, reviewed (correctness + skeptic, fixes applied: guard/queue self-heal, subagent enqueue skip, unknown-rung fallback). Probe research_finding 2abbeb80 proved rung 'read' on CC 2.1.215; sterling-main and Comsoft configs set injection_rung='read'. Activates per session at SessionStart (restart required in live sessions). Disclosed limitations: prompt-rung one-turn lag (approved in ladder); grill-entry delivery is touch-transitive, not prompt-time territory detection (keep-or-solve pending with user); subagents receive delivery only on inject rungs (queue serves the conductor prompt)." },
+    { "date": "2026-07-19T08:20:00.000Z", "event": "Dead-finally sweep (board f81b1987, commit dde5604 merged 8592882) touched h19-knowledge-delivery.mjs: removed the dead finally{store.close()} + explanatory comment; behavior unchanged. Baselines refreshed by this reconcile touch." }
+  ],
+  "live_test_refs": []
+}

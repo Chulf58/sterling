@@ -1,0 +1,68 @@
+{
+  "id": "af0bfcd9-9074-4e0c-b461-0714d99a5db0",
+  "type": "brief",
+  "created_at": "2026-07-19T06:56:46.873Z",
+  "updated_at": "2026-07-19T06:56:46.873Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [],
+  "scope": "project",
+  "stack_tags": ["sterling"],
+  "slug": "retrieval-first-knowledge-delivery",
+  "title": "Retrieval-first enforcement — knowledge delivery + mechanized staging (front half of the learning loop)",
+  "problem": "The retrieval-first rule is prose and gets skipped under momentum. Trigger (SpaceExplorer/Comsoft conductor-direct session, 2026-07-19, user verbatim): the conductor 'repeatedly started work — code edits, and even a requirements grill — by reading CODE first and staging knowledge articles late or not at all. I had to call it out three separate times (\"you didn't read any articles?\", \"are the hooks not forcing you to read the kb?\")'. Clarified (user verbatim): 'the comsoft Claude only read the code as preparation as part of knowledge retrieval. it didnt take the articles related so it ended up suggestion a bad solution.' The learning loop read-the-store -> act -> capture -> reconcile is enforced only on the back half (H7/H10/H15); the front half has no mechanism.",
+  "feature": "Per decision fe62546f: knowledge delivery + mechanized staging, never blocking. File-touch injection of the owning-article payload per the probe-gated fallback ladder (rung 1 first-Read injection -> rung 2 first-Edit/Write injection -> rung 3 UserPromptSubmit/territory-entry staging only); payload = owning article substance + one-hop pointers; frontier signal on unowned governed touches; session delivery guard with per-file re-arm; dispatch staging for declared file_keys; pipeline unchanged (prep.mjs); grill-entry protection = mechanized staging at grill-skill entry (supersedes the earlier grill-entry deny-gate answer). Concept family: knowledge-delivery (article 49722544).",
+  "user_stated": {
+    "criteria": [
+      "Verbatim: 'The retrieval-first rule is prose, so under momentum it gets skipped' — the front half must get teeth like the back half (H7/H10/H15) has.",
+      "Verbatim: 'Re-arming: when work grows into NEW territory mid-session, the demand must fire again (today's failure was exactly scope growth without re-staging).'",
+      "Verbatim: 'P1 check: the gate must change outcomes, not add ceremony.'",
+      "Chosen (fork): 'Deliver + mechanize' — no blocking gate for now; toothed gate revisited as its own later decision only if skip-failures recur.",
+      "Chosen (frontier limitation): 'Solve — add a frontier signal' — loud unowned-territory notice on governed touches with no owning article.",
+      "Chosen (ladder): 'Approve the ladder' — probe at build start decides rung 1/2/3.",
+      "Chosen (payload): 'Article + one-hop pointers.'",
+      "Chosen (split): jargon/glossary grill rule split out as its own item (board ef157057)."
+    ],
+    "constraints": [
+      "One-hop knowledge reach preserved (user's original evidence answer 'owning article + one hop' carried into the payload as pointers).",
+      "Session-scoped delivery state, whole session, no expiry (user's TTL answer); re-arm via per-file keying.",
+      "Dispatch coverage keyed on structurally declared file_keys only — no free-text prompt parsing (user's dispatch answer, P3).",
+      "Pipeline phases keep prep.mjs staging — no double-delivery inside runs."
+    ]
+  },
+  "conductor_proposals": [
+    { "text": "Fallback ladder (rung 1 Read-injection -> rung 2 Edit-injection -> rung 3 staging-only) with a live probe at build start deciding the rung; build records which rung was proven and why.", "status": "confirmed" },
+    { "text": "Payload shape: owning article substance + one-hop slug pointers instead of full one-hop bodies (bounded injection; no platform dedup exists).", "status": "confirmed" },
+    { "text": "Session delivery guard (H13-style ledger) required because injections accumulate verbatim with no platform de-duplication (research_finding b7d4aeac).", "status": "confirmed" },
+    { "text": "Grill-entry deny-gate replaced by mechanized staging at grill-skill entry — supersession of the earlier grill-entry staging-gate answer, confirmed with AC set.", "status": "confirmed" },
+    { "text": "MCP hook observability contradiction (docs vs recorded 2.1.198 finding) tracked as probe-and-revisit board item 00845d07, out of scope here.", "status": "confirmed" },
+    { "text": "This machine's empty local KB (store content lives on the dev machine) undermines every retrieval mechanism including this one — recommend a separate sync/populate task. Raised, not yet accepted.", "status": "unconfirmed" }
+  ],
+  "acceptance_criteria": [
+    { "ac_id": "AC1", "text": "Probe first: a captured research_finding for the exact Claude Code version in use records which ladder rung was proven, before any rung-specific code merges.", "verifiable_at": "final" },
+    { "ac_id": "AC2", "text": "Delivery fires: in a conductor-direct session, first touch (Read on rung 1 / Edit-Write on rung 2) of a file owned by a feature_article puts the payload (owning substance + one-hop pointers) into the conductor's context with zero conductor action, visible in the transcript. On rung 3 the same payload is staged mechanically at territory entry (UserPromptSubmit), including grill-skill entry.", "verifiable_at": "final" },
+    { "ac_id": "AC3", "text": "Frontier signal: the same touch on a governed file with NO owning article delivers the loud 'territory unowned — H10 will demand an article' notice.", "verifiable_at": "final" },
+    { "ac_id": "AC4", "text": "Guarded, re-arming: repeat touches of already-delivered territory do not re-inject within a session; a first touch of NEW territory mid-session always delivers. Guard state is session-lifecycle-bound (P4).", "verifiable_at": "final" },
+    { "ac_id": "AC5", "text": "Dispatch staging: a subagent dispatch with declared file_keys gets the payload staged into its brief/handoff mechanically; undeclared dispatches are unchanged.", "verifiable_at": "final" },
+    { "ac_id": "AC6", "text": "Pipeline untouched: no double-delivery inside runs — prep.mjs staging remains the pipeline path.", "verifiable_at": "final" },
+    { "ac_id": "AC7", "text": "Never blocks: no tool call is ever denied by this mechanism.", "verifiable_at": "final" }
+  ],
+  "technical_design": {
+    "approach": "Intake-level only — planning owns the design. Settled intent: probe-gated fallback ladder; reuse H7's file->owning-article join, H2's additionalContext primitive, H13/lib-ledger machinery for the guard, prep.mjs pattern for staging. See decision fe62546f and concept article 49722544.",
+    "interfaces": [],
+    "shared_structures": []
+  },
+  "blast_radius": { "files": [], "reconcile_list": ["49722544-fd1a-456f-9590-5c8169738833"] },
+  "incidental_scope": [],
+  "out_of_scope": [
+    "Any blocking gate, including the server-side delivered-evidence ledger — deferred to its own future decision, triggered only if skip-failures recur with delivery in place.",
+    "The jargon/glossary grill rule — split out by user decision (board ef157057).",
+    "Revisiting the H11 architecture or adopting hook-side MCP observation — probe-and-revisit board item 00845d07.",
+    "Pipeline staging changes beyond the no-double-delivery guarantee — prep.mjs stays as is.",
+    "Assistant-prose enforcement (grill questions, jargon hard-stops) — no platform surface exists; stays SOP discipline.",
+    "This machine's empty-KB problem (store sync from the dev machine) — standing issue, separate from the mechanism."
+  ],
+  "phases": [],
+  "decisions_made": ["fe62546f-8dbc-4d5c-b2f3-a7f121daf739"]
+}

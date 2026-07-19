@@ -1,0 +1,25 @@
+{
+  "id": "72fa8697-3dae-4dc8-98aa-3fe23a12398d",
+  "type": "research_finding",
+  "created_at": "2026-07-19T08:11:00.429Z",
+  "updated_at": "2026-07-19T08:11:00.429Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [{ "rel": "informed_by", "target_id": "1a3ae5a9-b695-4106-840f-5fcdff7fb45c" }],
+  "scope": "domain:sterling",
+  "stack_tags": ["sterling"],
+  "question": "Do PreToolUse/PostToolUse hooks fire on MCP tool calls (mcp__server__tool) on current Claude Code (~v2.1.215), and does PostToolUse expose the MCP tool's result? Secondary: does any hook event fire on an assistant prose message?",
+  "answer": "RESOLVED BY LIVE PROBE (2026-07-19, this machine, CC 2.1.215, headless -p, PROBES.md artifact method): the recorded Sterling assertion ('PostToolUse never fires on MCP tool calls', verified CC 2.1.198, research_finding 5e7d0a78 in Comsoft store — the H11-retirement rationale) NO LONGER HOLDS. Evidence: no-dependency stdio MCP server logged the tools/call (MCP-CALL-42); an MCP-matched PreToolUse hook FIRED (payload keys incl. tool_input, no tool_response); an MCP-matched PostToolUse hook FIRED WITH tool_response (the tool's full result); AND additionalContext emitted by BOTH MCP-matched hooks reached the model (both sentinels echoed verbatim) — also contradicting issue #24788's injection-dropped claim. Consequences: hook-side observation of MCP results (e.g. a future delivered-evidence ledger for the deferred toothed gate, decision fe62546f) is platform-viable again on current CC; H11's server-side detach-spawn remains the SHIPPED architecture by decision (see the keep-H11 decision record) — the constraint lifted, the design stays until a need arises. The 2.1.198 observation was either version-fixed unlogged or context-specific. Volatility remains fast — re-probe on CC upgrades (verify-at-build 0956a464). Comsoft-store finding 5e7d0a78 should be superseded from a Comsoft session; this promoted domain finding carries the correction meanwhile. Secondary (docs-based, not re-probed): MessageDisplay fires on assistant text but is display-only — no enforcement surface on assistant prose.",
+  "source_urls": [
+    "https://code.claude.com/docs/en/hooks",
+    "https://github.com/anthropics/claude-code/issues/24788",
+    "https://github.com/anthropics/claude-code/issues/32105",
+    "https://github.com/anthropics/claude-code/issues/40506",
+    "https://github.com/anthropics/claude-agent-sdk-typescript/issues/101",
+    "https://code.claude.com/docs/en/changelog"
+  ],
+  "source_date": "2026-07-19",
+  "capture_date": "2026-07-19",
+  "volatility_hint": "fast"
+}
