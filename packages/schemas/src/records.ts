@@ -323,6 +323,8 @@ export const AGENT_MODEL_KEY = {
   'implementation-architect': 'implementation_architect',
   researcher: 'researcher',
   explorer: 'explorer',
+  librarian: 'librarian',
+  debugger: 'debugger',
 } as Record<string, string>;
 
 // REVIEWER_ROLES (decision 628c4b7f, run r-d630, phase 1 — AC1): derived from
@@ -331,6 +333,41 @@ export const AGENT_MODEL_KEY = {
 // drift from the roster). Totality-tested in schemas.test.ts vs registry.json.
 export const REVIEWER_ROLES: Set<string> = new Set(
   Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === 'reviewers')
+);
+
+// ---------------------------------------------------------------------------
+// AGENT_CLASS — the roster holds TWO agent classes and the distinction is
+// LOAD-BEARING, not documentation (council wf_0d90ab18-436, black/green):
+//   'pipeline'         — dispatched inside a run; carries handoff_write/agent_exit;
+//                        slice-guarded and cap-counted by H8.
+//   'conductor_direct' — dispatched outside a run by the conductor; holds NO
+//                        agent_exit/handoff_write (both are run-scoped and refused
+//                        with `no active run`), so it reports its signal as the
+//                        first line of its final text.
+// Mirrors the `class` field in agent-templates/registry.json; totality-tested
+// against it in schemas.test.ts exactly as AGENT_MODEL_KEY is. Deriving H8's
+// guarded set from AGENT_MODEL_KEY's KEYS was the defect this replaces: adding a
+// conductor-direct agent silently enrolled it in pipeline slice-guarding and
+// cap-counting, so a mid-run dispatch was denied for lacking a knowledge slice it
+// was never meant to carry.
+// ---------------------------------------------------------------------------
+export const AGENT_CLASS = {
+  'test-writer': 'pipeline',
+  coder: 'pipeline',
+  'reviewer-correctness': 'pipeline',
+  'reviewer-security': 'pipeline',
+  'reviewer-skeptic': 'pipeline',
+  'reviewer-performance': 'pipeline',
+  'implementation-architect': 'pipeline',
+  researcher: 'pipeline',
+  explorer: 'pipeline',
+  librarian: 'conductor_direct',
+  debugger: 'conductor_direct',
+} as Record<string, string>;
+
+// The set H8 slice-guards and cap-counts: pipeline agents ONLY.
+export const PIPELINE_AGENT_TYPES: Set<string> = new Set(
+  Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === 'pipeline')
 );
 
 // ---------------------------------------------------------------------------

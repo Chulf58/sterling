@@ -516,11 +516,14 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
     'implementation-architect': 'implementation_architect',
     researcher: 'researcher',
     explorer: 'explorer',
+    // conductor-direct agents (adopted from Comsoft): one key each, no folding
+    librarian: 'librarian',
+    debugger: 'debugger',
   });
 
   // many-to-one asserted head-on: all four reviewer agents resolve to the single 'reviewers' key.
   // (map re-cast to Record<string,string> at the string-indexed lookup: the preceding deepEqual
-  // unifies `map` to its inferred 9-literal-key shape, which otherwise trips TS7053 on map![r].)
+  // unifies `map` to its inferred literal-key shape, which otherwise trips TS7053 on map![r].)
   const lookup = map as Record<string, string>;
   const reviewerAgents = registeredNames.filter((n) => n.startsWith('reviewer-'));
   assert.equal(reviewerAgents.length, 4, 'the registry carries four reviewer agents');
@@ -537,6 +540,48 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
   const configKeys = Object.keys(cfg.models);
   for (const value of Object.values(lookup)) {
     assert.ok(configKeys.includes(value), `AGENT_MODEL_KEY value '${value}' must be an actual config.models key`);
+  }
+});
+
+// AGENT_CLASS totality (council wf_0d90ab18-436): the class marking is
+// LOAD-BEARING — H8 derives its slice-guarded/cap-counted set from it — so it
+// must not be allowed to drift from the registry that declares it. Both
+// directions, exactly as AGENT_MODEL_KEY above.
+test('AGENT_CLASS: totality over agent-templates/registry.json, and PIPELINE_AGENT_TYPES is exactly the pipeline class', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const cls = mod.AGENT_CLASS as Record<string, string> | undefined;
+  const pipeline = mod.PIPELINE_AGENT_TYPES as Set<string> | undefined;
+  assert.ok(cls, 'AGENT_CLASS must be exported from the schemas index (defined once, invariant 1)');
+  assert.ok(pipeline, 'PIPELINE_AGENT_TYPES must be exported from the schemas index');
+
+  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
+    agents: { name: string; class?: string }[];
+  };
+
+  // every registered agent declares a class, and the mirror agrees with it
+  for (const a of registry.agents) {
+    assert.ok(a.class, `registry entry '${a.name}' must declare a class`);
+    assert.equal(cls![a.name], a.class, `AGENT_CLASS['${a.name}'] must match the registry's class`);
+  }
+  // no orphan keys: the mirror's keys are EXACTLY the registered agents
+  assert.deepEqual(
+    Object.keys(cls!).sort(),
+    registry.agents.map((a) => a.name).sort(),
+    'AGENT_CLASS keys are exactly the registered agents — none missing, none orphaned'
+  );
+  // only the two known classes exist (a typo'd class must fail, not silently un-guard an agent)
+  for (const [name, value] of Object.entries(cls!)) {
+    assert.ok(['pipeline', 'conductor_direct'].includes(value), `AGENT_CLASS['${name}'] = '${value}' is not a known class`);
+  }
+  // the derived guard set is exactly the pipeline class...
+  assert.deepEqual(
+    [...pipeline!].sort(),
+    registry.agents.filter((a) => a.class === 'pipeline').map((a) => a.name).sort(),
+    'PIPELINE_AGENT_TYPES is exactly the registry pipeline class'
+  );
+  // ...and the conductor-direct agents are NOT in it (the H8 regression this guards)
+  for (const a of registry.agents.filter((x) => x.class === 'conductor_direct')) {
+    assert.ok(!pipeline!.has(a.name), `conductor-direct '${a.name}' must NOT be H8 slice-guarded/cap-counted`);
   }
 });
 

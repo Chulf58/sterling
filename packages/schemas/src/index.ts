@@ -18,6 +18,8 @@ export {
   validateRecord,
   AGENT_MODEL_KEY,
   REVIEWER_ROLES,
+  AGENT_CLASS,
+  PIPELINE_AGENT_TYPES,
 } from './records.js';
 export type { RecordType, RecordTypeEntry, DurableRecord } from './records.js';
 export {

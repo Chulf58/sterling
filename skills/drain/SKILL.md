@@ -23,6 +23,12 @@ The one rule the queue runs on: an item leaves only **after** its fulfilling art
    - `stale_research` — re-verify the `research_finding`'s claim (dispatch a `researcher` if it needs the web), update both clocks. Then `board_remove`.
    - `wire_in_dormant` — wire the dormant article's feature in; if it is genuinely abandoned, route to cleanup instead. `board_remove` once resolved.
 
+   **Delegating the mechanical half to the `librarian` (P8: judgment stays here, clerking goes cheap).** The classification above — co-tenant vs substantive, already-paid vs genuinely behind — is judgment and stays YOURS. Once you have classified, the resulting *writes* are mechanical and may be dispatched in bulk to the `librarian` agent instead of performed inline:
+   - Dispatch it work order **(a)** — the co-tenant / already-behind-but-baseline-only items as `{maintenance_id, feature_link, verdict}` triples — and it performs the minimal `{"state": "active"}` refresh per item, which auto-drains each one.
+   - Dispatch it work order **(b)** — your own drafted update bodies keyed by article id — and it applies them byte-for-byte. Drafts must carry the **full** history array: history REPLACES on update, so a truncated draft destroys history (the librarian is instructed to stop and report rather than write one).
+   - It will REFUSE anything substantive and hand it back with a one-line reason. That refusal is correct — draft the reconcile yourself and re-dispatch as (b), never tell it to author.
+   - It reports drained ids → new article ids plus the post-drain `maintenance_query` count; that report is your audit input for step 4. Delegation is optional — for one or two items, doing it inline is cheaper than briefing an agent (P1).
+
 3. **Delegate the gated items — never auto-resolve them inside a drain** (P1: keep the gate where being wrong is costly):
    - `deletion_candidate` → hand to `/sterling:cleanup` (the §8.4 gated deletion SOP). Leave the item; cleanup's deletion artifact removes it.
    - `promotion_review` → present the candidate to the human as a keep-or-promote decision; only on yes run `knowledge_promote` (promoting drains the matching review). Never auto-promote.

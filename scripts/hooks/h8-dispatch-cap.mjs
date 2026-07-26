@@ -5,12 +5,15 @@
 // Increment the per-agent-type run counter; over cap → deny + escalate.
 // Respawns count under this cap (§5.1).
 import { readStdin, deny, allow, loadConfig, openStore, withRetry } from './lib/common.mjs';
-import { AGENT_MODEL_KEY } from '@sterling/schemas';
+import { PIPELINE_AGENT_TYPES } from '@sterling/schemas';
 
-// The guarded pipeline agent types = the registered Sterling roster (the keys of
-// AGENT_MODEL_KEY — registry-backed, one source of truth). A platform-default
-// type like 'general-purpose' is not a member, so it is never slice-guarded.
-const PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_MODEL_KEY));
+// The guarded set is the registry's PIPELINE class only (AGENT_CLASS-derived,
+// one source of truth). It was previously the keys of AGENT_MODEL_KEY — i.e.
+// the whole roster — which silently enrolled the conductor-direct agents
+// (librarian, debugger) in slice-guarding and cap-counting the moment they were
+// registered: a mid-run dispatch was denied for lacking a knowledge slice it was
+// never meant to carry. A platform-default type like 'general-purpose' is not a
+// member either, so it is never slice-guarded.
 
 // Slice-presence guard (decision 628c4b7f (e)): during an active run a guarded
 // pipeline dispatch must carry either the prep-stamped STERLING-SLICE marker or

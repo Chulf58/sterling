@@ -41,6 +41,98 @@ export function checkSpawnContract(content, label) {
   return [];
 }
 
+// ---------------------------------------------------------------------------
+// Tool-grant linter (board bc272f83; decision b4388c11, research_finding 34a03611).
+// The failure mode this guards is SILENT: Claude Code ignores an agent `tools:`
+// entry naming a tool that is not mounted, so the agent simply lacks it and says
+// nothing. That class has bitten twice — the `mcp__plugin_sterling_sterling__`
+// prefix being wrong under the strict-mcp launcher, and `ToolSearch` missing
+// (store tools are served DEFERRED to subagents, so without it a correctly-named
+// tool is present-but-uncallable). Nothing mechanical checked either one.
+//
+// Rules enforced per template:
+//   1. every `mcp__…` grant resolves to a REAL registered Sterling tool
+//   2. every granted store tool names BOTH prefixes (the launcher decides which
+//      one mounts; init generates both launchers, so both must be declared)
+//   3. a template granting any store tool also grants ToolSearch
+// ---------------------------------------------------------------------------
+export const MCP_PREFIXES = ['mcp__sterling__', 'mcp__plugin_sterling_sterling__'];
+
+// Derived, never duplicated: the registered tool surface is server.ts's
+// registerTool('<name>') calls. A hardcoded second list would drift from the
+// server the way the prefix drifted from the launcher (the REVIEWER_ROLES
+// precedent: a second source of truth is the bug).
+export function readRegisteredToolNames(serverTsPath) {
+  const src = readFileSync(serverTsPath, 'utf8');
+  const names = [...src.matchAll(/registerTool\(\s*'([a-z_]+)'/g)].map((m) => m[1]);
+  if (names.length === 0) {
+    throw new Error(
+      `tool-grant linter: no registerTool('<name>') calls found in ${serverTsPath} — the extraction shape changed; fix the linter rather than letting it pass vacuously (P5)`
+    );
+  }
+  return new Set(names);
+}
+
+export function parseToolsLine(content) {
+  const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return null;
+  const line = fm[1].match(/^tools:\s*(.+)$/m);
+  if (!line) return null;
+  return line[1]
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+export function lintToolGrants(content, label, registeredTools) {
+  const grants = parseToolsLine(content);
+  if (grants === null) return [{ kind: 'missing_tools_line', detail: `${label}: no 'tools:' line in frontmatter` }];
+
+  const violations = [];
+  const baseNames = new Set();
+
+  for (const grant of grants) {
+    if (!grant.startsWith('mcp__')) continue;
+    const prefix = MCP_PREFIXES.find((p) => grant.startsWith(p));
+    if (!prefix) {
+      violations.push({ kind: 'unknown_mcp_prefix', detail: `${label}: '${grant}' uses no known Sterling MCP prefix` });
+      continue;
+    }
+    const base = grant.slice(prefix.length);
+    if (!registeredTools.has(base)) {
+      violations.push({
+        kind: 'unknown_mcp_tool',
+        detail: `${label}: '${grant}' names '${base}', which is not a registered Sterling tool`,
+      });
+      continue;
+    }
+    baseNames.add(base);
+  }
+
+  // both prefixes per granted store tool — a single-prefix grant is dead under
+  // whichever launcher does not mount it, silently.
+  for (const base of [...baseNames].sort()) {
+    for (const prefix of MCP_PREFIXES) {
+      if (!grants.includes(prefix + base)) {
+        violations.push({
+          kind: 'missing_mcp_prefix',
+          detail: `${label}: store tool '${base}' is granted without '${prefix}${base}' — dead under the launcher that mounts that prefix`,
+        });
+      }
+    }
+  }
+
+  // ToolSearch is required whenever any store tool is granted (deferred serving).
+  if (baseNames.size > 0 && !grants.includes('ToolSearch')) {
+    violations.push({
+      kind: 'missing_toolsearch',
+      detail: `${label}: grants Sterling store tools but not 'ToolSearch' — store tools are served deferred, so they would be present-but-uncallable`,
+    });
+  }
+
+  return violations;
+}
+
 // §6 skill linter: stale file references in SKILL.md (and commands/*.md) files.
 // Prefix/extension coverage widened by R2 board 72807b1f: skills|commands
 // prefixes (cross-skill references were previously unlinted) + sh|bat.

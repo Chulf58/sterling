@@ -1,14 +1,16 @@
 {
   "version": 1,
   "agents": [
-    { "name": "test-writer", "file": "test-writer.md" },
-    { "name": "coder", "file": "coder.md" },
-    { "name": "reviewer-correctness", "file": "reviewer-correctness.md" },
-    { "name": "reviewer-security", "file": "reviewer-security.md" },
-    { "name": "reviewer-skeptic", "file": "reviewer-skeptic.md" },
-    { "name": "reviewer-performance", "file": "reviewer-performance.md" },
-    { "name": "implementation-architect", "file": "implementation-architect.md" },
-    { "name": "researcher", "file": "researcher.md" },
-    { "name": "explorer", "file": "explorer.md" }
+    { "name": "test-writer", "file": "test-writer.md", "class": "pipeline" },
+    { "name": "coder", "file": "coder.md", "class": "pipeline" },
+    { "name": "reviewer-correctness", "file": "reviewer-correctness.md", "class": "pipeline" },
+    { "name": "reviewer-security", "file": "reviewer-security.md", "class": "pipeline" },
+    { "name": "reviewer-skeptic", "file": "reviewer-skeptic.md", "class": "pipeline" },
+    { "name": "reviewer-performance", "file": "reviewer-performance.md", "class": "pipeline" },
+    { "name": "implementation-architect", "file": "implementation-architect.md", "class": "pipeline" },
+    { "name": "researcher", "file": "researcher.md", "class": "pipeline" },
+    { "name": "explorer", "file": "explorer.md", "class": "pipeline" },
+    { "name": "librarian", "file": "librarian.md", "class": "conductor_direct" },
+    { "name": "debugger", "file": "debugger.md", "class": "conductor_direct" }
   ]
 }

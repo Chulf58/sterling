@@ -151,12 +151,16 @@ const extractor = process.env.STERLING_H11_EXTRACTOR;
 // PATH, the absolute .exe runs (decision 2d6da80f).
 const nativeWinClaude = join(homedir(), '.local', 'bin', 'claude.exe');
 const claudeCmd = process.platform === 'win32' && existsSync(nativeWinClaude) ? nativeWinClaude : 'claude';
+// windowsHide on both branches: this worker is itself console-less (spawned
+// detached), so a console child here otherwise auto-allocates a visible
+// window that steals focus on every note capture. shell stays UNSET —
+// shell:true would make note text a shell-injection vector (decision c6f9f0e0).
 const result = extractor
-  ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: 'utf8', timeout: 90_000 })
+  ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: 'utf8', timeout: 90_000, windowsHide: true })
   : spawnSync(
       claudeCmd,
       ['-p', PROMPT, '--model', 'claude-haiku-4-5-20251001', '--json-schema', SCHEMA, '--tools', '', '--safe-mode', '--no-session-persistence'],
-      { input: '', encoding: 'utf8', timeout: 90_000 }
+      { input: '', encoding: 'utf8', timeout: 90_000, windowsHide: true }
     );
 
 if (result.error || result.status !== 0) skipLoud(extractor ? 'extractor_failed' : 'claude_cli_unavailable');

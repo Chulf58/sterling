@@ -95,6 +95,11 @@ export const configSchema = z.object({
       researcher: modelEffort.default({ model: 'claude-sonnet-4-6', effort: 'medium' }),
       explorer: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
       classifiers: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
+      // Conductor-direct agents (no agent_exit/handoff_write; final text is the
+      // deliverable). librarian is mechanical clerking — cheap model, low effort
+      // (P8); debugger is root-cause judgment — high effort.
+      librarian: modelEffort.default({ model: 'claude-sonnet-4-6', effort: 'low' }),
+      debugger: modelEffort.default({ model: 'claude-sonnet-4-6', effort: 'high' }),
     })
     .default({}),
   // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on

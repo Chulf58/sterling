@@ -4356,9 +4356,25 @@ var AGENT_MODEL_KEY = {
   "reviewer-performance": "reviewers",
   "implementation-architect": "implementation_architect",
   researcher: "researcher",
-  explorer: "explorer"
+  explorer: "explorer",
+  librarian: "librarian",
+  debugger: "debugger"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
+var AGENT_CLASS = {
+  "test-writer": "pipeline",
+  coder: "pipeline",
+  "reviewer-correctness": "pipeline",
+  "reviewer-security": "pipeline",
+  "reviewer-skeptic": "pipeline",
+  "reviewer-performance": "pipeline",
+  "implementation-architect": "pipeline",
+  researcher: "pipeline",
+  explorer: "pipeline",
+  librarian: "conductor_direct",
+  debugger: "conductor_direct"
+};
+var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -4657,7 +4673,12 @@ var configSchema = external_exports.object({
     coder_hard: modelEffort.default({ model: "claude-opus-4-8", effort: "xhigh" }),
     researcher: modelEffort.default({ model: "claude-sonnet-4-6", effort: "medium" }),
     explorer: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
-    classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" })
+    classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
+    // Conductor-direct agents (no agent_exit/handoff_write; final text is the
+    // deliverable). librarian is mechanical clerking — cheap model, low effort
+    // (P8); debugger is root-cause judgment — high effort.
+    librarian: modelEffort.default({ model: "claude-sonnet-4-6", effort: "low" }),
+    debugger: modelEffort.default({ model: "claude-sonnet-4-6", effort: "high" })
   }).default({}),
   // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
   // run data, never the reverse. Patterns are JS regex source strings.
@@ -5514,10 +5535,10 @@ var SCHEMA = JSON.stringify({
 var extractor = process.env.STERLING_H11_EXTRACTOR;
 var nativeWinClaude = join2(homedir(), ".local", "bin", "claude.exe");
 var claudeCmd = process.platform === "win32" && existsSync3(nativeWinClaude) ? nativeWinClaude : "claude";
-var result = extractor ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: "utf8", timeout: 9e4 }) : spawnSync(
+var result = extractor ? spawnSync(process.execPath, [extractor], { input: PROMPT, encoding: "utf8", timeout: 9e4, windowsHide: true }) : spawnSync(
   claudeCmd,
   ["-p", PROMPT, "--model", "claude-haiku-4-5-20251001", "--json-schema", SCHEMA, "--tools", "", "--safe-mode", "--no-session-persistence"],
-  { input: "", encoding: "utf8", timeout: 9e4 }
+  { input: "", encoding: "utf8", timeout: 9e4, windowsHide: true }
 );
 if (result.error || result.status !== 0) skipLoud(extractor ? "extractor_failed" : "claude_cli_unavailable");
 var candidates;

@@ -52,7 +52,9 @@ const NOTE_WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.
 
 function spawnNoteExtraction(payload: NoteExtractionPayload): NoteExtractionDispatch {
   if (!existsSync(NOTE_WORKER)) return { dispatched: false, reason: 'worker_script_missing' };
-  const child = spawn(process.execPath, [NOTE_WORKER], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  // windowsHide: a detached console child on Windows otherwise auto-allocates
+  // a visible console window that steals focus on every note capture.
+  const child = spawn(process.execPath, [NOTE_WORKER], { detached: true, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
   // A dead child must not crash the server: 'error' fires async on both the
   // process and its stdin pipe. Nothing to record from here — the worker owns
   // its own check_skipped once running, and pre-exec failures are covered by

@@ -3,6 +3,26 @@
 // (baked into config at init) and (2) the contract-checked fs helpers
 // (fs-remove / fs-move) are allowed. Frontmatter grants the tool; this hook is
 // the restriction.
+//
+// THREAT MODEL — READ THIS BEFORE TREATING H14 AS A SANDBOX (research_finding
+// 08893fc0). H14 enforces SCOPE DISCIPLINE, not code-execution containment. It
+// cannot be the latter, and no tightening of this allowlist would make it so:
+//   * a declared run command is an interpreter invocation. `node --test <file>`
+//     EXECUTES that file's top-level code even when it registers no tests
+//     (probed 2026-07-26, Node 24: a file containing only a console.log printed
+//     it and was reported `tests 1 / pass 1`, exit 0). The shipped node adapter
+//     declares `test: 'node --test'`, so arbitrary execution is reachable in
+//     every Sterling node project by default.
+//   * the agents holding Bash also hold Write. Anything that can author a file
+//     and run a declared interpreter over it can run arbitrary code. Path-scoping
+//     the argument does not change that — the debugger's legitimate probe road is
+//     exactly "write a scratchpad file, run it through the declared command".
+// What H14 DOES buy, and why it stays: agents stay on the project's declared
+// toolchain commands instead of inventing shell; chaining and redirection are
+// denied so an allowed prefix cannot smuggle a second command or redirect into an
+// arbitrary path; find/sed/awk stay denied. Containment lives elsewhere — H3
+// (write contract), H5 (frozen tests), H17 (bash write sweep) — and in Sterling
+// running agents that are already trusted to write code.
 import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
 
 const input = readStdin();

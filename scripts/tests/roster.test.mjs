@@ -6,7 +6,15 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderInstalledAgent, loadRegistry } from '../lib/agent-distribution.mjs';
-import { lintAgentPrompt, checkSpawnContract, collectAgentTemplates, lintSkill, collectSkills } from '../lib/checks.mjs';
+import {
+  lintAgentPrompt,
+  checkSpawnContract,
+  collectAgentTemplates,
+  lintSkill,
+  collectSkills,
+  lintToolGrants,
+  readRegisteredToolNames,
+} from '../lib/checks.mjs';
 import { AGENT_MODEL_KEY, REVIEWER_ROLES } from '@sterling/schemas';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -35,6 +43,10 @@ const ROSTER = [
   'implementation-architect',
   'researcher',
   'explorer',
+  // Conductor-direct agents (adopted from Comsoft): no agent_exit/handoff_write —
+  // they report their signal as the first line of their final text instead.
+  'librarian',
+  'debugger',
 ];
 
 test('the §7.1 roster is registered, linter-complete, and spawn-contracted', () => {
@@ -44,6 +56,61 @@ test('the §7.1 roster is registered, linter-complete, and spawn-contracted', ()
     assert.deepEqual(lintAgentPrompt(t.content, t.file), [], `${t.file} passes the §7.3 linter`);
     assert.deepEqual(checkSpawnContract(t.content, t.file), [], `${t.file} declares required_inputs`);
   }
+});
+
+// Tool-grant linter (board bc272f83). The two historical failures it exists to
+// catch are asserted head-on: a single-prefix grant, and a store-tool grant with
+// no ToolSearch. Both were SILENT in production — the platform ignores an
+// unmounted tool name, so the agent simply lacked the tool.
+test('tool-grant linter: the shipped roster is clean, and it catches every failure in the silent-name class', () => {
+  const registeredTools = readRegisteredToolNames(join(root, 'packages', 'mcp-server', 'src', 'server.ts'));
+
+  // the registered surface is derived from server.ts, not duplicated
+  assert.ok(registeredTools.has('knowledge_query'), 'knowledge_query is a registered tool');
+  assert.ok(registeredTools.has('agent_exit'), 'agent_exit is a registered tool');
+  assert.ok(!registeredTools.has('knowledge_frobnicate'), 'a made-up name is not registered');
+
+  // every shipped template passes
+  for (const t of collectAgentTemplates(TPL)) {
+    assert.deepEqual(lintToolGrants(t.content, t.file, registeredTools), [], `${t.file} passes the tool-grant linter`);
+  }
+
+  const tpl = (tools) => `---\nname: probe\ntools: ${tools}\nrequired_inputs:\n  - x\n---\n\nbody\n`;
+  const kinds = (tools) => lintToolGrants(tpl(tools), 'probe.md', registeredTools).map((v) => v.kind);
+
+  // REGRESSION 1 — the 2026-07-20 defect: only the plugin prefix, dead under --strict-mcp-config
+  assert.ok(
+    kinds('Read, ToolSearch, mcp__plugin_sterling_sterling__knowledge_query').includes('missing_mcp_prefix'),
+    'a single-prefix (plugin-only) grant is caught'
+  );
+  // ...and the mirror image: only the strict prefix, dead under --plugin-dir
+  assert.ok(
+    kinds('Read, ToolSearch, mcp__sterling__knowledge_query').includes('missing_mcp_prefix'),
+    'a single-prefix (strict-only) grant is caught'
+  );
+  // REGRESSION 2 — store tools granted with no ToolSearch: present-but-uncallable
+  assert.ok(
+    kinds('Read, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query').includes('missing_toolsearch'),
+    'a store-tool grant without ToolSearch is caught'
+  );
+  // a typo'd / retired tool name must not pass silently
+  assert.ok(
+    kinds('Read, ToolSearch, mcp__sterling__knowledge_qeury, mcp__plugin_sterling_sterling__knowledge_qeury').includes('unknown_mcp_tool'),
+    'a misspelled tool name is caught'
+  );
+  // a foreign mcp prefix is not silently accepted as a Sterling grant
+  assert.ok(
+    kinds('Read, ToolSearch, mcp__someotherserver__knowledge_query').includes('unknown_mcp_prefix'),
+    'a non-Sterling mcp prefix is caught'
+  );
+  // a correctly-formed dual-prefix grant is clean
+  assert.deepEqual(
+    kinds('Read, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query'),
+    [],
+    'a correct dual-prefix grant passes'
+  );
+  // an agent granting NO store tools needs no ToolSearch
+  assert.deepEqual(kinds('Read, Grep, Glob'), [], 'a store-free agent needs no ToolSearch');
 });
 
 test('AGENT_MODEL_KEY covers every registered agent (totality) and folds the reviewers to one key', () => {

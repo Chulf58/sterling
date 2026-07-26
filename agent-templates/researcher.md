@@ -3,7 +3,7 @@ name: researcher
 description: Bounded online research answering exactly one specific question, under a capped budget. Output is captured as a research_finding with both clocks.
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: WebSearch, WebFetch, Read, mcp__plugin_sterling_sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_create, mcp__plugin_sterling_sterling__handoff_write, mcp__plugin_sterling_sterling__agent_exit
+tools: WebSearch, WebFetch, Read, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_create, mcp__plugin_sterling_sterling__knowledge_create, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - the single question (verbatim)
   - context (why it blocks, what decision it feeds)
