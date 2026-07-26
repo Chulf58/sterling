@@ -1,0 +1,41 @@
+{
+  "id": "6e12c43e-f1f3-4a1b-b999-b860aa3e917e",
+  "type": "feature_article",
+  "created_at": "2026-07-26T13:36:51.165Z",
+  "updated_at": "2026-07-26T13:36:51.165Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [],
+  "scope": "project",
+  "stack_tags": ["sterling"],
+  "slug": "knowledge-transfer-export",
+  "title": "Cross-machine knowledge transfer — the knowledge-export payload convention",
+  "what_it_does": "Owns `knowledge-export/<date>-<machine>/` — the mechanism by which knowledge born in one machine's Sterling store reaches another machine's store, since Sterling stores are per-project/per-machine SQLite files that git never carries (`.sterling/` is gitignored). A payload directory contains one numbered JSON file per record (`NN-<type>-<slug>.json`, records serialized whole) plus a `README.md` carrying: a one-paragraph statement of which session produced it, the corresponding code commit, a CONTENTS TABLE split by scope (project-scoped vs domain-scoped, since they land in different stores), and IMPORT NOTES naming any record in the RECEIVING store that the payload obsoletes. Two payloads exist so far: `2026-07-19-chulf` (H19 retrieval-first build) and `2026-07-26-chulf` (agent tool-grant fix + conductor-direct agent adoption). The directory is TRANSIENT by design — its README instructs the receiving conductor to delete it once imported (P4: transient state removed by the mechanical event that ends its life).",
+  "intended_behavior": "INTENT: move knowledge, not files. The store is the product (P2) but it is machine-local, so the repo is the only shared channel between the chulf and cuj machines — a payload is knowledge in transit, never a second home for it.\n\nEXPORT RULES (derived from the two existing payloads; follow them or the receiving conductor cannot import safely):\n1. Records are serialized WHOLE, exactly as `knowledge_get` returns them — envelope included. The envelope is PROVENANCE, not instruction: the receiving server mints fresh ids, so the exported ids exist to resolve the cross-references that appear throughout the prose.\n2. STRIP `file_baselines` from articles and leave an `_export_note` saying why — they are the exporting machine's content hashes; the receiving server recomputes at create/reconcile. Importing them would assert a reconcile that never happened against that machine's files.\n3. STRIP read-time annotations (`staleness`, `verify_before_use`) — they are computed at read time from the two clocks, not stored facts.\n4. SPLIT the contents table by scope. `scope: project` records go to the project store; `scope: domain:<tag>` records belong in the per-user domain store, and the README must say so rather than leaving the receiver to infer it.\n5. NAME the collateral. If a payload record supersedes or disproves a record that lives ONLY in the receiving store, the README must call it out explicitly as an import action — the exporter cannot make that link (the target id is unreachable from here), so an unstated supersession simply never happens and the receiving store keeps lying.\n6. Import goes through the MCP tool surface (`knowledge_create` per record), never shell writes (H15).\n7. Self-superseding chains that never left the exporting machine ship as the HEAD ONLY; list the superseded ids in the README purely so the `links` array reads honestly.\n\nKNOWN GAP (open, and the reason this article exists rather than a lint): there is NO export script. Both payloads were hand-assembled by the conductor copying `knowledge_get` output into files. That is exactly the P3 violation Sterling normally refuses — deterministic, mechanical work done by judgment — and it carries silent transcription risk on records whose whole value is fidelity. It also makes both READMEs' claim of being 'machine-generated from the live stores' false as written. A `scripts/knowledge-export.mjs` taking record ids and emitting the directory (applying rules 1–3 mechanically) would remove the risk and make the claim true. Not built: the transfer has happened twice in a week, so the recurrence is real but the build was out of scope for the session that surfaced it.\n\nINTERACTIONS: [agent-distribution] — the 2026-07-26 payload carries that article's head plus the decisions behind it. The `sterling-update-procedure` reference doc covers the OPPOSITE direction (repo -> install, code); this covers store -> store, knowledge. Note the asymmetry with `architecture.md`: that is also a store projection committed to the repo, but it is regenerated in place and freshness-checked rather than shipped as a payload — which is why it ping-pongs between machines whose stores differ (unresolved; flagged during the 2026-07-26 push, where the chulf projection was 53 lines against the repo's 65 and was deliberately NOT pushed).",
+  "files": [
+    { "path": "knowledge-export/2026-07-19-chulf/README.md", "role": "payload 1 (H19 retrieval-first build) — import table + notes; transient" },
+    { "path": "knowledge-export/2026-07-26-chulf/README.md", "role": "payload 2 (agent tool-grants + conductor-direct agents) — import table + notes; transient" },
+    { "path": "knowledge-export/2026-07-26-chulf/01-decision-dual-prefix-toolsearch.json", "role": "payload 2 record: decision b4388c11 (project scope)" },
+    { "path": "knowledge-export/2026-07-26-chulf/02-decision-conductor-direct-agent-class.json", "role": "payload 2 record: decision 87f5f982 (project scope)" },
+    { "path": "knowledge-export/2026-07-26-chulf/03-decision-h14-scope-discipline-not-sandbox.json", "role": "payload 2 record: decision 4be0a159 (project scope)" },
+    { "path": "knowledge-export/2026-07-26-chulf/04-research-finding-mcp-prefix-launcher-dependent.json", "role": "payload 2 record: research_finding 34a03611 (domain:sterling)" },
+    { "path": "knowledge-export/2026-07-26-chulf/05-research-finding-h14-not-a-sandbox.json", "role": "payload 2 record: research_finding 08893fc0 (domain:sterling)" },
+    { "path": "knowledge-export/2026-07-26-chulf/06-feature-article-agent-distribution.json", "role": "payload 2 record: feature_article 3882375a v4 (project scope)" }
+  ],
+  "_export_note": "file_baselines stripped — chulf-machine hashes; the receiving server recomputes at create/reconcile. Note this article's own `files` list does not yet include 07 (itself) — it was written before this record existed; reconcile on import.",
+  "current_ac": [
+    { "ac_id": "AC1", "text": "A payload directory contains one whole-record JSON per exported record plus a README whose contents table is split by scope (project vs domain).", "verifiable_at": "final" },
+    { "ac_id": "AC2", "text": "Article payloads carry no `file_baselines` and no read-time annotations (`staleness`, `verify_before_use`), and say so via `_export_note`.", "verifiable_at": "final" },
+    { "ac_id": "AC3", "text": "Every record in the RECEIVING store that a payload supersedes or disproves is named explicitly in the README's import notes — the exporter cannot link it, so an unnamed one never happens.", "verifiable_at": "final" },
+    { "ac_id": "AC4", "text": "Every exported JSON file parses, and its `scope` matches the section of the README table it is listed under.", "verifiable_at": "final" },
+    { "ac_id": "AC5", "text": "The payload directory is deleted from the repo once imported — it is transit, not storage (P4).", "verifiable_at": "final" }
+  ],
+  "dependencies": { "relies_on": ["agent-distribution"], "relied_by": [] },
+  "state": "wired_in",
+  "version": 1,
+  "history": [
+    { "date": "2026-07-26T13:35:00.000Z", "event": "Article created on H10's unowned-territory demand after the 2026-07-26 payload was written and pushed (commit a14515c, branch feat/agent-tool-grants-and-conductor-direct-agents). Territory had been unowned since the first payload on 2026-07-19 — the convention existed only as an example to copy. Captures the seven export rules reverse-engineered from that first payload, and records the standing gap: no export script exists, both payloads were hand-assembled, and both READMEs therefore overclaim 'machine-generated'." }
+  ],
+  "live_test_refs": []
+}

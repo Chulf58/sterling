@@ -1,6 +1,6 @@
 # Knowledge export — chulf machine, 2026-07-26
 
-**Transfer payload, machine-generated from the live stores via the §10 MCP tool surface — not a hand-maintained document.** Produced so the main project store (cuj machine) can absorb the knowledge born on the chulf machine during the agent tool-grant session: fixing the MCP prefix / ToolSearch defect carried in `TODO-agent-tool-prefix.md`, adopting the `librarian` and `debugger` agents from the Comsoft project, and the post-hoc six-hats council (`wf_0d90ab18-436`) that reviewed both. Delete this directory once imported.
+**Transfer payload, assembled from the live stores via the §10 MCP tool surface.** Note honestly: assembled BY HAND (the conductor copying `knowledge_get` output), not by a script — there is no `scripts/knowledge-export.mjs` yet. The 2026-07-19 payload claimed to be "machine-generated"; that was never true of either payload, and record `07` records the gap. Treat the JSON as high-fidelity but not mechanically guaranteed. Produced so the main project store (cuj machine) can absorb the knowledge born on the chulf machine during the agent tool-grant session: fixing the MCP prefix / ToolSearch defect carried in `TODO-agent-tool-prefix.md`, adopting the `librarian` and `debugger` agents from the Comsoft project, and the post-hoc six-hats council (`wf_0d90ab18-436`) that reviewed both. Delete this directory once imported.
 
 Corresponding code: branch `feat/agent-tool-grants-and-conductor-direct-agents`, commit `c176b6f`.
 
@@ -14,6 +14,7 @@ Project-scoped records (from `sterling-main/.sterling/sterling.db`):
 | `02-decision-conductor-direct-agent-class.json` | decision | `87f5f982` | Adopt `librarian` + `debugger` as a marked `conductor_direct` class; roster 9 → 11. The class marking is LOAD-BEARING (registry → `AGENT_CLASS` → `PIPELINE_AGENT_TYPES` → H8), replacing a regression where H8 slice-guarded the new agents. |
 | `03-decision-h14-scope-discipline-not-sandbox.json` | decision | `4be0a159` | H14 enforces scope discipline, NOT code-execution containment — stated honestly in the hook header rather than tightened, because no tightening can work. |
 | `06-feature-article-agent-distribution.json` | feature_article | `3882375a` (v4) | Owning article `agent-distribution` — templates, install/sync, the two agent classes, the tool-grant surface, 8 ACs. Supersedes `0d6a375a`, `5696152c`, `0104f166` (all born this session; only the head matters). |
+| `07-feature-article-knowledge-transfer-export.json` | feature_article | `6e12c43e` | Owning article `knowledge-transfer-export` — **the convention this very directory follows**, written down for the first time: the seven export rules, plus the standing gap that no export script exists. Import this one first if you ever intend to send a payload back. |
 
 Domain-scoped records (from `~/.sterling/domains/sterling/sterling.db` on the chulf machine):
 
