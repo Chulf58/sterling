@@ -1,0 +1,18 @@
+{
+  "id": "08893fc0-4a27-4bc1-b3d0-5220f60e0792",
+  "type": "research_finding",
+  "created_at": "2026-07-26T13:01:43.329Z",
+  "updated_at": "2026-07-26T13:01:43.329Z",
+  "author": "conductor",
+  "status": "active",
+  "superseded_by": null,
+  "links": [],
+  "scope": "domain:sterling",
+  "stack_tags": ["sterling", "node"],
+  "question": "Does H14's deny-by-default Bash allowlist actually prevent arbitrary code execution by agents in a default Sterling node project?",
+  "answer": "NO — it is substantially nominal, and this is a PRE-EXISTING sterling-main property, not something the 2026-07-26 agent adoption introduced.\n\nMECHANISM (verified by reading + live probe, 2026-07-26, CC 2.1.220, Node 24): H14 builds its allowlist as `Object.values(tc.run_commands)` (scripts/hooks/h14-bash-allowlist.mjs:33) and admits a command when `command === p || command.startsWith(p + ' ')` (:49). The shipped node adapter declares `runCommands = { test: 'node --test' }` (scripts/adapters/node.mjs:33). Therefore `node --test <any-path>.mjs` is allowlisted in EVERY Sterling node project by default.\n\nTHE DECISIVE FACT (probed directly): `node --test <file.mjs>` EXECUTES that file's top-level code even when it registers no tests — a file containing only `console.log(\"ARBITRARY-CODE-EXECUTED\")` printed its output and was reported as `tests 1 / pass 1`, exit 0. So the allowlisted `node --test ` prefix is an arbitrary-code-execution channel, not merely a test runner.\n\nREACHABILITY: the agent must also be able to WRITE the file it executes. H3 (scripts/hooks/h3-contract-gate.mjs) denies out-of-repo writes in RUN mode (:51) but ALLOWS them in DIRECT mode (:63). So a conductor-direct Bash+Write agent (e.g. the debugger) can author and execute arbitrary code unblocked; the in-run coder is narrower because H3 blocks its out-of-repo scratchpad write. End-to-end confirmation: a real dispatched `debugger` subagent wrote `<scratchpad>/probe.mjs` and executed it via `node --test`, reporting EXEC=YES.\n\nCONSEQUENCE FOR AN EARLIER CLAIM (corrected): Comsoft's hand-added `probe: \"node\"` run command was described as the thing granting arbitrary `node <script>` to every Bash-holding agent. That is DERIVATIVE, not causal — arbitrary execution was already reachable via the default `node --test` prefix. `probe: \"node\"` only removes the `--test` requirement and the .mjs-shaped framing.\n\nCONSEQUENCE FOR THE DEBUGGER: the shipped debugger template originally declared a FULL-vs-BOUNDED instrumentation mode premised on a project needing to declare a probe command. That premise is false; the template was corrected to document the `node --test <scratchpad>/probe.mjs` idiom, because an agent that wrongly believes it cannot gather evidence will narrate an unfalsified hypothesis (false-blocked is the worst output of a root-causer).\n\nNOT YET ANSWERED (open): whether a Bash allowlist entry can be scoped to an interpreter PLUS an argument path (e.g. `node <scratchpad>/*.mjs`) in current CC hook mechanics — that is the candidate real fix, and it edits a blocking enforcement hook.\n\nSurfaced by the six-hats council run wf_0d90ab18-436 (black hat headline, white hat precondition-closing); both load-bearing claims were then verified directly rather than accepted.",
+  "source_urls": [],
+  "source_date": "2026-07-26",
+  "capture_date": "2026-07-26",
+  "volatility_hint": "stable"
+}
