@@ -78,14 +78,20 @@ try {
   if (owners.length === 0) {
     // Frontier signal (grill answer: solve, not accept) — once per file per session.
     if (guard.frontier_files.includes(rel)) allow();
-    guard.frontier_files.push(rel);
     const notice = renderFrontier(rel);
-    writeGuard(gPath, guard);
+    // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
+    // makes this once-per-session, so writing it before the delivery actually
+    // happens converts any failure into permanent silent loss: nothing retries,
+    // because the next touch sees the file already marked. Ordered this way, a
+    // throw lands in the catch below with the guard untouched, so the next touch
+    // delivers again.
     if (mode === 'enqueue') {
       enqueuePending(pendingPath(input.cwd), { kind: 'frontier', rel, payload: notice, agent_id: input.agent_id ?? 'conductor' });
-      allow();
+    } else {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: notice } }));
     }
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: notice } }));
+    guard.frontier_files.push(rel);
+    writeGuard(gPath, guard);
     allow();
   }
 
@@ -99,14 +105,24 @@ try {
   const blocks = fresh.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap)));
   const payload = renderPayload(rel, blocks);
 
-  guard.records.push(...fresh.map((r) => r.id));
-  writeGuard(gPath, guard);
-
+  // SIDE EFFECT FIRST, GUARD SECOND — see the frontier path above for why.
+  // `fresh.length === 0` at :96 is the short-circuit this guard arms, so a guard
+  // written before a failed delivery silences the article for the whole session
+  // with no residue and no detector. NOTE what this does and does not close: it
+  // fully closes the case where the delivery THROWS (enqueue or stdout). It cannot
+  // close the case where stdout succeeds and the PLATFORM ignores additionalContext
+  // — nothing raises there, so no in-process ordering helps. That case is a
+  // per-platform binary, not an intermittent flake, so it is settled by probing the
+  // rung (board item) and gated by keeping injection_rung at 'prompt' until then
+  // (decision 4e529b83), rather than by permanently double-delivering on inject
+  // rungs to hedge it.
   if (mode === 'enqueue') {
     enqueuePending(pendingPath(input.cwd), { kind: 'delivery', rel, payload, agent_id: input.agent_id ?? 'conductor' });
-    allow();
+  } else {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
   }
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
+  guard.records.push(...fresh.map((r) => r.id));
+  writeGuard(gPath, guard);
   allow();
 } catch (e) {
   // Delivery is an aid, never a gate: internal failure is loud but NON-blocking

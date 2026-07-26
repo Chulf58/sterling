@@ -345,6 +345,60 @@ test('never blocks (AC7): no store, outside-repo path, .sterling tree — always
   }
 });
 
+// Ordering contract (council wf_db9a59aa-0af): the guard is what makes delivery
+// once-per-session, so it must be written only AFTER the delivery side effect
+// actually completed. Written first, any failure becomes permanent silent loss —
+// the next touch sees the article already marked and the `fresh.length === 0`
+// short-circuit turns it into a session-long no-op with no residue.
+// Failure is injected by making pending.json a DIRECTORY: enqueuePending reads
+// before it writes, so readFileSync throws EISDIR.
+test('ordering: a delivery that FAILS leaves the guard unwritten, so the next touch retries instead of losing the article', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const dDir = join(dir, '.sterling', 'transient', 'delivery');
+    mkdirSync(join(dDir, 'pending.json'), { recursive: true });
+
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    // AC7 is "never DENIES a tool call" — exit 2 is the only blocking code. A
+    // delivery failure exits 1: loud on stderr (P5) but non-blocking.
+    assert.notEqual(r.code, 2, 'a delivery failure must never DENY the tool call (AC7)');
+    assert.match(r.stderr, /H19/, 'the failure is loud, not swallowed (P5)');
+    const gPath = join(dDir, 'guard-conductor.json');
+    const guard = existsSync(gPath) ? JSON.parse(readFileSync(gPath, 'utf8')) : { records: [], frontier_files: [] };
+    assert.deepEqual(guard.records, [], 'guard must NOT record a delivery that did not happen');
+
+    rmSync(join(dDir, 'pending.json'), { recursive: true, force: true });
+    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(pendingOf(dir).length, 1, 'the retry delivers — the article was never silently written off');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ordering (frontier): a failed unowned-territory notice leaves the file unmarked, so it retries', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // no owning article for src/orphan.mjs — the frontier path
+    const dDir = join(dir, '.sterling', 'transient', 'delivery');
+    mkdirSync(join(dDir, 'pending.json'), { recursive: true });
+
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
+    assert.notEqual(r.code, 2, 'a frontier-notice failure must never DENY the tool call (AC7)');
+    const gPath = join(dDir, 'guard-conductor.json');
+    const guard = existsSync(gPath) ? JSON.parse(readFileSync(gPath, 'utf8')) : { records: [], frontier_files: [] };
+    assert.deepEqual(guard.frontier_files, [], 'frontier file must NOT be marked when its notice failed to deliver');
+
+    rmSync(join(dDir, 'pending.json'), { recursive: true, force: true });
+    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
+    const pending = pendingOf(dir);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].kind, 'frontier');
+  } finally {
+    cleanup();
+  }
+});
+
 test('h19-clear-session: SessionStart removes guard and queue (whole-session TTL, P4)', () => {
   const { dir, store, cleanup } = makeProject();
   try {

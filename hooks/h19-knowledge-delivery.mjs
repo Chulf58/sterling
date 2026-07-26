@@ -5578,14 +5578,14 @@ try {
   const guard = readGuard(gPath);
   if (owners.length === 0) {
     if (guard.frontier_files.includes(rel)) allow();
-    guard.frontier_files.push(rel);
     const notice = renderFrontier(rel);
-    writeGuard(gPath, guard);
     if (mode === "enqueue") {
       enqueuePending(pendingPath(input.cwd), { kind: "frontier", rel, payload: notice, agent_id: input.agent_id ?? "conductor" });
-      allow();
+    } else {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: notice } }));
     }
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: notice } }));
+    guard.frontier_files.push(rel);
+    writeGuard(gPath, guard);
     allow();
   }
   const fresh = owners.filter((r) => !guard.records.includes(r.id));
@@ -5593,13 +5593,13 @@ try {
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
   const blocks = fresh.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap));
   const payload = renderPayload(rel, blocks);
-  guard.records.push(...fresh.map((r) => r.id));
-  writeGuard(gPath, guard);
   if (mode === "enqueue") {
     enqueuePending(pendingPath(input.cwd), { kind: "delivery", rel, payload, agent_id: input.agent_id ?? "conductor" });
-    allow();
+  } else {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
   }
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
+  guard.records.push(...fresh.map((r) => r.id));
+  writeGuard(gPath, guard);
   allow();
 } catch (e) {
   warnNonBlocking(`H19: knowledge delivery failed for '${rel}': ${e && e.message || e}`);
