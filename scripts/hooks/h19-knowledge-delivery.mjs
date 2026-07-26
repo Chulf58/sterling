@@ -111,11 +111,17 @@ try {
   // with no residue and no detector. NOTE what this does and does not close: it
   // fully closes the case where the delivery THROWS (enqueue or stdout). It cannot
   // close the case where stdout succeeds and the PLATFORM ignores additionalContext
-  // — nothing raises there, so no in-process ordering helps. That case is a
-  // per-platform binary, not an intermittent flake, so it is settled by probing the
-  // rung (board item) and gated by keeping injection_rung at 'prompt' until then
-  // (decision 4e529b83), rather than by permanently double-delivering on inject
-  // rungs to hedge it.
+  // — nothing raises there, so no in-process ordering helps. That case is now PROBED
+  // rather than hypothetical (research_finding 6adaa2ef, decision aa41e2ed): both
+  // surfaces inject on this machine's WSL CLI at CC 2.1.220, interactive as well as
+  // headless, so injection_rung is 'read' here. What that probe does NOT license is
+  // the claim this comment used to make — that the failure is a 'per-platform
+  // binary' settled once. Upstream it is per CC version x client surface x matcher x
+  // tool class (live in the CLI, dead in the VSCode extension; dropped for the Bash
+  // matcher; dropped for MCP calls), so a probe settles one CELL and an unprobed
+  // client or launcher still loses silently. The successor is rung PROVENANCE — fall
+  // back to 'prompt' when the running session is not the probed cell — not
+  // residue-on-inject, which would double-deliver every healthy payload to hedge it.
   if (mode === 'enqueue') {
     enqueuePending(pendingPath(input.cwd), { kind: 'delivery', rel, payload, agent_id: input.agent_id ?? 'conductor' });
   } else {
