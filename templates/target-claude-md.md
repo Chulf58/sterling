@@ -18,8 +18,7 @@
 
 ## Retrieval-first — consult the knowledge base before work
 
-- **Stage retrieval before acting** — `knowledge_query` the area you are about to touch, **articles first, code second.** Pipelines wire this automatically (prep stages the knowledge_pack); inline work must do it deliberately. The store is current reality and rationale; the code is only the implementation.
-- **Delivery helps, it does not excuse you (H19).** Touching a file an article owns puts that article's substance and one-hop pointers into context on its own; touching governed territory that **no** article owns says so loudly. It never blocks a tool call, it cannot cover unowned territory, and it only reacts to what you already touched — so it is a safety net under the rule above, not a replacement for it.
+- **Stage retrieval before acting** — `knowledge_query` the area you are about to touch, **articles first, code second.** Pipelines wire this automatically (prep stages the knowledge_pack); inline work must do it deliberately. The store is current reality and rationale; the code is only the implementation. H19 delivery helps here but does not excuse you: touching a file an article owns puts that article's substance and one-hop pointers into context on its own, and touching governed territory that **no** article owns says so loudly — but it never blocks a tool call, it cannot cover unowned territory, and it only reacts to what you already touched. A safety net under this rule, not a replacement for it.
 
 ## Reconcile-always — every affected article, every change (anti-drift)
 

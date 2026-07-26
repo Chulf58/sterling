@@ -29,6 +29,12 @@ const TARGET_LEADS = [
   '- **Reconcile _every affected_ article, not just the primary one**',
   '- **Concept articles — capture design the moment it settles',
   '- **Wired, not just asked:**',
+  // Added 2026-07-26 so the H19-delivery caveat reaches already-initialized
+  // siblings. It rides INSIDE this existing bullet rather than arriving as a new
+  // one, precisely so the replace path carries it: a bullet with no anchor in the
+  // sibling is reported as drift and never invented (deliberate, P5), so a new
+  // top-level bullet would need an insert capability this script does not have.
+  '- **Stage retrieval before acting**',
 ];
 
 // A block = the bullet line plus continuation lines until the next top-level
