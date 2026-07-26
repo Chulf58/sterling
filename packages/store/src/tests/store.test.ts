@@ -61,6 +61,32 @@ function tempStore() {
   return { dir, store: new SterlingStore(join(dir, 'sterling.db')) };
 }
 
+test('recordIdIndex serves ids at ANY status — tombstones included, which query() never does', () => {
+  const { dir, store } = tempStore();
+  try {
+    const active = store.create(decision());
+    const old = store.create(decision());
+    const replacement = store.supersede(old.id, decision({ updated_at: LATER }));
+
+    const index = store.recordIdIndex();
+    const byId = new Map(index.map((r) => [r.id, r]));
+    assert.equal(byId.get(active.id)?.status, 'active');
+    assert.equal(byId.get(replacement.id)?.status, 'active');
+    assert.equal(byId.get(old.id)?.status, 'superseded', 'the tombstone is in the index — citing history is legitimate');
+    assert.equal(byId.get(old.id)?.type, 'decision');
+    // the contrast that makes this primitive necessary
+    assert.equal(
+      store.query({ types: ['decision'], cap: 50 }).some((r) => r.id === old.id),
+      false,
+      'query() excludes superseded records, so it cannot resolve a citation to one'
+    );
+    assert.equal(index.length, 3);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('WAL mode is active on a file-backed store (§3.1 criterion 6)', () => {
   const { dir, store } = tempStore();
   try {
