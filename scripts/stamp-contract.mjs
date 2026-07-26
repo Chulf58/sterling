@@ -29,6 +29,21 @@ const TARGET_LEADS = [
   '- **Reconcile _every affected_ article, not just the primary one**',
   '- **Concept articles — capture design the moment it settles',
   '- **Wired, not just asked:**',
+  // Added 2026-07-26 so the H19-delivery caveat reaches already-initialized
+  // siblings. It rides INSIDE this existing bullet rather than arriving as a new
+  // top-level one, so the REPLACE path carries it.
+  //
+  // CORRECTED 2026-07-26 (council wf_db9a59aa-0af, black/green/yellow all landed
+  // on it): an earlier version of this comment claimed a new bullet "would need an
+  // insert capability this script does not have". That was FALSE — the insert path
+  // exists at :127-137. What is true is narrower: that path is INDEX-PINNED, firing
+  // only for TARGET_LEADS[1] and anchoring on TARGET_LEADS[0]. A lead appended at
+  // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
+  // call for THIS bullet — but for that reason, not the one first written down.
+  // Note the index pinning is itself a hazard: reordering TARGET_LEADS silently
+  // retargets an insert into seven foreign repos. Generalizing it to a declared
+  // {lead, insertAfter} pair is tracked, not done here.
+  '- **Stage retrieval before acting**',
 ];
 
 // A block = the bullet line plus continuation lines until the next top-level

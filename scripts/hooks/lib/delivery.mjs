@@ -1,4 +1,4 @@
-// H19 knowledge-delivery plumbing (decision fe62546f, concept family
+// H19 knowledge-delivery plumbing (decision 6dfbe675, concept family
 // knowledge-delivery): guard ledger, pending queue, payload rendering.
 // Transient, session-lifecycle-bound (P4): everything under
 // .sterling/transient/delivery/ is cleared by h19-clear-session at SessionStart

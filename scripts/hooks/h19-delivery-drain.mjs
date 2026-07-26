@@ -1,4 +1,4 @@
-// H19 drain — the 'prompt' rung's injection surface (decision fe62546f).
+// H19 drain — the 'prompt' rung's injection surface (decision 6dfbe675).
 // UserPromptSubmit is the one additionalContext seam PROVEN on this platform
 // (H2). File-touch enqueues; this drains one-shot (read+delete, P4) and
 // injects everything pending. One-turn lag is the rung's known cost — the

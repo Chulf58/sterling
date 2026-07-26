@@ -821,8 +821,10 @@ test('AC2: non-reviewer handoffs are entirely unaffected — they land with or w
 });
 
 // --------------------------- note structuring dispatch (board ccb14030) ---------------------------
-// PostToolUse never fires on MCP tool calls (research_finding 5e7d0a78), so
-// knowledgeCreate itself dispatches the bundled worker. These tests pin the
+// knowledgeCreate itself dispatches the bundled worker — originally because
+// PostToolUse did not fire on MCP tool calls (CC 2.1.198), now by decision
+// 5ef11bd4 since that constraint was disproven (research_finding e7bd5c19).
+// These tests pin the
 // dispatch seam; the worker's own behavior stays covered in hooks-full.test.mjs.
 
 test('note create dispatches note-structuring with the hook-shaped payload; success is not a skip', () => {

@@ -4610,19 +4610,19 @@ var configSchema = external_exports.object({
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-4-8", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-4-8", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-4-8", effort: "high" }),
-    coder: modelEffort.default({ model: "claude-sonnet-4-6", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-4-8", effort: "xhigh" }),
-    researcher: modelEffort.default({ model: "claude-sonnet-4-6", effort: "medium" }),
+    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
+    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
+    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
+    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
+    researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     explorer: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
     // (P8); debugger is root-cause judgment — high effort.
-    librarian: modelEffort.default({ model: "claude-sonnet-4-6", effort: "low" }),
-    debugger: modelEffort.default({ model: "claude-sonnet-4-6", effort: "high" })
+    librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
   // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
   // run data, never the reverse. Patterns are JS regex source strings.
@@ -4676,7 +4676,7 @@ var configSchema = external_exports.object({
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
   }).default({}),
-  // H19 knowledge delivery (decision fe62546f). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only

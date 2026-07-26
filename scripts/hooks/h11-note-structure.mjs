@@ -1,8 +1,13 @@
-// H11 — note structuring (spec §6 H11, §3.2.6). NOT a registered hook anymore:
-// PostToolUse never fires on MCP tool calls (verified CC 2.1.198 —
-// research_finding 5e7d0a78, board ccb14030), so the hooks.json registration
-// was retired and the MCP server's knowledgeCreate detach-spawns this script
-// directly on every note create. The stdin payload keeps the PostToolUse hook
+// H11 — note structuring (spec §6 H11, §3.2.6). NOT a registered hook: the MCP
+// server's knowledgeCreate detach-spawns this script directly on every note
+// create. That placement was originally FORCED by the platform — PostToolUse did
+// not fire on MCP tool calls on CC 2.1.198 (research_finding 5e7d0a78, board
+// ccb14030) — but that constraint was DISPROVEN on CC 2.1.215: MCP-matched
+// Pre/PostToolUse both fire and PostToolUse carries tool_response (corrected
+// finding research_finding e7bd5c19; the sterling-domain probe is 782b871d).
+// The server-side trigger therefore stays BY DECISION (5ef11bd4), not by
+// impossibility: it works, it is mode-independent, and it does not ride a
+// platform fact that has already changed once unlogged. Re-probe on CC upgrades. The stdin payload keeps the PostToolUse hook
 // shape ({cwd, tool_input, tool_response}) so the script runs unchanged; it
 // keys on tool_input.type, not the tool name.
 //

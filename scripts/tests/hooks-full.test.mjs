@@ -1045,10 +1045,12 @@ test('H11: a prompt-injected candidate cannot override the trust-bearing envelop
 });
 
 test('H11 is NOT registered in hooks.json — the server spawns the worker (dead MCP hook seam)', () => {
-  // Regression guard, inverted from the original matcher-coverage test:
-  // PostToolUse never fires on MCP tool calls (verified CC 2.1.198 —
-  // research_finding 5e7d0a78, board ccb14030), so the registration was retired
-  // and knowledgeCreate detach-spawns the worker instead. Re-adding the
+  // Regression guard, inverted from the original matcher-coverage test: the
+  // registration was retired and knowledgeCreate detach-spawns the worker
+  // instead. Originally forced by the platform (PostToolUse did not fire on MCP
+  // tool calls on CC 2.1.198, board ccb14030); that premise was disproven on
+  // 2.1.215 (research_finding e7bd5c19) and the seam now stays by decision
+  // 5ef11bd4, so this guard still holds for a different reason. Re-adding the
   // registration would resurrect a fail-silent seam that looks wired but never
   // runs — keep H11 out of hooks.json unless the platform behavior is re-verified.
   const hooksJson = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8'));
