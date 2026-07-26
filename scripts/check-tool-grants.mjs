@@ -2,7 +2,7 @@
 // template names only REAL Sterling tools, names BOTH MCP prefixes for each
 // store tool it grants, and carries ToolSearch when it grants any.
 //
-// Why this check exists (decision b4388c11, research_finding 34a03611): the
+// Why this check exists (decision e7a805b6, research_finding 4211a9f7): the
 // platform silently ignores a `tools:` entry naming an unmounted tool, so a
 // wrong or half-declared grant produces an agent that just lacks the tool and
 // reports nothing. That failure shipped twice before anything checked it.

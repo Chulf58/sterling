@@ -1,4 +1,4 @@
-// H19 knowledge delivery (decision fe62546f, brief retrieval-first-knowledge-
+// H19 knowledge delivery (decision 6dfbe675, brief retrieval-first-knowledge-
 // delivery): file-touch delivery + frontier signal + session guard + drain.
 // AC7 pins the floor everywhere: no path through these hooks may exit 2.
 import { test, before } from 'node:test';

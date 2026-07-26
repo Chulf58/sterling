@@ -42,7 +42,7 @@ export function checkSpawnContract(content, label) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool-grant linter (board bc272f83; decision b4388c11, research_finding 34a03611).
+// Tool-grant linter (board bc272f83; decision e7a805b6, research_finding 4211a9f7).
 // The failure mode this guards is SILENT: Claude Code ignores an agent `tools:`
 // entry naming a tool that is not mounted, so the agent simply lacks it and says
 // nothing. That class has bitten twice — the `mcp__plugin_sterling_sterling__`

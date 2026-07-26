@@ -1,4 +1,4 @@
-// H19 — knowledge delivery (decision fe62546f; concept family
+// H19 — knowledge delivery (decision 6dfbe675; concept family
 // knowledge-delivery). The front half of the learning loop: put the owning
 // article IN FRONT of the agent at file-touch, mechanically — never a gate
 // (AC7: this hook must never exit 2). Registered at PostToolUse

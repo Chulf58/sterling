@@ -31,8 +31,11 @@ export interface ToolDeps {
  * stdin payload for the bundled note-structuring worker
  * (hooks/h11-note-structure.mjs) — mirrors the PostToolUse hook input shape the
  * script was built against, so the worker runs unchanged now that the server,
- * not the platform, spawns it (PostToolUse never fires on MCP tool calls —
- * research_finding 5e7d0a78, board ccb14030).
+ * not the platform, spawns it. That placement was originally forced by the
+ * platform (PostToolUse did not fire on MCP tool calls on CC 2.1.198) but is now
+ * a DECISION (5ef11bd4) — the constraint was disproven on CC 2.1.215, corrected
+ * finding research_finding e7bd5c19, and the seam stays because it works and is
+ * mode-independent.
  */
 export interface NoteExtractionPayload {
   cwd: string;
@@ -255,10 +258,12 @@ export class SterlingTools {
   }
 
   /**
-   * §3.2.6 note structuring, dispatched from the server: PostToolUse hooks
-   * never fire on MCP tool calls (verified on CC 2.1.198 — research_finding
-   * 5e7d0a78, board ccb14030), so knowledge_create itself detach-spawns the
-   * bundled worker — the one seam that provably runs on every note capture.
+   * §3.2.6 note structuring, dispatched from the server: knowledge_create itself
+   * detach-spawns the bundled worker — the one seam that provably runs on every
+   * note capture. Originally because PostToolUse did not fire on MCP tool calls
+   * (CC 2.1.198, board ccb14030); that premise was disproven on CC 2.1.215
+   * (corrected finding research_finding e7bd5c19) and the server-side seam now
+   * stays BY DECISION (5ef11bd4) rather than by platform limit.
    * Fire-and-forget: the worker opens the store at cwd and records its own
    * check_skipped on every failure path; only a dispatch that never starts is
    * recorded here (loud, P5).

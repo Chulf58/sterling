@@ -5,7 +5,7 @@
 // the restriction.
 //
 // THREAT MODEL — READ THIS BEFORE TREATING H14 AS A SANDBOX (research_finding
-// 08893fc0). H14 enforces SCOPE DISCIPLINE, not code-execution containment. It
+// bc00be84). H14 enforces SCOPE DISCIPLINE, not code-execution containment. It
 // cannot be the latter, and no tightening of this allowlist would make it so:
 //   * a declared run command is an interpreter invocation. `node --test <file>`
 //     EXECUTES that file's top-level code even when it registers no tests
