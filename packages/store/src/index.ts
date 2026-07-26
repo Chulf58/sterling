@@ -229,6 +229,25 @@ export class SterlingStore {
   }
 
   /**
+   * Every record id in this store at ANY status, tombstones included, with its
+   * type — the resolution surface for id CITATIONS in tracked source
+   * (check-record-citations). It exists because neither existing read serves
+   * that need: query() deliberately excludes superseded records (AC4), yet
+   * citing a superseded record is legitimate and common — a comment names the
+   * decision that ORIGINALLY justified a design, and history is exactly what it
+   * should cite — while get() resolves any status but only from a FULL id, and
+   * citations in prose are 8-char prefixes. No body fetch, no JSON.parse: ids
+   * and types only, so scanning the whole tree stays cheap.
+   */
+  recordIdIndex(): { id: string; type: string; status: string }[] {
+    return this.db.prepare('SELECT id, type, status FROM records').all() as {
+      id: string;
+      type: string;
+      status: string;
+    }[];
+  }
+
+  /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
    * file-key join) shared by query() and count() — everything EXCEPT the rank
    * (FTS), ordering, and cap. One definition so count() can never drift from

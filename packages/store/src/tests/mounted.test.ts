@@ -238,6 +238,32 @@ test('MountedStores: routes writes by scope, fans query project-first, get spans
   }
 });
 
+test('recordIdIndex fans every mounted store project-first, tombstones included (the citation resolver universe)', () => {
+  const { stores, cleanup } = harness(['genesys', 'fuel-prices']);
+  try {
+    const projectRec = stores.create(ref('project')) as { id: string };
+    const genesysRec = stores.create(ref('domain:genesys')) as { id: string };
+    const fuelRec = stores.create(ref('domain:fuel-prices')) as { id: string };
+    // a tombstone in a DOMAIN store — the shape a cross-store citation hits
+    const replacement = stores.supersede(genesysRec.id, { ...ref('domain:genesys'), updated_at: '2026-06-16T13:00:00.000Z' }) as { id: string };
+
+    const index = stores.recordIdIndex();
+    const ids = index.map((r) => r.id);
+    assert.equal(ids[0], projectRec.id, 'project store first (§3.3 bias)');
+    for (const id of [genesysRec.id, fuelRec.id, replacement.id]) {
+      assert.ok(ids.includes(id), `mounted-store id ${id} is in the index`);
+    }
+    assert.equal(
+      index.find((r) => r.id === genesysRec.id)?.status,
+      'superseded',
+      'a domain tombstone resolves — a project-only lookup would call it dangling'
+    );
+    assert.equal(ids.length, 4);
+  } finally {
+    cleanup();
+  }
+});
+
 test('MountedStores: a write to an unmounted domain is rejected loudly', () => {
   const { stores, cleanup } = harness(['genesys']);
   try {

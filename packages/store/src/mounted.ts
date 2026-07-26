@@ -133,6 +133,15 @@ export class MountedStores {
     return undefined;
   }
 
+  /** Project-first concatenation of every mounted store's id index (any status,
+   *  tombstones included). A citation checker MUST span mounts: legitimately
+   *  cited ids live in the shared domain stores as often as in the project one,
+   *  so a project-only lookup calls them dangling. No dedup needed — a record
+   *  lives in exactly one store. */
+  recordIdIndex(): { id: string; type: string; status: string }[] {
+    return this.all().flatMap((s) => s.recordIdIndex());
+  }
+
   // -- record mutations: route to the store that HOLDS the record --------------
   // A record's scope decided where it lives at create time; a later change has to
   // land in that same store, so these route by where the id actually is — never
