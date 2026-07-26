@@ -383,7 +383,7 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
     // coder resolves to the shipped-default coder model — config.models is the
     // authoritative source at install (matches config.test.ts's shipped default).
     const coderFm = readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8').match(/^---\n([\s\S]*?)\n---/)[1];
-    assert.match(coderFm, /^model: claude-sonnet-4-6$/m, 'coder installs on the shipped-default coder model (config.models authoritative)');
+    assert.match(coderFm, /^model: claude-sonnet-5$/m, 'coder installs on the shipped-default coder model (config.models authoritative)');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
