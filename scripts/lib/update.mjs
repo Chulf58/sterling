@@ -308,13 +308,24 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // Read-only: reports CLAUDE.md contract drift in sibling projects without
   // touching them (--apply stays a deliberate act — it rewrites seven repos).
+  // TOLERATED because a sibling's CLAUDE.md must never abort THIS clone's update —
+  // but tolerated is not the same as unseen: the step's own block sits between
+  // build/test/check output, so its verdict is repeated in the closing summary
+  // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
   if (opts.projects !== false && existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-    step('contract drift in sibling projects (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs')], { show: true, tolerate: true });
+    const contract = step('contract drift in sibling projects (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs')], {
+      show: true,
+      tolerate: true,
+    });
+    report.contract_drift = !contract.ok;
   }
 
   log(
     `\n${'─'.repeat(60)}\n` +
       `Updated: ${before.head_short} → ${after.head_short}${after.describe && after.describe !== after.head_short ? ` (${after.describe})` : ''}\n` +
+      (report.contract_drift
+        ? 'CONTRACT DRIFT in a sibling project — see the stamp-contract block above. Tolerated here (a sibling CLAUDE.md never blocks this clone), and it does NOT self-heal: resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.\n'
+        : '') +
       'RESTART THE SESSION before working: the MCP server and every project subagent load at session start, so the code now on disk is not the code running.'
   );
   return report;
