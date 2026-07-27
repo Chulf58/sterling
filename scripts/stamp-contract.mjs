@@ -49,6 +49,20 @@ const TARGET_LEADS = [
   // retargets an insert into seven foreign repos. Generalizing it to a declared
   // {lead, insertAfter} pair is tracked, not done here.
   '- **Stage retrieval before acting**',
+  // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
+  // had diverged and the stronger text was in Sterling's own CLAUDE.md — so seven
+  // siblings were running weaker conduct rules than the repo that ships them. Both
+  // bullets ALREADY EXIST in every sibling (they were generated from this template),
+  // so these ride the REPLACE path; neither depends on the index-pinned insert above.
+  // APPEND ONLY: reordering this array retargets that insert into foreign repos.
+  '- **Anti-speculation:**',
+  '- **No false action claims:**',
+  // Added 2026-07-27: projects were observed using notes and the maintenance queue
+  // as a todo board. The board/queue/note distinction rides INSIDE the existing
+  // Notes bullet, whose lead is left byte-identical so extractBlock's startsWith
+  // still anchors in every sibling — the fold pattern, for the same reason as the
+  // H19 caveat above: a renamed lead matches nothing and would refuse in all seven.
+  "- **Notes are the user's surface.**",
 ];
 
 // A block = the bullet line plus continuation lines until the next top-level
