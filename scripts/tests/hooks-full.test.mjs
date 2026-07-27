@@ -846,6 +846,61 @@ test('H15 store guard: shell references to the store are denied naming the §10 
   }
 });
 
+// Project-root resolution from a SUBDIRECTORY cwd (board 51b1e2c0). The platform
+// hands a hook the SHELL's working directory, which follows a Bash `cd` — every
+// hook test before this one passed cwd = the project root, which is exactly why
+// 538 green tests never caught it. A `cd` into any subdirectory used to make H3
+// fail closed on 'no Sterling store' while H7/H9/H13/H15/H16/H19 went SILENTLY
+// inert. lib/common.mjs readStdin now normalizes cwd to the nearest ancestor
+// holding .sterling/sterling.db.
+test('hook cwd: a SUBDIRECTORY resolves to the project root; a bare .sterling dir is NOT a root', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const sub = join(dir, 'packages', 'deep', 'nested');
+    mkdirSync(sub, { recursive: true });
+
+    // H15 must still recognise the project from below it — otherwise the store
+    // guard is disarmed by a `cd` (it keys on .sterling/ next to input.cwd)
+    const guarded = runHook(
+      'h15-store-guard.mjs',
+      hookInput(sub, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'sqlite3 .sterling/sterling.db ".tables"' } }),
+      sub
+    );
+    assert.equal(guarded.code, 2, 'H15 gates store access from a subdirectory cwd, not just from the root');
+
+    // H3 must resolve the store from below it. Targeting a NEW file exercises the
+    // creation exemption, so a correctly-resolved H3 ALLOWS — the pre-fix failure
+    // was a deny naming 'no Sterling store', which must not reappear.
+    const creation = runHook(
+      'h3-contract-gate.mjs',
+      hookInput(sub, { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: join(dir, 'brand-new.mjs') } }),
+      sub
+    );
+    assert.doesNotMatch(creation.stderr, /no Sterling store/, 'H3 found the store from a subdirectory cwd');
+    assert.equal(creation.code, 0, 'creation is exempt once the contract can actually be evaluated');
+  } finally {
+    cleanup();
+  }
+
+  // The ~/.sterling trap: a bare .sterling DIRECTORY with no sterling.db is NOT a
+  // project root (on every machine ~/.sterling holds the domain stores + registry.db).
+  // Resolution must key on the DB FILE, so this stays a non-project — silent (P1).
+  const trap = mkdtempSync(join(tmpdir(), 'sterling-trap-'));
+  try {
+    mkdirSync(join(trap, '.sterling', 'domains'), { recursive: true });
+    const sub = join(trap, 'sub');
+    mkdirSync(sub, { recursive: true });
+    const r = runHook(
+      'h15-store-guard.mjs',
+      hookInput(sub, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'sqlite3 .sterling/sterling.db ".tables"' } }),
+      sub
+    );
+    assert.equal(r.code, 0, 'a bare .sterling directory must not be mistaken for a project root');
+  } finally {
+    rmSync(trap, { recursive: true, force: true });
+  }
+});
+
 // H3/H8 fail-closed (audit finding 5/43, board ea2742e0): a BLOCKING gate whose
 // store access throws must DENY (exit 2), never void itself via an uncaught
 // exit 1 (decision 2422e76a's rule, previously applied only to H17/H15).
@@ -878,6 +933,37 @@ test('H3/H8: an unreadable store denies (fail closed) instead of voiding the blo
     assert.match(h8.stderr, /failing closed/);
   } finally {
     cleanup();
+  }
+});
+
+// H9 fail-closed (anti_pattern af5382e4, the F5 class): H9 was the last BLOCKING
+// gate whose store/config access sat in a try/FINALLY with no catch — an
+// unreadable store threw past it and exited 1 (non-blocking), silently voiding
+// the completion backstop. Probed live 2026-07-27: exit 1, uncaught
+// 'file is not a database' from openStore. Absent store vs UNEVALUABLE store
+// must stay distinct: the first is 'not a Sterling project' (allow, P1), only
+// the second is a voided gate (deny, P5).
+test('H9: an unreadable store denies (fail closed); an ABSENT store still allows', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-h9fc-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+
+    // no sterling.db at all — not an initialized project, nothing to gate (P1)
+    const absent = runHook('h9-stop-backstop.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: false }), dir);
+    assert.equal(absent.code, 0, 'an absent store is not a Sterling project — allow, never a spurious block');
+
+    // present but unreadable — the gate cannot evaluate, so it must DENY
+    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'not a sqlite database — corrupt on purpose. '.repeat(100));
+    const corrupt = runHook('h9-stop-backstop.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: false }), dir);
+    assert.equal(corrupt.code, 2, 'a corrupt store denies (fail closed), never a non-blocking exit 1');
+    assert.match(corrupt.stderr, /failing closed/);
+
+    // the loop guard still wins, so a fail-closed H9 can never trap the conductor
+    const looped = runHook('h9-stop-backstop.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: true }), dir);
+    assert.equal(looped.code, 0, 'stop_hook_active short-circuits before any store access — one denial per stop, never a trap');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

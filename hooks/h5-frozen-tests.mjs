@@ -4717,7 +4717,7 @@ var runtimeMarkerSchema = external_exports.object({
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
@@ -4730,8 +4730,21 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (; ; ) {
+    if (existsSync(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function deny(message) {
   process.stderr.write(message);

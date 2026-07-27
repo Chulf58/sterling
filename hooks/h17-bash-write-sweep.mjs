@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h17-bash-write-sweep.mjs
 import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, realpathSync } from "node:fs";
-import { join as join2, dirname as dirname2, relative } from "node:path";
+import { join as join2, dirname as dirname3, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -4796,7 +4796,7 @@ var runtimeMarkerSchema = external_exports.object({
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { join } from "node:path";
+import { dirname as dirname2, join, resolve } from "node:path";
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
@@ -5480,8 +5480,21 @@ var SterlingStore = class {
 };
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (; ; ) {
+    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function deny(message) {
   process.stderr.write(message);
@@ -5588,7 +5601,7 @@ function validateBaselineKey(key) {
 }
 function writeUnder(cwd2, rel, content) {
   const abs = join2(cwd2, rel);
-  mkdirSync2(dirname2(abs), { recursive: true });
+  mkdirSync2(dirname3(abs), { recursive: true });
   writeFileSync(abs, content);
 }
 function parsePorcelainZ(out) {

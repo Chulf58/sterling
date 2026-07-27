@@ -7,11 +7,11 @@ var __export = (target, all) => {
 
 // scripts/hooks/h16-event-register.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3 } from "node:fs";
-import { join as join2, dirname as dirname2 } from "node:path";
+import { join as join2, dirname as dirname3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { join } from "node:path";
+import { dirname as dirname2, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5450,8 +5450,21 @@ var SterlingStore = class {
 };
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (; ; ) {
+    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function allow() {
   process.exit(0);
@@ -5485,7 +5498,7 @@ try {
     detail = String(input.tool_input?.subagent_type ?? "");
   }
   const eventsPath = join2(input.cwd, ".sterling", "transient", "session-events.json");
-  mkdirSync2(dirname2(eventsPath), { recursive: true });
+  mkdirSync2(dirname3(eventsPath), { recursive: true });
   const events = existsSync3(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
   events.push({ kind, detail, at: (/* @__PURE__ */ new Date()).toISOString() });
   writeFileSync(eventsPath, JSON.stringify(events));

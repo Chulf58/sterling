@@ -7,6 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4690,8 +4691,21 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (; ; ) {
+    if (existsSync(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function allow() {
   process.exit(0);
@@ -4699,11 +4713,11 @@ function allow() {
 
 // scripts/hooks/lib/ledger.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync, existsSync as existsSync2, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join as join2, dirname as dirname2 } from "node:path";
 function ledgerPath(cwd, runId, agentId) {
-  if (runId && agentId) return join(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
-  if (agentId) return join(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
-  return join(cwd, ".sterling", "transient", "conductor-reads.json");
+  if (runId && agentId) return join2(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
+  if (agentId) return join2(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
+  return join2(cwd, ".sterling", "transient", "conductor-reads.json");
 }
 function clearLedger(path) {
   if (existsSync2(path)) rmSync(path);

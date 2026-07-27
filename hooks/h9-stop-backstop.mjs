@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { join } from "node:path";
+import { dirname as dirname2, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5446,8 +5446,21 @@ var SterlingStore = class {
 };
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (; ; ) {
+    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function deny(message) {
   process.stderr.write(message);
@@ -5466,7 +5479,7 @@ function openStore(cwd) {
 }
 
 // scripts/lib/promotion.mjs
-function verifyPromotionConditions({ store: store2, config, run }) {
+function verifyPromotionConditions({ store, config, run }) {
   const refusals = [];
   const refuse = (condition, detail) => refusals.push(`${condition}: ${detail}`);
   if (!config.backup_path && !config.backup_opt_out) {
@@ -5475,12 +5488,12 @@ function verifyPromotionConditions({ store: store2, config, run }) {
   if (run.machine_state !== "completing") {
     refuse("wrong_state", `run '${run.id}' is '${run.machine_state}', not 'completing' \u2014 disposal runs only inside the completion sequence (H9)`);
   }
-  const brief = store2.get(run.brief_ref);
+  const brief = store.get(run.brief_ref);
   if (!brief || brief.type !== "brief") {
     refuse("brief_missing", `brief '${run.brief_ref}' not found in the store`);
     return { refusals, article: void 0, brief: void 0 };
   }
-  const articles = store2.query({ types: ["feature_article"], cap: 1e3 }).filter((a) => a.history.some((h) => h.target_id === brief.id));
+  const articles = store.query({ types: ["feature_article"], cap: 1e3 }).filter((a) => a.history.some((h) => h.target_id === brief.id));
   let article;
   if (articles.length === 0) {
     refuse("feature_article_missing", `no active feature_article carries a history entry for brief '${brief.id}' \u2014 the capture gate did not run`);
@@ -5489,17 +5502,17 @@ function verifyPromotionConditions({ store: store2, config, run }) {
   }
   const reconcileIds = /* @__PURE__ */ new Set([...brief.blast_radius.reconcile_list, ...run.reconcile_needed ?? []]);
   for (const id of reconcileIds) {
-    const rec = store2.get(id);
+    const rec = store.get(id);
     if (!rec) {
       refuse("article_unreconciled", `reconcile-list id '${id}' not found in the store`);
     } else if (rec.status === "active" && rec.updated_at < run.started_at) {
       refuse("article_unreconciled", `article '${id}' was not reconciled during the run (updated_at ${rec.updated_at} < run start ${run.started_at})`);
     }
   }
-  const handoffs = store2.readHandoffs(run.id);
+  const handoffs = store.readHandoffs(run.id);
   const reported = handoffs.flatMap((h) => h.decisions_made);
   if (reported.length > 0) {
-    const captured = store2.query({ types: ["decision"], cap: 1e3 }).filter((d) => d.created_at >= run.started_at);
+    const captured = store.query({ types: ["decision"], cap: 1e3 }).filter((d) => d.created_at >= run.started_at);
     if (captured.length === 0) {
       refuse("decisions_uncaptured", `handoffs report ${reported.length} decision(s) made but no decision record was created during the run`);
     }
@@ -5510,7 +5523,7 @@ function verifyPromotionConditions({ store: store2, config, run }) {
       if (!traced.has(ac.ac_id)) refuse("ac_untraced", `AC '${ac.ac_id}' has no live_test_refs entry on article '${article.slug}'`);
     }
     for (const link of article.links.filter((l) => l.rel === "fulfills")) {
-      if (store2.get(link.target_id)) {
+      if (store.get(link.target_id)) {
         refuse("fulfilled_todo_still_on_board", `article fulfills todo '${link.target_id}' but it is still in the store \u2014 done = removed (P4)`);
       }
     }
@@ -5521,9 +5534,9 @@ function verifyPromotionConditions({ store: store2, config, run }) {
 // scripts/hooks/h9-stop-backstop.mjs
 var input = readStdin();
 if (input.stop_hook_active) allow();
-var store = openStore(input.cwd);
-if (!store) allow();
 try {
+  const store = openStore(input.cwd);
+  if (!store) allow();
   const run = store.getRun();
   if (!run || run.machine_state !== "completing") allow();
   const config = loadConfig(input.cwd) ?? {};
@@ -5535,6 +5548,8 @@ try {
   ${outstanding.join("\n  ")}
 Complete capture, then run dispose-run.` : "All promotion conditions look satisfied \u2014 run scripts/dispose-run.mjs to dispose and advance to the merge gate.")
   );
-} finally {
-  store.close();
+} catch (e) {
+  deny(
+    `H9: completion backstop could not evaluate the run (${e && e.message || e}) \u2014 failing closed (P5); fix the store/config, then stop again.`
+  );
 }
