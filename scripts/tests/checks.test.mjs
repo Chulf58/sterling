@@ -195,6 +195,47 @@ test('check-record-citations resolves across MOUNTED stores and at ANY status; f
   }
 });
 
+// Consumer-machine shape (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89): the
+// clone HAS a store — init creates it — but no project-scoped records, because
+// .sterling/ is gitignored and knowledge never travels with the repo. Every
+// citation in the tree then "fails" for want of knowledge, which aborted
+// /sterling:update at its check step. The DOMAIN store here is deliberately
+// populated: the mounted fan is per-machine and non-empty on any machine with
+// other Sterling projects, so the emptiness probe must read the PROJECT store —
+// the first version of this guard probed the fan and never fired.
+test('consumer clone: an empty PROJECT store skips the citation check even when a mounted domain store is full', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-citations-consumer-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(
+      join(dir, '.sterling', 'config.json'),
+      JSON.stringify({ stack_tags: ['fixturedomain'], domain_paths: { fixturedomain: join(dir, 'domain.db') } })
+    );
+
+    const NOW = '2026-06-10T12:00:00.000Z';
+    const domain = new SterlingStore(join(dir, 'domain.db'));
+    domain.create({
+      id: randomUUID(), type: 'decision', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
+      superseded_by: null, links: [], scope: 'domain:fixturedomain', stack_tags: [],
+      title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', file_keys: [],
+    });
+    domain.close();
+    new SterlingStore(join(dir, '.sterling', 'sterling.db')).close(); // project store: created, empty
+
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(dir, 'src.mjs'), '// decision deadbeef from the authoring machine\n'); // not-a-citation: fixture
+    assert.equal(spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' }).status, 0);
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'check-record-citations.mjs'), dir], {
+      encoding: 'utf8', cwd: dir, timeout: 120_000,
+    });
+    assert.equal(r.status, 0, `an empty project store must skip, not fail: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /skipped \(project store holds no records/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('all day-one check scripts pass on the current repo (empty sets pass — invariant 3)', () => {
   // check-bundles-fresh joined the list with R2 7cde1448 (bundle freshness is a
   // tree invariant). check-projection-fresh stays gate-bound only (direct-merge

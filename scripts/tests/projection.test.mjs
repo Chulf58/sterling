@@ -132,3 +132,27 @@ test('§15 projection freshness check (audit finding 25/43): passes when current
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Consumer-machine shape (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89): the
+// clone HAS a store — init creates it — but no articles, because .sterling/ is
+// gitignored and knowledge never travels with the repo. Comparing the committed
+// projection against that store reported staleness that cannot exist there, and
+// it aborted /sterling:update at its check step on every consumer machine.
+test('an initialized store holding NO articles skips the freshness check loudly (consumer clone)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-consumer-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}');
+  try {
+    // store exists, holds nothing; a committed projection from the authoring machine
+    new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
+    writeFileSync(join(dir, 'architecture.md'), '# Architecture\n(store state as of 2026-07-26T20:01:51.260Z)\n');
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'check-projection-fresh.mjs'), dir], {
+      encoding: 'utf8', cwd: dir, timeout: 60_000,
+    });
+    assert.equal(r.status, 0, `an empty store must skip, not fail: ${r.stderr}`);
+    assert.match(r.stdout, /skipped \(store holds no articles/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -17,13 +17,14 @@
 // Plus the type-word rule in lib/checks.mjs: board/todo/note/maintenance ids are
 // NOT required to resolve, because those records are removed when drained (P4).
 //
-// Outside an initialized project (no store) this is a loud no-op pass — the same
-// shape as check-projection-fresh, whose store-reading pattern this mirrors.
+// Outside an initialized project (no store) — and inside one whose PROJECT store
+// holds no records at all, the consumer-clone shape — this is a loud no-op pass:
+// the same shape as check-projection-fresh, whose store-reading pattern this mirrors.
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { openMounted } from './lib/project.mjs';
+import { openMounted, openProject } from './lib/project.mjs';
 import { lintRecordCitations, UNCITED_RECORD_WORDS, CITATION_OPT_OUT, countCitationOptOuts } from './lib/checks.mjs';
 
 const root = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -42,6 +43,30 @@ if (!existsSync(storePath)) {
 //     so its ids are the articles' business, not the tree's (the e1275166 precedent).
 const SCANNED_EXTENSIONS = ['.mjs', '.ts', '.md'];
 const EXCLUDED_PREFIXES = ['docs/historical/', 'hooks/'];
+
+// CONSUMER-CLONE PRECONDITION, one step further in than the no-store skip above
+// (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89). A consumer machine's Sterling
+// clone HAS a store — init creates it — but holds no knowledge, because
+// .sterling/ is gitignored and records never travel with the repo. Every
+// citation in the tree then "fails" for want of knowledge rather than for a bad
+// id, which aborted the consumer update sequence at its check step (verified
+// 2026-07-27 against an init'd empty root: all citations reported unresolved).
+// The probe is the PROJECT store, not the mounted fan: the shared domain stores
+// are per-machine and can hold plenty while this repo's own project-scoped
+// records — what the tree actually cites — are absent, which is exactly what the
+// first version of this guard got wrong. A PARTIALLY populated project store
+// still fails loud: that is the mid-import state this check exists to surface.
+const probe = openProject(root);
+let projectRecordCount;
+try {
+  projectRecordCount = probe.store.recordIdIndex().length;
+} finally {
+  probe.store.close();
+}
+if (projectRecordCount === 0) {
+  console.log('record citations: skipped (project store holds no records — a consumer clone)');
+  process.exit(0);
+}
 
 const { store, config } = openMounted(root);
 let index;
