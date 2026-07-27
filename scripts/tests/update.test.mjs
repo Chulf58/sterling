@@ -237,11 +237,11 @@ function scratchCwd() {
   return mkdtempSync(join(tmpdir(), 'sterling-update-cwd-'));
 }
 
-test('refusal path mutates nothing: no merge, no npm, exit 2', () => {
+test('refusal path mutates nothing: no merge, no npm, exit 2', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 3, dirty: [' M packages/store/src/index.ts'] });
-    const report = runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
 
     assert.equal(report.exit, 2);
     assert.match(report.refusal, /uncommitted changes to tracked files/);
@@ -253,11 +253,11 @@ test('refusal path mutates nothing: no merge, no npm, exit 2', () => {
   }
 });
 
-test('already current: fetches, reports, and runs no build or sync (exit 0)', () => {
+test('already current: fetches, reports, and runs no build or sync (exit 0)', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 0 });
-    const report = runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
 
     assert.equal(report.exit, 0);
     assert.ok(calls.some((c) => c.startsWith('git fetch')));
@@ -268,11 +268,11 @@ test('already current: fetches, reports, and runs no build or sync (exit 0)', ()
   }
 });
 
-test('--check never mutates even when behind', () => {
+test('--check never mutates even when behind', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 5 });
-    const report = runUpdate({ cwd, exec, log: () => {}, projects: [], opts: { check: true } });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [], opts: { check: true } });
 
     assert.equal(report.exit, 0);
     assert.equal(report.currency.behind, 5);
@@ -283,11 +283,11 @@ test('--check never mutates even when behind', () => {
   }
 });
 
-test('behind: fast-forward then build → build:tui → check → test, then the project fan-out', () => {
+test('behind: fast-forward then build → build:tui → check → test, then the project fan-out', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 2, changed: ['packages/store/src/index.ts'] });
-    const report = runUpdate({
+    const report = await runUpdate({
       cwd,
       exec,
       log: () => {},
@@ -313,11 +313,64 @@ test('behind: fast-forward then build → build:tui → check → test, then the
   }
 });
 
-test('npm ci runs only when the lockfile moved', () => {
+// THE BOOTSTRAP DEFECT, found by running the real CLI against a fresh clone:
+// the workspace packages are gitignored, so on a first update NOTHING is built —
+// and the CLI needs @sterling/store to read the project registry. Reading it at
+// startup crashed with ERR_MODULE_NOT_FOUND before the build that would have
+// fixed it. The list is therefore resolved LAZILY, at the fan-out step, which is
+// after the build; this pins that ordering.
+test('the project list is resolved lazily AFTER the build, never at startup', async () => {
+  const cwd = scratchCwd();
+  try {
+    const { exec, calls } = fakeExec({ behind: 1 });
+    let callsWhenResolved = null;
+    const report = await runUpdate({
+      cwd,
+      exec,
+      log: () => {},
+      projects: async () => {
+        callsWhenResolved = [...calls];
+        return [{ name: 'Deepdots', repo_path: '/tmp/deepdots' }];
+      },
+      opts: {},
+    });
+
+    assert.equal(report.exit, 0);
+    assert.ok(callsWhenResolved, 'the loader must be called');
+    assert.ok(callsWhenResolved.includes('npm run build'), 'the build must already have run when the registry is read');
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 1);
+    assert.deepEqual(report.projects.map((p) => p.name), ['Deepdots']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('a lazy project loader is never called when the fan-out is skipped', async () => {
+  const cwd = scratchCwd();
+  try {
+    const { exec } = fakeExec({ behind: 1 });
+    let called = false;
+    await runUpdate({
+      cwd,
+      exec,
+      log: () => {},
+      projects: async () => {
+        called = true;
+        return [];
+      },
+      opts: { projects: false },
+    });
+    assert.equal(called, false, '--no-projects must not even load the registry');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('npm ci runs only when the lockfile moved', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 1, changed: ['package-lock.json', 'packages/store/src/index.ts'] });
-    runUpdate({ cwd, exec, log: () => {}, projects: [], opts: {} });
+    await runUpdate({ cwd, exec, log: () => {}, projects: [], opts: {} });
     const ciIdx = calls.indexOf('npm ci');
     assert.ok(ciIdx !== -1, 'npm ci must run when package-lock.json changed');
     assert.ok(ciIdx < calls.indexOf('npm run build'), 'npm ci must precede the build');
@@ -326,11 +379,11 @@ test('npm ci runs only when the lockfile moved', () => {
   }
 });
 
-test('--no-test skips the battery; --no-projects skips the fan-out', () => {
+test('--no-test skips the battery; --no-projects skips the fan-out', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 1 });
-    runUpdate({
+    await runUpdate({
       cwd,
       exec,
       log: () => {},
@@ -345,11 +398,11 @@ test('--no-test skips the battery; --no-projects skips the fan-out', () => {
   }
 });
 
-test('a failing step stops the sequence loudly (exit 1) — no half-update in silence', () => {
+test('a failing step stops the sequence loudly (exit 1) — no half-update in silence', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 1, failing: 'npm run build' });
-    const report = runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
 
     assert.equal(report.exit, 1);
     assert.ok(calls.includes('git merge --ff-only origin/main'), 'the fast-forward already happened and is reported as standing');
@@ -361,14 +414,14 @@ test('a failing step stops the sequence loudly (exit 1) — no half-update in si
   }
 });
 
-test('a per-project sync refusal surfaces as exit 2 without stopping the other projects', () => {
+test('a per-project sync refusal surfaces as exit 2 without stopping the other projects', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({
       behind: 1,
       syncStatus: (target) => (target === '/tmp/salesforce' ? 2 : 0),
     });
-    const report = runUpdate({
+    const report = await runUpdate({
       cwd,
       exec,
       log: () => {},
@@ -387,7 +440,7 @@ test('a per-project sync refusal surfaces as exit 2 without stopping the other p
   }
 });
 
-test('the init ensure pass runs only when the clone is itself initialized', () => {
+test('the init ensure pass runs only when the clone is itself initialized', async () => {
   const withConfig = scratchCwd();
   const without = scratchCwd();
   try {
@@ -395,11 +448,11 @@ test('the init ensure pass runs only when the clone is itself initialized', () =
     writeFileSync(join(withConfig, '.sterling', 'config.json'), '{}');
 
     const a = fakeExec({ behind: 1 });
-    runUpdate({ cwd: withConfig, exec: a.exec, log: () => {}, projects: [], opts: {} });
+    await runUpdate({ cwd: withConfig, exec: a.exec, log: () => {}, projects: [], opts: {} });
     assert.ok(a.calls.some((c) => c.includes('init.mjs')), 'an initialized clone re-bakes its machine artifacts');
 
     const b = fakeExec({ behind: 1 });
-    runUpdate({ cwd: without, exec: b.exec, log: () => {}, projects: [], opts: {} });
+    await runUpdate({ cwd: without, exec: b.exec, log: () => {}, projects: [], opts: {} });
     assert.equal(b.calls.filter((c) => c.includes('init.mjs')).length, 0);
   } finally {
     rmSync(withConfig, { recursive: true, force: true });

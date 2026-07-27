@@ -156,8 +156,14 @@ export function currencyLine(c) {
 /**
  * The update sequence. Returns { exit, currency, steps, projects, refusal }.
  * exit: 0 ok · 1 a step failed · 2 refused (nothing mutated) or an agent sync refusal.
+ *
+ * `projects` is an array OR a (possibly async) function returning one. The
+ * function form is not a convenience: the CLI cannot read the project registry
+ * until the workspace packages are BUILT, and building them is a step in here —
+ * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
+ * not at startup.
  */
-export function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
+export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
   const report = { exit: 0, currency: null, steps: [], projects: [], refusal: null };
@@ -275,9 +281,12 @@ export function runUpdate({ cwd, exec = defaultExec, log = console.log, projects
   // and the hook commands baked into each project's .claude/agents carry THIS
   // machine's node + hooks paths. A refusal (locally modified agent) is surfaced,
   // never merged, and never stops the other projects.
-  if (opts.projects !== false && projects.length) {
-    log(`\n▸ syncing agents across ${projects.length} registered project(s)`);
-    for (const p of projects) {
+  // Resolved HERE, not at startup: on a fresh clone the registry cannot be read
+  // until the build above has run (see the projects param note).
+  const projectList = opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+  if (opts.projects !== false && projectList.length) {
+    log(`\n▸ syncing agents across ${projectList.length} registered project(s)`);
+    for (const p of projectList) {
       const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
