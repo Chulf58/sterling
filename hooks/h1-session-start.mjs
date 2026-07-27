@@ -5589,7 +5589,13 @@ var CONVENTIONS = [
   "Sterling conventions (injected by H1):",
   `- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don't know, checking" and check.`,
   "- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.",
-  "- Canonical naming: one name per concept, from the registries; phase execution, intake, steps \u2014 kill synonyms on sight."
+  "- Canonical naming: one name per concept, from the registries; phase execution, intake, steps \u2014 kill synonyms on sight.",
+  // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
+  // reach every project at its next session start with no per-project copy and no
+  // stamp-contract propagation — the same reason the todo/note routing lines live on
+  // the commands. Stated because the user was otherwise re-declaring them per project.
+  "- Subagents and workflows are OPT-IN, never a default: do not spawn an ad-hoc Agent or run a Workflow unless the user asked for it \u2014 the fan-out cost is theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work, not this.",
+  "- Every spawned agent carries an EXPLICIT pinned model (judgment \u2192 opus, mechanical \u2192 sonnet/haiku). A dispatch must never silently inherit the session model."
 ].join("\n");
 var BANNER_ROWS = [
   "\u2584\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588   \u2580\u2588\u2580 \u2588\u2584 \u2588 \u2584\u2580\u2580\u2584",
