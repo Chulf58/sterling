@@ -29,9 +29,22 @@ const { store } = openProject(root);
 let newest;
 try {
   const articles = store.query({ types: ['feature_article'], cap: 1000 });
-  newest = articles.map((a) => a.updated_at).sort().at(-1) ?? 'empty store';
+  newest = articles.map((a) => a.updated_at).sort().at(-1) ?? null;
 } finally {
   store.close();
+}
+
+// An initialized store holding NO articles is the same situation as no store at
+// all, one step further in: a consumer machine's Sterling clone has a store
+// (init creates it) but no knowledge (.sterling/ is gitignored, so the articles
+// never travel with the repo). Comparing the committed projection against an
+// empty store reports staleness that cannot exist there — and it aborted the
+// consumer update sequence at its check step (decision
+// e6240afe-e94b-4c1f-8eed-bafe32fb4d89, verified 2026-07-27 against an init'd
+// empty root). Skip LOUD, never silently pass.
+if (newest === null) {
+  console.log('projection freshness: skipped (store holds no articles — a consumer clone)');
+  process.exit(0);
 }
 
 const header = readFileSync(archPath, 'utf8').slice(0, 400);
