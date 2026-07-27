@@ -10,6 +10,7 @@ import { rmSync, existsSync as existsSync2 } from "node:fs";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4693,17 +4694,30 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir2 = resolve(String(from));
+  for (; ; ) {
+    if (existsSync(join(dir2, ".sterling", "sterling.db"))) return dir2;
+    const parent = dirname(dir2);
+    if (parent === dir2) return null;
+    dir2 = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function allow() {
   process.exit(0);
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { join, dirname } from "node:path";
+import { join as join2, dirname as dirname2 } from "node:path";
 function deliveryDir(cwd) {
-  return join(cwd, ".sterling", "transient", "delivery");
+  return join2(cwd, ".sterling", "transient", "delivery");
 }
 
 // scripts/hooks/h19-clear-session.mjs

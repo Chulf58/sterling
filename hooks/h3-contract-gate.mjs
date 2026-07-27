@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h3-contract-gate.mjs
 import { existsSync as existsSync5 } from "node:fs";
-import { isAbsolute, join as join4, dirname as dirname4 } from "node:path";
+import { isAbsolute, join as join4, dirname as dirname5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -4806,7 +4806,7 @@ var runtimeMarkerSchema = external_exports.object({
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { join } from "node:path";
+import { dirname as dirname2, join, resolve } from "node:path";
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
@@ -5490,8 +5490,21 @@ var SterlingStore = class {
 };
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (; ; ) {
+    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function deny(message) {
   process.stderr.write(message);
@@ -5534,7 +5547,7 @@ function repoRel(toolPath2, cwd2) {
 
 // scripts/hooks/lib/ledger.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
-import { join as join2, dirname as dirname2 } from "node:path";
+import { join as join2, dirname as dirname3 } from "node:path";
 function ledgerPath(cwd2, runId, agentId) {
   if (runId && agentId) return join2(cwd2, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
   if (agentId) return join2(cwd2, ".sterling", "transient", "reads", `agent-${agentId}.json`);
@@ -5549,7 +5562,7 @@ function hasRead(path, repoRelPath) {
 
 // scripts/hooks/lib/contract.mjs
 import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, existsSync as existsSync4 } from "node:fs";
-import { join as join3, dirname as dirname3 } from "node:path";
+import { join as join3, dirname as dirname4 } from "node:path";
 function debugScopePath(cwd2) {
   return join3(cwd2, ".sterling", "transient", "debug-scope.json");
 }
@@ -5587,7 +5600,7 @@ var toolPath = input.tool_input?.file_path;
 var rel = repoRel(toolPath, cwd);
 if (input.agent_id && toolPath) {
   const fwd = String(toolPath).replace(/\\/g, "/");
-  const hooksDir = dirname4(fileURLToPath(import.meta.url)).replace(/\\/g, "/");
+  const hooksDir = dirname5(fileURLToPath(import.meta.url)).replace(/\\/g, "/");
   if (fwd === hooksDir || fwd.startsWith(hooksDir + "/")) {
     deny(`H3 [self-protection]: '${toolPath}' is inside the bundled hooks directory \u2014 the enforcement surface is never agent-editable, in any mode (\xA76 H3)`);
   }

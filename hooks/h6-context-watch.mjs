@@ -7,11 +7,11 @@ var __export = (target, all) => {
 
 // scripts/hooks/h6-context-watch.mjs
 import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
-import { join as join2, dirname as dirname2 } from "node:path";
+import { join as join2, dirname as dirname3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { join } from "node:path";
+import { dirname as dirname2, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5450,8 +5450,21 @@ var SterlingStore = class {
 };
 
 // scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (; ; ) {
+    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 function readStdin() {
-  return JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input2.cwd);
+  if (root) input2.cwd = root;
+  return input2;
 }
 function deny(message) {
   process.stderr.write(message);
@@ -5569,7 +5582,7 @@ try {
   const fill = fillPct(usage, windowSize);
   if (input.hook_event_name === "PostToolUse") {
     const fillsPath = run ? join2(input.cwd, ".sterling", "runs", run.id, "h6-fills.jsonl") : join2(input.cwd, ".sterling", "transient", "h6-fills.jsonl");
-    mkdirSync2(dirname2(fillsPath), { recursive: true });
+    mkdirSync2(dirname3(fillsPath), { recursive: true });
     appendFileSync(
       fillsPath,
       JSON.stringify({ agent_id: input.agent_id, agent_type: input.agent_type, fill_pct: fill, model, at: now }) + "\n"
