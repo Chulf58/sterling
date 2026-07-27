@@ -8,7 +8,11 @@
 //     print the diff, leave the file untouched (P5).
 //   - a missing anchor bullet is drift → reported, never invented.
 //   - dry-run by default; --apply writes.
-//   node scripts/stamp-contract.mjs [--apply] [--project <repo_path>...]
+//   - QUIET ON CLEAN: an in-sync project prints nothing and is counted in the
+//     summary; --verbose restores the per-bullet listing. The caller that matters
+//     is /sterling:update, where this block sits between build/test/check output
+//     and a per-bullet inventory would bury the rare refusal (P1).
+//   node scripts/stamp-contract.mjs [--apply] [--verbose] [--project <repo_path>...]
 import { readFileSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname, resolve } from 'node:path';
@@ -16,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 
 const APPLY = process.argv.includes('--apply');
+const VERBOSE = process.argv.includes('--verbose');
 const onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === '--project' && process.argv[i + 1]) onlyProjects.push(resolve(process.argv[++i]));
@@ -154,18 +159,35 @@ for (const p of projects) {
   results.push({ project: p.name, status: 'processed', file: claudeMd, actions });
 }
 
+// QUIET ON CLEAN, LOUD ON DRIFT (P1). A fully in-sync project prints nothing —
+// it is counted in the summary instead. This runs inside /sterling:update between
+// the build/test/check blocks, where one 'matches' line per bullet per project
+// (28 lines for seven clean siblings, observed 2026-07-27) buries the rare ✗ in a
+// wall of green. Attention is spent only where something needs doing; --verbose
+// restores the full per-bullet listing when you actually want the inventory.
+let inSync = 0;
 for (const r of results) {
   if (r.status !== 'processed') {
     console.log(`✗ ${r.project}: ${r.status} (${r.detail})`);
     continue;
   }
+  const notable = r.actions.filter((a) => a.action !== 'matches');
+  if (!notable.length) {
+    inSync++;
+    if (!VERBOSE) continue;
+  }
   console.log(`${r.actions.some((a) => a.action.includes('REFUSED')) ? '✗' : '•'} ${r.project} (${r.file})`);
-  for (const a of r.actions) {
+  for (const a of VERBOSE ? r.actions : notable) {
     console.log(`    ${a.action}  ${a.lead.slice(0, 60)}…`);
     if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):\n      ${a.have.split('\n').join('\n      ')}`);
   }
 }
-console.log(`\n${APPLY ? 'APPLIED' : 'DRY-RUN (no writes; pass --apply)'} — ${results.filter((r) => r.status === 'processed').length} project(s) processed, ${drift} refusal(s).`);
+const processed = results.filter((r) => r.status === 'processed').length;
+console.log(
+  `\n${APPLY ? 'APPLIED' : 'DRY-RUN (no writes; pass --apply)'} — ${processed} project(s) processed, ` +
+    `${inSync} already in sync, ${drift} refusal(s).` +
+    (!VERBOSE && inSync ? ' Pass --verbose to list the in-sync bullets.' : '')
+);
 if (drift) {
   console.error('stamp-contract: drift refused above — resolve by hand (the sibling text differs from every template version) and re-run.');
   process.exit(2);

@@ -195,7 +195,7 @@ test('describe surfaces an annotated tag as the human-legible version; no tags s
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 
-function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0 } = {}) {
+function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, contractStatus = 0 } = {}) {
   const calls = [];
   let merged = false;
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -222,6 +222,10 @@ function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = n
       return ok('');
     }
     if (cmd === 'npm') return ok('npm output');
+    // stamp-contract exits 2 on a refusal it will not auto-resolve
+    if (args[0]?.endsWith('stamp-contract.mjs')) {
+      return { status: contractStatus, stdout: contractStatus ? '✗ comsoft: HAND_TUNED_REFUSED\n' : '7 already in sync, 0 refusal(s).\n', stderr: '' };
+    }
     // node <script> --target <dir>
     if (args[0]?.endsWith('sync-agents.mjs')) {
       const status = syncStatus(args[2]);
@@ -411,6 +415,36 @@ test('a failing step stops the sequence loudly (exit 1) — no half-update in si
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// The stamp-contract step is deliberately TOLERATED (a sibling's CLAUDE.md must
+// never abort this clone's update) — but tolerated used to mean its verdict lived
+// only in a block sandwiched between build/test/check output. The closing summary
+// now repeats it, so a refusal cannot scroll past (P1/P5).
+test('sibling contract drift is tolerated but repeated in the closing summary, never only in the scrolled-past block', async () => {
+  for (const [contractStatus, expectDrift] of [
+    [2, true],
+    [0, false],
+  ]) {
+    const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-contract-'));
+    try {
+      mkdirSync(join(cwd, 'scripts'), { recursive: true });
+      writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
+      const { exec, calls } = fakeExec({ behind: 1, contractStatus });
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [], opts: {} });
+      const out = lines.join('\n');
+
+      assert.ok(calls.some((c) => c.includes('stamp-contract.mjs')), 'the dry run runs either way');
+      assert.equal(report.contract_drift, expectDrift, 'the report carries the verdict for callers');
+      assert.equal(report.exit, 0, "a sibling's CLAUDE.md never blocks this clone's update");
+      assert.equal(/CONTRACT DRIFT/.test(out), expectDrift, 'the summary names drift only when there is drift');
+      if (expectDrift) assert.match(out, /stamp-contract\.mjs --apply/, 'and names the command that fixes it');
+      assert.match(out, /RESTART THE SESSION/, 'the restart instruction survives either way');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   }
 });
 
