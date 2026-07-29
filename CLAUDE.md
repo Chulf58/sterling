@@ -118,7 +118,7 @@ Sterling is initialized in its own repo (`/sterling:init`). The sections below a
 - Stack tags (= domain mount manifest, §3.3): node, typescript, sterling
 - Toolchains: node (**/*.mjs, **/*.ts)  <!-- path globs → adapter; test-path globs; run commands -->
 - Domain stores (one shared store per stack tag): ~/.sterling/domains/node/, ~/.sterling/domains/typescript/, ~/.sterling/domains/sterling/ — created lazily on first need (§2.3)
-- Backup path: C:/Users/cuj/.sterling-backups/sterling
+- Backup path: configured — see `.sterling/config.json` → `backup_path` (machine-local, deliberately not restated here)
 
 ## Conventions (lean — grows only via architecture-altering decision records)
 
