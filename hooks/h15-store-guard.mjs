@@ -4585,7 +4585,7 @@ var configSchema = external_exports.object({
     coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
+    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
