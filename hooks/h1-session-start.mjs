@@ -4670,7 +4670,7 @@ var configSchema = external_exports.object({
     coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
+    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
@@ -5622,7 +5622,11 @@ var CONVENTIONS = [
   "- Delegation: FIVE concurrent subagents is a CEILING, not a target \u2014 there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real \u2014 speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.",
   '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind \u2014 being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" \u2014 it is the conductor reading files by hand that an agent should have read for it.',
   `- The Workflow tool stays OPT-IN and needs the user's explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting \u2014 its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.`,
-  `- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring and mechanical work, haiku where a cheap read is genuinely enough (the registered explorer runs haiku BY DESIGN \u2014 do not "upgrade" it for tidiness). NEVER Fable without the user's prior agreement for that specific spawn, and never a silent inherit of the session model.`
+  // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
+  // the rationale lives in the store (decision + the paired-exploration research_finding), and
+  // conventions injected on every session stay short to stay read.
+  "- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring, exploration and mechanical work. NEVER haiku for a spawned agent, and NEVER Fable without the user's prior agreement for that specific spawn \u2014 and never a silent inherit of the session model.",
+  '- A SUBAGENT RESULT IS EVIDENCE, NOT A VERDICT. Treat every exhaustiveness claim in an agent report ("all N files", "every hook", "ruled out none") as unverified until you have the count yourself \u2014 measured 2026-07-29, explorers at two different tiers BOTH asserted "all N" from a partial sweep. One grep -c is cheaper than a conclusion built on one.'
 ].join("\n");
 var BANNER_ROWS = [
   "\u2584\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588   \u2580\u2588\u2580 \u2588\u2584 \u2588 \u2584\u2580\u2580\u2584",
