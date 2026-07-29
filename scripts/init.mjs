@@ -206,7 +206,15 @@ const expectedClaudeMd = assertNoDeadTerms('CLAUDE.md', readFileSync(join(plugin
   .replaceAll('{{DOMAINS}}', eff.stackTags.length
     ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — created lazily on first need (§2.3)'
     : '(none — declare stack tags to mount domain stores)')
-  .replaceAll('{{BACKUP_PATH}}', eff.backupPath ? eff.backupPath : '(opted out — recorded)')
+  // WHETHER backups are on is a project fact; WHERE they go is a machine fact,
+  // and this file is tracked. Baking the absolute path made CLAUDE.md differ per
+  // machine forever — on the self-hosted clone, shared between two machines, that
+  // is a permanently dirty tracked file, which `update.mjs` refuses on (exit 2)
+  // before it does anything. So /sterling:update could never run without first
+  // stashing this one line by hand. Config holds the value; this states the fact.
+  .replaceAll('{{BACKUP_PATH}}', eff.backupPath
+    ? 'configured — see `.sterling/config.json` → `backup_path` (machine-local, deliberately not restated here)'
+    : '(opted out — recorded)')
   .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)'));
 const claudeMdPath = join(target, 'CLAUDE.md');
 if (!existsSync(claudeMdPath)) {
