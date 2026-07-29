@@ -125,6 +125,28 @@ for (const file of files) {
   violations.push(...found);
 }
 
+// STORE AUTHORITY, one step further in than the consumer-clone skip above (config
+// `store_authority`). That skip covers an EMPTY project store; this covers the
+// other shape the same cause produces — a store holding plenty of records under
+// ITS OWN ids while the tree cites another store's. Only the minting store can
+// read a dangling citation as a defect; anywhere else every citation looks
+// dangling for want of that id namespace, so the arm reports and passes instead
+// of halting a check run nobody there can fix (P1). Never silent: the full list
+// still prints, and the ok line names the setting, so a weakened arm is never
+// mistaken for a clean one (P5).
+const authority = config?.store_authority ?? 'primary';
+
+if (violations.length > 0 && authority === 'secondary') {
+  console.log(
+    `record citations: ${violations.length} citation(s) do not resolve — REPORTED, NOT FAILED (store_authority='secondary'):`
+  );
+  for (const v of violations) console.log(`  [${v.kind}] ${v.detail}`);
+  console.log(
+    "  This store did not mint the ids the tree cites, so a dangling id here is expected rather than a defect — and by the same token a citation written HERE is unchecked. On the store that mints them, leave store_authority='primary' (the default), where these must resolve."
+  );
+  process.exit(0);
+}
+
 if (violations.length > 0) {
   console.error(`record citations FAILED: ${violations.length} citation(s) do not resolve:`);
   for (const v of violations) console.error(`  [${v.kind}] ${v.detail}`);
@@ -137,5 +159,6 @@ if (violations.length > 0) {
 console.log(
   `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${index.length} records; ` +
     `${optOuts} line(s) opted out via '${CITATION_OPT_OUT}'; ` +
+    `store_authority=${authority}; ` +
     `${UNCITED_RECORD_WORDS.join('/')} ids excluded by design — those records are removed when drained)`
 );

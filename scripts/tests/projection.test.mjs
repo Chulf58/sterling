@@ -156,3 +156,41 @@ test('an initialized store holding NO articles skips the freshness check loudly 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The shape the empty-store skip above misses: a store with PLENTY of articles
+// that still did not produce the committed projection. Unique among the battery,
+// this arm's stated remedy would do harm on such a store — regenerating from a
+// smaller store projects a smaller architecture.md, regressing a shared file.
+test("store_authority 'secondary': a projection this store did not produce is reported, not failed, and never regenerated", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-authority-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const writeConfig = (authority) =>
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_authority: authority }));
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store.create(articleRec('brain-signal-protocol', 'g'));
+    store.close();
+    // a committed projection stamped from ANOTHER store — mismatched by construction
+    const committed = '# Architecture\n(store state as of 2099-01-01T00:00:00.000Z)\n';
+    writeFileSync(join(dir, 'architecture.md'), committed);
+
+    const runFresh = () =>
+      spawnSync(process.execPath, [join(root, 'scripts', 'check-projection-fresh.mjs'), dir], {
+        encoding: 'utf8', cwd: dir, timeout: 60_000,
+      });
+
+    writeConfig('secondary');
+    const secondary = runFresh();
+    assert.equal(secondary.status, 0, `a secondary store must pass: ${secondary.stdout}${secondary.stderr}`);
+    assert.match(secondary.stdout, /REPORTED, NOT FAILED/);
+    assert.match(secondary.stdout, /do NOT regenerate here/, 'the harm must be named, not just the drift (P5)');
+    assert.equal(readFileSync(join(dir, 'architecture.md'), 'utf8'), committed, 'the check never rewrites the projection');
+
+    writeConfig('primary');
+    const primary = runFresh();
+    assert.equal(primary.status, 1, 'the producing store must still fail on a lagging projection');
+    assert.match(primary.stderr, /stale|Regenerate/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

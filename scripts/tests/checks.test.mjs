@@ -236,6 +236,61 @@ test('consumer clone: an empty PROJECT store skips the citation check even when 
   }
 });
 
+// The OTHER shape the same cause produces, and the one the empty-store skip above
+// misses: a store holding plenty of records under ITS OWN ids while the tree cites
+// another store's. Knowledge crosses machines as an export payload whose ids the
+// receiving server re-mints, so the citing tree is shared while the id namespace
+// is not — and the arm cannot tell a foreign id from a typo. Only the minting
+// store can, so only it fails (config `citations.id_authority`).
+test("store_authority: 'secondary' reports unresolved citations and passes; 'primary' fails on the same tree", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-citations-authority-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const writeConfig = (authority) =>
+      writeFileSync(
+        join(dir, '.sterling', 'config.json'),
+        JSON.stringify({
+          stack_tags: ['fixturedomain'],
+          domain_paths: { fixturedomain: join(dir, 'domain.db') },
+          store_authority: authority,
+        })
+      );
+
+    // A POPULATED project store — this is what makes the empty-store skip miss it.
+    const NOW = '2026-06-10T12:00:00.000Z';
+    const project = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    project.create({
+      id: randomUUID(), type: 'decision', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
+      superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      title: 'locally minted', statement: 's', alternatives_rejected: [], rationale: 'r', file_keys: [],
+    });
+    project.close();
+    new SterlingStore(join(dir, 'domain.db')).close();
+
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(dir, 'src.mjs'), '// decision deadbeef minted on the other machine\n'); // not-a-citation: fixture
+    assert.equal(spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' }).status, 0);
+
+    const run = () =>
+      spawnSync(process.execPath, [join(root, 'scripts', 'check-record-citations.mjs'), dir], {
+        encoding: 'utf8', cwd: dir, timeout: 120_000,
+      });
+
+    writeConfig('secondary');
+    const secondary = run();
+    assert.equal(secondary.status, 0, `a secondary store must pass: ${secondary.stdout}${secondary.stderr}`);
+    assert.match(secondary.stdout, /REPORTED, NOT FAILED/);
+    assert.match(secondary.stdout, /citation_unresolved/, 'passing must not mean going quiet (P5)');
+
+    writeConfig('primary');
+    const primary = run();
+    assert.equal(primary.status, 1, 'the minting store must still fail on an id that resolves to nothing');
+    assert.match(primary.stderr, /citation_unresolved/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('all day-one check scripts pass on the current repo (empty sets pass — invariant 3)', () => {
   // check-bundles-fresh joined the list with R2 7cde1448 (bundle freshness is a
   // tree invariant). check-projection-fresh stays gate-bound only (direct-merge
