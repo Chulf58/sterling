@@ -4712,6 +4712,34 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Whether THIS project store is the one the repo's shared, store-DERIVED
+  // artifacts are produced from. Two exist: record-id citations in tracked source,
+  // and the committed architecture.md projection. Both are checked into git while
+  // the store that produces them is NOT (.sterling/ is gitignored), so on any
+  // store but the producing one they read as broken when they are merely foreign.
+  // Record ids make this concrete: an id is minted by the store that first created
+  // the record, and knowledge crosses machines as an export payload whose ids the
+  // receiving server RE-MINTS, so one record ends up with a different id per store.
+  //
+  // 'primary'   — this store mints the ids the tree cites and owns the projection.
+  //               A dangling citation (a typo, or a record never created) and a
+  //               stale projection are real defects here. Both arms fail.
+  // 'secondary' — the tree cites another store's id namespace, and the committed
+  //               projection was generated from that store. Neither is verifiable
+  //               here, and REGENERATING the projection here would actively regress
+  //               a shared file, since a smaller store projects a smaller document.
+  //               Both arms report in full and exit 0 (P1 — a gate that cannot
+  //               change an outcome is ceremony; P5 — it never goes quiet, and each
+  //               pass line names the setting so a weakened arm is never mistaken
+  //               for a clean one).
+  //
+  // KNOWN COST, not a side effect: under 'secondary' a citation written on THAT
+  // machine goes unchecked too — the arm cannot tell it from a foreign one. What
+  // removes the need for this knob entirely is preserving origin ids on import, so
+  // a record carries one id everywhere; see the decision 'Citation and projection
+  // authority is per-store' (cited by title, not id, deliberately — citing its id
+  // here would itself dangle on every store but the one that minted it).
+  store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
