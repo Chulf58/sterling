@@ -4704,6 +4704,17 @@ var configSchema = external_exports.object({
   article_demand: external_exports.object({
     min_unowned_files: external_exports.number().int().positive().default(3)
   }).default({}),
+  // §3.2.7 H1 queue-depth signal: at or above this many open maintenance items,
+  // SessionStart tells the CONDUCTOR the queue is deep and wants draining — not
+  // just the human. The counts have always been computed and sent as a
+  // systemMessage the MODEL never sees, on the reasoning that an event-drained
+  // queue is otherwise noise; that holds while it is shallow and fails once it is
+  // not. A consuming project reached 63 items, most of them work already finished
+  // and never closed, with nothing prompting a drain (reported 2026-07-29).
+  // Below the threshold H1 stays silent to the model (P1 — no ceremony).
+  maintenance_queue: external_exports.object({
+    deep_threshold: external_exports.number().int().positive().default(15)
+  }).default({}),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
@@ -4863,6 +4874,7 @@ function deepReplaceString(value, from, to) {
 }
 var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+var DEFAULT_QUERY_CAP = 20;
 var SterlingStore = class {
   db;
   constructor(path) {
@@ -4942,7 +4954,7 @@ var SterlingStore = class {
   }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
-    const cap = opts.cap ?? 20;
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
     const { where, params, fileKeys } = this.baseFilter(opts);
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);

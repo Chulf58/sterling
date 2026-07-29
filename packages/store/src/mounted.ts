@@ -11,7 +11,7 @@
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, type QueryOptions } from './index.js';
+import { SterlingStore, DEFAULT_QUERY_CAP, type QueryOptions } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 
 /** A domain store to mount: its manifest name + its already-resolved DB path. */
@@ -84,9 +84,18 @@ export class MountedStores {
    *  internally bm25-ranked — §3.3 project-store-first bias) and the overall cap
    *  re-applies. A unified cross-store bm25 re-rank is a later refinement. */
   query(opts: QueryOptions = {}): DurableRecord[] {
-    const cap = opts.cap ?? 20;
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
     const merged = this.all().flatMap((s) => s.query(opts));
     return merged.slice(0, cap);
+  }
+
+  /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
+   *  query(), summed project-first across every mounted store (countBySource is
+   *  the same fan, kept per-source for the TUI's badges). No body fetch. The tool
+   *  layer reports it so a capped retrieval can say how many records matched the
+   *  filter it was given, instead of presenting its window as the whole store. */
+  count(opts: QueryOptions = {}): number {
+    return this.countBySource(opts).reduce((n, s) => n + s.count, 0);
   }
 
   /** Per-source projection (AC2): project store FIRST, then each mounted domain

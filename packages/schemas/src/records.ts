@@ -472,6 +472,46 @@ export type DurableRecord =
   | z.infer<typeof todoSchema>
   | z.infer<typeof briefSchema>;
 
+/**
+ * The field names a registered type actually accepts, derived from its own
+ * schema so nothing is listed twice (invariant 1). Each record schema is
+ * base.extend({...}).superRefine(...), i.e. a ZodEffects wrapping the object, so
+ * the shape has to be unwrapped rather than read off the top — and reference_
+ * material chains two refinements, hence the loop rather than one step.
+ */
+export function knownFieldsFor(type: string): Set<string> | undefined {
+  const entry = RECORD_TYPES[type];
+  if (!entry) return undefined;
+  let schema: unknown = entry.schema;
+  // unwrap ZodEffects/ZodDefault layers until the ZodObject with .shape surfaces
+  for (let i = 0; i < 10 && schema && typeof schema === 'object'; i++) {
+    const shape = (schema as { shape?: Record<string, unknown> }).shape;
+    if (shape) return new Set(Object.keys(shape));
+    const inner = (schema as { _def?: { schema?: unknown; innerType?: unknown } })._def;
+    schema = inner?.schema ?? inner?.innerType;
+  }
+  return undefined;
+}
+
+/**
+ * Keys in `candidate` that the type does not define — the input half of the
+ * fail-loud rule (P5). zod objects STRIP unknown keys, so without this a
+ * misfiled field (reference_material has no `files`/`file_keys`; its paths come
+ * from `location`) was accepted, silently dropped, and the write returned
+ * SUCCESS — caught only by later querying for the thing the write was supposed
+ * to have done. Reported to a sibling project 2026-07-29, and the same defect
+ * class as the tool-parameter strip closed by decision b47889b7: a write surface
+ * must not claim to have stored what it discarded.
+ *
+ * Returns [] for an unregistered type — that is validateRecord's louder error to
+ * raise, not this one's to pre-empt.
+ */
+export function unknownFieldsIn(type: string, candidate: Record<string, unknown>): string[] {
+  const known = knownFieldsFor(type);
+  if (!known) return [];
+  return Object.keys(candidate).filter((k) => !known.has(k));
+}
+
 /** The one validation gate for durable writes: unregistered type = loud rejection. */
 export function validateRecord(input: unknown): DurableRecord {
   if (typeof input !== 'object' || input === null || typeof (input as { type?: unknown }).type !== 'string') {

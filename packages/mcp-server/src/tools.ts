@@ -7,13 +7,46 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
-import type { QueryOptions, RecordedExit, ToolStore } from '@sterling/store';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { DEFAULT_QUERY_CAP, type QueryOptions, type RecordedExit, type ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
 export interface SkippedCheck {
   check: string;
   reason: string;
+}
+
+export interface BoardFilter {
+  source?: 'user' | 'system';
+  system_reason?: string;
+  file_keys?: string[];
+  cap?: number;
+}
+
+/** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
+export interface BoardQueryResult {
+  /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
+  matched_filter: number;
+  returned: number;
+  cap: number;
+  /** exact: more matched than were returned */
+  capped: boolean;
+  note?: string;
+  records: DurableRecord[];
+}
+
+/** knowledge_query's disclosed result envelope (see knowledgeQueryResult). */
+export interface KnowledgeQueryResult {
+  /** records matching the FILTER (types/stack_tags/file_keys), rank- and cap-blind */
+  matched_filter: number;
+  returned: number;
+  /** the cap actually applied — the caller's, or DEFAULT_QUERY_CAP */
+  cap: number;
+  /** the cap was reached, so more may exist past it; false GUARANTEES nothing was dropped */
+  capped: boolean;
+  /** present only when the window is partial — states how to widen it */
+  note?: string;
+  records: Record<string, unknown>[];
 }
 
 export interface ToolDeps {
@@ -70,6 +103,14 @@ function spawnNoteExtraction(payload: NoteExtractionPayload): NoteExtractionDisp
 }
 
 const DAY_MS = 86_400_000;
+
+// Board/queue read defaults, named rather than inlined for the DEFAULT_QUERY_CAP
+// reason (decision b47889b7): the tool layer now REPORTS the cap it applied, so
+// the value has two readers and a literal would be a second place to drift.
+const DEFAULT_BOARD_CAP = 50;
+// The bounded todo scan the filter runs over. A full scan means the reported
+// count is a floor; boardQueryResult says so rather than under-reporting.
+const BOARD_SCAN_CAP = 1000;
 
 export class SterlingTools {
   private store: ToolStore;
@@ -187,7 +228,63 @@ export class SterlingTools {
 
   // -- knowledge CRUD ---------------------------------------------------------
 
+  /**
+   * Refuse a write that tries to ASSIGN a server-owned envelope key, instead of
+   * stripping it in silence. The stripping itself is correct and stays (finding
+   * 14/43 — a caller must not be able to forge an id, a clock, or a status); what
+   * was wrong is that the caller was told the write succeeded.
+   *
+   * MEASURED 2026-07-29, and this is the sharpest instance of the whole class: a
+   * project trying to retire a duplicate passed {status:'superseded',
+   * superseded_by:'<canonical>'} to knowledge_update. The call SUCCEEDED and
+   * returned status:'active', superseded_by:null — both fields discarded, no error,
+   * no warning. Their words: "that's the dangerous shape — a caller who doesn't
+   * re-read the result believes it worked." They then wrote store records asserting
+   * a retirement that had never happened.
+   *
+   * So the message must not merely refuse: for status/superseded_by it has to say
+   * that NO retire path exists on this surface, because a caller reaching for
+   * these fields is trying to do something the surface cannot do, and silence let
+   * them believe otherwise.
+   */
+  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update'): void {
+    const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
+    const attempted = SERVER_OWNED.filter((k) => k in fields);
+    if (attempted.length === 0) return;
+    const retiring = attempted.includes('status') || attempted.includes('superseded_by');
+    throw new Error(
+      `${op}: ${attempted.map((k) => `'${k}'`).join(', ')} ${attempted.length === 1 ? 'is' : 'are'} SERVER-OWNED and cannot be assigned by a caller — ` +
+        `the value would have been discarded and the write reported success. ` +
+        (retiring
+          ? `status/superseded_by are set only by supersession: knowledge_update writes a NEW version and retires the prior one automatically. ` +
+            `There is NO way to retire a record to a non-serving state through this surface — /sterling:cleanup never hard-deletes knowledge either. ` +
+            `To correct a wrong record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug.`
+          : `id and the clocks are assigned at write; type is fixed at create.`)
+    );
+  }
+
+  /**
+   * Refuse a write carrying fields the record type does not define, naming them
+   * AND the valid set — the write-side half of fail-loud (P5), symmetric with the
+   * strict tool PARAMETERS of decision b47889b7. The valid set is in the message
+   * because discoverability is the actual complaint: per-type required fields and
+   * the files-vs-file_keys split (feature_article uses files[].path, decision /
+   * anti_pattern / research_finding / todo use file_keys, reference_material
+   * derives paths from location) cost a round-trip each to learn otherwise.
+   * An unregistered type is left to validateRecord's louder rejection.
+   */
+  private refuseUnknownFields(type: string, candidate: Record<string, unknown>): void {
+    const unknown = unknownFieldsIn(type, candidate);
+    if (unknown.length === 0) return;
+    const valid = [...(knownFieldsFor(type) ?? [])].sort().join(', ');
+    throw new Error(
+      `knowledge write: '${type}' does not define ${unknown.map((k) => `'${k}'`).join(', ')} — ` +
+        `the field would have been silently dropped and the write reported success. Valid fields: ${valid}.`
+    );
+  }
+
   knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
+    this.refuseServerOwnedFields(fields, 'knowledge_create');
     const ts = this.now();
     // The envelope is SERVER-OWNED: strip these keys from caller fields before
     // assembling the candidate, so a caller cannot override id/timestamps/status/
@@ -223,6 +320,14 @@ export class SterlingTools {
     // ('./x'→'x'), so the dedup key-overlap compares like-for-like against stored
     // records (audit finding 28/43); the raw candidate skipped the assist tier.
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    // A field this type does not define is REFUSED, never dropped (P5). zod
+    // objects strip unknown keys, so before this a misfiled field was accepted,
+    // discarded, and the create returned SUCCESS — the caller found out only by
+    // querying for what the write was supposed to have stored (sibling report
+    // 2026-07-29: reference_material has no files/file_keys, its paths come from
+    // location). Checked BEFORE schema.parse so the error names the actual
+    // mistake instead of a required field that went missing because of it.
+    this.refuseUnknownFields(type, candidate);
     const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
     const skipped: SkippedCheck[] = [];
 
@@ -459,6 +564,156 @@ export class SterlingTools {
     });
   }
 
+  /**
+   * The MCP-facing result for knowledge_query: the flagged records, PROJECTED for
+   * reading, inside an envelope that DISCLOSES what the retrieval did. Two
+   * failures of one class — a retrieval that misrepresents itself (P5) — and both
+   * were observed, not theorized (sibling-project retrospective, 2026-07-29):
+   *
+   * (1) THE CAP WAS SILENT. query() caps at DEFAULT_QUERY_CAP, so a filter
+   * matching 200 records returned 20 with no signal the other 180 existed. A
+   * sibling conductor read such a window as the whole store and concluded it held
+   * ~20 records when it held 21 feature articles alone — then reasoned from that.
+   * count() already existed over the SAME base filter (the TUI's badges use it),
+   * so disclosure costs one COUNT(*) and no new machinery.
+   *
+   * (2) VERSION HISTORY DOMINATED THE PAYLOAD. A v42 article serializes a
+   * 42-entry supersedes chain plus 25 server-owned sha256 baselines on EVERY hit;
+   * a cap:6 query measured 56KB, nearly none of it readable content. The
+   * projection drops both — from QUERY results only. knowledge_get stays
+   * full-fidelity, so nothing becomes unreachable; it just stops being paid for on
+   * every retrieval. Semantic links (cites/informed_by/fulfills) SURVIVE: they
+   * point at the decisions and briefs a reader may need to follow, and
+   * supersedes_count keeps the version depth visible without the uuids.
+   *
+   * Scoped to this boundary deliberately: internal consumers read the fields the
+   * projection drops (promotion.mjs filters links.rel==='fulfills'; the drift
+   * wires above read file_baselines), and they call store.query/knowledgeQuery
+   * directly — so trimming in the store would have starved them. knowledgeQuery
+   * keeps returning full flagged records for exactly that reason.
+   */
+  /**
+   * APPEND to an array field without retransmitting it (decision 44e45931's
+   * successor — the append half of the append/identity problem).
+   *
+   * knowledgeUpdate REPLACES each field it receives, so adding one history entry
+   * to a 25-entry article meant resending all 25 byte-exact. That cost scales with
+   * how valuable a record has become, which is exactly backwards, and it produced
+   * the pathology two consuming projects independently ranked their #1: a record
+   * gets richer, gets bigger, becomes unwriteable, stops being updated, starts
+   * lying. Measured here on 2026-07-29: reconciling one session's work took three
+   * full-article hand re-transmits, one of a ~5,000-word what_it_does with a
+   * 25-entry history, to add one history entry each.
+   *
+   * It delegates to knowledgeUpdate rather than writing its own supersede, so it
+   * CANNOT diverge from the update path's guarantees: version bump, prior version
+   * retained, file_baselines re-baseline, and the P4 drift-item drain all happen
+   * exactly once and exactly as before. Only the caller's transmission cost
+   * changes — this is not a second write path (invariant: one write code path).
+   *
+   * Refuses loudly (P5) rather than guessing: an unknown field for the type (with
+   * the valid set named, same helper as the write guards), a field whose current
+   * value is not an array, an empty entry list, and `links` — typed edges have
+   * their own tool and a second path would let the record_links index drift.
+   */
+  knowledgeAppend(id: string, field: string, entries: unknown[]): DurableRecord {
+    const old = this.store.get(id);
+    if (!old) throw new Error(`knowledge_append: no record '${id}'`);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
+    }
+    if (field === 'links') {
+      throw new Error(`knowledge_append: 'links' is not appendable here — use knowledge_link, which also maintains the record_links index`);
+    }
+    this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_update');
+    this.refuseUnknownFields(old.type, { [field]: entries });
+    const current = (old as unknown as Record<string, unknown>)[field];
+    if (current !== undefined && !Array.isArray(current)) {
+      throw new Error(
+        `knowledge_append: '${field}' on ${old.type} is ${typeof current}, not an array — append only extends array fields; use knowledge_update to set a scalar`
+      );
+    }
+    const next = [...((current as unknown[]) ?? []), ...entries];
+    // Straight through the ONE update path — every guarantee above rides along.
+    return this.knowledgeUpdate(id, { [field]: next });
+  }
+
+  /**
+   * The MCP-facing result for knowledge_update: the new version plus any COHERENCE
+   * WARNINGS about what the merge left behind.
+   *
+   * knowledgeUpdate keeps every field you do not pass, which is what makes a
+   * partial update cheap and also what lets it ship a self-contradicting record:
+   * revise what_it_does, leave an intended_behavior or current_ac now asserting
+   * the opposite, and nothing objects — the stale half then reads as
+   * authoritative. One consuming project did exactly that four times in a single
+   * session on one article.
+   *
+   * It WARNS rather than refuses, deliberately: only the author can judge whether
+   * the untouched pairing is genuinely unaffected, and plenty of legitimate
+   * updates change the description without changing the intent. A refusal here
+   * would be ceremony on the common case (P1) and would train callers to pass
+   * fields they had no reason to touch — which is its own drift.
+   */
+  knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[] } {
+    const before = this.store.get(id);
+    const record = this.knowledgeUpdate(id, body);
+    const warnings: string[] = [];
+    if (before?.type === 'feature_article' && 'what_it_does' in body) {
+      const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
+      if (untouched.length > 0) {
+        warnings.push(
+          `what_it_does changed but ${untouched.join(' and ')} ${untouched.length === 1 ? 'was' : 'were'} not passed, so the prior text persists — ` +
+            `re-read the new version and confirm it does not now contradict itself. This is a WARNING, not a refusal: the pairing is often genuinely unaffected, ` +
+            `and only you can tell. (knowledge_append extends history/files/current_ac without retransmitting them.)`
+        );
+      }
+    }
+    return { record, warnings };
+  }
+
+  knowledgeQueryResult(opts: QueryOptions): KnowledgeQueryResult {
+    const records = this.knowledgeQuery(opts);
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    // count() shares query()'s base filter but is rank-BLIND (rank_terms is a
+    // no-op there), so this is "records matching the filter", which is exactly
+    // the number a caller needs to see it is holding a window. Claiming it as
+    // "records your query would return" would trade a silent lie for a loud one.
+    const matchedFilter = this.store.count(opts);
+    // returned === cap is the only truthful truncation signal: the LIMIT was
+    // reached, so more MAY exist past it. returned < cap guarantees nothing was
+    // dropped. Deriving capped from matchedFilter alone would false-positive
+    // every time rank_terms legitimately narrowed the set.
+    const capped = records.length === cap;
+    const rankRestricted = (opts.rank_terms?.length ?? 0) > 0 && !capped && matchedFilter > records.length;
+    return {
+      matched_filter: matchedFilter,
+      returned: records.length,
+      cap,
+      capped,
+      ...(capped
+        ? {
+            note: `cap reached — showing ${records.length} of ${matchedFilter} records matching this filter; raise cap or narrow the filter (types/file_keys/rank_terms) to see the rest`,
+          }
+        : rankRestricted
+          ? {
+              note: `rank_terms restricted this to ${records.length} FTS match(es); ${matchedFilter} records match the filter alone — drop or widen rank_terms to see them`,
+            }
+          : {}),
+      records: records.map((r) => this.projectForQuery(r)),
+    };
+  }
+
+  /** Query-result projection (see knowledgeQueryResult): drop the supersedes
+   *  chain and the server-owned baseline hashes, keep every semantic link. */
+  private projectForQuery(record: DurableRecord & { staleness?: object; verify_before_use?: boolean }): Record<string, unknown> {
+    const { file_baselines: _baselines, ...rest } = record as unknown as Record<string, unknown>;
+    const links = (rest.links ?? []) as { rel: string; target_id: string }[];
+    const semantic = links.filter((l) => l.rel !== 'supersedes');
+    const supersedesCount = links.length - semantic.length;
+    return { ...rest, links: semantic, ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}) };
+  }
+
   knowledgeGet(id: string): DurableRecord {
     const record = this.store.get(id);
     if (!record) throw new Error(`knowledge_get: no record '${id}'`);
@@ -469,8 +724,14 @@ export class SterlingTools {
   knowledgeUpdate(id: string, body: Record<string, unknown>): DurableRecord {
     const old = this.store.get(id);
     if (!old) throw new Error(`knowledge_update: no record '${id}'`);
+    this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
     const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, ...overrides } = body;
+    // Same refusal as create, applied to the CALLER's fields rather than the
+    // merged record: `old` is already valid, so anything unknown came from this
+    // call. Without it the merge silently discarded the field and reported a new
+    // version — the failure that makes a "fix" look applied when it never landed.
+    this.refuseUnknownFields(old.type, overrides);
     const next: Record<string, unknown> = {
       ...old,
       ...overrides,
@@ -572,8 +833,14 @@ export class SterlingTools {
     return this.knowledgeCreate('todo', { text, source, ...rest });
   }
 
-  boardQuery(filter: { source?: 'user' | 'system'; system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
-    const todos = this.store.query({ types: ['todo'], file_keys: filter.file_keys, cap: 1000 });
+  /**
+   * The whole filtered set, uncapped — ONE definition of the board filter, shared
+   * by the capped array (boardQuery, for internal callers) and the disclosed
+   * envelope (boardQueryResult, for the tool surface). Extracted so the two can
+   * never disagree about what "matching" means.
+   */
+  private boardFiltered(filter: BoardFilter): { matching: DurableRecord[]; scanTruncated: boolean } {
+    const todos = this.store.query({ types: ['todo'], file_keys: filter.file_keys, cap: BOARD_SCAN_CAP });
     // Apply EVERY filter BEFORE the cap slice (audit finding 33/43): capping the
     // mixed set first silently dropped matching items past the cap (the store
     // orders updated_at DESC, so long-standing reason-filtered items vanished).
@@ -581,7 +848,54 @@ export class SterlingTools {
     if (filter.system_reason) {
       filtered = filtered.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason);
     }
-    return filtered.slice(0, filter.cap ?? 50);
+    // The underlying scan is itself bounded; if it came back full, the count we
+    // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
+    return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
+  }
+
+  boardQuery(filter: BoardFilter = {}): DurableRecord[] {
+    return this.boardFiltered(filter).matching.slice(0, filter.cap ?? DEFAULT_BOARD_CAP);
+  }
+
+  /**
+   * The MCP-facing result for board_query / maintenance_query: the same envelope
+   * knowledge_query gained in decision b47889b7, extended to the two surfaces it
+   * MISSED. That omission was reported from the field within a day: "maintenance_
+   * query caps at 50 silently. No count, no '50 of N'. I only learned the tail was
+   * deep because removing 19 revealed 19 more, including a capture_owed reason not
+   * previously visible." A queue that under-reports its own depth reads as drained
+   * when it is merely truncated — and a drain is exactly the operation that must
+   * know what remains.
+   *
+   * One difference from knowledge_query, in this surface's favour: the filter runs
+   * in JS over the scanned set, so `capped` here is EXACT (returned < matching)
+   * rather than the returned === cap heuristic that FTS rank-blindness forces
+   * there. The field NAME is deliberately the same (matched_filter = records
+   * matching the filter you gave) — one name per concept, with each tool
+   * documenting its own guarantee.
+   */
+  boardQueryResult(filter: BoardFilter = {}): BoardQueryResult {
+    const { matching, scanTruncated } = this.boardFiltered(filter);
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    const records = matching.slice(0, cap);
+    const capped = records.length < matching.length;
+    const notes: string[] = [];
+    if (capped) {
+      notes.push(
+        `cap reached — showing ${records.length} of ${matching.length} matching items; raise cap to see the rest (a drain that stops at the cap leaves the tail behind)`
+      );
+    }
+    if (scanTruncated) {
+      notes.push(`the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total`);
+    }
+    return {
+      matched_filter: matching.length,
+      returned: records.length,
+      cap,
+      capped,
+      ...(notes.length ? { note: notes.join('; ') } : {}),
+      records,
+    };
   }
 
   /** P4: done = removed. The artifact-write binding (H9/H10) is not built yet — skipped loudly, never silently. */
@@ -792,6 +1106,11 @@ export class SterlingTools {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap.
     return this.boardQuery({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
+  }
+
+  /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
+  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): BoardQueryResult {
+    return this.boardQueryResult({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------

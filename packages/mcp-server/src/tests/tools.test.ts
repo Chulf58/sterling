@@ -122,6 +122,102 @@ test('knowledge_update writes a new version and supersedes the prior; article ve
   }
 });
 
+test('knowledge_append extends an array without retransmitting it, and inherits the update path whole', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: v1 } = tools.knowledgeCreate('feature_article', {
+      slug: 'csv-export',
+      title: 'CSV export',
+      what_it_does: 'Exports the board.',
+      intended_behavior: 'User clicks Export and gets a file.',
+      files: [{ path: 'src/export/csv.ts', role: 'serializer' }],
+      current_ac: [{ ac_id: 'AC1', text: 'export works', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'originating brief' }],
+      live_test_refs: [],
+    });
+
+    // THE POINT: one entry added, the existing entry NOT resent. That is the whole
+    // reason this tool exists — the cost of keeping a record true was scaling with
+    // how much truth it already held.
+    const appended = tools.knowledgeAppend(v1.id, 'history', [{ date: NOW, event: 'second entry' }]);
+    const v2 = appended as unknown as {
+      id: string;
+      history: { event: string }[];
+      version: number;
+      what_it_does: string;
+      links: { rel: string; target_id: string }[];
+    };
+    assert.deepEqual(
+      v2.history.map((h) => h.event),
+      ['originating brief', 'second entry'],
+      'appended in order, the prior entry preserved without being passed'
+    );
+    assert.equal(v2.what_it_does, 'Exports the board.', 'untouched fields carry over as with any update');
+
+    // It must be the SAME write path, not a second one: version bump, prior
+    // retained + supersede link, and only the head served.
+    assert.equal(v2.version, 2, 'version auto-bumped exactly as knowledge_update does');
+    assert.equal(tools.knowledgeGet(v1.id).status, 'superseded', 'prior version retained');
+    assert.ok(v2.links.some((l) => l.rel === 'supersedes' && l.target_id === v1.id));
+    assert.equal(tools.knowledgeQuery({ types: ['feature_article'] }).length, 1, 'only the head is served');
+
+    // Any array field, not just history — and note the id CHANGED with the append,
+    // which is the identity half of the problem this tool only half-solves.
+    const v3 = tools.knowledgeAppend(v2.id, 'current_ac', [{ ac_id: 'AC2', text: 'header row included', verifiable_at: 'final' }]) as unknown as {
+      id: string;
+      current_ac: { ac_id: string }[];
+    };
+    assert.deepEqual(
+      v3.current_ac.map((a) => a.ac_id),
+      ['AC1', 'AC2'],
+      'current_ac extends too'
+    );
+
+    // Refusals — each names what to do instead rather than guessing (P5).
+    const head = v3.id;
+    assert.throws(() => tools.knowledgeAppend(head, 'history', []), /non-empty array/);
+    assert.throws(() => tools.knowledgeAppend(head, 'what_it_does', ['more prose']), /not an array/);
+    assert.throws(() => tools.knowledgeAppend(head, 'nonexistent_field', ['x']), /does not define/);
+    assert.throws(() => tools.knowledgeAppend(head, 'links', [{ rel: 'cites', target_id: 'x' }]), /knowledge_link/);
+    assert.throws(() => tools.knowledgeAppend(head, 'status', ['superseded']), /SERVER-OWNED/);
+    assert.throws(() => tools.knowledgeAppend('no-such-id', 'history', [{ date: NOW, event: 'x' }]), /no record/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_update WARNS when what_it_does changes but its paired fields were not passed — a warning, never a refusal', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+
+    // The observed failure: revise the description, leave intended_behavior and
+    // current_ac asserting the opposite, and nothing objects — the stale half then
+    // reads as authoritative. One project shipped that four times in one session.
+    const partial = tools.knowledgeUpdateResult(article.id, { what_it_does: 'does something else entirely now' });
+    assert.equal(partial.warnings.length, 1);
+    assert.match(partial.warnings[0], /intended_behavior and current_ac/, 'names exactly what was left behind');
+    assert.match(partial.warnings[0], /WARNING, not a refusal/, 'and says why it is not blocking');
+    assert.equal(
+      (partial.record as unknown as { what_it_does: string }).what_it_does,
+      'does something else entirely now',
+      'the write LANDS — warning, not refusal'
+    );
+
+    // Passing the pairing clears it; so does an update that never touches the description.
+    const head = (tools.knowledgeQuery({ types: ['feature_article'] })[0] as unknown as { id: string }).id;
+    const coherent = tools.knowledgeUpdateResult(head, { what_it_does: 'x', intended_behavior: 'y', current_ac: [] });
+    assert.deepEqual(coherent.warnings, [], 'no warning when the pairing is passed');
+    const head2 = (tools.knowledgeQuery({ types: ['feature_article'] })[0] as unknown as { id: string }).id;
+    assert.deepEqual(tools.knowledgeUpdateResult(head2, { state: 'active' }).warnings, [], 'a re-baseline refresh warns about nothing');
+  } finally {
+    cleanup();
+  }
+});
+
 const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
   tools.knowledgeCreate('feature_article', {
     slug,
@@ -204,6 +300,100 @@ test('board tools: add/query separates board from maintenance queue; remove is t
   }
 });
 
+test('a write carrying a field the type does not define is REFUSED, never silently dropped (P5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // The reported failure, verbatim in shape: reference_material has no files or
+    // file_keys (its paths come from `location`), so the write was accepted, the
+    // field discarded, and success returned — caught only by later querying for
+    // the thing the write was supposed to have done.
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('reference_material', {
+          title: 'ROADMAP',
+          kind: 'doc',
+          location: 'ROADMAP.md',
+          summary: 's',
+          source_date: '2026-07-29',
+          capture_date: '2026-07-29',
+          files: [{ path: 'ROADMAP.md', role: 'plan' }],
+        }),
+      (err: Error) => {
+        assert.match(err.message, /'files'/, 'the refusal names the offending field');
+        assert.match(err.message, /silently dropped/, 'and says what would have happened');
+        assert.match(err.message, /location/, 'and lists the valid fields so the fix needs no round-trip');
+        return true;
+      }
+    );
+    // nothing was written by the refused create
+    assert.equal(tools.knowledgeQuery({ types: ['reference_material'] }).length, 0);
+
+    // a correct create still lands, and the SAME guard covers update
+    const { record: ref } = tools.knowledgeCreate('reference_material', {
+      title: 'ROADMAP',
+      kind: 'doc',
+      location: 'ROADMAP.md',
+      summary: 's',
+      source_date: '2026-07-29',
+      capture_date: '2026-07-29',
+    });
+    assert.throws(() => tools.knowledgeUpdate(ref.id, { file_keys: ['ROADMAP.md'] }), /'file_keys'/);
+    assert.equal(tools.knowledgeQuery({ types: ['reference_material'] })[0].id, ref.id, 'the refused update wrote no new version');
+
+    // the per-type split is real, and the guard respects it: files[] is exactly
+    // how a feature_article carries paths, so the same field is valid there
+    const { record: art } = tools.knowledgeCreate('feature_article', {
+      slug: 'a',
+      title: 'a',
+      what_it_does: 'x',
+      intended_behavior: 'y',
+      files: [{ path: 'src/a.ts', role: 'impl' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    });
+    assert.equal((art as unknown as { files: unknown[] }).files.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_query / maintenance_query DISCLOSE their depth — a queue that under-reports reads as drained (P5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (let i = 0; i < 5; i++) {
+      tools.boardAdd({ text: `queue item ${i}`, source: 'system', system_reason: 'reconcile_needed' });
+    }
+    tools.boardAdd({ text: 'real work', source: 'user' });
+
+    // The reported failure: "maintenance_query caps at 50 silently. No count, no
+    // '50 of N'. I only learned the tail was deep because removing 19 revealed 19
+    // more." capped is EXACT here (the filter runs in JS over the scanned set),
+    // unlike knowledge_query where FTS rank-blindness forces returned === cap.
+    const capped = tools.maintenanceQueryResult({ cap: 2 });
+    assert.equal(capped.returned, 2);
+    assert.equal(capped.matched_filter, 5, 'the queue states its real depth, not its window');
+    assert.equal(capped.capped, true);
+    assert.match(capped.note ?? '', /cap reached/);
+    assert.match(capped.note ?? '', /tail behind/, 'the notice names the drain consequence');
+
+    const full = tools.maintenanceQueryResult({ cap: 50 });
+    assert.equal(full.returned, 5);
+    assert.equal(full.capped, false);
+    assert.equal(full.note, undefined, 'a complete result carries no notice');
+
+    // source still separates the two surfaces through the envelope
+    assert.equal(tools.boardQueryResult({ source: 'user' }).matched_filter, 1);
+    assert.equal(tools.boardQueryResult({ source: 'system' }).matched_filter, 5);
+    assert.equal(tools.boardQueryResult({}).matched_filter, 6);
+  } finally {
+    cleanup();
+  }
+});
+
 test('stale-at-read (§3.4): research findings get both clocks + flag; platform basis gets verify_before_use', () => {
   const { store, tools, cleanup } = harness();
   try {
@@ -254,6 +444,79 @@ test('stale-at-read (§3.4): research findings get both clocks + flag; platform 
     });
     const refs = tools.knowledgeQuery({ types: ['reference_material'], cap: 10 }) as unknown as { verify_before_use?: boolean }[];
     assert.equal(refs[0].verify_before_use, true, 'wrong old knowledge is worse than no knowledge');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_query DISCLOSES its window: capped says so with the filter count, uncapped GUARANTEES nothing was dropped (P5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (let i = 0; i < 5; i++) {
+      tools.knowledgeCreate('decision', { title: `D${i}`, statement: 'S', alternatives_rejected: [], rationale: 'R' });
+    }
+    // The failure this pins (sibling-project retrospective, 2026-07-29): a caller
+    // received a capped window with no signal, read it as the whole store, and
+    // reasoned from that. matched_filter is the number it previously had to guess.
+    const capped = tools.knowledgeQueryResult({ types: ['decision'], cap: 2 });
+    assert.equal(capped.returned, 2);
+    assert.equal(capped.matched_filter, 5, 'the count matching the FILTER, not the size of the window');
+    assert.equal(capped.cap, 2);
+    assert.equal(capped.capped, true);
+    assert.match(capped.note ?? '', /cap reached/, 'the disclosure teaches how to widen the window');
+
+    // Disclosure appears ONLY when the window is actually partial (P1 — a notice
+    // on every complete result is ceremony): capped:false is a guarantee.
+    const full = tools.knowledgeQueryResult({ types: ['decision'], cap: 50 });
+    assert.equal(full.returned, 5);
+    assert.equal(full.capped, false);
+    assert.equal(full.note, undefined, 'a complete result carries no notice');
+
+    // rank_terms restricting the set is NOT the cap truncating it — the two are
+    // reported distinctly, so "3 of 5" never gets misread as "the cap dropped 2".
+    const ranked = tools.knowledgeQueryResult({ types: ['decision'], rank_terms: ['D3'], cap: 50 });
+    assert.equal(ranked.capped, false, 'rank_terms narrowing is not a cap truncation');
+    assert.equal(ranked.matched_filter, 5);
+    assert.match(ranked.note ?? '', /rank_terms restricted/, 'the FTS narrowing is disclosed too');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_query PROJECTS version history out of results; knowledge_get stays full-fidelity (the 56KB cap:6 payload)', () => {
+  // A repoRoot + a real owned file, because file_baselines is only computed where
+  // there is a tree to hash — the default harness has none, so a projection test
+  // on it would assert the absence of something that was never there.
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'thing.ts'), 'export const x = 1;\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  const cleanup = () => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    let article = mkArticle(tools, 'thing', 'src/thing.ts');
+    assert.ok(
+      Object.keys((article as unknown as { file_baselines: Record<string, string> }).file_baselines).length > 0,
+      'precondition: the article really does carry a server-computed baseline'
+    );
+    const firstId = article.id;
+    for (let i = 0; i < 3; i++) article = tools.knowledgeUpdate(article.id, { what_it_does: `does ${i}` });
+
+    const [projected] = tools.knowledgeQueryResult({ types: ['feature_article'] }).records;
+    assert.equal(projected.supersedes_count, 3, 'chain DEPTH stays visible without the uuids');
+    assert.deepEqual(projected.links, [], 'the supersedes chain is gone from query results');
+    assert.ok(!('file_baselines' in projected), 'server-owned baseline hashes are gone from query results');
+    assert.equal(projected.what_it_does, 'does 2', 'the readable content is untouched');
+
+    // Nothing became unreachable — it just stopped being paid for on every hit.
+    const full = tools.knowledgeGet(article.id) as unknown as Record<string, unknown>;
+    assert.equal((full.links as unknown[]).length, 3, 'knowledge_get keeps the full chain');
+    assert.ok('file_baselines' in full, 'knowledge_get keeps the baselines');
+    assert.equal(tools.knowledgeGet(firstId).status, 'superseded', 'and the superseded versions remain retrievable by id');
   } finally {
     cleanup();
   }
@@ -588,24 +851,51 @@ test('knowledge_create: caller cannot override the server-owned envelope (id/tim
   const { tools, cleanup } = harness();
   try {
     const forgedId = randomUUID();
+    // The envelope is still unforgeable — but as of 2026-07-29 the attempt is
+    // REFUSED rather than silently ignored. The strip alone satisfied finding
+    // 14/43 while telling the caller the write succeeded, and a project acting on
+    // that belief wrote store records asserting a retirement that never happened.
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('decision', {
+          title: 'envelope test',
+          statement: 's',
+          alternatives_rejected: [],
+          rationale: 'r',
+          id: forgedId,
+          status: 'superseded',
+          superseded_by: randomUUID(),
+          created_at: '2000-01-01T00:00:00.000Z',
+          updated_at: '2000-01-01T00:00:00.000Z',
+        }),
+      (err: Error) => {
+        assert.match(err.message, /SERVER-OWNED/);
+        assert.match(err.message, /'id'/, 'the refusal names every attempted key');
+        assert.match(err.message, /'status'/);
+        assert.match(err.message, /NO way to retire/, 'reaching for status gets told the retire path does not exist');
+        return true;
+      }
+    );
+    assert.equal(tools.knowledgeQuery({ types: ['decision'], cap: 10 }).length, 0, 'the refused create wrote nothing');
+
+    // A clean create still lands, born with the server's own envelope.
     const { record } = tools.knowledgeCreate('decision', {
       title: 'envelope test',
       statement: 's',
       alternatives_rejected: [],
       rationale: 'r',
-      id: forgedId,
-      status: 'superseded',
-      superseded_by: randomUUID(),
-      created_at: '2000-01-01T00:00:00.000Z',
-      updated_at: '2000-01-01T00:00:00.000Z',
     });
     assert.notEqual(record.id, forgedId, 'server assigns the id');
-    assert.equal(record.status, 'active', 'born active regardless of caller status');
+    assert.equal(record.status, 'active', 'born active');
     assert.equal(record.superseded_by, null, 'not born superseded');
-    assert.notEqual(record.created_at, '2000-01-01T00:00:00.000Z', 'server owns created_at');
     // the record is actually served (a caller-forged status:superseded would have hidden it)
     const served = tools.knowledgeQuery({ types: ['decision'], cap: 10 });
     assert.ok(served.some((r) => r.id === record.id), 'the created record is visible to default queries');
+
+    // The measured silent no-op, now loud: the retirement attempt that returned
+    // status:'active' and superseded_by:null with no error (2026-07-29).
+    assert.throws(() => tools.knowledgeUpdate(record.id, { status: 'superseded', superseded_by: randomUUID() }), /NO way to retire/);
+    assert.equal(tools.knowledgeGet(record.id).status, 'active', 'the refused update changed nothing');
   } finally {
     cleanup();
   }
