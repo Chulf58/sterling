@@ -86,10 +86,21 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'knowledge_update',
     {
-      description: 'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place.',
+      description:
+        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append.',
       inputSchema: strict({ id: z.string(), body: passthrough }),
     },
-    ({ id, body }) => json(tools.knowledgeUpdate(id, body))
+    ({ id, body }) => json(tools.knowledgeUpdateResult(id, body))
+  );
+
+  server.registerTool(
+    'knowledge_append',
+    {
+      description:
+        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, the file_baselines re-baseline and the drift-item drain are identical. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link).',
+      inputSchema: strict({ id: z.string(), field: z.string(), entries: z.array(z.unknown()) }),
+    },
+    ({ id, field, entries }) => json(tools.knowledgeAppend(id, field, entries))
   );
 
   server.registerTool(

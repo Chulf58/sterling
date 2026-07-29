@@ -122,6 +122,102 @@ test('knowledge_update writes a new version and supersedes the prior; article ve
   }
 });
 
+test('knowledge_append extends an array without retransmitting it, and inherits the update path whole', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: v1 } = tools.knowledgeCreate('feature_article', {
+      slug: 'csv-export',
+      title: 'CSV export',
+      what_it_does: 'Exports the board.',
+      intended_behavior: 'User clicks Export and gets a file.',
+      files: [{ path: 'src/export/csv.ts', role: 'serializer' }],
+      current_ac: [{ ac_id: 'AC1', text: 'export works', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'originating brief' }],
+      live_test_refs: [],
+    });
+
+    // THE POINT: one entry added, the existing entry NOT resent. That is the whole
+    // reason this tool exists — the cost of keeping a record true was scaling with
+    // how much truth it already held.
+    const appended = tools.knowledgeAppend(v1.id, 'history', [{ date: NOW, event: 'second entry' }]);
+    const v2 = appended as unknown as {
+      id: string;
+      history: { event: string }[];
+      version: number;
+      what_it_does: string;
+      links: { rel: string; target_id: string }[];
+    };
+    assert.deepEqual(
+      v2.history.map((h) => h.event),
+      ['originating brief', 'second entry'],
+      'appended in order, the prior entry preserved without being passed'
+    );
+    assert.equal(v2.what_it_does, 'Exports the board.', 'untouched fields carry over as with any update');
+
+    // It must be the SAME write path, not a second one: version bump, prior
+    // retained + supersede link, and only the head served.
+    assert.equal(v2.version, 2, 'version auto-bumped exactly as knowledge_update does');
+    assert.equal(tools.knowledgeGet(v1.id).status, 'superseded', 'prior version retained');
+    assert.ok(v2.links.some((l) => l.rel === 'supersedes' && l.target_id === v1.id));
+    assert.equal(tools.knowledgeQuery({ types: ['feature_article'] }).length, 1, 'only the head is served');
+
+    // Any array field, not just history — and note the id CHANGED with the append,
+    // which is the identity half of the problem this tool only half-solves.
+    const v3 = tools.knowledgeAppend(v2.id, 'current_ac', [{ ac_id: 'AC2', text: 'header row included', verifiable_at: 'final' }]) as unknown as {
+      id: string;
+      current_ac: { ac_id: string }[];
+    };
+    assert.deepEqual(
+      v3.current_ac.map((a) => a.ac_id),
+      ['AC1', 'AC2'],
+      'current_ac extends too'
+    );
+
+    // Refusals — each names what to do instead rather than guessing (P5).
+    const head = v3.id;
+    assert.throws(() => tools.knowledgeAppend(head, 'history', []), /non-empty array/);
+    assert.throws(() => tools.knowledgeAppend(head, 'what_it_does', ['more prose']), /not an array/);
+    assert.throws(() => tools.knowledgeAppend(head, 'nonexistent_field', ['x']), /does not define/);
+    assert.throws(() => tools.knowledgeAppend(head, 'links', [{ rel: 'cites', target_id: 'x' }]), /knowledge_link/);
+    assert.throws(() => tools.knowledgeAppend(head, 'status', ['superseded']), /SERVER-OWNED/);
+    assert.throws(() => tools.knowledgeAppend('no-such-id', 'history', [{ date: NOW, event: 'x' }]), /no record/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_update WARNS when what_it_does changes but its paired fields were not passed — a warning, never a refusal', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+
+    // The observed failure: revise the description, leave intended_behavior and
+    // current_ac asserting the opposite, and nothing objects — the stale half then
+    // reads as authoritative. One project shipped that four times in one session.
+    const partial = tools.knowledgeUpdateResult(article.id, { what_it_does: 'does something else entirely now' });
+    assert.equal(partial.warnings.length, 1);
+    assert.match(partial.warnings[0], /intended_behavior and current_ac/, 'names exactly what was left behind');
+    assert.match(partial.warnings[0], /WARNING, not a refusal/, 'and says why it is not blocking');
+    assert.equal(
+      (partial.record as unknown as { what_it_does: string }).what_it_does,
+      'does something else entirely now',
+      'the write LANDS — warning, not refusal'
+    );
+
+    // Passing the pairing clears it; so does an update that never touches the description.
+    const head = (tools.knowledgeQuery({ types: ['feature_article'] })[0] as unknown as { id: string }).id;
+    const coherent = tools.knowledgeUpdateResult(head, { what_it_does: 'x', intended_behavior: 'y', current_ac: [] });
+    assert.deepEqual(coherent.warnings, [], 'no warning when the pairing is passed');
+    const head2 = (tools.knowledgeQuery({ types: ['feature_article'] })[0] as unknown as { id: string }).id;
+    assert.deepEqual(tools.knowledgeUpdateResult(head2, { state: 'active' }).warnings, [], 'a re-baseline refresh warns about nothing');
+  } finally {
+    cleanup();
+  }
+});
+
 const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
   tools.knowledgeCreate('feature_article', {
     slug,

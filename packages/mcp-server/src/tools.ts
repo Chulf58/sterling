@@ -592,6 +592,86 @@ export class SterlingTools {
    * directly — so trimming in the store would have starved them. knowledgeQuery
    * keeps returning full flagged records for exactly that reason.
    */
+  /**
+   * APPEND to an array field without retransmitting it (decision 44e45931's
+   * successor — the append half of the append/identity problem).
+   *
+   * knowledgeUpdate REPLACES each field it receives, so adding one history entry
+   * to a 25-entry article meant resending all 25 byte-exact. That cost scales with
+   * how valuable a record has become, which is exactly backwards, and it produced
+   * the pathology two consuming projects independently ranked their #1: a record
+   * gets richer, gets bigger, becomes unwriteable, stops being updated, starts
+   * lying. Measured here on 2026-07-29: reconciling one session's work took three
+   * full-article hand re-transmits, one of a ~5,000-word what_it_does with a
+   * 25-entry history, to add one history entry each.
+   *
+   * It delegates to knowledgeUpdate rather than writing its own supersede, so it
+   * CANNOT diverge from the update path's guarantees: version bump, prior version
+   * retained, file_baselines re-baseline, and the P4 drift-item drain all happen
+   * exactly once and exactly as before. Only the caller's transmission cost
+   * changes — this is not a second write path (invariant: one write code path).
+   *
+   * Refuses loudly (P5) rather than guessing: an unknown field for the type (with
+   * the valid set named, same helper as the write guards), a field whose current
+   * value is not an array, an empty entry list, and `links` — typed edges have
+   * their own tool and a second path would let the record_links index drift.
+   */
+  knowledgeAppend(id: string, field: string, entries: unknown[]): DurableRecord {
+    const old = this.store.get(id);
+    if (!old) throw new Error(`knowledge_append: no record '${id}'`);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
+    }
+    if (field === 'links') {
+      throw new Error(`knowledge_append: 'links' is not appendable here — use knowledge_link, which also maintains the record_links index`);
+    }
+    this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_update');
+    this.refuseUnknownFields(old.type, { [field]: entries });
+    const current = (old as unknown as Record<string, unknown>)[field];
+    if (current !== undefined && !Array.isArray(current)) {
+      throw new Error(
+        `knowledge_append: '${field}' on ${old.type} is ${typeof current}, not an array — append only extends array fields; use knowledge_update to set a scalar`
+      );
+    }
+    const next = [...((current as unknown[]) ?? []), ...entries];
+    // Straight through the ONE update path — every guarantee above rides along.
+    return this.knowledgeUpdate(id, { [field]: next });
+  }
+
+  /**
+   * The MCP-facing result for knowledge_update: the new version plus any COHERENCE
+   * WARNINGS about what the merge left behind.
+   *
+   * knowledgeUpdate keeps every field you do not pass, which is what makes a
+   * partial update cheap and also what lets it ship a self-contradicting record:
+   * revise what_it_does, leave an intended_behavior or current_ac now asserting
+   * the opposite, and nothing objects — the stale half then reads as
+   * authoritative. One consuming project did exactly that four times in a single
+   * session on one article.
+   *
+   * It WARNS rather than refuses, deliberately: only the author can judge whether
+   * the untouched pairing is genuinely unaffected, and plenty of legitimate
+   * updates change the description without changing the intent. A refusal here
+   * would be ceremony on the common case (P1) and would train callers to pass
+   * fields they had no reason to touch — which is its own drift.
+   */
+  knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[] } {
+    const before = this.store.get(id);
+    const record = this.knowledgeUpdate(id, body);
+    const warnings: string[] = [];
+    if (before?.type === 'feature_article' && 'what_it_does' in body) {
+      const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
+      if (untouched.length > 0) {
+        warnings.push(
+          `what_it_does changed but ${untouched.join(' and ')} ${untouched.length === 1 ? 'was' : 'were'} not passed, so the prior text persists — ` +
+            `re-read the new version and confirm it does not now contradict itself. This is a WARNING, not a refusal: the pairing is often genuinely unaffected, ` +
+            `and only you can tell. (knowledge_append extends history/files/current_ac without retransmitting them.)`
+        );
+      }
+    }
+    return { record, warnings };
+  }
+
   knowledgeQueryResult(opts: QueryOptions): KnowledgeQueryResult {
     const records = this.knowledgeQuery(opts);
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
