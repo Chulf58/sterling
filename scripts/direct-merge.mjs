@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { arg, fail, openProject } from './lib/project.mjs';
 import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
+import { defaultExec } from './lib/update.mjs';
 
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail('direct-merge: not a git repository');
@@ -59,9 +60,17 @@ const pkgJsonPath = join(target, 'package.json');
 const hasCheck = existsSync(pkgJsonPath) && !!JSON.parse(readFileSync(pkgJsonPath, 'utf8')).scripts?.check;
 if (hasCheck) {
   console.error('direct-merge: running the consistency-check battery (npm run check)…');
-  const check = spawnSync('npm', ['run', 'check'], { cwd: target, encoding: 'utf8', timeout: 300_000 });
+  // Through defaultExec, NOT a bare spawnSync: `npm` resolves through a .cmd shim
+  // on native Windows that spawn cannot exec directly, so a bare call returned
+  // ENOENT with status null and EMPTY stdout/stderr — the gate then reported
+  // "battery FAILED" with nothing after the colon, on every Windows merge, for a
+  // battery that passes. Undiagnosable by construction (P5), and it blocked the
+  // gate rather than opening it, which is why it survived unnoticed. defaultExec
+  // owns the shell/quoting rule and normalizes a spawn error into status 1 with
+  // the message in stderr, so a future failure prints something readable.
+  const check = defaultExec('npm', ['run', 'check'], { cwd: target, timeout: 300_000 });
   if (check.status !== 0) {
-    fail(`direct-merge: the consistency-check battery FAILED — fix before merging:\n${(check.stdout || '') + (check.stderr || '')}`);
+    fail(`direct-merge: the consistency-check battery FAILED — fix before merging:\n${check.stdout + check.stderr}`);
   }
 } else {
   console.error("direct-merge: no `check` script in the target's package.json — battery skipped (loud)");
