@@ -12,6 +12,30 @@ import { SterlingTools } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
 
+/**
+ * Every tool's TOP-LEVEL parameters are STRICT: an unknown key is a loud
+ * validation error, never a silent drop (P5).
+ *
+ * The SDK builds `z.object(shape)` from a raw shape, and zod's default object
+ * mode STRIPS unknown keys — so a caller using a plausible-but-wrong parameter
+ * name got a successful call with its argument silently discarded. Measured
+ * 2026-07-29: knowledge_query called with {query, limit} — neither is a real
+ * parameter — returned a normal unfiltered window, and a sibling conductor
+ * reasoned from it three times as though it were the whole store. The served
+ * JSON Schema said additionalProperties:false the whole time, so the surface was
+ * advertising a contract it did not enforce.
+ *
+ * A full ZodObject passes through the SDK's normalizeObjectSchema untouched
+ * (verified against @modelcontextprotocol/sdk 1.29.0 — it accepts a schema OR a
+ * raw shape), so .strict() survives to the parse. The SDK validates before the
+ * handler runs and returns the InvalidParams error IN-BAND (isError + the zod
+ * message naming the offending keys) — the same channel spawned agents already
+ * self-correct from (§5.2). Record BODIES stay `passthrough`: fields /
+ * body / payload / handoff carry arbitrary validated-downstream shapes, and it is
+ * only the parameter names that are a closed set.
+ */
+const strict = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
+
 export function createSterlingServer(storePath: string): { server: McpServer; store: MountedStores; tools: SterlingTools } {
   // config.json sits beside the store in .sterling/ (§12); malformed fails loud.
   // Read before opening the store: config.stack_tags is the §3.3 mount manifest.
@@ -31,7 +55,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_create',
     {
       description: 'Create a knowledge record. Schema-validated against the registered record types; unregistered types are rejected.',
-      inputSchema: { type: z.string(), fields: passthrough },
+      inputSchema: strict({ type: z.string(), fields: passthrough }),
     },
     ({ type, fields }) => json(tools.knowledgeCreate(type, fields))
   );
@@ -40,22 +64,22 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_query',
     {
       description:
-        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed.',
-      inputSchema: {
+        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read.',
+      inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
         file_keys: z.array(z.string()).optional(),
         rank_terms: z.array(z.string()).optional(),
         include_unconfirmed: z.boolean().optional(),
         cap: z.number().int().positive().optional(),
-      },
+      }),
     },
-    (opts) => json(tools.knowledgeQuery(opts))
+    (opts) => json(tools.knowledgeQueryResult(opts))
   );
 
   server.registerTool(
     'knowledge_get',
-    { description: 'Fetch a record by id.', inputSchema: { id: z.string() } },
+    { description: 'Fetch a record by id — the full-fidelity read (query results are projected).', inputSchema: strict({ id: z.string() }) },
     ({ id }) => json(tools.knowledgeGet(id))
   );
 
@@ -63,7 +87,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description: 'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place.',
-      inputSchema: { id: z.string(), body: passthrough },
+      inputSchema: strict({ id: z.string(), body: passthrough }),
     },
     ({ id, body }) => json(tools.knowledgeUpdate(id, body))
   );
@@ -73,7 +97,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     {
       description:
         'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo/note never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome.',
-      inputSchema: { id: z.string(), domain: z.string() },
+      inputSchema: strict({ id: z.string(), domain: z.string() }),
     },
     ({ id, domain }) => json(tools.knowledgePromote(id, domain))
   );
@@ -82,7 +106,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_add',
     {
       description: 'Add a todo to the board (source: user) or the maintenance queue (source: system, requires system_reason).',
-      inputSchema: {
+      inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
         file_keys: z.array(z.string()).optional(),
@@ -90,7 +114,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         feature_link: z.string().optional(),
         system_reason: z.string().optional(),
         stack_tags: z.array(z.string()).optional(),
-      },
+      }),
     },
     (args) => json(tools.boardAdd(args))
   );
@@ -99,11 +123,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description: 'List open board items. source=user is the board; source=system is the maintenance queue.',
-      inputSchema: {
+      inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         file_keys: z.array(z.string()).optional(),
         cap: z.number().int().positive().optional(),
-      },
+      }),
     },
     (args) => json(tools.boardQuery(args))
   );
@@ -112,7 +136,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_remove',
     {
       description: 'Remove a todo — the only way items leave the board (done = removed, bound to the artifact-write).',
-      inputSchema: { id: z.string() },
+      inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardRemove(id))
   );
@@ -122,7 +146,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     {
       description:
         "Remove a note outright — notes are the user's capture surface (§3.2.6); misfiled or spent notes leave the Notes tab here. Refuses non-note records.",
-      inputSchema: { id: z.string() },
+      inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.noteRemove(id))
   );
@@ -131,7 +155,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'run_state',
     {
       description: 'Current run record — the conductor source of truth for run state (re-read after compaction; never trust recall).',
-      inputSchema: { run_id: z.string().optional() },
+      inputSchema: strict({ run_id: z.string().optional() }),
     },
     ({ run_id }) => json(tools.runState(run_id))
   );
@@ -141,13 +165,13 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     {
       description:
         'The exit wire (never prose): record your typed exit signal + payload before finishing. Signals: complete{handoff_ref} | research-needed{question,context,blocking} | review-unresolved | blocked{reason} | tests-invalid{evidence} | contract-violated{path,rule} | bug-found{description,location,depends_on_current_work,workaround_built} | phase-overflow{agent,fill_pct}. agent-died is conductor-reported, never agent-emitted. Invalid signal or payload is rejected — correct and re-call.',
-      inputSchema: {
+      inputSchema: strict({
         run_id: z.string().optional(),
         phase_id: z.string(),
         agent_role: z.string(),
         signal: z.string(),
         payload: passthrough.optional(),
-      },
+      }),
     },
     (args) => json(tools.agentExit(args))
   );
@@ -157,12 +181,10 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     {
       description:
         "The brain: computes the reaction to the recorded exit and returns the next action; the conductor executes exactly that. Routing (§5.2): abnormal exits come here immediately; normal 'complete' only at the PHASE BOUNDARY — intra-phase completes are consumed via scripts/consume-exit.mjs as the next §8.1 step, never signalled here.",
-      inputSchema: {
+      inputSchema: strict({
         run_id: z.string().optional(),
-        exit: z
-          .object({ signal: z.string(), payload: passthrough.optional(), phase_id: z.string().optional(), agent_role: z.string().optional() })
-          .optional(),
-      },
+        exit: strict({ signal: z.string(), payload: passthrough.optional(), phase_id: z.string().optional(), agent_role: z.string().optional() }).optional(),
+      }),
     },
     (args) => json(tools.runSignal(args))
   );
@@ -171,7 +193,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_link',
     {
       description: 'Add a typed link between records: cites | informed_by | fulfills | supersedes.',
-      inputSchema: { from: z.string(), rel: z.string(), to: z.string() },
+      inputSchema: strict({ from: z.string(), rel: z.string(), to: z.string() }),
     },
     ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to))
   );
@@ -180,7 +202,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'run_escalate',
     {
       description: 'Surface a judgment branch / typed escalation onto the active run record.',
-      inputSchema: { payload: passthrough },
+      inputSchema: strict({ payload: passthrough }),
     },
     ({ payload }) => json(tools.runEscalate(payload))
   );
@@ -189,12 +211,12 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_enqueue',
     {
       description: 'Enqueue a maintenance item (system todo): reconcile_needed | stale_research | deletion_candidate | capture_owed | promotion_review | wire_in_dormant.',
-      inputSchema: {
+      inputSchema: strict({
         reason: z.string(),
         text: z.string(),
         file_keys: z.array(z.string()).optional(),
         feature_link: z.string().optional(),
-      },
+      }),
     },
     (args) => json(tools.maintenanceEnqueue(args))
   );
@@ -203,11 +225,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_query',
     {
       description: 'List open maintenance-queue items (system todos), optionally by system_reason or file keys.',
-      inputSchema: {
+      inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         cap: z.number().int().positive().optional(),
-      },
+      }),
     },
     (args) => json(tools.maintenanceQuery(args))
   );
@@ -216,7 +238,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'handoff_write',
     {
       description: 'Write your phase handoff (schema-validated). Run-scoped transient state — never enters the durable store.',
-      inputSchema: { run_id: z.string().optional(), handoff: passthrough },
+      inputSchema: strict({ run_id: z.string().optional(), handoff: passthrough }),
     },
     (args) => json(tools.handoffWrite(args))
   );
@@ -225,7 +247,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'handoff_read',
     {
       description: 'Read handoffs for a phase, or those touching the given files.',
-      inputSchema: { run_id: z.string().optional(), phase_id: z.string().optional(), files: z.array(z.string()).optional() },
+      inputSchema: strict({ run_id: z.string().optional(), phase_id: z.string().optional(), files: z.array(z.string()).optional() }),
     },
     (args) => json(tools.handoffRead(args))
   );

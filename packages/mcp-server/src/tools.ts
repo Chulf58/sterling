@@ -8,12 +8,26 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
-import type { QueryOptions, RecordedExit, ToolStore } from '@sterling/store';
+import { DEFAULT_QUERY_CAP, type QueryOptions, type RecordedExit, type ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
 export interface SkippedCheck {
   check: string;
   reason: string;
+}
+
+/** knowledge_query's disclosed result envelope (see knowledgeQueryResult). */
+export interface KnowledgeQueryResult {
+  /** records matching the FILTER (types/stack_tags/file_keys), rank- and cap-blind */
+  matched_filter: number;
+  returned: number;
+  /** the cap actually applied — the caller's, or DEFAULT_QUERY_CAP */
+  cap: number;
+  /** the cap was reached, so more may exist past it; false GUARANTEES nothing was dropped */
+  capped: boolean;
+  /** present only when the window is partial — states how to widen it */
+  note?: string;
+  records: Record<string, unknown>[];
 }
 
 export interface ToolDeps {
@@ -457,6 +471,76 @@ export class SterlingTools {
       }
       return record;
     });
+  }
+
+  /**
+   * The MCP-facing result for knowledge_query: the flagged records, PROJECTED for
+   * reading, inside an envelope that DISCLOSES what the retrieval did. Two
+   * failures of one class — a retrieval that misrepresents itself (P5) — and both
+   * were observed, not theorized (sibling-project retrospective, 2026-07-29):
+   *
+   * (1) THE CAP WAS SILENT. query() caps at DEFAULT_QUERY_CAP, so a filter
+   * matching 200 records returned 20 with no signal the other 180 existed. A
+   * sibling conductor read such a window as the whole store and concluded it held
+   * ~20 records when it held 21 feature articles alone — then reasoned from that.
+   * count() already existed over the SAME base filter (the TUI's badges use it),
+   * so disclosure costs one COUNT(*) and no new machinery.
+   *
+   * (2) VERSION HISTORY DOMINATED THE PAYLOAD. A v42 article serializes a
+   * 42-entry supersedes chain plus 25 server-owned sha256 baselines on EVERY hit;
+   * a cap:6 query measured 56KB, nearly none of it readable content. The
+   * projection drops both — from QUERY results only. knowledge_get stays
+   * full-fidelity, so nothing becomes unreachable; it just stops being paid for on
+   * every retrieval. Semantic links (cites/informed_by/fulfills) SURVIVE: they
+   * point at the decisions and briefs a reader may need to follow, and
+   * supersedes_count keeps the version depth visible without the uuids.
+   *
+   * Scoped to this boundary deliberately: internal consumers read the fields the
+   * projection drops (promotion.mjs filters links.rel==='fulfills'; the drift
+   * wires above read file_baselines), and they call store.query/knowledgeQuery
+   * directly — so trimming in the store would have starved them. knowledgeQuery
+   * keeps returning full flagged records for exactly that reason.
+   */
+  knowledgeQueryResult(opts: QueryOptions): KnowledgeQueryResult {
+    const records = this.knowledgeQuery(opts);
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    // count() shares query()'s base filter but is rank-BLIND (rank_terms is a
+    // no-op there), so this is "records matching the filter", which is exactly
+    // the number a caller needs to see it is holding a window. Claiming it as
+    // "records your query would return" would trade a silent lie for a loud one.
+    const matchedFilter = this.store.count(opts);
+    // returned === cap is the only truthful truncation signal: the LIMIT was
+    // reached, so more MAY exist past it. returned < cap guarantees nothing was
+    // dropped. Deriving capped from matchedFilter alone would false-positive
+    // every time rank_terms legitimately narrowed the set.
+    const capped = records.length === cap;
+    const rankRestricted = (opts.rank_terms?.length ?? 0) > 0 && !capped && matchedFilter > records.length;
+    return {
+      matched_filter: matchedFilter,
+      returned: records.length,
+      cap,
+      capped,
+      ...(capped
+        ? {
+            note: `cap reached — showing ${records.length} of ${matchedFilter} records matching this filter; raise cap or narrow the filter (types/file_keys/rank_terms) to see the rest`,
+          }
+        : rankRestricted
+          ? {
+              note: `rank_terms restricted this to ${records.length} FTS match(es); ${matchedFilter} records match the filter alone — drop or widen rank_terms to see them`,
+            }
+          : {}),
+      records: records.map((r) => this.projectForQuery(r)),
+    };
+  }
+
+  /** Query-result projection (see knowledgeQueryResult): drop the supersedes
+   *  chain and the server-owned baseline hashes, keep every semantic link. */
+  private projectForQuery(record: DurableRecord & { staleness?: object; verify_before_use?: boolean }): Record<string, unknown> {
+    const { file_baselines: _baselines, ...rest } = record as unknown as Record<string, unknown>;
+    const links = (rest.links ?? []) as { rel: string; target_id: string }[];
+    const semantic = links.filter((l) => l.rel !== 'supersedes');
+    const supersedesCount = links.length - semantic.length;
+    return { ...rest, links: semantic, ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}) };
   }
 
   knowledgeGet(id: string): DurableRecord {

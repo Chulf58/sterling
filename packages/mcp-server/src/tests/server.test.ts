@@ -95,8 +95,31 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
 
     const queried = payload(
       await client.callTool({ name: 'knowledge_query', arguments: { types: ['decision'], rank_terms: ['T'] } })
-    ) as unknown[];
-    assert.equal(queried.length, 1);
+    ) as { returned: number; matched_filter: number; capped: boolean; records: { id: string }[] };
+    assert.equal(queried.returned, 1);
+    assert.equal(queried.records.length, 1);
+    assert.equal(queried.matched_filter, 1);
+    assert.equal(queried.capped, false, 'returned < cap guarantees nothing was dropped');
+
+    // P5 OVER THE WIRE: an unknown parameter name is REJECTED, never silently
+    // stripped. Measured 2026-07-29 — knowledge_query called with {query, limit},
+    // neither of which is a real parameter, returned a normal window and the
+    // caller reasoned from it as though it were the whole store. This pin only
+    // DISCRIMINATES over the wire: the strip happened inside the SDK's own parse,
+    // so no unit test on knowledgeQueryResult can see it. The SDK validates
+    // BEFORE the handler runs and returns the InvalidParams error IN-BAND
+    // (isError + the zod message), which is the channel agents self-correct from.
+    const bogus = await client.callTool({ name: 'knowledge_query', arguments: { types: ['decision'], query: 'T', limit: 5 } });
+    assert.equal(bogus.isError, true, 'unknown parameter names are rejected, never ignored');
+    const bogusText = (bogus.content as { text: string }[])[0].text;
+    assert.match(bogusText, /unrecognized_keys/, 'the refusal is a validation error, not a tool-logic error');
+    assert.match(bogusText, /query/, 'the refusal NAMES the offending parameters so the caller can self-correct');
+    assert.match(bogusText, /limit/);
+
+    // the same closed-set rule holds across the surface, not just on retrieval
+    const bogusBoard = await client.callTool({ name: 'board_query', arguments: { source: 'user', limit: 5 } });
+    assert.equal(bogusBoard.isError, true, 'strictness is a property of the whole tool surface');
+    assert.match((bogusBoard.content as { text: string }[])[0].text, /limit/);
 
     // protocol loop over the wire
     store.createRun({

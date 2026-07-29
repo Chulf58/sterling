@@ -259,6 +259,79 @@ test('stale-at-read (§3.4): research findings get both clocks + flag; platform 
   }
 });
 
+test('knowledge_query DISCLOSES its window: capped says so with the filter count, uncapped GUARANTEES nothing was dropped (P5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (let i = 0; i < 5; i++) {
+      tools.knowledgeCreate('decision', { title: `D${i}`, statement: 'S', alternatives_rejected: [], rationale: 'R' });
+    }
+    // The failure this pins (sibling-project retrospective, 2026-07-29): a caller
+    // received a capped window with no signal, read it as the whole store, and
+    // reasoned from that. matched_filter is the number it previously had to guess.
+    const capped = tools.knowledgeQueryResult({ types: ['decision'], cap: 2 });
+    assert.equal(capped.returned, 2);
+    assert.equal(capped.matched_filter, 5, 'the count matching the FILTER, not the size of the window');
+    assert.equal(capped.cap, 2);
+    assert.equal(capped.capped, true);
+    assert.match(capped.note ?? '', /cap reached/, 'the disclosure teaches how to widen the window');
+
+    // Disclosure appears ONLY when the window is actually partial (P1 — a notice
+    // on every complete result is ceremony): capped:false is a guarantee.
+    const full = tools.knowledgeQueryResult({ types: ['decision'], cap: 50 });
+    assert.equal(full.returned, 5);
+    assert.equal(full.capped, false);
+    assert.equal(full.note, undefined, 'a complete result carries no notice');
+
+    // rank_terms restricting the set is NOT the cap truncating it — the two are
+    // reported distinctly, so "3 of 5" never gets misread as "the cap dropped 2".
+    const ranked = tools.knowledgeQueryResult({ types: ['decision'], rank_terms: ['D3'], cap: 50 });
+    assert.equal(ranked.capped, false, 'rank_terms narrowing is not a cap truncation');
+    assert.equal(ranked.matched_filter, 5);
+    assert.match(ranked.note ?? '', /rank_terms restricted/, 'the FTS narrowing is disclosed too');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_query PROJECTS version history out of results; knowledge_get stays full-fidelity (the 56KB cap:6 payload)', () => {
+  // A repoRoot + a real owned file, because file_baselines is only computed where
+  // there is a tree to hash — the default harness has none, so a projection test
+  // on it would assert the absence of something that was never there.
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'thing.ts'), 'export const x = 1;\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  const cleanup = () => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    let article = mkArticle(tools, 'thing', 'src/thing.ts');
+    assert.ok(
+      Object.keys((article as unknown as { file_baselines: Record<string, string> }).file_baselines).length > 0,
+      'precondition: the article really does carry a server-computed baseline'
+    );
+    const firstId = article.id;
+    for (let i = 0; i < 3; i++) article = tools.knowledgeUpdate(article.id, { what_it_does: `does ${i}` });
+
+    const [projected] = tools.knowledgeQueryResult({ types: ['feature_article'] }).records;
+    assert.equal(projected.supersedes_count, 3, 'chain DEPTH stays visible without the uuids');
+    assert.deepEqual(projected.links, [], 'the supersedes chain is gone from query results');
+    assert.ok(!('file_baselines' in projected), 'server-owned baseline hashes are gone from query results');
+    assert.equal(projected.what_it_does, 'does 2', 'the readable content is untouched');
+
+    // Nothing became unreachable — it just stopped being paid for on every hit.
+    const full = tools.knowledgeGet(article.id) as unknown as Record<string, unknown>;
+    assert.equal((full.links as unknown[]).length, 3, 'knowledge_get keeps the full chain');
+    assert.ok('file_baselines' in full, 'knowledge_get keeps the baselines');
+    assert.equal(tools.knowledgeGet(firstId).status, 'superseded', 'and the superseded versions remain retrievable by id');
+  } finally {
+    cleanup();
+  }
+});
+
 test('dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED naming the match — the author merges via knowledge_update or stores with dedup_override', () => {
   const { tools, cleanup } = harness();
   try {

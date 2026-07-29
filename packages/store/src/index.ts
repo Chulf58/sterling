@@ -165,6 +165,14 @@ export const rankTerms = z
   .array(z.string().regex(/^\S{1,64}$/, 'rank_terms must be single keywords (no whitespace, ≤64 chars)'))
   .max(MAX_RANK_TERMS);
 
+// One definition of the §3.4 default cap (invariant 1), for the same reason as
+// MAX_RANK_TERMS: it was written literally in BOTH query() here and
+// MountedStores.query, and the tool layer now has to report the cap it actually
+// applied (knowledgeQueryResult) — a third literal would have been a third place
+// to drift. A caller that omits cap gets this many records and, at the tool
+// boundary, is TOLD so.
+export const DEFAULT_QUERY_CAP = 20;
+
 export interface QueryOptions {
   types?: string[];
   stack_tags?: string[];
@@ -185,6 +193,7 @@ export type ToolStore = Pick<
   SterlingStore,
   | 'create'
   | 'query'
+  | 'count'
   | 'get'
   | 'supersede'
   | 'retireInFavorOf'
@@ -299,7 +308,7 @@ export class SterlingStore {
 
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts: QueryOptions = {}): DurableRecord[] {
-    const cap = opts.cap ?? 20;
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
     const { where, params, fileKeys } = this.baseFilter(opts);
 
     if (opts.rank_terms !== undefined) {

@@ -137,6 +137,33 @@ test('countBySource: COUNT(*) twin of bySource — project FIRST then domains, p
   }
 });
 
+test('count: cross-mount COUNT(*) summed project-first — the number knowledge_query discloses as matched_filter', () => {
+  const { stores, cleanup } = harness(['alpha', 'beta']);
+  try {
+    stores.create(ref('domain:alpha'));
+    stores.create({ ...ref('domain:alpha'), location: 'docs/y.md' });
+    stores.create(ref('domain:beta'));
+
+    // The tool layer reports this as matched_filter so a capped retrieval can say
+    // how many records matched the filter it was given. It must span mounts: a
+    // project-only count would under-report and re-create the very "you are
+    // holding the whole store" misread the disclosure exists to prevent.
+    assert.equal(stores.count({ types: ['reference_material'] }), 3, 'sums every mounted store, not just the project one');
+    assert.equal(
+      stores.count({ types: ['reference_material'] }),
+      stores.countBySource({ types: ['reference_material'] }).reduce((n, s) => n + s.count, 0),
+      'count never drifts from the per-source fan it sums'
+    );
+    // cap is a RETRIEVAL bound, never a counting one — otherwise the disclosure
+    // could never report more matches than the window it is disclosing.
+    assert.equal(stores.query({ types: ['reference_material'], cap: 1 }).length, 1, 'the cap bounds the window');
+    assert.equal(stores.count({ types: ['reference_material'], cap: 1 }), 3, 'but never the count');
+    assert.equal(stores.count({ types: ['decision'] }), 0, 'an unmatched filter counts zero');
+  } finally {
+    cleanup();
+  }
+});
+
 test('querySource: records from ONE named source only; an unknown source → []', () => {
   const { stores, cleanup } = harness(['alpha']);
   try {

@@ -4868,6 +4868,7 @@ function deepReplaceString(value, from, to) {
 }
 var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+var DEFAULT_QUERY_CAP = 20;
 var SterlingStore = class {
   db;
   constructor(path) {
@@ -4947,7 +4948,7 @@ var SterlingStore = class {
   }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
-    const cap = opts.cap ?? 20;
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
     const { where, params, fileKeys } = this.baseFilter(opts);
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);
