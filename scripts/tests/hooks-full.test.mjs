@@ -152,6 +152,46 @@ test('H1: banner art to stderr (env-only suppression), counts to the human, conv
   }
 });
 
+test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its lane split; a shallow one stays silent to the model (P1)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // SHALLOW: counts still go to the human, nothing to the model. This is the
+    // pre-existing contract and it must survive — an event-drained shallow queue
+    // is noise to the conductor.
+    for (let i = 0; i < 3; i++) {
+      store.create({ ...envelope('todo'), text: `m${i}`, source: 'system', system_reason: 'reconcile_needed' });
+    }
+    const shallow = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
+    assert.match(shallow.systemMessage, /3 maintenance items pending/, 'the human still gets the count');
+    assert.ok(!/MAINTENANCE QUEUE IS DEEP/.test(shallow.hookSpecificOutput.additionalContext), 'silent to the model below threshold');
+
+    // DEEP: cross the configured threshold and the CONDUCTOR is told, because the
+    // human seeing a number never drained anything — a consuming project reached
+    // 63 items, most already-finished work never closed (reported 2026-07-29).
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 5 } }));
+    for (let i = 0; i < 2; i++) {
+      store.create({ ...envelope('todo'), text: `a${i}`, source: 'system', system_reason: 'article_missing' });
+    }
+    const deep = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
+    const ctx = deep.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 open items/);
+    assert.match(ctx, /reconcile_needed ×3/, 'the lane split says WHAT is owed, not just how much');
+    assert.match(ctx, /article_missing ×2/);
+    assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
+    assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
+    assert.match(ctx, /Anti-speculation/, 'the conventions injection is unaffected');
+
+    // A malformed config costs the THRESHOLD, never the conventions: H1 is soft,
+    // unlike the gates that fail closed on this same input (anti_pattern e13f0fb5).
+    writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
+    const broken = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' });
+    assert.equal(broken.code, 0, broken.stderr);
+    assert.match(JSON.parse(broken.stdout).hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions survive a corrupt config');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H1: shared project registry — touches this project last_seen + makes the CONDUCTOR aware of live siblings via additionalContext, not systemMessage (decision 8f9e6db2)', () => {
   const { dir, cleanup } = makeProject();
   const regPath = join(dir, 'registry.db');

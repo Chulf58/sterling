@@ -204,6 +204,100 @@ test('board tools: add/query separates board from maintenance queue; remove is t
   }
 });
 
+test('a write carrying a field the type does not define is REFUSED, never silently dropped (P5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // The reported failure, verbatim in shape: reference_material has no files or
+    // file_keys (its paths come from `location`), so the write was accepted, the
+    // field discarded, and success returned — caught only by later querying for
+    // the thing the write was supposed to have done.
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('reference_material', {
+          title: 'ROADMAP',
+          kind: 'doc',
+          location: 'ROADMAP.md',
+          summary: 's',
+          source_date: '2026-07-29',
+          capture_date: '2026-07-29',
+          files: [{ path: 'ROADMAP.md', role: 'plan' }],
+        }),
+      (err: Error) => {
+        assert.match(err.message, /'files'/, 'the refusal names the offending field');
+        assert.match(err.message, /silently dropped/, 'and says what would have happened');
+        assert.match(err.message, /location/, 'and lists the valid fields so the fix needs no round-trip');
+        return true;
+      }
+    );
+    // nothing was written by the refused create
+    assert.equal(tools.knowledgeQuery({ types: ['reference_material'] }).length, 0);
+
+    // a correct create still lands, and the SAME guard covers update
+    const { record: ref } = tools.knowledgeCreate('reference_material', {
+      title: 'ROADMAP',
+      kind: 'doc',
+      location: 'ROADMAP.md',
+      summary: 's',
+      source_date: '2026-07-29',
+      capture_date: '2026-07-29',
+    });
+    assert.throws(() => tools.knowledgeUpdate(ref.id, { file_keys: ['ROADMAP.md'] }), /'file_keys'/);
+    assert.equal(tools.knowledgeQuery({ types: ['reference_material'] })[0].id, ref.id, 'the refused update wrote no new version');
+
+    // the per-type split is real, and the guard respects it: files[] is exactly
+    // how a feature_article carries paths, so the same field is valid there
+    const { record: art } = tools.knowledgeCreate('feature_article', {
+      slug: 'a',
+      title: 'a',
+      what_it_does: 'x',
+      intended_behavior: 'y',
+      files: [{ path: 'src/a.ts', role: 'impl' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    });
+    assert.equal((art as unknown as { files: unknown[] }).files.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_query / maintenance_query DISCLOSE their depth — a queue that under-reports reads as drained (P5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (let i = 0; i < 5; i++) {
+      tools.boardAdd({ text: `queue item ${i}`, source: 'system', system_reason: 'reconcile_needed' });
+    }
+    tools.boardAdd({ text: 'real work', source: 'user' });
+
+    // The reported failure: "maintenance_query caps at 50 silently. No count, no
+    // '50 of N'. I only learned the tail was deep because removing 19 revealed 19
+    // more." capped is EXACT here (the filter runs in JS over the scanned set),
+    // unlike knowledge_query where FTS rank-blindness forces returned === cap.
+    const capped = tools.maintenanceQueryResult({ cap: 2 });
+    assert.equal(capped.returned, 2);
+    assert.equal(capped.matched_filter, 5, 'the queue states its real depth, not its window');
+    assert.equal(capped.capped, true);
+    assert.match(capped.note ?? '', /cap reached/);
+    assert.match(capped.note ?? '', /tail behind/, 'the notice names the drain consequence');
+
+    const full = tools.maintenanceQueryResult({ cap: 50 });
+    assert.equal(full.returned, 5);
+    assert.equal(full.capped, false);
+    assert.equal(full.note, undefined, 'a complete result carries no notice');
+
+    // source still separates the two surfaces through the envelope
+    assert.equal(tools.boardQueryResult({ source: 'user' }).matched_filter, 1);
+    assert.equal(tools.boardQueryResult({ source: 'system' }).matched_filter, 5);
+    assert.equal(tools.boardQueryResult({}).matched_filter, 6);
+  } finally {
+    cleanup();
+  }
+});
+
 test('stale-at-read (§3.4): research findings get both clocks + flag; platform basis gets verify_before_use', () => {
   const { store, tools, cleanup } = harness();
   try {
@@ -661,24 +755,51 @@ test('knowledge_create: caller cannot override the server-owned envelope (id/tim
   const { tools, cleanup } = harness();
   try {
     const forgedId = randomUUID();
+    // The envelope is still unforgeable — but as of 2026-07-29 the attempt is
+    // REFUSED rather than silently ignored. The strip alone satisfied finding
+    // 14/43 while telling the caller the write succeeded, and a project acting on
+    // that belief wrote store records asserting a retirement that never happened.
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('decision', {
+          title: 'envelope test',
+          statement: 's',
+          alternatives_rejected: [],
+          rationale: 'r',
+          id: forgedId,
+          status: 'superseded',
+          superseded_by: randomUUID(),
+          created_at: '2000-01-01T00:00:00.000Z',
+          updated_at: '2000-01-01T00:00:00.000Z',
+        }),
+      (err: Error) => {
+        assert.match(err.message, /SERVER-OWNED/);
+        assert.match(err.message, /'id'/, 'the refusal names every attempted key');
+        assert.match(err.message, /'status'/);
+        assert.match(err.message, /NO way to retire/, 'reaching for status gets told the retire path does not exist');
+        return true;
+      }
+    );
+    assert.equal(tools.knowledgeQuery({ types: ['decision'], cap: 10 }).length, 0, 'the refused create wrote nothing');
+
+    // A clean create still lands, born with the server's own envelope.
     const { record } = tools.knowledgeCreate('decision', {
       title: 'envelope test',
       statement: 's',
       alternatives_rejected: [],
       rationale: 'r',
-      id: forgedId,
-      status: 'superseded',
-      superseded_by: randomUUID(),
-      created_at: '2000-01-01T00:00:00.000Z',
-      updated_at: '2000-01-01T00:00:00.000Z',
     });
     assert.notEqual(record.id, forgedId, 'server assigns the id');
-    assert.equal(record.status, 'active', 'born active regardless of caller status');
+    assert.equal(record.status, 'active', 'born active');
     assert.equal(record.superseded_by, null, 'not born superseded');
-    assert.notEqual(record.created_at, '2000-01-01T00:00:00.000Z', 'server owns created_at');
     // the record is actually served (a caller-forged status:superseded would have hidden it)
     const served = tools.knowledgeQuery({ types: ['decision'], cap: 10 });
     assert.ok(served.some((r) => r.id === record.id), 'the created record is visible to default queries');
+
+    // The measured silent no-op, now loud: the retirement attempt that returned
+    // status:'active' and superseded_by:null with no error (2026-07-29).
+    assert.throws(() => tools.knowledgeUpdate(record.id, { status: 'superseded', superseded_by: randomUUID() }), /NO way to retire/);
+    assert.equal(tools.knowledgeGet(record.id).status, 'active', 'the refused update changed nothing');
   } finally {
     cleanup();
   }

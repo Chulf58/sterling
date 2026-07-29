@@ -4702,6 +4702,17 @@ var configSchema = external_exports.object({
   article_demand: external_exports.object({
     min_unowned_files: external_exports.number().int().positive().default(3)
   }).default({}),
+  // §3.2.7 H1 queue-depth signal: at or above this many open maintenance items,
+  // SessionStart tells the CONDUCTOR the queue is deep and wants draining — not
+  // just the human. The counts have always been computed and sent as a
+  // systemMessage the MODEL never sees, on the reasoning that an event-drained
+  // queue is otherwise noise; that holds while it is shallow and fails once it is
+  // not. A consuming project reached 63 items, most of them work already finished
+  // and never closed, with nothing prompting a drain (reported 2026-07-29).
+  // Below the threshold H1 stays silent to the model (P1 — no ceremony).
+  maintenance_queue: external_exports.object({
+    deep_threshold: external_exports.number().int().positive().default(15)
+  }).default({}),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
@@ -5437,11 +5448,11 @@ var SterlingStore = class {
    * pinned model IDs. No network; no fabrication — day-one entries are the IDs
    * already in use by the installed agents.
    */
-  bootstrapCatalogIfAbsent(config, nowISO) {
+  bootstrapCatalogIfAbsent(config2, nowISO) {
     const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
     if (existing.length > 0)
       return;
-    const cfg = config;
+    const cfg = config2;
     const models = cfg.models ?? {};
     const ids = /* @__PURE__ */ new Set();
     for (const v of Object.values(models)) {
@@ -5549,6 +5560,10 @@ function readStdin() {
 function allow() {
   process.exit(0);
 }
+function loadConfig(cwd) {
+  const p = join3(cwd, ".sterling", "config.json");
+  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
 function openStore(cwd) {
   const p = join3(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -5644,13 +5659,31 @@ function pluginVersion() {
 var input = readStdin();
 var store = openStore(input.cwd);
 if (!store) allow();
+var config = null;
+try {
+  config = loadConfig(input.cwd);
+} catch {
+  config = null;
+}
 var counts = { todos: 0, maintenance: 0 };
+var queueReasons = [];
 try {
   const todos = store.query({ types: ["todo"], cap: 1e3 });
   counts.todos = todos.filter((t) => t.source === "user").length;
-  counts.maintenance = todos.filter((t) => t.source === "system").length;
+  const system = todos.filter((t) => t.source === "system");
+  counts.maintenance = system.length;
+  const byReason = /* @__PURE__ */ new Map();
+  for (const t of system) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
+  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} \xD7${n}`);
 } finally {
   store.close();
+}
+var queueContext = "";
+if (counts.maintenance >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
+  queueContext = `
+
+MAINTENANCE QUEUE IS DEEP \u2014 ${counts.maintenance} open items (${queueReasons.join(", ")}).
+Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
 }
 var registryContext = "";
 if (existsSync3(registryPath())) {
@@ -5730,7 +5763,7 @@ ${versionLine}`);
 }
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + registryContext + machineContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

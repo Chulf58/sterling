@@ -7,7 +7,7 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readStdin, allow, openStore } from './lib/common.mjs';
+import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths } from '../lib/agent-distribution.mjs';
@@ -89,13 +89,49 @@ const input = readStdin();
 const store = openStore(input.cwd);
 if (!store) allow(); // not a Sterling project — no ceremony (P1)
 
+// H1 is SOFT (banner + conventions + counts): a malformed config must cost the
+// deep-queue threshold, never the conventions injection, so this read is guarded
+// and falls back to the schema default rather than throwing. Contrast the gates
+// (H3/H5/H14/H15), which fail CLOSED on exactly this input — a hook that cannot
+// evaluate must deny only where denying is its job (anti_pattern e13f0fb5).
+let config = null;
+try {
+  config = loadConfig(input.cwd);
+} catch {
+  config = null;
+}
+
 let counts = { todos: 0, maintenance: 0 };
+let queueReasons = [];
 try {
   const todos = store.query({ types: ['todo'], cap: 1000 });
   counts.todos = todos.filter((t) => t.source === 'user').length;
-  counts.maintenance = todos.filter((t) => t.source === 'system').length;
+  const system = todos.filter((t) => t.source === 'system');
+  counts.maintenance = system.length;
+  // Lane breakdown for the deep-queue signal below: a bare total says "drain",
+  // a per-lane split says WHAT is owed, which is what decides how to drain it.
+  const byReason = new Map();
+  for (const t of system) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
+  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ×${n}`);
 } finally {
   store.close();
+}
+
+// DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold).
+// The counts above go to the human as a systemMessage, which the MODEL never
+// sees — correct while the queue is shallow and event-drained, wrong once it is
+// deep, because the human is not the one who drains it. A consuming project
+// reached 63 items, most of them work finished days earlier and never closed,
+// with nothing anywhere prompting a drain (reported 2026-07-29). Silent below the
+// threshold (P1); above it, states the depth, the lanes, and the remedy.
+let queueContext = '';
+if (counts.maintenance >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
+  queueContext =
+    `\n\nMAINTENANCE QUEUE IS DEEP — ${counts.maintenance} open items (${queueReasons.join(', ')}).\n` +
+    `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
+    `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
+    `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
+    `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
 }
 
 // shared project registry (decision 8f9e6db2): touch THIS project's last_seen
@@ -233,7 +269,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext + machineContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

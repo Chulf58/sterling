@@ -4701,6 +4701,17 @@ var configSchema = external_exports.object({
   article_demand: external_exports.object({
     min_unowned_files: external_exports.number().int().positive().default(3)
   }).default({}),
+  // §3.2.7 H1 queue-depth signal: at or above this many open maintenance items,
+  // SessionStart tells the CONDUCTOR the queue is deep and wants draining — not
+  // just the human. The counts have always been computed and sent as a
+  // systemMessage the MODEL never sees, on the reasoning that an event-drained
+  // queue is otherwise noise; that holds while it is shallow and fails once it is
+  // not. A consuming project reached 63 items, most of them work already finished
+  // and never closed, with nothing prompting a drain (reported 2026-07-29).
+  // Below the threshold H1 stays silent to the model (P1 — no ceremony).
+  maintenance_queue: external_exports.object({
+    deep_threshold: external_exports.number().int().positive().default(15)
+  }).default({}),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)

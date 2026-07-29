@@ -7,13 +7,32 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import { DEFAULT_QUERY_CAP, type QueryOptions, type RecordedExit, type ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
 export interface SkippedCheck {
   check: string;
   reason: string;
+}
+
+export interface BoardFilter {
+  source?: 'user' | 'system';
+  system_reason?: string;
+  file_keys?: string[];
+  cap?: number;
+}
+
+/** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
+export interface BoardQueryResult {
+  /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
+  matched_filter: number;
+  returned: number;
+  cap: number;
+  /** exact: more matched than were returned */
+  capped: boolean;
+  note?: string;
+  records: DurableRecord[];
 }
 
 /** knowledge_query's disclosed result envelope (see knowledgeQueryResult). */
@@ -84,6 +103,14 @@ function spawnNoteExtraction(payload: NoteExtractionPayload): NoteExtractionDisp
 }
 
 const DAY_MS = 86_400_000;
+
+// Board/queue read defaults, named rather than inlined for the DEFAULT_QUERY_CAP
+// reason (decision b47889b7): the tool layer now REPORTS the cap it applied, so
+// the value has two readers and a literal would be a second place to drift.
+const DEFAULT_BOARD_CAP = 50;
+// The bounded todo scan the filter runs over. A full scan means the reported
+// count is a floor; boardQueryResult says so rather than under-reporting.
+const BOARD_SCAN_CAP = 1000;
 
 export class SterlingTools {
   private store: ToolStore;
@@ -201,7 +228,63 @@ export class SterlingTools {
 
   // -- knowledge CRUD ---------------------------------------------------------
 
+  /**
+   * Refuse a write that tries to ASSIGN a server-owned envelope key, instead of
+   * stripping it in silence. The stripping itself is correct and stays (finding
+   * 14/43 — a caller must not be able to forge an id, a clock, or a status); what
+   * was wrong is that the caller was told the write succeeded.
+   *
+   * MEASURED 2026-07-29, and this is the sharpest instance of the whole class: a
+   * project trying to retire a duplicate passed {status:'superseded',
+   * superseded_by:'<canonical>'} to knowledge_update. The call SUCCEEDED and
+   * returned status:'active', superseded_by:null — both fields discarded, no error,
+   * no warning. Their words: "that's the dangerous shape — a caller who doesn't
+   * re-read the result believes it worked." They then wrote store records asserting
+   * a retirement that had never happened.
+   *
+   * So the message must not merely refuse: for status/superseded_by it has to say
+   * that NO retire path exists on this surface, because a caller reaching for
+   * these fields is trying to do something the surface cannot do, and silence let
+   * them believe otherwise.
+   */
+  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update'): void {
+    const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
+    const attempted = SERVER_OWNED.filter((k) => k in fields);
+    if (attempted.length === 0) return;
+    const retiring = attempted.includes('status') || attempted.includes('superseded_by');
+    throw new Error(
+      `${op}: ${attempted.map((k) => `'${k}'`).join(', ')} ${attempted.length === 1 ? 'is' : 'are'} SERVER-OWNED and cannot be assigned by a caller — ` +
+        `the value would have been discarded and the write reported success. ` +
+        (retiring
+          ? `status/superseded_by are set only by supersession: knowledge_update writes a NEW version and retires the prior one automatically. ` +
+            `There is NO way to retire a record to a non-serving state through this surface — /sterling:cleanup never hard-deletes knowledge either. ` +
+            `To correct a wrong record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug.`
+          : `id and the clocks are assigned at write; type is fixed at create.`)
+    );
+  }
+
+  /**
+   * Refuse a write carrying fields the record type does not define, naming them
+   * AND the valid set — the write-side half of fail-loud (P5), symmetric with the
+   * strict tool PARAMETERS of decision b47889b7. The valid set is in the message
+   * because discoverability is the actual complaint: per-type required fields and
+   * the files-vs-file_keys split (feature_article uses files[].path, decision /
+   * anti_pattern / research_finding / todo use file_keys, reference_material
+   * derives paths from location) cost a round-trip each to learn otherwise.
+   * An unregistered type is left to validateRecord's louder rejection.
+   */
+  private refuseUnknownFields(type: string, candidate: Record<string, unknown>): void {
+    const unknown = unknownFieldsIn(type, candidate);
+    if (unknown.length === 0) return;
+    const valid = [...(knownFieldsFor(type) ?? [])].sort().join(', ');
+    throw new Error(
+      `knowledge write: '${type}' does not define ${unknown.map((k) => `'${k}'`).join(', ')} — ` +
+        `the field would have been silently dropped and the write reported success. Valid fields: ${valid}.`
+    );
+  }
+
   knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
+    this.refuseServerOwnedFields(fields, 'knowledge_create');
     const ts = this.now();
     // The envelope is SERVER-OWNED: strip these keys from caller fields before
     // assembling the candidate, so a caller cannot override id/timestamps/status/
@@ -237,6 +320,14 @@ export class SterlingTools {
     // ('./x'→'x'), so the dedup key-overlap compares like-for-like against stored
     // records (audit finding 28/43); the raw candidate skipped the assist tier.
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    // A field this type does not define is REFUSED, never dropped (P5). zod
+    // objects strip unknown keys, so before this a misfiled field was accepted,
+    // discarded, and the create returned SUCCESS — the caller found out only by
+    // querying for what the write was supposed to have stored (sibling report
+    // 2026-07-29: reference_material has no files/file_keys, its paths come from
+    // location). Checked BEFORE schema.parse so the error names the actual
+    // mistake instead of a required field that went missing because of it.
+    this.refuseUnknownFields(type, candidate);
     const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
     const skipped: SkippedCheck[] = [];
 
@@ -553,8 +644,14 @@ export class SterlingTools {
   knowledgeUpdate(id: string, body: Record<string, unknown>): DurableRecord {
     const old = this.store.get(id);
     if (!old) throw new Error(`knowledge_update: no record '${id}'`);
+    this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
     const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, ...overrides } = body;
+    // Same refusal as create, applied to the CALLER's fields rather than the
+    // merged record: `old` is already valid, so anything unknown came from this
+    // call. Without it the merge silently discarded the field and reported a new
+    // version — the failure that makes a "fix" look applied when it never landed.
+    this.refuseUnknownFields(old.type, overrides);
     const next: Record<string, unknown> = {
       ...old,
       ...overrides,
@@ -656,8 +753,14 @@ export class SterlingTools {
     return this.knowledgeCreate('todo', { text, source, ...rest });
   }
 
-  boardQuery(filter: { source?: 'user' | 'system'; system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
-    const todos = this.store.query({ types: ['todo'], file_keys: filter.file_keys, cap: 1000 });
+  /**
+   * The whole filtered set, uncapped — ONE definition of the board filter, shared
+   * by the capped array (boardQuery, for internal callers) and the disclosed
+   * envelope (boardQueryResult, for the tool surface). Extracted so the two can
+   * never disagree about what "matching" means.
+   */
+  private boardFiltered(filter: BoardFilter): { matching: DurableRecord[]; scanTruncated: boolean } {
+    const todos = this.store.query({ types: ['todo'], file_keys: filter.file_keys, cap: BOARD_SCAN_CAP });
     // Apply EVERY filter BEFORE the cap slice (audit finding 33/43): capping the
     // mixed set first silently dropped matching items past the cap (the store
     // orders updated_at DESC, so long-standing reason-filtered items vanished).
@@ -665,7 +768,54 @@ export class SterlingTools {
     if (filter.system_reason) {
       filtered = filtered.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason);
     }
-    return filtered.slice(0, filter.cap ?? 50);
+    // The underlying scan is itself bounded; if it came back full, the count we
+    // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
+    return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
+  }
+
+  boardQuery(filter: BoardFilter = {}): DurableRecord[] {
+    return this.boardFiltered(filter).matching.slice(0, filter.cap ?? DEFAULT_BOARD_CAP);
+  }
+
+  /**
+   * The MCP-facing result for board_query / maintenance_query: the same envelope
+   * knowledge_query gained in decision b47889b7, extended to the two surfaces it
+   * MISSED. That omission was reported from the field within a day: "maintenance_
+   * query caps at 50 silently. No count, no '50 of N'. I only learned the tail was
+   * deep because removing 19 revealed 19 more, including a capture_owed reason not
+   * previously visible." A queue that under-reports its own depth reads as drained
+   * when it is merely truncated — and a drain is exactly the operation that must
+   * know what remains.
+   *
+   * One difference from knowledge_query, in this surface's favour: the filter runs
+   * in JS over the scanned set, so `capped` here is EXACT (returned < matching)
+   * rather than the returned === cap heuristic that FTS rank-blindness forces
+   * there. The field NAME is deliberately the same (matched_filter = records
+   * matching the filter you gave) — one name per concept, with each tool
+   * documenting its own guarantee.
+   */
+  boardQueryResult(filter: BoardFilter = {}): BoardQueryResult {
+    const { matching, scanTruncated } = this.boardFiltered(filter);
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    const records = matching.slice(0, cap);
+    const capped = records.length < matching.length;
+    const notes: string[] = [];
+    if (capped) {
+      notes.push(
+        `cap reached — showing ${records.length} of ${matching.length} matching items; raise cap to see the rest (a drain that stops at the cap leaves the tail behind)`
+      );
+    }
+    if (scanTruncated) {
+      notes.push(`the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total`);
+    }
+    return {
+      matched_filter: matching.length,
+      returned: records.length,
+      cap,
+      capped,
+      ...(notes.length ? { note: notes.join('; ') } : {}),
+      records,
+    };
   }
 
   /** P4: done = removed. The artifact-write binding (H9/H10) is not built yet — skipped loudly, never silently. */
@@ -876,6 +1026,11 @@ export class SterlingTools {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap.
     return this.boardQuery({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
+  }
+
+  /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
+  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): BoardQueryResult {
+    return this.boardQueryResult({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------

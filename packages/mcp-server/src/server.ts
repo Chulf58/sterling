@@ -122,14 +122,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'board_query',
     {
-      description: 'List open board items. source=user is the board; source=system is the maintenance queue.',
+      description:
+        'List open board items. source=user is the board; source=system is the maintenance queue. Returns {matched_filter, returned, cap, capped, records}: capped=true means more items matched than are shown — raise cap before concluding the board or queue is shorter than it is.',
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         file_keys: z.array(z.string()).optional(),
         cap: z.number().int().positive().optional(),
       }),
     },
-    (args) => json(tools.boardQuery(args))
+    (args) => json(tools.boardQueryResult(args))
   );
 
   server.registerTool(
@@ -224,14 +225,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'maintenance_query',
     {
-      description: 'List open maintenance-queue items (system todos), optionally by system_reason or file keys.',
+      description:
+        'List open maintenance-queue items (system todos), optionally by system_reason or file keys. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false.',
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         cap: z.number().int().positive().optional(),
       }),
     },
-    (args) => json(tools.maintenanceQuery(args))
+    (args) => json(tools.maintenanceQueryResult(args))
   );
 
   server.registerTool(

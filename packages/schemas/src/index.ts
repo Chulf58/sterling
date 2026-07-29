@@ -16,6 +16,8 @@ export {
   DRAIN_VERBS,
   RECORD_TYPES,
   validateRecord,
+  knownFieldsFor,
+  unknownFieldsIn,
   AGENT_MODEL_KEY,
   REVIEWER_ROLES,
   AGENT_CLASS,
