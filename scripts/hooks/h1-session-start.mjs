@@ -21,8 +21,19 @@ const CONVENTIONS = [
   // reach every project at its next session start with no per-project copy and no
   // stamp-contract propagation — the same reason the todo/note routing lines live on
   // the commands. Stated because the user was otherwise re-declaring them per project.
-  '- Subagents and workflows are OPT-IN, never a default: do not spawn an ad-hoc Agent or run a Workflow unless the user asked for it — the fan-out cost is theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work, not this.',
-  '- Every spawned agent carries an EXPLICIT pinned model (judgment → opus, mechanical → sonnet/haiku). A dispatch must never silently inherit the session model.',
+  // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
+  // rule read "3-5 active at all times" in a consuming project and the user withdrew it
+  // within a day — "i am afraid that a session will feel force to spend up subagents even
+  // if they see necessary" — and the same concern was raised again here on 2026-07-29:
+  // "i am afraid that the conductor feel force to dispatch subagents without any value,
+  // for the sake of just doing it to keep the claude.md happy". Leading with "up to 5"
+  // reads as a target; leading with the ceiling reads as a limit. Both halves of the
+  // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
+  // because a rule that only pushes one way is the rule that produced the fear.
+  '- Delegation: FIVE concurrent subagents is a CEILING, not a target — there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real — speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.',
+  '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind — being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" — it is the conductor reading files by hand that an agent should have read for it.',
+  '- The Workflow tool stays OPT-IN and needs the user\'s explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting — its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.',
+  '- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring and mechanical work, haiku where a cheap read is genuinely enough (the registered explorer runs haiku BY DESIGN — do not "upgrade" it for tidiness). NEVER Fable without the user\'s prior agreement for that specific spawn, and never a silent inherit of the session model.',
 ].join('\n');
 
 // swappable art slot (§6 H1): fixed-width ≤40 cols, fits the 35% split pane
