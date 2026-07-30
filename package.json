@@ -2,7 +2,7 @@
   "name": "sterling",
   "private": true,
   "type": "module",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Sterling monorepo — plugin sources. The shipped plugin is described in STERLING-SPEC.md section 2.2.",
   "workspaces": [
     "packages/*"
