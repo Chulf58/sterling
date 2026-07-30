@@ -4781,5 +4781,6 @@ deny(
   `H15: shell access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
 Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / note_remove / maintenance_enqueue / run_signal / agent_exit.
 Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts).
+THIS GATE MATCHES COMMAND TEXT: a store path appearing only as PROSE \u2014 a commit message, an echo, a search pattern \u2014 trips it too, even though nothing would be accessed. Do not rewrite the command to evade the match; write the text to a file OUTSIDE the store and pass it by path (e.g. git commit -F <file>).
 If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`
 );
