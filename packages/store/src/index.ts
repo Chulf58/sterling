@@ -195,6 +195,10 @@ export type ToolStore = Pick<
   | 'query'
   | 'count'
   | 'get'
+  // knowledge_get resolves 8-char id PREFIXES through this index (decision
+  // 27f148c2) — the citation format the whole repo writes, which get() alone
+  // cannot serve because it matches a full id only.
+  | 'recordIdIndex'
   | 'supersede'
   | 'retireInFavorOf'
   | 'remove'

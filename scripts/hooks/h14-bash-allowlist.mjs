@@ -69,8 +69,43 @@ try {
     runCommandPrefixes.some((p) => command === p || command.startsWith(p + ' ')) || isFsHelper || isReadOnlySearch;
 
   if (!allowed) {
+    // QUOTING DIAGNOSTIC (reported from a consuming project 2026-07-30, decision
+    // 398adceb). The prefix match above is literal, so quoting an allowlisted
+    // absolute exe path — the instinct when it contains spaces — fails to match,
+    // and the generic denial never named quoting as the discriminator. Two agents
+    // hit it; one worked it out by trial. The trap was well hidden because the
+    // fs-helper branch above DOES accept a quoted path, so quoting works in one
+    // branch of this hook and silently fails in the other. The command stays
+    // DENIED — the allow surface is unchanged deliberately, since loosening a
+    // blocking gate is not a message fix — and the agent is pointed at the
+    // unquoted form, which works even for paths containing spaces (a literal
+    // prefix match does not care about spaces).
+    // Both quoting instincts, not just double quotes: a single-quoted exe path
+    // hits the identical literal-match failure, so diagnosing only one form
+    // leaves the same trap open for the other (correctness review 2026-07-30).
+    const unquoted = command.replace(/^(["'])([^"']+)\1/, '$2');
+    const matchedPrefix = runCommandPrefixes.find((p) => unquoted === p || unquoted.startsWith(p + ' '));
+    const quotingIsTheCause = unquoted !== command && !!matchedPrefix;
+    // "Re-run it unquoted" is true about THIS matcher and can still be false
+    // about the outcome: if the space sits inside the executable PATH rather than
+    // separating arguments, the shell word-splits the unquoted form and the
+    // command has no working spelling under this allowlist (correctness review
+    // 2026-07-30). Which case a given prefix is CANNOT be decided from the config
+    // string — 'node --test' and 'C:/Program Files/node.exe --test' are both
+    // "a prefix containing a space" — so the caveat is stated as a condition the
+    // caller can evaluate against its own toolchain instead of guessed at here.
+    // Papering over it would hand out advice that passes the gate and then dies.
+    const prefixHasSpace = quotingIsTheCause && matchedPrefix.includes(' ');
     deny(
-      `H14: command not on the allowlist: '${command}'. Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), and standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
+      `H14: command not on the allowlist: '${command}'.${
+        quotingIsTheCause
+          ? ` THE QUOTES ARE THE CAUSE: the allowlist matches command prefixes LITERALLY, so a quoted executable path does not match. Re-run it unquoted: '${unquoted}'.${
+              prefixHasSpace
+                ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell — meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).`
+                : ''
+            }`
+          : ''
+      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), and standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();

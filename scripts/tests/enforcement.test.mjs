@@ -618,6 +618,77 @@ test('H14: standalone read-only grep/ls are allowed; chaining, redirection, find
   }
 });
 
+test('H14: a quoted run-command prefix is still denied, but the denial names QUOTING as the cause (decision 398adceb)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const bash = (command) => runHook('h14-bash-allowlist.mjs', hookInput(dir, { tool_name: 'Bash', tool_input: { command } }), dir);
+    const r = bash('"node --test" src/x.test.mjs');
+    assert.equal(r.code, 2, 'the allow surface is unchanged — quoting is diagnosed, not normalized');
+    assert.match(r.stderr, /THE QUOTES ARE THE CAUSE/, 'the discriminator is named, not just the allowlist');
+    assert.match(r.stderr, /Re-run it unquoted: 'node --test src\/x\.test\.mjs'/, 'and the working form is spelled out');
+    // Both quoting instincts, not only double quotes.
+    const single = bash("'node --test' src/x.test.mjs");
+    assert.equal(single.code, 2);
+    assert.match(single.stderr, /THE QUOTES ARE THE CAUSE/, 'a single-quoted exe path hits the same trap and gets the same diagnosis');
+    // The hint fires ONLY when quoting is the actual discriminator — an unrelated
+    // denial must not acquire a misleading quoting explanation.
+    const unrelated = bash('git push --force');
+    assert.equal(unrelated.code, 2);
+    assert.doesNotMatch(unrelated.stderr, /THE QUOTES ARE THE CAUSE/, 'no quoting hint where dropping quotes would not have helped');
+    const quotedButStillWrong = bash('"git" push');
+    assert.equal(quotedButStillWrong.code, 2);
+    assert.doesNotMatch(quotedButStillWrong.stderr, /THE QUOTES ARE THE CAUSE/, 'quoted but not otherwise allowlisted gets no hint either');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H14: a space-bearing declared prefix carries the word-splitting caveat, so the unquoted advice cannot mislead', () => {
+  // "Re-run it unquoted" is true about H14's matcher and can be false about the
+  // outcome: the shell word-splits a path containing spaces. Which case applies
+  // is undecidable from the config string, so the hook states the condition
+  // rather than guessing (correctness review 2026-07-30).
+  const spaced = {
+    toolchains: [
+      { adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['**/*.test.mjs'], run_commands: { test: 'C:/Program Files/nodejs/node.exe --test' } },
+    ],
+  };
+  const { dir, cleanup } = makeProject({ config: spaced });
+  try {
+    const r = runHook(
+      'h14-bash-allowlist.mjs',
+      hookInput(dir, { tool_name: 'Bash', tool_input: { command: '"C:/Program Files/nodejs/node.exe --test" src/x.test.mjs' } }),
+      dir
+    );
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /THE QUOTES ARE THE CAUSE/);
+    assert.match(r.stderr, /CAVEAT before you retry/, 'the dead end is disclosed rather than papered over');
+    assert.match(r.stderr, /word-split by the shell/, 'and the reason is named');
+    assert.match(r.stderr, /NO working spelling here/, 'including that the command may be unrunnable outright');
+    assert.match(r.stderr, /board f49466f5/, 'pointing at the open decision on accepting quoted forms');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H14: the word-splitting caveat is NOT attached to a space-free executable — no false alarm on the common case', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // Declared prefix here is 'node --test': the space separates arguments, the
+    // executable is one token, and the unquoted advice is unconditionally sound.
+    const r = runHook(
+      'h14-bash-allowlist.mjs',
+      hookInput(dir, { tool_name: 'Bash', tool_input: { command: '"node --test" src/x.test.mjs' } }),
+      dir
+    );
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /Re-run it unquoted/);
+    assert.match(r.stderr, /CAVEAT before you retry/, "'node --test' does contain a space, so the caveat is stated honestly rather than suppressed by a guess");
+  } finally {
+    cleanup();
+  }
+});
+
 test('H14: a corrupt config denies (fail closed), never a voided allowlist (F5 class)', () => {
   const corrupt = mkdtempSync(join(tmpdir(), 'sterling-h14c-'));
   mkdirSync(join(corrupt, '.sterling'), { recursive: true });

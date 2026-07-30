@@ -413,3 +413,190 @@ test('h19-clear-session: SessionStart removes guard and queue (whole-session TTL
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Hazards and rationale for the touched path (decision ca23c811). Delivery had
+// been articles-only, so an anti_pattern naming the EXACT file being edited was
+// never delivered while H10 asked at Stop whether a hazard had been RECORDED.
+// ---------------------------------------------------------------------------
+
+function antiPattern(title, paths, extra = {}) {
+  return {
+    ...envelope('anti_pattern'),
+    title,
+    trigger: `${title} trigger text`,
+    guidance: `${title} guidance`,
+    wrong_way: `${title} wrong way`,
+    right_way: `${title} right way text`,
+    source_evidence: `${title} evidence`,
+    basis: 'codebase',
+    file_keys: paths,
+    ...extra,
+  };
+}
+
+function decisionRecord(statement, paths, extra = {}) {
+  return {
+    ...envelope('decision'),
+    title: statement,
+    statement,
+    alternatives_rejected: [],
+    rationale: `${statement} rationale`,
+    file_keys: paths,
+    ...extra,
+  };
+}
+
+test('H19: an anti_pattern owning the touched path delivers as SUBSTANCE (trigger + right_way), leading the payload', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(antiPattern('one-way latch', ['src/a.mjs']));
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ANTI-PATTERN \[WARN\] for this path — 'one-way latch'/, 'the hazard is named, with its severity');
+    assert.match(ctx, /TRIGGER: one-way latch trigger text/, 'trigger renders as substance, not a pointer');
+    assert.match(ctx, /RIGHT WAY: one-way latch right way text/, 'right_way renders as substance');
+    assert.ok(
+      ctx.indexOf('ANTI-PATTERN') < ctx.indexOf("article 'alpha'"),
+      'hazards LEAD: "do not do this here" outranks what the territory is'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: a hazard in UNOWNED territory delivers WITH the frontier signal — the case the early return used to swallow', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    // No article owns this path: only the hazard does. Before ca23c811 the
+    // frontier branch returned early and the hazard was never seen.
+    store.create(antiPattern('latch', ['src/orphan.mjs']));
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /STERLING FRONTIER SIGNAL/, 'territory is still UNOWNED — a hazard is not ownership');
+    assert.match(ctx, /H10 will demand the owning article/, "H10's demand surface is unchanged");
+    assert.match(ctx, /ANTI-PATTERN \[WARN\] for this path — 'latch'/, 'and the hazard arrives anyway');
+    // The notice must not tell the reader there is nothing here while a hazard
+    // prints underneath it — a reader who believes that sentence stops reading.
+    assert.doesNotMatch(ctx, /There is no knowledge to deliver/, 'the frontier header cannot claim emptiness above a hazard');
+    assert.match(ctx, /KEEP READING/, 'it points the reader at what the store DOES hold for this path');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: the pure-frontier notice (no hazards, no decisions) is unchanged — it still says there is nothing to deliver', () => {
+  const { dir, cleanup } = makeProject({ rung: 'read' });
+  try {
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/nothing.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /There is no knowledge to deliver/, 'unowned AND empty is still stated plainly');
+    assert.doesNotMatch(ctx, /KEEP READING/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: hazards render most-severe-first; absent severity reads as warn', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(antiPattern('info one', ['src/a.mjs'], { severity: 'info' }));
+    store.create(antiPattern('no severity', ['src/a.mjs']));
+    store.create(antiPattern('blocker', ['src/a.mjs'], { severity: 'block' }));
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(ctx.indexOf("'blocker'") < ctx.indexOf("'no severity'"), 'block outranks the warn default');
+    assert.ok(ctx.indexOf("'no severity'") < ctx.indexOf("'info one'"), 'the warn default outranks info');
+    assert.match(ctx, /ANTI-PATTERN \[WARN\] for this path — 'no severity'/, 'absent severity renders as WARN');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: decisions render as CAPPED POINTERS, never bodies, and the overflow is stated with the widening query', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    for (let i = 0; i < 11; i += 1) store.create(decisionRecord(`choice ${i}`, ['src/a.mjs']));
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /DECISIONS for this path \(11\)/, 'the true total is stated, not the shown count');
+    assert.equal(ctx.match(/\(knowledge_get [0-9a-f-]{36}\)/g).length, 8, 'exactly the cap renders as pointers');
+    assert.doesNotMatch(ctx, /choice \d+ rationale/, 'pointers carry the statement only — never the decision body');
+    assert.match(ctx, /3 more NOT shown \(cap 8\)/, 'the drop is disclosed — a silent cap reads as "that is all there is"');
+    assert.match(ctx, /knowledge_query types:\["decision"\] file_keys:\["src\/a\.mjs"\] cap:11/, 'and names the query that widens it');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: hazards and decisions are guarded per record like articles — a repeat touch re-delivers nothing', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(antiPattern('latch', ['src/a.mjs']));
+    store.create(decisionRecord('chose x', ['src/a.mjs']));
+    const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext, /ANTI-PATTERN/);
+    const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(second.code, 0);
+    assert.equal(second.stdout, '', 'nothing fresh — no second delivery (AC4)');
+
+    // Scope-growth re-arm still holds for a hazard added mid-session.
+    store.create(antiPattern('new latch', ['src/a.mjs'], { severity: 'block' }));
+    const third = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    const ctx = JSON.parse(third.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /'new latch'/, 'a NEW hazard mid-session delivers');
+    assert.doesNotMatch(ctx, /'latch'\)/, 'the already-delivered hazard does not repeat');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: a hazard-only touch never denies the tool call (AC7 floor holds on the new path)', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'edit' });
+  try {
+    store.create(antiPattern('latch', ['src/orphan.mjs']));
+    const r = runHook('h19-knowledge-delivery.mjs', preEdit(dir, 'src/orphan.mjs'), dir);
+    assert.notEqual(r.code, 2, 'delivery is an aid, never a gate');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: capped-away decisions are NOT marked delivered — they surface on the next touch instead of vanishing', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    // 11 decisions governing BOTH files. Guarding all 11 on the first touch used
+    // to leave the second file with no DECISIONS block at all — not even a count
+    // (correctness review 2026-07-30).
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(article('beta', ['src/b.mjs']));
+    for (let i = 0; i < 11; i += 1) store.create(decisionRecord(`choice ${i}`, ['src/a.mjs', 'src/b.mjs']));
+
+    const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    const firstCtx = JSON.parse(first.stdout).hookSpecificOutput.additionalContext;
+    assert.equal(firstCtx.match(/\(knowledge_get [0-9a-f-]{36}\)/g).length, 8, 'the cap still holds on the first touch');
+
+    const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/b.mjs'), dir);
+    assert.equal(second.code, 0);
+    const secondCtx = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
+    assert.match(secondCtx, /DECISIONS for this path \(3\)/, 'the 3 never-rendered decisions reach the second file');
+    assert.equal(secondCtx.match(/\(knowledge_get [0-9a-f-]{36}\)/g).length, 3);
+    assert.doesNotMatch(secondCtx, /NOT shown/, 'nothing is dropped this time, so nothing is disclosed as dropped');
+
+    // And a third touch of the first file re-delivers nothing: everything governing
+    // it has now actually been shown.
+    const third = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(third.stdout, '', 'the guard still converges — no endless re-delivery (AC4)');
+  } finally {
+    cleanup();
+  }
+});
