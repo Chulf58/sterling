@@ -25,7 +25,7 @@ if (!existsSync(storePath) || !existsSync(archPath)) {
   process.exit(0);
 }
 
-const { store } = openProject(root);
+const { store, config } = openProject(root);
 let newest;
 try {
   const articles = store.query({ types: ['feature_article'], cap: 1000 });
@@ -55,6 +55,21 @@ if (!m) {
 }
 const stamped = m[1].trim();
 
+// STORE AUTHORITY (config `store_authority`), one step further in than the
+// no-articles skip above and the exact analogue of the citation arm's. A
+// SECONDARY store did not produce the committed projection, so a mismatch here
+// carries no information — and unlike every other check in the battery, its
+// stated remedy would do harm: regenerating from a store that holds fewer
+// articles projects a SMALLER architecture.md, silently regressing a shared file
+// (observed: 53 lines against the repo's 65). Report the drift, never act on it.
+if (stamped !== newest && (config?.store_authority ?? 'primary') === 'secondary') {
+  console.log(
+    `projection freshness: architecture.md as-of ${stamped}, this store's newest article ${newest} — REPORTED, NOT FAILED (store_authority='secondary').\n` +
+      '  The committed projection was generated from the primary store; do NOT regenerate here, it would shrink the file to this store\'s contents.'
+  );
+  process.exit(0);
+}
+
 if (stamped !== newest) {
   console.error(
     `projection freshness FAILED: architecture.md is stale — header as-of ${stamped}, store newest article ${newest}.\n` +
@@ -62,4 +77,4 @@ if (stamped !== newest) {
   );
   process.exit(1);
 }
-console.log(`projection freshness: ok (as of ${stamped})`);
+console.log(`projection freshness: ok (as of ${stamped}, store_authority=${config?.store_authority ?? 'primary'})`);

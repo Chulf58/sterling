@@ -953,6 +953,16 @@ function makeGitProject({ activeRun = true, briefRef, config = CONFIG, amendment
   git(dir, ['config', 'user.email', 'h17@sterling.test'], { must: true });
   git(dir, ['config', 'user.name', 'H17 Test'], { must: true });
   git(dir, ['config', 'commit.gpgsign', 'false']);
+  // PIN LINE ENDINGS, or seven H17 tests fail on Windows and nowhere else.
+  // A fresh repo INHERITS core.autocrlf from the user/system config, and
+  // Git-for-Windows sets it true at SYSTEM level by default. The fixtures below
+  // are written with \n, but git then stores them normalized and hands them back
+  // CRLF on checkout — which is exactly what H17's restore path does — so the
+  // byte-exact `readFileSync === original` assertions compare 'x;\r\n' to 'x;\n'
+  // and fail. The defect is the harness's, not the hook's: this repo sets
+  // autocrlf=false locally, so only the TEMP repos this helper creates inherit
+  // the system value. A repo the test creates is a repo the test must configure.
+  git(dir, ['config', 'core.autocrlf', 'false'], { must: true });
 
   // .gitignore = v3.1 reality
   writeFileSync(join(dir, '.gitignore'), ['.claude/agents/', '.claude/settings.local.json', '.sterling/', ''].join('\n'));

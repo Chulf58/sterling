@@ -52,6 +52,7 @@
   "maintenance_queue": {
     "deep_threshold": 15
   },
+  "store_authority": "primary",
   "staleness": {
     "research_days": { "fast": 30, "medium": 90, "stable": 365 },
     "platform_external_days": 180
