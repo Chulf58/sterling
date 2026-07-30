@@ -5662,6 +5662,11 @@ var input = readStdin();
 var cwd = input.cwd;
 var toolPath = input.tool_input?.file_path;
 var rel = repoRel(toolPath, cwd);
+function evidenceDenial(mode, lp, path) {
+  const count = readLedger(lp).length;
+  const window = input.agent_id ? "this AGENT's own ledger \u2014 reads by the conductor or by another agent are never yours" : "the CONDUCTOR ledger, which h13-clear-conductor CLEARS ON EVERY USER PROMPT \u2014 so anything you read before your last prompt no longer counts as evidence";
+  return `H3 [${mode}]: no read-evidence for '${path}' \u2014 Read the exact file before editing. Checked ${lp} (${count} entr${count === 1 ? "y" : "ies"}), which is ${window}. Grep/Glob hits are not read-evidence.`;
+}
 if (input.agent_id && toolPath) {
   const fwd = String(toolPath).replace(/\\/g, "/");
   const hooksDir = dirname5(fileURLToPath(import.meta.url)).replace(/\\/g, "/");
@@ -5687,7 +5692,7 @@ try {
     const scope2 = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope2.deny) deny(`H3 [run mode]: ${scope2.deny}`);
     if (!isCreation && !hasRead(ledgerPath(cwd, run.id, input.agent_id), rel)) {
-      deny(`H3: no read-evidence for '${rel}' \u2014 Read the exact file before editing (read before edit; Grep/Glob hits are not read-evidence)`);
+      deny(evidenceDenial("run mode", ledgerPath(cwd, run.id, input.agent_id), rel));
     }
     allow();
   }
@@ -5695,7 +5700,7 @@ try {
   const scope = scopeCheck({ debugScope: readDebugScope(cwd), rel });
   if (scope.deny) deny(`H3 [debug-scope mode]: ${scope.deny}`);
   if (!isCreation && !hasRead(ledgerPath(cwd, void 0, input.agent_id), rel)) {
-    deny(`H3 [direct mode]: no read-evidence for '${rel}' \u2014 Read the exact file before editing`);
+    deny(evidenceDenial("direct mode", ledgerPath(cwd, void 0, input.agent_id), rel));
   }
   allow();
 } catch (e) {

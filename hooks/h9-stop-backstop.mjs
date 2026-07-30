@@ -5542,6 +5542,31 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/lib/run-state.mjs
+var LIFECYCLE = ["running", "completing", "awaiting_merge_gate", "merged", "rejected"];
+var NEXT_MOVE = {
+  running: "the run is still executing phases \u2014 finish or escalate it; this gate does not apply yet",
+  completing: "disposal belongs here \u2014 run `node scripts/dispose-run.mjs [--run <id>]`",
+  awaiting_merge_gate: "disposal has ALREADY run \u2014 the merge gate is next: `node scripts/merge-gate.mjs --run <id>` to see the summary, then `--decision merge|reject`",
+  merged: "the run is TERMINAL and its merge decision is recorded \u2014 there is nothing to do",
+  rejected: "the run is TERMINAL and was rejected \u2014 there is nothing to do",
+  halted: "the run is HALTED on an escalation \u2014 resolve that first (the escalations are on the run record)"
+};
+function stateRefusal({ runId, observed, expected, why }) {
+  const oi = LIFECYCLE.indexOf(observed);
+  const ei = LIFECYCLE.indexOf(expected);
+  let side;
+  if (oi === -1) {
+    side = `'${observed}' is not a point in the run lifecycle at all`;
+  } else if (oi < ei) {
+    side = `'${observed}' comes BEFORE '${expected}' \u2014 this is too EARLY`;
+  } else {
+    side = `'${observed}' comes AFTER '${expected}' \u2014 this has ALREADY happened, so re-running it is not the fix`;
+  }
+  const next = NEXT_MOVE[observed] ?? `'${observed}' is not a state this build knows \u2014 that is a defect, report it rather than working around it`;
+  return `run '${runId}' is '${observed}', not '${expected}'. ${side}. ${why} NEXT: ${next}`;
+}
+
 // scripts/lib/promotion.mjs
 function verifyPromotionConditions({ store, config, run }) {
   const refusals = [];
@@ -5550,27 +5575,53 @@ function verifyPromotionConditions({ store, config, run }) {
     refuse("backup_path_missing", "no backup_path and no recorded opt-out in .sterling/config.json \u2014 snapshots are a promotion condition (\xA72.3)");
   }
   if (run.machine_state !== "completing") {
-    refuse("wrong_state", `run '${run.id}' is '${run.machine_state}', not 'completing' \u2014 disposal runs only inside the completion sequence (H9)`);
+    refuse(
+      "wrong_state",
+      stateRefusal({
+        runId: run.id,
+        observed: run.machine_state,
+        expected: "completing",
+        why: "Disposal runs only inside the completion sequence (H9)."
+      })
+    );
   }
   const brief = store.get(run.brief_ref);
   if (!brief || brief.type !== "brief") {
-    refuse("brief_missing", `brief '${run.brief_ref}' not found in the store`);
+    refuse(
+      "brief_missing",
+      brief ? `run.brief_ref '${run.brief_ref}' resolves to a '${brief.type}', not a brief \u2014 the record EXISTS; the reference points at the wrong record` : `brief '${run.brief_ref}' resolves to no record in the store, at any status`
+    );
     return { refusals, article: void 0, brief: void 0 };
   }
-  const articles = store.query({ types: ["feature_article"], cap: 1e3 }).filter((a) => a.history.some((h) => h.target_id === brief.id));
+  const allArticles = store.query({ types: ["feature_article"], cap: 1e3 });
+  const articles = allArticles.filter((a) => a.history.some((h) => h.target_id === brief.id));
   let article;
   if (articles.length === 0) {
-    refuse("feature_article_missing", `no active feature_article carries a history entry for brief '${brief.id}' \u2014 the capture gate did not run`);
+    refuse(
+      "feature_article_missing",
+      `no active feature_article carries a history entry whose target_id is brief '${brief.id}' (${allArticles.length} active feature_article(s) exist in scope). Either capture never ran, OR an owning article exists but its history entry targets something else (a decision, or nothing). CHECK FIRST: if the owning article already exists, knowledge_update it to add the brief-linked history entry \u2014 do NOT create a second article for the same area, which would put two records under one slug`
+    );
   } else {
     article = articles[0];
   }
-  const reconcileIds = /* @__PURE__ */ new Set([...brief.blast_radius.reconcile_list, ...run.reconcile_needed ?? []]);
-  for (const id of reconcileIds) {
+  const sourceOf = /* @__PURE__ */ new Map();
+  for (const id of brief.blast_radius.reconcile_list) sourceOf.set(id, "the brief's planning-time reconcile_list");
+  for (const id of run.reconcile_needed ?? []) {
+    sourceOf.set(id, sourceOf.has(id) ? "both the brief's reconcile_list and H7's run marks" : "H7's run marks (accumulated from actual file touches)");
+  }
+  for (const id of sourceOf.keys()) {
     const rec = store.get(id);
+    const from = sourceOf.get(id);
     if (!rec) {
-      refuse("article_unreconciled", `reconcile-list id '${id}' not found in the store`);
+      refuse(
+        "article_unreconciled",
+        `reconcile id '${id}' (from ${from}) resolves to no record. ` + (from.startsWith("the brief's") ? "A planning-time id that resolves to nothing is a brief defect \u2014 correct the brief, or reject the run at the gate." : "An H7 run mark that resolves to nothing means the record was removed after being marked, or the mark is a hook/store defect \u2014 investigate rather than working around it.")
+      );
     } else if (rec.status === "active" && rec.updated_at < run.started_at) {
-      refuse("article_unreconciled", `article '${id}' was not reconciled during the run (updated_at ${rec.updated_at} < run start ${run.started_at})`);
+      refuse(
+        "article_unreconciled",
+        `${rec.type} '${rec.slug ?? rec.title ?? id}' (${id}, from ${from}) was not reconciled during the run \u2014 updated_at ${rec.updated_at} predates run start ${run.started_at}. Remedy: knowledge_update the record so it describes the code as it now is, then rerun disposal` + (rec.file_keys?.length ? ` (it declares file_keys: ${rec.file_keys.join(", ")})` : "")
+      );
     }
   }
   const handoffs = store.readHandoffs(run.id);
@@ -5583,8 +5634,10 @@ function verifyPromotionConditions({ store, config, run }) {
   }
   if (article) {
     const traced = new Set(article.live_test_refs.map((r) => r.ac_id));
+    const others = articles.filter((a) => a.id !== article.id).map((a) => a.slug);
+    const pick = others.length > 0 ? ` (checked against '${article.slug}', 1 of ${articles.length} articles historied to this brief \u2014 the others are ${others.join(", ")}; if the trace lives on one of THOSE, move or add it here rather than duplicating it)` : ` on article '${article.slug}'`;
     for (const ac of brief.acceptance_criteria) {
-      if (!traced.has(ac.ac_id)) refuse("ac_untraced", `AC '${ac.ac_id}' has no live_test_refs entry on article '${article.slug}'`);
+      if (!traced.has(ac.ac_id)) refuse("ac_untraced", `AC '${ac.ac_id}' has no live_test_refs entry${pick}`);
     }
     for (const link of article.links.filter((l) => l.rel === "fulfills")) {
       if (store.get(link.target_id)) {

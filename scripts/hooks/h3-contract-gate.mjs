@@ -9,13 +9,32 @@ import { isAbsolute, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesGlob } from '@sterling/schemas';
 import { readStdin, deny, allow, openStore, repoRel, withRetry } from './lib/common.mjs';
-import { ledgerPath, hasRead } from './lib/ledger.mjs';
+import { ledgerPath, hasRead, readLedger } from './lib/ledger.mjs';
 import { scopeCheck, readDebugScope, ENFORCEMENT_SURFACE } from './lib/contract.mjs';
 
 const input = readStdin();
 const cwd = input.cwd;
 const toolPath = input.tool_input?.file_path;
 const rel = repoRel(toolPath, cwd);
+
+// NAME THE LEDGER AND ITS WINDOW. ledgerPath resolves THREE different files
+// (lib/ledger.mjs) and the old denial named none of them, so one sentence covered
+// "you never read it", "you read it in an earlier prompt turn", and "a different
+// agent read it". The conductor case is the one that reads as a falsehood: its
+// ledger is cleared on EVERY UserPromptSubmit by h13-clear-conductor, so a
+// conductor that demonstrably read a file this session is told to read it again
+// with no hint that the prompt in between wiped the evidence.
+function evidenceDenial(mode, lp, path) {
+  const count = readLedger(lp).length;
+  const window = input.agent_id
+    ? "this AGENT's own ledger — reads by the conductor or by another agent are never yours"
+    : 'the CONDUCTOR ledger, which h13-clear-conductor CLEARS ON EVERY USER PROMPT — so anything you read before your last prompt no longer counts as evidence';
+  return (
+    `H3 [${mode}]: no read-evidence for '${path}' — Read the exact file before editing. ` +
+    `Checked ${lp} (${count} entr${count === 1 ? 'y' : 'ies'}), which is ${window}. ` +
+    `Grep/Glob hits are not read-evidence.`
+  );
+}
 
 // Enforcement self-protection (§6 H3, build-proven — a blocked session
 // attempted disableAllHooks self-repair): for SPAWNED AGENTS, edits to the
@@ -54,7 +73,7 @@ try {
     const scope = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope.deny) deny(`H3 [run mode]: ${scope.deny}`);
     if (!isCreation && !hasRead(ledgerPath(cwd, run.id, input.agent_id), rel)) {
-      deny(`H3: no read-evidence for '${rel}' — Read the exact file before editing (read before edit; Grep/Glob hits are not read-evidence)`);
+      deny(evidenceDenial('run mode', ledgerPath(cwd, run.id, input.agent_id), rel));
     }
     allow();
   }
@@ -64,7 +83,7 @@ try {
   const scope = scopeCheck({ debugScope: readDebugScope(cwd), rel });
   if (scope.deny) deny(`H3 [debug-scope mode]: ${scope.deny}`);
   if (!isCreation && !hasRead(ledgerPath(cwd, undefined, input.agent_id), rel)) {
-    deny(`H3 [direct mode]: no read-evidence for '${rel}' — Read the exact file before editing`);
+    deny(evidenceDenial('direct mode', ledgerPath(cwd, undefined, input.agent_id), rel));
   }
   allow();
 } catch (e) {

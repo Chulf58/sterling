@@ -414,6 +414,27 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
     let r = edit(join(dir, 'src', 'feature.ts'));
     assert.equal(r.code, 2);
     assert.match(r.stderr, /read-evidence/);
+    // NAME THE LEDGER AND ITS WINDOW. ledgerPath resolves three different files, so
+    // one sentence used to cover "never read it", "read it in an earlier prompt
+    // turn" and "a different agent read it" — and the conductor case reads as a
+    // falsehood, because h13-clear-conductor wipes that ledger on every user
+    // prompt. An agent's denial must say the ledger is the AGENT's own.
+    assert.match(r.stderr, /Checked .*reads/, 'the ledger actually consulted is named');
+    assert.match(r.stderr, /0 entries/, 'with how much evidence it held');
+    assert.match(r.stderr, /this AGENT's own ledger/);
+    assert.doesNotMatch(r.stderr, /CLEARS ON EVERY USER PROMPT/, 'the conductor window must not be claimed for an agent');
+
+    // The CONDUCTOR's denial names the per-prompt window instead — the fact that
+    // makes "I did read it" a reasonable objection rather than a mistake.
+    const conductorEdit = runHook(
+      'h3-contract-gate.mjs',
+      hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'feature.ts') } }),
+      dir
+    );
+    assert.equal(conductorEdit.code, 2);
+    assert.match(conductorEdit.stderr, /conductor-reads\.json/, 'the conductor ledger is named by path');
+    assert.match(conductorEdit.stderr, /CLEARS ON EVERY USER PROMPT/);
+    assert.match(conductorEdit.stderr, /before your last prompt no longer counts/);
 
     // with evidence -> allowed (absolute Windows path normalized)
     seedLedger(dir, 'r-1', 'a1', ['src/feature.ts']);

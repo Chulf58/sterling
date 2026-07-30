@@ -53,10 +53,21 @@ try {
       if (matchesGlob(rel, glob)) allow(); // a test file — the test-writer's legitimate output
     }
   }
+  // NAME THE GLOBS. Two causes reach here: the path really is source/docs/config,
+  // OR it IS a test file whose location or extension no declared test_glob matches
+  // (a tests/ directory nobody declared, .test.ts against a **/*.test.mjs glob, or
+  // a toolchain whose test_globs is absent — the `?? []` above matches nothing while
+  // the toolchains guard still passes). In the second case the old message asserted
+  // a falsehood about the file and closed with "author the tests at their test
+  // paths", which is what the caller just tried — the effective paths being the one
+  // thing withheld. The sibling H5 denial already names its matched glob, so this
+  // was inconsistent inside one enforcement pair.
+  const declared = config.toolchains.flatMap((tc) => (tc.test_globs ?? []).map((g) => `${g} (${tc.adapter})`));
   deny(
-    `H18: '${rel}' is not a test file — the test-writer writes ONLY test files (the toolchain test globs, §9.1). ` +
-      `Source, docs, and config belong to the coder/conductor; if an AC needs a non-test file, exit contract-violated naming it. ` +
-      `Author the phase's tests at their test paths.`
+    `H18: '${rel}' matches NO declared test glob — the test-writer writes ONLY test files (§9.1). ` +
+      `Compared against: ${declared.length ? declared.join(', ') : '(none — every declared toolchain has an empty test_globs)'}. ` +
+      `If this IS meant to be a test, its path or extension does not match any of those — author it at a path that does. ` +
+      `If it is genuinely source, docs or config, that belongs to the coder/conductor: exit contract-violated naming the file.`
   );
 } catch (e) {
   deny(`H18: write-gate evaluation failed (${(e && e.message) || e}) — failing closed (P5)`);

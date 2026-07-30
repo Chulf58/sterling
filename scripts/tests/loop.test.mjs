@@ -262,7 +262,13 @@ test('dispose-run refuses: wrong machine_state (running)', () => {
   const fix = makeLoopProject();
   try {
     writeHandoffs(fix.tools);
+    // Pin the DISCRIMINATOR, not just the condition name: 'running' must be
+    // reported as BEFORE 'completing' (too early), with the state-specific next
+    // move — the whole point of the shared stateRefusal helper.
     assertRefused(fix, /wrong_state/, 'running');
+    const r = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.match(r.stderr, /comes BEFORE 'completing' — this is too EARLY/);
+    assert.match(r.stderr, /still executing phases/, 'and names what to do from running');
   } finally {
     fix.cleanup();
   }
@@ -282,6 +288,12 @@ test('dispose-run refuses: feature article missing (capture gate did not run)', 
   const fix = makeReadyToDispose({ article: false });
   try {
     assertRefused(fix, /feature_article_missing/);
+    // The old wording asserted "the capture gate did not run" — one of several
+    // causes — and acting on it creates a SECOND article under one slug. The
+    // refusal must state what was observed and put fix-forward first.
+    const r = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.match(r.stderr, /active feature_article\(s\) exist in scope/, 'states what WAS found');
+    assert.match(r.stderr, /do NOT create a second article/, 'and forecloses the store-corrupting remedy');
   } finally {
     fix.cleanup();
   }
@@ -979,4 +991,42 @@ test('AC2: the SAME config field governs — a custom difficulty.split_interface
   } finally {
     tight.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Shared run-state refusal wording (scripts/lib/run-state.mjs). Four gates —
+// dispose-run's promotion check, merge-gate, consume-exit, and the run_signal
+// pair — printed the observed and expected state and stopped there, so "too
+// early" and "already happened" shared one sentence and one wrong remedy.
+// ---------------------------------------------------------------------------
+
+test('run-state: every machine state is classified — a new state cannot silently degrade the phrasing', async () => {
+  const { unclassifiedStates } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'run-state.mjs')).href);
+  assert.deepEqual(unclassifiedStates(), [], 'add the new MACHINE_STATES member to LIFECYCLE or OFF_AXIS');
+});
+
+test('run-state: the refusal says WHICH SIDE of the expected state the run is on, with a state-specific next move', async () => {
+  const { stateRefusal } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'run-state.mjs')).href);
+  const at = (observed) => stateRefusal({ runId: 'r-x', observed, expected: 'awaiting_merge_gate', why: 'Because.' });
+
+  // The motivating case: an already-merged run used to be told "the gate opens
+  // after disposal", sending the operator to run disposal on a merged run.
+  const merged = at('merged');
+  assert.match(merged, /comes AFTER 'awaiting_merge_gate' — this has ALREADY happened/);
+  assert.match(merged, /nothing to do/);
+  assert.doesNotMatch(merged, /dispose-run/, 'a terminal run is never sent back to disposal');
+
+  const completing = at('completing');
+  assert.match(completing, /comes BEFORE 'awaiting_merge_gate' — this is too EARLY/);
+  assert.match(completing, /dispose-run/, 'the too-early case names the step that advances it');
+
+  // halted is OFF the axis — neither early nor late, and collapsing it into the
+  // ordering would reintroduce the confusion.
+  const halted = at('halted');
+  assert.match(halted, /not a point in the run lifecycle at all/);
+  assert.match(halted, /resolve that first/);
+  assert.doesNotMatch(halted, /BEFORE|AFTER/);
+
+  assert.match(at('running'), /run 'r-x' is 'running', not 'awaiting_merge_gate'/, 'the observed and expected states are still named');
+  assert.match(at('running'), /Because\./, "and the caller's own reason is carried through");
 });
