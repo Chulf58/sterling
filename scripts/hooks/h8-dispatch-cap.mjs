@@ -25,12 +25,32 @@ export function sliceDenial(agentType, prompt) {
   if (!PIPELINE_AGENT_TYPES.has(agentType)) return null;
   const text = typeof prompt === 'string' ? prompt : '';
   if (SLICE_MARKER_RE.test(text) || SLICE_WAIVER_RE.test(text)) return null;
+  // FORMATTING vs ABSENCE. Both regexes are LINE-ANCHORED (/^…/m), so a marker
+  // that is present but indented, bulleted, inside a fence, or trailing other prose
+  // on its line does not match — and "Neither was present" then reads as a
+  // falsehood to a caller looking straight at the token in the prompt it just sent.
+  // That is resolved by trial-and-error re-indenting, which is exactly the H14
+  // quoting failure. Distinguish the two, and for the waiver name the empty-reason
+  // case ('SLICE-WAIVED:' with nothing after it fails the `.+`).
+  const looseMarker = /STERLING-SLICE/.test(text);
+  const looseWaiver = /SLICE-WAIVED/.test(text);
+  let why;
+  if (looseMarker || looseWaiver) {
+    const token = looseMarker ? 'STERLING-SLICE' : 'SLICE-WAIVED';
+    why =
+      `The text '${token}' IS present but did not match: both forms are LINE-ANCHORED, so the token must start its own line ` +
+      `with nothing before it — not indented, not bulleted, not inside a code fence, and not appended after other prose. ` +
+      (looseWaiver && !looseMarker ? `A waiver also needs a non-empty reason after the colon. ` : '') +
+      `Move it to column 0 of its own line and redispatch.`;
+  } else {
+    why = `Neither token appears anywhere in the prompt — spawning is denied (§7.4).`;
+  }
   return (
     `H8: pipeline dispatch of '${agentType}' during an active run carries no knowledge slice. ` +
     `Every guarded dispatch must include, on its own line, either the prep-stamped marker ` +
     `'STERLING-SLICE run=<id> phase=<id> role=<role> staged=<ISO>' (paste the reviewer/builder ` +
     `dispatch_slice prep wrote), or 'SLICE-WAIVED: <reason>' to waive by convention (fixer-mode). ` +
-    `Neither was present — spawning is denied (§7.4). A slice-denied dispatch consumes no cap slot.`
+    `${why} A slice-denied dispatch consumes no cap slot.`
   );
 }
 

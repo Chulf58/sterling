@@ -6,6 +6,7 @@
 //   node scripts/merge-gate.mjs --run <id> [--decision merge|reject] [--target <dir>]
 import { arg, fail, openProject, requireRun } from './lib/project.mjs';
 import { isGitRepo, mergeRun, discardRun, branchExists } from './lib/branch-manager.mjs';
+import { stateRefusal } from './lib/run-state.mjs';
 
 const target = arg('--target') ?? process.cwd();
 const { store } = openProject(target);
@@ -14,7 +15,18 @@ const decision = arg('--decision');
 
 if (run.machine_state !== 'awaiting_merge_gate') {
   store.close();
-  fail(`merge-gate: run '${run.id}' is '${run.machine_state}', not 'awaiting_merge_gate' — the gate opens after disposal (H9)`);
+  // The old trailing clause — "the gate opens after disposal" — is true only for
+  // 'completing'. Told to a run already 'merged', it sent the operator to run
+  // disposal on a merged run, which dispose-run then refuses from the other side:
+  // a full round trip caused by the message rather than by the state.
+  fail(
+    `merge-gate: ${stateRefusal({
+      runId: run.id,
+      observed: run.machine_state,
+      expected: 'awaiting_merge_gate',
+      why: 'The gate opens once disposal has advanced the run (H9).',
+    })}`
+  );
 }
 
 const summary = {

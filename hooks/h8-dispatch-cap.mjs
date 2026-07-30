@@ -5566,7 +5566,16 @@ function sliceDenial(agentType2, prompt) {
   if (!PIPELINE_AGENT_TYPES.has(agentType2)) return null;
   const text = typeof prompt === "string" ? prompt : "";
   if (SLICE_MARKER_RE.test(text) || SLICE_WAIVER_RE.test(text)) return null;
-  return `H8: pipeline dispatch of '${agentType2}' during an active run carries no knowledge slice. Every guarded dispatch must include, on its own line, either the prep-stamped marker 'STERLING-SLICE run=<id> phase=<id> role=<role> staged=<ISO>' (paste the reviewer/builder dispatch_slice prep wrote), or 'SLICE-WAIVED: <reason>' to waive by convention (fixer-mode). Neither was present \u2014 spawning is denied (\xA77.4). A slice-denied dispatch consumes no cap slot.`;
+  const looseMarker = /STERLING-SLICE/.test(text);
+  const looseWaiver = /SLICE-WAIVED/.test(text);
+  let why;
+  if (looseMarker || looseWaiver) {
+    const token = looseMarker ? "STERLING-SLICE" : "SLICE-WAIVED";
+    why = `The text '${token}' IS present but did not match: both forms are LINE-ANCHORED, so the token must start its own line with nothing before it \u2014 not indented, not bulleted, not inside a code fence, and not appended after other prose. ` + (looseWaiver && !looseMarker ? `A waiver also needs a non-empty reason after the colon. ` : "") + `Move it to column 0 of its own line and redispatch.`;
+  } else {
+    why = `Neither token appears anywhere in the prompt \u2014 spawning is denied (\xA77.4).`;
+  }
+  return `H8: pipeline dispatch of '${agentType2}' during an active run carries no knowledge slice. Every guarded dispatch must include, on its own line, either the prep-stamped marker 'STERLING-SLICE run=<id> phase=<id> role=<role> staged=<ISO>' (paste the reviewer/builder dispatch_slice prep wrote), or 'SLICE-WAIVED: <reason>' to waive by convention (fixer-mode). ${why} A slice-denied dispatch consumes no cap slot.`;
 }
 var BREADTH_MARKER_RE = /^STERLING-SLICE run=\S+ phase=(\S+) role=\S+ staged=\S+$/m;
 function breadthDenial(prompt, brief, config) {

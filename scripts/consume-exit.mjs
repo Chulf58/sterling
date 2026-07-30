@@ -13,6 +13,7 @@
 // appended to any phase, and the discard is printed loudly. The flag does
 // nothing when the phase resolves — normal consumption always wins.
 import { arg, fail, openProject, requireRun } from './lib/project.mjs';
+import { stateRefusal } from './lib/run-state.mjs';
 
 const target = arg('--target') ?? process.cwd();
 const { store } = openProject(target);
@@ -22,7 +23,21 @@ const discardOrphan = process.argv.includes('--discard-orphan');
 
 try {
   const exit = store.getPendingExit(run.id);
-  if (!exit) fail(`consume-exit REFUSED: no pending exit on run '${run.id}'`, 2);
+  if (!exit) {
+    // NEVER-EXITED vs ALREADY-CONSUMED have OPPOSITE remedies, and one message
+    // covered both: fabricate an agent-died signal, versus do nothing and proceed.
+    // The run's own phase signals discriminate them.
+    const consumed = run.phases.flatMap((p) => (p.signals ?? []).map((s) => `${p.id}:${typeof s === 'string' ? s : s.signal ?? '?'}`));
+    fail(
+      `consume-exit REFUSED: no pending exit on run '${run.id}'. Two very different causes: (a) the agent never called agent_exit — ` +
+        `report it to the brain as agent-died{observed:'empty_output'} via run_signal; or (b) this exit was ALREADY consumed by an earlier ` +
+        `consume-exit/run_signal, in which case do NOTHING and proceed to the next step. ` +
+        (consumed.length
+          ? `Signals already on this run: ${consumed.join(', ')} — if the step you are consuming is in that list, you are in case (b).`
+          : 'This run carries NO phase signals yet, which points at case (a).'),
+      2
+    );
+  }
   if (exit.signal !== 'complete') {
     fail(
       `consume-exit REFUSED: pending exit is '${exit.signal}' — abnormal exits go to run_signal immediately, from any position (§5.2)`,
@@ -30,7 +45,15 @@ try {
     );
   }
   if (run.machine_state !== 'running') {
-    fail(`consume-exit REFUSED: run '${run.id}' is '${run.machine_state}', not running`, 2);
+    fail(
+      `consume-exit REFUSED: ${stateRefusal({
+        runId: run.id,
+        observed: run.machine_state,
+        expected: 'running',
+        why: 'A phase-scoped complete is consumed only while the run is still executing phases.',
+      })}`,
+      2
+    );
   }
   const idx = exit.phase_id
     ? run.phases.findIndex((p) => p.id === exit.phase_id)

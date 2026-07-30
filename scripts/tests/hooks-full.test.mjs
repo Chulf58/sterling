@@ -447,6 +447,19 @@ test('H4: content-mode Grep hits the same wall — the r-ea9e bypass replay (den
     assert.equal(call('Grep', { pattern: 'x', path: dir, output_mode: 'content' }).code, 2, 'repo-root content grep');
     assert.equal(call('Grep', { pattern: 'x', path: '.', output_mode: 'content' }).code, 2, 'relative-root content grep');
     assert.equal(call('Grep', { pattern: 'x', path: join(dir, 'src'), output_mode: 'content' }).code, 2, 'dir-scoped content grep over source');
+
+    // An UNRECOGNIZED output_mode fails closed into the content branch — right —
+    // but the denial used to advise 'locate with output_mode files_with_matches',
+    // which is what the caller believes it just did. Name the observed value.
+    const typo = call('Grep', { pattern: 'x', output_mode: 'files_with_match' });
+    assert.equal(typo.code, 2, 'an unrecognized mode still fails closed');
+    assert.match(typo.stderr, /output_mode 'files_with_match' is NOT a value this gate recognizes/);
+    assert.match(typo.stderr, /fail CLOSED into the content path/, 'and says WHY that routed it here');
+    // The recognized-mode denials must NOT claim an unrecognized mode.
+    const pathless = call('Grep', { pattern: 'x', output_mode: 'content' });
+    assert.match(pathless.stderr, /output_mode was 'content'/);
+    assert.match(pathless.stderr, /No path was given/, 'and which unscoping applied');
+    assert.doesNotMatch(pathless.stderr, /NOT a value this gate recognizes/);
   } finally {
     cleanup();
   }
@@ -1033,7 +1046,15 @@ test('H18 test-write wall: the test-writer writes ONLY test files; source / enfo
     // DENIED — implementation source (the core gap: the test-writer could write ANY file)
     const src = w(join(dir, 'src', 'index.mjs'));
     assert.equal(src.code, 2, 'a source file is denied');
-    assert.match(src.stderr, /only test files|not a test file/i);
+    assert.match(src.stderr, /matches NO declared test glob/i);
+    // NAME THE GLOBS. Two causes reach this deny — genuine source, or a test file
+    // at a path no declared glob matches — and the old message asserted the file
+    // "is not a test file" while withholding the one fact that discriminates them.
+    // Its sibling H5 denial already named its matched glob.
+    assert.match(src.stderr, /Compared against:/);
+    assert.match(src.stderr, /tests\/\*\*|\*\*\/\*\.test\.mjs/, 'the actual configured globs appear');
+    assert.match(src.stderr, /\(node\)/, 'attributed to the declaring toolchain');
+    assert.match(src.stderr, /If this IS meant to be a test/, 'and the misnamed-test case is addressed, not just the source case');
 
     // DENIED — enforcement surface (self-protection, unconditional)
     assert.equal(w(join(dir, '.claude', 'agents', 'coder.md')).code, 2, 'installed agents (enforcement surface) denied');
@@ -2098,6 +2119,35 @@ test('H8 AC2: a dispatch whose STERLING-SLICE marker names an OVER-WIDE phase is
     // ordered AFTER sliceDenial (marker present → slice guard satisfied) and BEFORE the cap increment
     assert.equal(store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'a breadth-denied dispatch consumes no cap slot');
     assert.ok(!(store.getRun('r-h5').escalations ?? []).some((e) => e.kind === 'dispatch_cap_exceeded'), 'the breadth deny is not a cap-exceeded escalation');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H8 slice guard: a marker that is PRESENT but not line-anchored says so, instead of "neither was present"', () => {
+  const { dir, cleanup } = makeBreadthRun({ interfaceCount: 3 });
+  try {
+    // Both slice regexes are /^…/m, so an indented or bulleted marker does not
+    // match. The caller is looking straight at the token in the prompt it just
+    // sent, so "Neither token appears" reads as a falsehood and gets resolved by
+    // trial-and-error re-indenting — the H14 quoting failure shape.
+    const indented = breadthDispatch(dir, `  ${breadthMarker('p1')}\nbody`);
+    assert.equal(indented.code, 2, 'an indented marker still fails the line-anchored match');
+    assert.match(indented.stderr, /IS present but did not match/, 'the presence is acknowledged');
+    assert.match(indented.stderr, /must start its own line/, 'and the actual discriminator is named');
+    assert.match(indented.stderr, /not indented/);
+    assert.doesNotMatch(indented.stderr, /Neither token appears/, 'the false claim is gone');
+
+    // A waiver with an EMPTY reason fails the `.+` — same acknowledgement path.
+    const emptyWaiver = breadthDispatch(dir, 'SLICE-WAIVED:\nbody');
+    assert.equal(emptyWaiver.code, 2);
+    assert.match(emptyWaiver.stderr, /non-empty reason after the colon/);
+
+    // Genuinely absent keeps the plain wording — the new branch must not fire here.
+    const absent = breadthDispatch(dir, 'Implement it, no marker at all.');
+    assert.equal(absent.code, 2);
+    assert.match(absent.stderr, /Neither token appears anywhere in the prompt/);
+    assert.doesNotMatch(absent.stderr, /IS present but did not match/);
   } finally {
     cleanup();
   }

@@ -4818,8 +4818,10 @@ if (input.tool_name === "Grep") {
   const isAbs = /^[A-Za-z]:/.test(fwd) || fwd.startsWith("/");
   const isRepoRoot = isAbs ? fwd.toLowerCase() === String(input.cwd).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() : !repoRel(fwd, input.cwd);
   if (!target || isRepoRoot) {
+    const known = "'files_with_matches', 'count', or omitted";
+    const modeNote = mode === void 0 || mode === "content" ? `output_mode was ${mode === void 0 ? "omitted" : "'content'"}` : `output_mode '${mode}' is NOT a value this gate recognizes (${known} locate without showing content) and unrecognized values fail CLOSED into the content path \u2014 if you meant to locate only, that is why this denied`;
     deny(
-      "H4: unscoped content-mode Grep is a read of repo source (\xA76 H4). Locate with output_mode files_with_matches, or scope content to a test/doc file."
+      `H4: unscoped content-mode Grep is a read of repo source (\xA76 H4) \u2014 ${modeNote}. ${!target ? "No path was given" : `the path resolved to the repo ROOT ('${target}')`}, so the read is unscoped. Locate with output_mode files_with_matches, or scope content to a test/doc file.`
     );
   }
 }

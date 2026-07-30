@@ -22,8 +22,21 @@ if (input.tool_name === 'Grep') {
     ? fwd.toLowerCase() === String(input.cwd).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
     : !repoRel(fwd, input.cwd); // a relative path stays in-repo; '.', './' resolve to the root
   if (!target || isRepoRoot) {
+    // NAME THE OBSERVED MODE. The recognized set is checked above and anything
+    // else falls closed into this branch — so an unrecognized value (a typo like
+    // 'files_with_match', or a future mode) lands here and used to be told to
+    // "locate with output_mode files_with_matches", which is what the caller
+    // believes it just did. It then reissues the same call or scopes a path it
+    // never needed to scope. The fail-closed routing is right; the silence was not.
+    const known = "'files_with_matches', 'count', or omitted";
+    const modeNote =
+      mode === undefined || mode === 'content'
+        ? `output_mode was ${mode === undefined ? 'omitted' : "'content'"}`
+        : `output_mode '${mode}' is NOT a value this gate recognizes (${known} locate without showing content) and unrecognized values fail CLOSED into the content path — if you meant to locate only, that is why this denied`;
     deny(
-      'H4: unscoped content-mode Grep is a read of repo source (§6 H4). Locate with output_mode files_with_matches, or scope content to a test/doc file.'
+      `H4: unscoped content-mode Grep is a read of repo source (§6 H4) — ${modeNote}. ` +
+        `${!target ? 'No path was given' : `the path resolved to the repo ROOT ('${target}')`}, so the read is unscoped. ` +
+        `Locate with output_mode files_with_matches, or scope content to a test/doc file.`
     );
   }
 }

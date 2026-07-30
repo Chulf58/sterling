@@ -4843,8 +4843,9 @@ try {
       if (matchesGlob(rel, glob)) allow();
     }
   }
+  const declared = config.toolchains.flatMap((tc) => (tc.test_globs ?? []).map((g) => `${g} (${tc.adapter})`));
   deny(
-    `H18: '${rel}' is not a test file \u2014 the test-writer writes ONLY test files (the toolchain test globs, \xA79.1). Source, docs, and config belong to the coder/conductor; if an AC needs a non-test file, exit contract-violated naming it. Author the phase's tests at their test paths.`
+    `H18: '${rel}' matches NO declared test glob \u2014 the test-writer writes ONLY test files (\xA79.1). Compared against: ${declared.length ? declared.join(", ") : "(none \u2014 every declared toolchain has an empty test_globs)"}. If this IS meant to be a test, its path or extension does not match any of those \u2014 author it at a path that does. If it is genuinely source, docs or config, that belongs to the coder/conductor: exit contract-violated naming the file.`
   );
 } catch (e) {
   deny(`H18: write-gate evaluation failed (${e && e.message || e}) \u2014 failing closed (P5)`);
