@@ -864,11 +864,22 @@ test('H15 store guard: shell references to the store are denied naming the §10 
     assert.equal(run('npm test').code, 0, 'unrelated commands untouched');
     assert.equal(run('git status').code, 0);
 
+    // PROSE trips the gate too, and the denial now SAYS so (decision a8bec43f).
+    // Hit live by a `git commit -F -` whose heredoc message described store work:
+    // nothing is accessed, the deny is still correct by the gate's rule, and the
+    // old wording ('shell access is denied') misdiagnosed exactly that case.
+    const prose = run('git commit -F - <<EOF\nchore: teach the .sterling guard to explain itself\nEOF');
+    assert.equal(prose.code, 2, 'the matcher is NOT narrowed — prose still denies, the allow surface is unchanged');
+    assert.match(prose.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the discriminator is named, not just the rule');
+    assert.match(prose.stderr, /git commit -F <file>/, 'and the remedy is spelled out');
+    assert.match(nodeWrite.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the line is unconditional — no prose-detection heuristic to get wrong');
+
     // malformed config: the gate FAILS CLOSED on the protected branch (review finding)
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
     const broken = run('sqlite3 .sterling/sterling.db ".tables"');
     assert.equal(broken.code, 2, 'unreadable config denies rather than voiding the gate');
     assert.match(broken.stderr, /fails closed/);
+    assert.doesNotMatch(broken.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the fail-closed path keeps its own distinct message');
   } finally {
     cleanup();
   }
