@@ -5630,6 +5630,23 @@ function projectTag(cwd2) {
 function baselineFile(cwd2, runId) {
   return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}.json`);
 }
+function dirtyFile(cwd2, runId) {
+  return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}.dirty.json`);
+}
+function dirtyTrackedRels(cwd2) {
+  const status = spawnSync("git", ["-C", cwd2, "status", "--porcelain", "-z"], { encoding: "utf8" });
+  if (status.error || status.status !== 0) {
+    throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
+  }
+  const rels = [];
+  for (const entry of parsePorcelainZ(status.stdout)) {
+    for (const p of entry.paths) {
+      const rel = p.replace(/\/+$/, "");
+      if (rel) rels.push(rel);
+    }
+  }
+  return rels;
+}
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
 }
@@ -5706,6 +5723,7 @@ if (event === "PreToolUse") {
       store?.close();
     }
     writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
+    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyTrackedRels(cwd)));
     allow();
   } catch (e) {
     deny(`H17 [pre]: baseline snapshot failed (${e && e.message || e}) \u2014 failing closed (P5).`);
@@ -5736,6 +5754,19 @@ try {
   }
   store?.close();
   const violations = [];
+  const preExisting = [];
+  const dPath = dirtyFile(cwd, runId);
+  if (!existsSync3(dPath)) {
+    deny(
+      `H17: attribution record '${dPath}' absent at Post \u2014 cannot tell this command's writes from pre-existing ones; failing closed (P5). If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`
+    );
+  }
+  let preDirty;
+  try {
+    preDirty = new Set(JSON.parse(readFileSync2(dPath, "utf8")));
+  } catch {
+    deny(`H17: attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`);
+  }
   const status = spawnSync("git", ["-C", cwd, "status", "--porcelain", "-z"], { encoding: "utf8" });
   if (status.error || status.status !== 0) {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
@@ -5746,6 +5777,10 @@ try {
       if (!rel) continue;
       const isViolation = isEnforcementSurface(rel) || matchesGlob(rel, "hooks/**") || brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny;
       if (isViolation) {
+        if (preDirty.has(rel)) {
+          preExisting.push(rel);
+          continue;
+        }
         restoreTracked(cwd, p);
         violations.push(rel);
       }
@@ -5785,10 +5820,19 @@ try {
       violations.push(rel);
     }
   }
-  if (violations.length) {
-    deny(
-      `H17: out-of-contract write(s) detected and reverted: ${violations.join(", ")} \u2014 a denial exits contract-violated, never route around; reverted.`
-    );
+  if (violations.length || preExisting.length) {
+    const parts = [];
+    if (violations.length) {
+      parts.push(
+        `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
+      );
+    }
+    if (preExisting.length) {
+      parts.push(
+        `H17: PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside \u2014 commit or revert these (the conductor's own work, e.g. a mid-run bundle rebuild), then rerun.`
+      );
+    }
+    deny(parts.join("\n"));
   }
   allow();
 } catch (e) {

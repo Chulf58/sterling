@@ -48,6 +48,31 @@ function baselineFile(cwd, runId) {
   return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}.json`);
 }
 
+// The (A) attribution record (decision f76d7c5c): which TRACKED paths were
+// already dirty before this command ran. A SEPARATE file rather than a field on
+// the (B) baseline, deliberately — the baseline's key-validation loop is the most
+// security-critical code in this hook and adding a field would force a change to
+// it (smallest safe implementation).
+function dirtyFile(cwd, runId) {
+  return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}.dirty.json`);
+}
+
+/** Repo-relative paths of everything git reports as changed, Pre-snapshot shape. */
+function dirtyTrackedRels(cwd) {
+  const status = spawnSync('git', ['-C', cwd, 'status', '--porcelain', '-z'], { encoding: 'utf8' });
+  if (status.error || status.status !== 0) {
+    throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
+  }
+  const rels = [];
+  for (const entry of parsePorcelainZ(status.stdout)) {
+    for (const p of entry.paths) {
+      const rel = p.replace(/\/+$/, '');
+      if (rel) rels.push(rel);
+    }
+  }
+  return rels;
+}
+
 function toRel(cwd, abs) {
   return relative(cwd, abs).replace(/\\/g, '/');
 }
@@ -145,6 +170,9 @@ if (event === 'PreToolUse') {
       store?.close();
     }
     writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
+    // Attribution record for the (A) branch: without it, Post can only see that a
+    // tracked path is dirty NOW, not whether this command made it so.
+    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyTrackedRels(cwd)));
     allow();
   } catch (e) {
     // A snapshot failure during an active agent run cannot be verified later —
@@ -185,6 +213,30 @@ try {
   store?.close();
 
   const violations = [];
+  // Dirty BEFORE this command — reported, never reverted, never blamed on the
+  // agent (decision f76d7c5c). Safe to skip the revert because an agent cannot
+  // produce this state: H3's self-protection denies spawned agents every
+  // Edit/Write inside the bundled hooks dir or matching ENFORCEMENT_SURFACE, and
+  // its only other write vector is Bash — which this very branch reverts, so a
+  // previous command's dirt is already gone by the next Pre.
+  const preExisting = [];
+
+  const dPath = dirtyFile(cwd, runId);
+  if (!existsSync(dPath)) {
+    // Same posture as the missing (B) baseline: unverifiable attribution denies.
+    // Reached when Pre did not run, when a run boundary moved the runId between
+    // Pre and Post, or when a Pre written by an OLDER bundle predates this file.
+    deny(
+      `H17: attribution record '${dPath}' absent at Post — cannot tell this command's writes from pre-existing ones; failing closed (P5). ` +
+        `If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`
+    );
+  }
+  let preDirty;
+  try {
+    preDirty = new Set(JSON.parse(readFileSync(dPath, 'utf8')));
+  } catch {
+    deny(`H17: attribution record '${dPath}' corrupt/unparseable — cannot attribute writes; failing closed (P5).`);
+  }
 
   // --- (A) TRACKED writes via git ---
   const status = spawnSync('git', ['-C', cwd, 'status', '--porcelain', '-z'], { encoding: 'utf8' });
@@ -200,6 +252,13 @@ try {
         matchesGlob(rel, 'hooks/**') ||
         (brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny);
       if (isViolation) {
+        if (preDirty.has(rel)) {
+          // Already dirty at Pre — not this command's write. Reverting here is
+          // what destroyed a conductor's uncommitted enforcement-surface work and
+          // reported it as the agent's.
+          preExisting.push(rel);
+          continue;
+        }
         restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
         violations.push(rel);
       }
@@ -246,10 +305,23 @@ try {
     }
   }
 
-  if (violations.length) {
-    deny(
-      `H17: out-of-contract write(s) detected and reverted: ${violations.join(', ')} — a denial exits contract-violated, never route around; reverted.`
-    );
+  if (violations.length || preExisting.length) {
+    const parts = [];
+    if (violations.length) {
+      parts.push(
+        `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(', ')} — exit contract-violated, never route around. ` +
+          `A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check — ` +
+          `only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
+      );
+    }
+    if (preExisting.length) {
+      parts.push(
+        `H17: PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
+          `Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside — ` +
+          `commit or revert these (the conductor's own work, e.g. a mid-run bundle rebuild), then rerun.`
+      );
+    }
+    deny(parts.join('\n'));
   }
   allow();
 } catch (e) {
