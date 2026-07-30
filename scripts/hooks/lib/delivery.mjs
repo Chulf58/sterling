@@ -72,13 +72,20 @@ function clip(text, cap) {
 }
 
 /** One-hop pointer line for a sibling slug: resolved from the store when the
- *  slug matches exactly, marked absent otherwise — never invented. */
+ *  slug matches exactly, marked absent otherwise — never invented.
+ *
+ *  Resolution is a DETERMINISTIC store lookup, not a ranked query (decision
+ *  3db7095f). It used to be query({rank_terms:[slug], cap:5}) plus an exact match
+ *  among those five, which printed '(not in store)' for articles that were
+ *  demonstrably live: bm25 ranks by term frequency, so a slug cited heavily in
+ *  OTHER articles' prose loses its own top-5 to them (caught live against
+ *  'hooks-suite' at v46). That mattered because these pointers are how a reader
+ *  learns which siblings bear on the territory — a false '(not in store)' tells
+ *  them the neighbour does not exist, so they neither read it nor reconcile it. */
 function pointerLine(store, kind, slug) {
   let head = '(not in store)';
   try {
-    const match = store
-      .query({ types: ['feature_article'], rank_terms: [slug], cap: 5 })
-      .find((r) => r.slug === slug && !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
     if (match) head = clip(match.what_it_does, 140);
   } catch {
     head = '(lookup failed)';

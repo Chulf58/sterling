@@ -600,3 +600,43 @@ test('H19: capped-away decisions are NOT marked delivered — they surface on th
     cleanup();
   }
 });
+
+test('H19: a one-hop pointer resolves a sibling that loses its own bm25 top-5 — no false "(not in store)"', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('owner', ['src/a.mjs'], { dependencies: { relies_on: ['popular'], relied_by: [] } }));
+    store.create(article('popular', ['src/p.mjs'], { what_it_does: 'popular is the sibling that matters' }));
+    // Decoys that cite the sibling's slug far more than it names itself — the live
+    // shape that made the old ranked cap-5 pointer lookup report it absent
+    // (decision 3db7095f).
+    for (let i = 0; i < 6; i += 1) {
+      store.create(
+        article(`citer-${i}`, [`src/c${i}.mjs`], {
+          what_it_does: 'popular popular popular popular popular',
+          intended_behavior: 'popular popular popular',
+        })
+      );
+    }
+
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /→ relies_on \[\[popular\]\]: popular is the sibling that matters/, 'the pointer resolves to real substance');
+    assert.doesNotMatch(ctx, /\(not in store\)/, 'a live sibling is never reported absent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: a one-hop pointer to a genuinely absent slug still says so', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('owner', ['src/a.mjs'], { dependencies: { relies_on: ['never-written'], relied_by: [] } }));
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /→ relies_on \[\[never-written\]\]: \(not in store\)/, 'absence is still reported — the fix removes FALSE absence only');
+  } finally {
+    cleanup();
+  }
+});
