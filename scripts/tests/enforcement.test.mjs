@@ -1,8 +1,8 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -1015,7 +1015,15 @@ function makeGitProject({ activeRun = true, briefRef, config = CONFIG, amendment
     });
   }
 
-  const baselinePath = join(tmpdir(), 'sterling-enforce-' + runId + '.json');
+  // Must mirror h17's projectTag(cwd) EXACTLY — sha256(realpath(cwd)).slice(0,16).
+  // It did not: this was 'sterling-enforce-<runId>.json', a pre-projectTag name, so
+  // the AC9b "corrupt baseline" test wrote garbage to a path the hook never reads and
+  // passed on the ABSENT branch instead. Found 2026-07-30 while adding the
+  // attribution tests; both AC9 assertions now pin their specific message so neither
+  // can pass for the wrong reason again.
+  const projectTag = createHash('sha256').update(realpathSync(dir)).digest('hex').slice(0, 16);
+  const baselinePath = join(tmpdir(), `sterling-enforce-${projectTag}-${runId}.json`);
+  const dirtyPath = join(tmpdir(), `sterling-enforce-${projectTag}-${runId}.dirty.json`);
   let closed = false;
   const closeStore = () => {
     if (!closed) {
@@ -1029,9 +1037,10 @@ function makeGitProject({ activeRun = true, briefRef, config = CONFIG, amendment
     closeStore();
     rmSync(dir, { recursive: true, force: true });
     rmSync(baselinePath, { force: true });
+    rmSync(dirtyPath, { force: true });
     for (const p of extraPaths) rmSync(p, { force: true });
   };
-  return { dir, store, run, brief, runId, dbPath, baselinePath, closeStore, cleanup };
+  return { dir, store, run, brief, runId, dbPath, baselinePath, dirtyPath, closeStore, cleanup };
 }
 
 // run h17 in Pre (snapshot) or Post (verify+sweep) mode. agent_id passed via `over`.
@@ -1248,18 +1257,94 @@ test('H17 AC9a: missing baseline at Post (no Pre snapshot) → deny, not exit 1'
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'must not fail open on a missing baseline');
     assert.equal(r.code, 2, `missing baseline during active run → deny — ${r.stderr}`);
+    assert.match(r.stderr, /absent at Post/, 'and denies on the ABSENT branch specifically, not merely with exit 2');
   } finally {
     cleanup();
   }
 });
 
 test('H17 AC9b: corrupt/unparseable baseline → deny, not exit 1', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup, baselinePath } = makeGitProject();
+  const { dir, cleanup, baselinePath, dirtyPath } = makeGitProject();
   try {
     writeFileSync(baselinePath, '{ this is : not valid json ,,, ');
+    writeFileSync(dirtyPath, '[]'); // present and valid, so the CORRUPT branch is what fires
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'must not fail open on an unparseable baseline');
     assert.equal(r.code, 2, `corrupt baseline → deny — ${r.stderr}`);
+    // Pinning the branch. Before the fixture's baselinePath was corrected it wrote
+    // to a pre-projectTag filename the hook never reads, so the baseline was ABSENT
+    // and the deny came from that branch (h17: "absent at Post") — under which this
+    // assertion cannot match, which is what makes it a real guard rather than a
+    // restatement of the exit code.
+    assert.match(r.stderr, /corrupt\/unparseable/, 'and denies on the CORRUPT branch specifically');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Attribution (decision f76d7c5c): the (A) branch must distinguish writes made BY
+// the audited command from state that was already dirty before it ran. Reverting
+// the latter destroyed a conductor's uncommitted enforcement-surface work and
+// reported it as the agent's.
+// ---------------------------------------------------------------------------
+
+test('H17: a PRE-EXISTING dirty hooks/ file is reported, NOT reverted, and NOT blamed on the agent', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    // The conductor's own uncommitted work — e.g. a mid-run bundle rebuild, which
+    // only the conductor can run (the coder's allowlist holds the toolchain
+    // run_commands only).
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
+    const conductorBytes = readFileSync(bundle, 'utf8');
+
+    h17(dir, 'PreToolUse', A1); // Pre now records this path as already dirty
+    const r = h17(dir, 'PostToolUse', A1);
+
+    assert.equal(r.code, 2, 'still denies — the surface cannot be verified while dirty from outside');
+    assert.match(r.stderr, /PRE-EXISTING change\(s\)/, 'reported in its own block');
+    assert.match(r.stderr, /NOT attributed to it and NOT reverted/);
+    assert.match(r.stderr, /Nothing of yours was undone/);
+    assert.doesNotMatch(r.stderr, /BY THIS COMMAND/, 'the agent is not blamed for it');
+    assert.equal(readFileSync(bundle, 'utf8'), conductorBytes, 'THE POINT: the uncommitted work survives');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17: a write made DURING the command is still reverted and attributed — the gate is not weakened', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    const committed = readFileSync(bundle, 'utf8');
+
+    h17(dir, 'PreToolUse', A1); // clean at Pre
+    writeFileSync(bundle, '// tampered by the agent mid-command\n'); // the bypass H17 exists to catch
+    const r = h17(dir, 'PostToolUse', A1);
+
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /BY THIS COMMAND/, 'attributed to the command that made it');
+    assert.match(r.stderr, /hooks\/h3-contract-gate\.mjs/);
+    assert.match(r.stderr, /only the last is amendable by scope/, 'and names which of the three predicates can be amended');
+    assert.equal(readFileSync(bundle, 'utf8'), committed, 'reverted to HEAD');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17: a missing attribution record fails CLOSED — never silently unattributed', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup, baselinePath, dirtyPath } = makeGitProject();
+  try {
+    h17(dir, 'PreToolUse', A1);
+    assert.ok(existsSync(dirtyPath), 'Pre writes the attribution record beside the baseline');
+    rmSync(dirtyPath, { force: true }); // e.g. a Pre written by an older bundle
+    assert.ok(existsSync(baselinePath), 'the baseline itself is still present, isolating the new branch');
+
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'unverifiable attribution denies rather than guessing');
+    assert.match(r.stderr, /attribution record/);
+    assert.match(r.stderr, /failing closed/);
   } finally {
     cleanup();
   }
