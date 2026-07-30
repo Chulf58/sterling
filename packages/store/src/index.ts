@@ -195,6 +195,10 @@ export type ToolStore = Pick<
   | 'query'
   | 'count'
   | 'get'
+  // knowledge_get resolves 8-char id PREFIXES through this index (decision
+  // 27f148c2) — the citation format the whole repo writes, which get() alone
+  // cannot serve because it matches a full id only.
+  | 'recordIdIndex'
   | 'supersede'
   | 'retireInFavorOf'
   | 'remove'
@@ -254,6 +258,35 @@ export class SterlingStore {
       type: string;
       status: string;
     }[];
+  }
+
+  /**
+   * Every non-superseded feature_article carrying this EXACT slug, newest first.
+   * A deterministic identity lookup, deliberately NOT a search (decision
+   * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
+   * query({rank_terms:[slug], cap:5}) and then look for an exact match among
+   * those five, which reported LIVE articles as '(not in store)': bm25 ranks by
+   * term frequency over the FTS blob, so a popular slug is cited more often in
+   * OTHER articles' prose than in the article that owns it, and the owner falls
+   * outside its own top-5 — measured against 'hooks-suite' at v46. Raising the
+   * cap was rejected because the cause is the RANKING, not the number 5, and the
+   * miss gets likelier as the store grows.
+   *
+   * Returns an ARRAY so the caller keeps applying its own working_tree exclusion.
+   * More than one active record per slug is a store-integrity fault rather than a
+   * normal state; it resolves newest-first here instead of arbitrarily, and is
+   * not raised on this path because delivery must never fail (AC7) — an opaque
+   * '(lookup failed)' would trade one false payload for another.
+   */
+  articlesBySlug(slug: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT body FROM records
+          WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`
+      )
+      .all(slug) as { body: string }[];
+    return rows.map((r) => JSON.parse(r.body) as DurableRecord);
   }
 
   /**

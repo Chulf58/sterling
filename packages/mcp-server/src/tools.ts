@@ -714,9 +714,47 @@ export class SterlingTools {
     return { ...rest, links: semantic, ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}) };
   }
 
+  /** The citation format the repo actually writes: 8-char id prefixes. */
+  private static readonly CITATION_PREFIX_LEN = 8;
+
+  /**
+   * knowledge_get — full uuid, or the 8-char PREFIX every citation in this repo
+   * uses (decision 27f148c2). CLAUDE.md, code comments and record prose all cite
+   * "decision 6dfbe675" style, and check-record-citations already resolves that
+   * form mechanically through recordIdIndex() — so an agent handed a citation
+   * from any of those surfaces could read it everywhere except through the tool
+   * built for reading. Two agents in a consuming project burned a session on
+   * `no record '51735bec'` for exactly this reason (the id was not stale, as
+   * they concluded — superseded rows are retained by f64fd9a5 and resolve fine
+   * by full id; it was truncated).
+   *
+   * Resolution spans the mounted fan and ANY status, tombstones included, because
+   * citing a superseded record is legitimate and common. AMBIGUITY REFUSES rather
+   * than picking: a prefix collision means the caller's citation is under-specified,
+   * and silently serving one of two records is how a reader ends up acting on the
+   * wrong one (P5).
+   */
   knowledgeGet(id: string): DurableRecord {
-    const record = this.store.get(id);
-    if (!record) throw new Error(`knowledge_get: no record '${id}'`);
+    const direct = this.store.get(id);
+    if (direct) return direct;
+    if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
+      throw new Error(
+        `knowledge_get: no record '${id}' — and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, or pass the full uuid.`
+      );
+    }
+    const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
+    if (hits.length === 0) throw new Error(`knowledge_get: no record '${id}' in the project store or any mounted domain, at any status`);
+    if (hits.length > 1) {
+      throw new Error(
+        `knowledge_get: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits
+          .map((r) => `${r.id} (${r.type}, ${r.status})`)
+          .join('; ')}. Cite more of the id.`
+      );
+    }
+    const record = this.store.get(hits[0].id);
+    // The index and the bodies come from the same rows, so a hit with no body is
+    // a torn store, not a miss — say which it is rather than reporting "no record".
+    if (!record) throw new Error(`knowledge_get: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
     return record;
   }
 
@@ -932,6 +970,41 @@ export class SterlingTools {
   }
 
   /**
+   * The run wire's precondition, stated in the CALLER's terms (decision 391fae4f).
+   * agent_exit / handoff_write / handoff_read all need a run, and all used to
+   * inherit runState()'s bare 'run_state: no active run' — an error naming a tool
+   * the agent never called, with no direction. Agent templates grant these tools
+   * unconditionally (frontmatter is static, so they cannot be withheld per
+   * session) and the agents' prompts tell them to exit through the wire, so in
+   * conductor-direct mode every dispatched agent discovers this mid-task. A
+   * consuming project measured eight agents doing it in one session, several
+   * retrying with other signals and a fabricated run_id first, each ending with a
+   * paragraph apologising for infrastructure. It stays a loud refusal rather than
+   * a no-op success — a silent success here would let a PIPELINE agent's exit
+   * vanish if a run ended mid-phase — but it now terminates the attempt instead
+   * of starting a diagnosis.
+   */
+  private requireWireRun(tool: string, runId?: string): RunRecord {
+    // Keyed on "is any run active", NOT on "did the caller omit run_id"
+    // (correctness review 2026-07-30). The measured failure includes agents
+    // RETRYING WITH A FABRICATED run_id, and an earlier `!runId &&` conjunct let
+    // exactly that case fall through to runState(runId)'s bare `no run '<made
+    // up>'` — handing the direction-free error to the one behavior this guard
+    // documents. With a run active the condition is false and a wrong run_id
+    // still gets the ordinary `no run '<id>'`, so run-active refusals are
+    // untouched.
+    if (!this.store.getRun()) {
+      throw new Error(
+        `${tool}: no run is active, so there is no handoff wire to write to — nothing was recorded. ` +
+          `This is CONDUCTOR-DIRECT mode, not a fault to diagnose: ${tool} and its siblings (agent_exit, handoff_write, handoff_read) ` +
+          `work only inside a pipeline run. Your final message IS your deliverable — report your findings in prose and stop. ` +
+          `Do not retry with another signal, and never invent a run_id.`
+      );
+    }
+    return this.runState(runId);
+  }
+
+  /**
    * agent_exit — the exit wire, never prose: zod-validated against the signal
    * registry at the server; invalid signals are rejected in-band so the agent
    * sees the error and corrects itself (§5.2).
@@ -958,7 +1031,7 @@ export class SterlingTools {
           .join('; ')}. Correct the payload and re-call agent_exit.`
       );
     }
-    const run = this.runState(args.run_id);
+    const run = this.requireWireRun('agent_exit', args.run_id);
     // Phase validation at the RECORD seam (board 7d051522, incident 2026-07-03):
     // an exit naming a phase that is not on the run must fail HERE, loudly,
     // with nothing recorded — an orphan in the pending slot deadlocks the wire
@@ -1116,7 +1189,7 @@ export class SterlingTools {
   // -- handoff pair (§10): transient, never enters the durable store -------------
 
   handoffWrite(args: { run_id?: string; handoff: unknown }): { written: true; phase_id: string } {
-    const run = this.runState(args.run_id);
+    const run = this.requireWireRun('handoff_write', args.run_id);
     // AC2: reviewer-role disposition coverage check (decision 628c4b7f, run r-d630, phase 2).
     // Placement mirrors the 32fa4a05 agent_exit off-run-phase guard: validate BEFORE persisting —
     // a refused write records NOTHING. Non-reviewer roles skip this check entirely.
@@ -1145,7 +1218,7 @@ export class SterlingTools {
   }
 
   handoffRead(args: { run_id?: string; phase_id?: string; files?: string[] } = {}): unknown[] {
-    const run = this.runState(args.run_id);
+    const run = this.requireWireRun('handoff_read', args.run_id);
     return this.store.readHandoffs(run.id, { phase_id: args.phase_id, files: args.files });
   }
 }

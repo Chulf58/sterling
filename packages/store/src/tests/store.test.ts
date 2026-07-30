@@ -900,3 +900,56 @@ test('AC8 enqueue BOUNDARY: dedup is scoped to the refresh_reference lane — an
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('articlesBySlug resolves an exact slug deterministically — a slug that loses its own bm25 top-5 still resolves', () => {
+  const { dir, store } = tempStore();
+  try {
+    const target = store.create(article({ slug: 'hooks-suite', what_it_does: 'Twenty-two bundled hooks.' }));
+    // Six DECOYS that each mention the target slug far more than the target does
+    // itself — the exact shape that made the ranked cap-5 lookup report a live
+    // article as absent (decision 3db7095f).
+    for (let i = 0; i < 6; i += 1) {
+      store.create(
+        article({
+          slug: `citer-${i}`,
+          what_it_does: 'hooks-suite hooks-suite hooks-suite hooks-suite hooks-suite',
+          intended_behavior: 'hooks-suite hooks-suite hooks-suite',
+        })
+      );
+    }
+
+    // The old mechanism, pinned here so the regression is visible rather than asserted:
+    const ranked = store.query({ types: ['feature_article'], rank_terms: ['hooks-suite'], cap: 5 });
+    assert.equal(ranked.length, 5, 'the ranked window is full');
+    assert.equal(
+      ranked.some((r) => (r as unknown as { slug: string }).slug === 'hooks-suite'),
+      false,
+      'and the owner is NOT in it — the decoys outrank it on its own slug'
+    );
+
+    const hit = store.articlesBySlug('hooks-suite');
+    assert.equal(hit.length, 1, 'the lookup is unaffected by ranking or caps');
+    assert.equal(hit[0].id, target.id);
+
+    assert.deepEqual(store.articlesBySlug('no-such-slug'), [], 'a genuinely absent slug is still empty');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('articlesBySlug serves the live head only, newest first — superseded versions never', () => {
+  const { dir, store } = tempStore();
+  try {
+    const v1 = store.create(article({ slug: 'versioned' }));
+    const v2 = store.supersede(v1.id, article({ slug: 'versioned', version: 2, updated_at: LATER }));
+
+    const hits = store.articlesBySlug('versioned');
+    assert.equal(hits.length, 1, 'the tombstone is not served — unlike recordIdIndex, this resolves the CURRENT article');
+    assert.equal(hits[0].id, v2.id);
+    assert.equal(hits[0].status, 'active');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

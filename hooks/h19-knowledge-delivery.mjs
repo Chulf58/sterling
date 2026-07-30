@@ -4917,6 +4917,30 @@ var SterlingStore = class {
     return this.db.prepare("SELECT id, type, status FROM records").all();
   }
   /**
+   * Every non-superseded feature_article carrying this EXACT slug, newest first.
+   * A deterministic identity lookup, deliberately NOT a search (decision
+   * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
+   * query({rank_terms:[slug], cap:5}) and then look for an exact match among
+   * those five, which reported LIVE articles as '(not in store)': bm25 ranks by
+   * term frequency over the FTS blob, so a popular slug is cited more often in
+   * OTHER articles' prose than in the article that owns it, and the owner falls
+   * outside its own top-5 — measured against 'hooks-suite' at v46. Raising the
+   * cap was rejected because the cause is the RANKING, not the number 5, and the
+   * miss gets likelier as the store grows.
+   *
+   * Returns an ARRAY so the caller keeps applying its own working_tree exclusion.
+   * More than one active record per slug is a store-integrity fault rather than a
+   * normal state; it resolves newest-first here instead of arbitrarily, and is
+   * not raised on this path because delivery must never fail (AC7) — an opaque
+   * '(lookup failed)' would trade one false payload for another.
+   */
+  articlesBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`).all(slug);
+    return rows.map((r) => JSON.parse(r.body));
+  }
+  /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
    * file-key join) shared by query() and count() — everything EXCEPT the rank
    * (FTS), ordering, and cap. One definition so count() can never drift from
@@ -5550,7 +5574,7 @@ function clip(text, cap) {
 function pointerLine(store2, kind, slug) {
   let head = "(not in store)";
   try {
-    const match = store2.query({ types: ["feature_article"], rank_terms: [slug], cap: 5 }).find((r) => r.slug === slug && !r.working_tree);
+    const match = store2.articlesBySlug(slug).find((r) => !r.working_tree);
     if (match) head = clip(match.what_it_does, 140);
   } catch {
     head = "(lookup failed)";
@@ -5578,14 +5602,38 @@ function renderArticle(store2, article, charCap) {
 function renderReference(ref) {
   return `\u25B8 reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? "", 200)} \u2014 refresh via knowledge_get ${ref.id}`;
 }
-function renderPayload(rel2, blocks) {
+var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
+function renderHazards(hazards, charCap) {
+  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).map(
+    (ap) => [
+      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `TRIGGER: ${clip(ap.trigger, charCap)}`,
+      `RIGHT WAY: ${clip(ap.right_way, charCap)}`
+    ].join("\n")
+  );
+}
+var DECISION_POINTER_CAP = 8;
+function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
+  const shown = decisions.slice(0, cap);
+  const lines = [
+    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
+    ...shown.map((d) => `  \u2192 ${clip(d.statement, 160)} (knowledge_get ${d.id})`)
+  ];
+  if (decisions.length > shown.length) {
+    lines.push(
+      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length} for the full set`
+    );
+  }
+  return lines.join("\n");
+}
+function renderPayload(rel2, blocks, { unowned = false } = {}) {
   return [
-    `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
+    unowned ? renderFrontier(rel2, { hasOtherKnowledge: blocks.length > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
     ...blocks
   ].join("\n\n");
 }
-function renderFrontier(rel2) {
-  return `STERLING FRONTIER SIGNAL (H19): territory '${rel2}' is UNOWNED \u2014 no owning article exists in the store. There is no knowledge to deliver; H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
+function renderFrontier(rel2, { hasOtherKnowledge = false } = {}) {
+  return `STERLING FRONTIER SIGNAL (H19): territory '${rel2}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
 }
 
 // scripts/hooks/h19-knowledge-delivery.mjs
@@ -5613,31 +5661,36 @@ try {
   const run = store.getRun();
   if (run && input.agent_id) allow();
   const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+  const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
+  const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
-  if (owners.length === 0) {
-    if (guard.frontier_files.includes(rel)) allow();
-    const notice = renderFrontier(rel);
-    if (mode === "enqueue") {
-      enqueuePending(pendingPath(input.cwd), { kind: "frontier", rel, payload: notice, agent_id: input.agent_id ?? "conductor" });
-    } else {
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: notice } }));
-    }
-    guard.frontier_files.push(rel);
-    writeGuard(gPath, guard);
-    allow();
-  }
-  const fresh = owners.filter((r) => !guard.records.includes(r.id));
-  if (fresh.length === 0) allow();
+  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
+  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
+  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  const unowned = owners.length === 0;
+  const frontierFresh = unowned && !guard.frontier_files.includes(rel);
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const blocks = fresh.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap));
-  const payload = renderPayload(rel, blocks);
+  const blocks = [
+    ...renderHazards(freshHazards, charCap),
+    ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
+    ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []
+  ];
+  const payload = renderPayload(rel, blocks, { unowned });
+  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
   if (mode === "enqueue") {
-    enqueuePending(pendingPath(input.cwd), { kind: "delivery", rel, payload, agent_id: input.agent_id ?? "conductor" });
+    enqueuePending(pendingPath(input.cwd), {
+      kind: unowned ? "frontier" : "delivery",
+      rel,
+      payload,
+      agent_id: input.agent_id ?? "conductor"
+    });
   } else {
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
   }
   guard.records.push(...fresh.map((r) => r.id));
+  if (frontierFresh) guard.frontier_files.push(rel);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {

@@ -1231,3 +1231,96 @@ test('default dispatch spawns the bundled worker end-to-end: candidate lands der
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// knowledge_get id-PREFIX resolution (decision 27f148c2) — the citation format
+// the whole repo writes, which get() alone could not serve.
+// ---------------------------------------------------------------------------
+
+test('knowledge_get resolves the 8-char citation prefix, at any status, and refuses ambiguity loudly', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const rec = tools.knowledgeCreate('decision', {
+      title: 'a choice',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+    }).record as unknown as DurableRecord;
+
+    const byPrefix = tools.knowledgeGet(rec.id.slice(0, 8));
+    assert.equal(byPrefix.id, rec.id, 'an 8-char prefix resolves to the record');
+    assert.equal(tools.knowledgeGet(rec.id).id, rec.id, 'full-id lookups are unchanged');
+
+    // A SUPERSEDED record must stay reachable by prefix: citing the version that
+    // was live at the time is legitimate and common (history entries do it).
+    const next = tools.knowledgeUpdate(rec.id, { rationale: 'r2' });
+    assert.equal(tools.knowledgeGet(rec.id.slice(0, 8)).status, 'superseded', 'tombstones resolve by prefix too');
+    assert.equal(tools.knowledgeGet(next.id.slice(0, 8)).id, next.id);
+
+    assert.throws(() => tools.knowledgeGet('deadbeef'), /no record 'deadbeef'/, 'an unknown prefix is a plain miss');
+    assert.throws(
+      () => tools.knowledgeGet(rec.id.slice(0, 4)),
+      /too little to resolve/,
+      'shorter than the citation prefix is refused as under-specified, not searched'
+    );
+
+    // Collision: two records sharing an 8-char prefix must refuse, never pick.
+    const collide = store.recordIdIndex()[0].id.slice(0, 8);
+    const twin = tools.knowledgeCreate('decision', {
+      title: 'twin',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+    }).record as unknown as DurableRecord;
+    // ids are server-minted, so the collision is forced through the store directly.
+    store.create({
+      ...(JSON.parse(JSON.stringify(twin)) as Record<string, unknown>),
+      id: `${collide}-0000-4000-8000-000000000000`,
+    });
+    assert.throws(() => tools.knowledgeGet(collide), /is ambiguous — it prefixes 2 records/, 'a collision names both candidates');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The run wire outside a run (decision 391fae4f): eight agents in a consuming
+// project burned tokens diagnosing `run_state: no active run`.
+// ---------------------------------------------------------------------------
+
+test('agent_exit/handoff_write/handoff_read name conductor-direct when no run is active, and record nothing', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    for (const call of [
+      () => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } }),
+      () => tools.handoffWrite({ handoff: { phase_id: 'p1', agent_role: 'coder' } }),
+      () => tools.handoffRead({}),
+    ]) {
+      assert.throws(call, /no run is active/, 'the refusal names the real precondition, not run_state');
+      assert.throws(call, /CONDUCTOR-DIRECT mode, not a fault to diagnose/, 'and says it is a mode, not a bug to chase');
+      assert.throws(call, /final message IS your deliverable/, 'and tells the agent what to do instead');
+      assert.throws(call, /never invent a run_id/, 'and forecloses the fabricated-run_id retry that was measured');
+    }
+    assert.equal(store.getRun(), undefined, 'nothing was recorded and no implicit run was minted');
+
+    // THE MEASURED RETRY: agents fabricated a run_id when the first call failed.
+    // Keying the guard on "did the caller omit run_id" let exactly that case fall
+    // through to the bare `no run '<made up>'` this change exists to kill.
+    assert.throws(
+      () => tools.agentExit({ run_id: 'r-invented', phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'x' } }),
+      /CONDUCTOR-DIRECT mode, not a fault to diagnose/,
+      'a fabricated run_id with no active run gets the guidance, not the bare no-run error'
+    );
+    assert.throws(() => tools.handoffRead({ run_id: 'r-invented' }), /final message IS your deliverable/);
+
+    // The guidance is scoped to the runless case: with a run active, the existing
+    // off-run-phase refusal is untouched.
+    startRun(store);
+    assert.throws(
+      () => tools.agentExit({ phase_id: 'nope', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'x' } }),
+      /no phase 'nope' on run/
+    );
+  } finally {
+    cleanup();
+  }
+});

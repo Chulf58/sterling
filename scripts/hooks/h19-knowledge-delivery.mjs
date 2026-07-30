@@ -1,7 +1,10 @@
 // H19 — knowledge delivery (decision 6dfbe675; concept family
 // knowledge-delivery). The front half of the learning loop: put the owning
 // article IN FRONT of the agent at file-touch, mechanically — never a gate
-// (AC7: this hook must never exit 2). Registered at PostToolUse
+// (AC7: this hook must never exit 2). Since decision ca23c811 the payload also
+// carries the path's HAZARDS (anti_pattern, as substance) and its RATIONALE
+// (decision, as capped pointers) — articles alone answer neither "what must I
+// not do here" nor "why is it this way". Registered at PostToolUse
 // Read|Edit|Write|MultiEdit and PreToolUse Edit|Write|MultiEdit; which
 // registration acts is decided by config.delivery.injection_rung — the rung is
 // PROBE-SET (verify-at-build 0956a464, research_finding on the build's CC
@@ -23,8 +26,10 @@ import {
   enqueuePending,
   renderArticle,
   renderReference,
+  renderHazards,
+  renderDecisionPointers,
+  DECISION_POINTER_CAP,
   renderPayload,
-  renderFrontier,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -72,42 +77,62 @@ try {
     .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
     .filter((r) => !r.working_tree);
 
+  // HAZARDS AND RATIONALE FOR THIS PATH (decision ca23c811). Articles answer
+  // "what is this and how must it behave"; they do NOT answer "what must I not
+  // do here" or "why is it this way" — those live in anti_pattern and decision,
+  // both of which carry file_keys and neither of which delivery served. An
+  // anti_pattern naming the exact path being edited was invisible while H10
+  // asked at Stop whether a hazard had been RECORDED; a consuming project
+  // shipped the very bug its stored anti_pattern described. Queried SEPARATELY
+  // from owners because these types do NOT confer ownership — the frontier
+  // signal still fires for territory no article owns.
+  const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: 100 });
+  const decisions = store.query({ types: ['decision'], file_keys: [rel], cap: 100 });
+
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
 
-  if (owners.length === 0) {
-    // Frontier signal (grill answer: solve, not accept) — once per file per session.
-    if (guard.frontier_files.includes(rel)) allow();
-    const notice = renderFrontier(rel);
-    // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
-    // makes this once-per-session, so writing it before the delivery actually
-    // happens converts any failure into permanent silent loss: nothing retries,
-    // because the next touch sees the file already marked. Ordered this way, a
-    // throw lands in the catch below with the guard untouched, so the next touch
-    // delivers again.
-    if (mode === 'enqueue') {
-      enqueuePending(pendingPath(input.cwd), { kind: 'frontier', rel, payload: notice, agent_id: input.agent_id ?? 'conductor' });
-    } else {
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: notice } }));
-    }
-    guard.frontier_files.push(rel);
-    writeGuard(gPath, guard);
-    allow();
-  }
-
   // Dedup by record id, not by file: a new file owned by an already-delivered
   // article re-arms nothing (the article is in context); a new owning record
-  // always delivers (scope-growth re-arm).
-  const fresh = owners.filter((r) => !guard.records.includes(r.id));
-  if (fresh.length === 0) allow();
+  // always delivers (scope-growth re-arm). Hazards and decisions share the one
+  // ledger — their ids are ids like any other.
+  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
+  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
+  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  // The frontier signal stays once per file per session (grill answer: solve,
+  // not accept), but it is now the payload HEADER rather than a separate
+  // emission that returned early. That early return was why a hazard in UNOWNED
+  // territory — the reporting project's exact case — was swallowed.
+  const unowned = owners.length === 0;
+  const frontierFresh = unowned && !guard.frontier_files.includes(rel);
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
 
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const blocks = fresh.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap)));
-  const payload = renderPayload(rel, blocks);
+  // Hazards LEAD: "do not do this here" outranks the description of what the
+  // territory is, and the reader may stop after the first block.
+  const blocks = [
+    ...renderHazards(freshHazards, charCap),
+    ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
+    ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
+  ];
+  const payload = renderPayload(rel, blocks, { unowned });
+  // GUARD ONLY WHAT WAS ACTUALLY RENDERED (correctness review 2026-07-30). The
+  // decision cap means freshDecisions can exceed what the payload shows, and
+  // marking the unshown ones delivered is silent loss with no detector: a later
+  // touch of a DIFFERENT file governed by the same decisions would find them all
+  // guarded and print no DECISIONS block at all — not even the count. Guarding
+  // only the rendered slice makes the remainder surface on a later touch instead,
+  // which is the same "never mark delivered what was not delivered" rule the
+  // side-effect-first ordering below enforces for the payload as a whole.
+  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
 
-  // SIDE EFFECT FIRST, GUARD SECOND — see the frontier path above for why.
-  // `fresh.length === 0` at :96 is the short-circuit this guard arms, so a guard
-  // written before a failed delivery silences the article for the whole session
+  // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
+  // makes delivery once-per-session, so writing it before the delivery actually
+  // happens converts any failure into permanent silent loss: nothing retries,
+  // because the next touch sees the records already marked. Ordered this way, a
+  // throw lands in the catch below with the guard untouched, so the next touch
+  // delivers again. The combined freshness short-circuit above is what this guard
+  // arms, so a guard written before a failed delivery silences the article for the whole session
   // with no residue and no detector. NOTE what this does and does not close: it
   // fully closes the case where the delivery THROWS (enqueue or stdout). It cannot
   // close the case where stdout succeeds and the PLATFORM ignores additionalContext
@@ -123,11 +148,17 @@ try {
   // back to 'prompt' when the running session is not the probed cell — not
   // residue-on-inject, which would double-deliver every healthy payload to hedge it.
   if (mode === 'enqueue') {
-    enqueuePending(pendingPath(input.cwd), { kind: 'delivery', rel, payload, agent_id: input.agent_id ?? 'conductor' });
+    enqueuePending(pendingPath(input.cwd), {
+      kind: unowned ? 'frontier' : 'delivery',
+      rel,
+      payload,
+      agent_id: input.agent_id ?? 'conductor',
+    });
   } else {
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
   }
   guard.records.push(...fresh.map((r) => r.id));
+  if (frontierFresh) guard.frontier_files.push(rel);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {

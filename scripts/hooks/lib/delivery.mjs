@@ -72,13 +72,20 @@ function clip(text, cap) {
 }
 
 /** One-hop pointer line for a sibling slug: resolved from the store when the
- *  slug matches exactly, marked absent otherwise — never invented. */
+ *  slug matches exactly, marked absent otherwise — never invented.
+ *
+ *  Resolution is a DETERMINISTIC store lookup, not a ranked query (decision
+ *  3db7095f). It used to be query({rank_terms:[slug], cap:5}) plus an exact match
+ *  among those five, which printed '(not in store)' for articles that were
+ *  demonstrably live: bm25 ranks by term frequency, so a slug cited heavily in
+ *  OTHER articles' prose loses its own top-5 to them (caught live against
+ *  'hooks-suite' at v46). That mattered because these pointers are how a reader
+ *  learns which siblings bear on the territory — a false '(not in store)' tells
+ *  them the neighbour does not exist, so they neither read it nor reconcile it. */
 function pointerLine(store, kind, slug) {
   let head = '(not in store)';
   try {
-    const match = store
-      .query({ types: ['feature_article'], rank_terms: [slug], cap: 5 })
-      .find((r) => r.slug === slug && !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
     if (match) head = clip(match.what_it_does, 140);
   } catch {
     head = '(lookup failed)';
@@ -116,17 +123,88 @@ export function renderReference(ref) {
   return `▸ reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? '', 200)} — refresh via knowledge_get ${ref.id}`;
 }
 
-export function renderPayload(rel, blocks) {
+// Severity ordering for hazard blocks: a 'block' hazard must not sit below an
+// 'info' one just because it was written first. Absent severity reads as 'warn'
+// (the schema leaves it optional, and most records omit it).
+const HAZARD_RANK = { block: 0, warn: 1, info: 2 };
+
+/** Hazard blocks for the anti_patterns whose file_keys name this path, most
+ *  severe first. ALL matches render — measured before choosing the shape
+ *  (2026-07-30): anti-patterns are low-volume per file, unlike decisions.
+ *
+ *  WHY THIS EXISTS (defect reported from a consuming project 2026-07-30,
+ *  decision ca23c811): delivery's owner query was articles-only, so an
+ *  anti_pattern naming the EXACT file being edited was never delivered, while
+ *  H10 asked at Stop whether a hazard had been RECORDED. The two directions were
+ *  asymmetric, and anti_pattern is precisely the type whose whole value is being
+ *  seen BEFORE the mistake is repeated — the reporting project shipped a
+ *  one-way-latch bug in territory that had a stored one-way-latch anti_pattern.
+ *  Substance (trigger + right_way), not a pointer: a pointer to a hazard the
+ *  reader must choose to follow reproduces the skippable step delivery deletes. */
+export function renderHazards(hazards, charCap) {
+  return [...hazards]
+    .sort((a, b) => (HAZARD_RANK[a.severity ?? 'warn'] ?? 1) - (HAZARD_RANK[b.severity ?? 'warn'] ?? 1))
+    .map((ap) =>
+      [
+        `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}' (full record: knowledge_get ${ap.id})`,
+        `TRIGGER: ${clip(ap.trigger, charCap)}`,
+        `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
+      ].join('\n')
+    );
+}
+
+/** How many decision pointers render before the rest are disclosed as dropped. */
+export const DECISION_POINTER_CAP = 8;
+
+/** Decisions whose file_keys name this path, as POINTER lines — never bodies.
+ *  Measured before choosing this shape (2026-07-30): packages/mcp-server/src/
+ *  tools.ts carries 17 matching decisions against 0 anti-patterns, so inlining
+ *  decision substance would flood the payload and train the reader to skip it —
+ *  the flood half of P6 is as much a failure as starvation. The cap's overflow
+ *  is STATED with the query that widens it: a silent cap reads as 'that is all
+ *  there is', which is the failure mode knowledge_query's own capped envelope
+ *  exists to prevent. */
+export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
+  const shown = decisions.slice(0, cap);
+  const lines = [
+    `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
+    ...shown.map((d) => `  → ${clip(d.statement, 160)} (knowledge_get ${d.id})`),
+  ];
+  if (decisions.length > shown.length) {
+    lines.push(
+      `  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
+    );
+  }
+  return lines.join('\n');
+}
+
+/** The delivery envelope. `unowned` swaps the header for the frontier signal:
+ *  hazards and decisions can attach to territory NO article owns, and claiming
+ *  'owning knowledge for X' above them would be false. With no blocks at all the
+ *  unowned payload is exactly the frontier notice — the pre-hazard behavior. */
+export function renderPayload(rel, blocks, { unowned = false } = {}) {
   return [
-    `STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
+    unowned
+      ? renderFrontier(rel, { hasOtherKnowledge: blocks.length > 0 })
+      : `STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
     ...blocks,
   ].join('\n\n');
 }
 
-export function renderFrontier(rel) {
+/** The unowned-territory notice. `hasOtherKnowledge` is load-bearing, not
+ *  cosmetic: since ca23c811 this notice is the HEADER above any hazard and
+ *  decision blocks, and the old unconditional "there is no knowledge to deliver"
+ *  became FALSE in exactly the case the change exists to fix — a reader who
+ *  trusts that sentence stops before the BLOCK-severity hazard printed beneath
+ *  it, which rebuilds the skippable step delivery deletes (correctness review
+ *  2026-07-30). */
+export function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
   return (
     `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED — no owning article exists in the store. ` +
-    `There is no knowledge to deliver; H10 will demand the owning article at session end if this work lands here. ` +
+    (hasOtherKnowledge
+      ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path — they are all it has here. `
+      : `There is no knowledge to deliver; `) +
+    `H10 will demand the owning article at session end if this work lands here. ` +
     `Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`
   );
 }

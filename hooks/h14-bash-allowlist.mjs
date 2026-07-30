@@ -4748,8 +4748,12 @@ try {
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
   const allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper || isReadOnlySearch;
   if (!allowed) {
+    const unquoted = command.replace(/^(["'])([^"']+)\1/, "$2");
+    const matchedPrefix = runCommandPrefixes.find((p) => unquoted === p || unquoted.startsWith(p + " "));
+    const quotingIsTheCause = unquoted !== command && !!matchedPrefix;
+    const prefixHasSpace = quotingIsTheCause && matchedPrefix.includes(" ");
     deny(
-      `H14: command not on the allowlist: '${command}'. Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
+      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTES ARE THE CAUSE: the allowlist matches command prefixes LITERALLY, so a quoted executable path does not match. Re-run it unquoted: '${unquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();
