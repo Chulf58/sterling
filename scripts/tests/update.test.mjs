@@ -493,3 +493,63 @@ test('the init ensure pass runs only when the clone is itself initialized', asyn
     rmSync(without, { recursive: true, force: true });
   }
 });
+
+/** A currency object clearing every EARLIER refusal, so a test isolates one branch
+ *  of the matrix. Built literally rather than from a temp repo: the partitioning is
+ *  pure string logic over porcelain lines, and driving it through real git would
+ *  only obscure which input produced which remedy. */
+function cleanCurrency() {
+  return {
+    is_repo: true,
+    has_origin: true,
+    detached: false,
+    head_short: 'abc1234',
+    describe: 'abc1234',
+    branch: 'main',
+    default_branch: 'main',
+    upstream: 'origin/main',
+    upstream_exists: true,
+    behind: 1,
+    ahead: 0,
+    dirty_tracked: [],
+    untracked: [],
+  };
+}
+
+test('the dirty refusal splits committed BUILD OUTPUTS from source and gives each its own remedy', () => {
+  // Reported from a consumer 2026-07-30: a dirty hooks/ bundle drew "commit and
+  // push from the authoring machine", which is never right for a build output the
+  // consumer is explicitly told not to rebuild. Both remedies must be correct AND
+  // distinguishable, so the refusal is exercised in all three shapes.
+  const bundle = ' M hooks/h19-knowledge-delivery.mjs';
+  const projection = ' M architecture.md';
+  const src = ' M scripts/prep.mjs';
+
+  const generatedOnly = refusalFor({ ...cleanCurrency(), dirty_tracked: [bundle, projection] });
+  assert.match(generatedOnly, /COMMITTED BUILD OUTPUTS — discard these, always/);
+  assert.match(generatedOnly, /git checkout -- hooks\/h19-knowledge-delivery\.mjs architecture\.md/, 'the exact discard command is spelled out');
+  assert.match(generatedOnly, /byte-compares/, 'and states why discarding cannot hide a defect');
+  assert.doesNotMatch(generatedOnly, /belongs on the authoring machine/, 'the push-it advice must NOT reach a build output');
+
+  const sourceOnly = refusalFor({ ...cleanCurrency(), dirty_tracked: [src] });
+  assert.match(sourceOnly, /SOURCE CHANGES/);
+  assert.match(sourceOnly, /belongs on the authoring machine/, 'real source keeps the original remedy');
+  assert.doesNotMatch(sourceOnly, /COMMITTED BUILD OUTPUTS/, 'no build-output block when none are dirty');
+
+  const both = refusalFor({ ...cleanCurrency(), dirty_tracked: [bundle, src] });
+  assert.match(both, /COMMITTED BUILD OUTPUTS/);
+  assert.match(both, /SOURCE CHANGES/);
+  assert.match(both, /hooks\/h19-knowledge-delivery\.mjs/);
+  assert.match(both, /scripts\/prep\.mjs/);
+
+  // A rename resolves to its DESTINATION, and a hooks/ SOURCE is not a bundle.
+  assert.match(
+    refusalFor({ ...cleanCurrency(), dirty_tracked: ['R  hooks/old.mjs -> hooks/h7-file-touch.mjs'] }),
+    /git checkout -- hooks\/h7-file-touch\.mjs/
+  );
+  assert.match(
+    refusalFor({ ...cleanCurrency(), dirty_tracked: [' M scripts/hooks/h19-knowledge-delivery.mjs'] }),
+    /SOURCE CHANGES/,
+    'the authored hook SOURCE under scripts/ is source, not a build output'
+  );
+});
