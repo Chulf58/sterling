@@ -383,9 +383,38 @@ export interface RecordTypeEntry {
   immutable: boolean;
   fts: (record: Record<string, unknown>) => string;
   fileKeys: (record: Record<string, unknown>) => string[];
+  /**
+   * The type's HEADLINE fields — what identifies a record when the caller wants
+   * the landscape rather than the bodies (knowledge_query projection:'digest').
+   * Field name → whether it is emitted whole or clipped to DIGEST_CLIP.
+   *
+   * Unlike knownFieldsFor this CANNOT be derived from the schema: WHICH field is
+   * the headline is an editorial judgement (anti_pattern leads with `trigger`,
+   * research_finding with its two clocks), and no shape encodes that. So it is a
+   * hand-maintained list of field names — the exact thing decision 44e45931
+   * warns about — and it is DECLARATIVE rather than a closure for that reason:
+   * a map of names can be checked against knownFieldsFor(type), so renaming a
+   * schema field fails the registry test loudly instead of silently emptying
+   * the digest. A closure reading r.trigger would just stop finding anything
+   * (invariant 3: the registry's consistency check exists before its members).
+   */
+  digest: Record<string, 'plain' | 'clip'>;
 }
 
 const s = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/**
+ * Headline clip (projection:'digest'). Long enough for an anti_pattern trigger
+ * to be actionable without opening the record, short enough that a 100-record
+ * digest stays an order of magnitude under one full-body window.
+ */
+export const DIGEST_CLIP = 160;
+
+const clipped = (v: unknown, n: number = DIGEST_CLIP): string | undefined => {
+  const text = s(v).replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  return text.length <= n ? text : `${text.slice(0, n)}…`;
+};
 
 export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
   decision: {
@@ -393,18 +422,27 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     immutable: true,
     fts: (r) => [s(r.title), s(r.statement), s(r.rationale)].join('\n'),
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // Title only, as asked: a decision's title is written to state the ruling.
+    digest: { title: 'plain' },
   },
   anti_pattern: {
     schema: antiPatternSchema,
     immutable: false,
     fts: (r) => [s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join('\n'),
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // trigger is the field that tells a reader whether the hazard applies to
+    // what they are about to do — the whole point of scanning hazards — and
+    // severity is the order H19 already renders them in.
+    digest: { title: 'plain', trigger: 'clip', severity: 'plain' },
   },
   research_finding: {
     schema: researchFindingSchema,
     immutable: false,
     fts: (r) => [s(r.question), s(r.answer)].join('\n'),
     fileKeys: () => [],
+    // No title on this type — the question IS the identity. Both clocks ride
+    // along because a finding's currency decides whether it may be used at all.
+    digest: { question: 'clip', source_date: 'plain', capture_date: 'plain' },
   },
   reference_material: {
     schema: referenceMaterialSchema,
@@ -421,12 +459,18 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
         return []; // absolute/escaping location: not repo-located
       }
     },
+    // location is this type's path-bearing field (§3.2.5), so it is what a
+    // reader needs to go open the thing.
+    digest: { title: 'plain', kind: 'plain', location: 'plain' },
   },
   disconfirmed_hypothesis: {
     schema: disconfirmedHypothesisSchema,
     immutable: false,
     fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join('\n'),
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The rejected answer is the reusable half — it stops the question being
+    // re-asked and re-answered the same wrong way.
+    digest: { question: 'clip', rejected_answer: 'clip' },
   },
   feature_article: {
     schema: featureArticleSchema,
@@ -435,18 +479,27 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     // article (class enumeration stays a consumer-side filter on the field).
     fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join('\n'),
     fileKeys: (r) => ((r.files as { path: string }[] | undefined) ?? []).map((f) => f.path),
+    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
+    // and the id in the envelope beside it is not. version + state say whether
+    // this is a moving target and whether it is wired yet.
+    digest: { slug: 'plain', title: 'plain', state: 'plain', version: 'plain', concept_family: 'plain' },
   },
   note: {
     schema: noteSchema,
     immutable: false,
     fts: (r) => s(r.raw_text),
     fileKeys: () => [],
+    digest: { raw_text: 'clip' },
   },
   todo: {
     schema: todoSchema,
     immutable: false,
     fts: (r) => s(r.text),
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The measured worst case for full bodies: board items run to ~8 KB each,
+    // so a whole-board read spilled 478 KB. system_reason is what sorts the
+    // maintenance queue into lanes; priority/source sort the board.
+    digest: { text: 'clip', source: 'plain', priority: 'plain', system_reason: 'plain' },
   },
   brief: {
     schema: briefSchema,
@@ -456,8 +509,40 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
       const br = r.blast_radius as { files?: { path: string }[] } | undefined;
       return (br?.files ?? []).map((f) => f.path);
     },
+    digest: { slug: 'plain', title: 'plain', problem: 'clip' },
   },
 };
+
+/**
+ * The shared digest envelope + the type's headline fields (§3.4 read side).
+ *
+ * `id` stays a FULL uuid deliberately: an 8-char prefix resolves through
+ * knowledge_get since decision 27f148c2, but handing back a truncated id is how
+ * a caller ends up pasting one into a tool that wants the whole thing. The
+ * point of the digest is to make the NEXT call cheap, so the handle it returns
+ * has to be the one that works everywhere.
+ *
+ * An unregistered type yields the envelope alone rather than throwing — a
+ * projection is a read convenience and must never be the thing that makes a
+ * read fail.
+ */
+export function digestRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    id: record.id,
+    type: record.type,
+    status: record.status,
+    updated_at: record.updated_at,
+  };
+  const entry = RECORD_TYPES[s(record.type)];
+  if (!entry) return out;
+  for (const [field, mode] of Object.entries(entry.digest)) {
+    // Absent/empty headline fields are OMITTED rather than emitted as null: an
+    // optional field then costs nothing, which is the entire point of a digest.
+    const value = mode === 'clip' ? clipped(record[field]) : record[field];
+    if (value !== undefined && value !== null && value !== '') out[field] = value;
+  }
+  return out;
+}
 
 export type RecordType = keyof typeof RECORD_TYPES;
 

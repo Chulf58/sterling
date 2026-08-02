@@ -522,6 +522,124 @@ test('knowledge_query PROJECTS version history out of results; knowledge_get sta
   }
 });
 
+test("projection:'digest' returns the LANDSCAPE, not the bodies — and 'full' stays the default", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const body = 'x'.repeat(3000);
+    for (let i = 0; i < 6; i++) {
+      tools.knowledgeCreate('decision', { title: `Decision ${i}`, statement: body, alternatives_rejected: [], rationale: body });
+    }
+    tools.knowledgeCreate('anti_pattern', {
+      title: 'Absence claimed from a guessed symbol name',
+      trigger: 'an agent greps for a name it expects and reports the concept absent when the grep is empty',
+      guidance: 'verify absence by reading the thing that would do the job',
+      wrong_way: 'grep lose(',
+      right_way: 'open the file',
+      source_evidence: 'sibling retrospective 2026-08-02',
+      file_keys: ['src/run.ts'],
+      severity: 'warn',
+    });
+
+    // DEFAULT UNCHANGED — no existing caller sees different data (P1: an opt-in
+    // read, not a migration).
+    const full = tools.knowledgeQueryResult({ types: ['decision'], cap: 50 });
+    assert.equal(full.records[0].statement, body, "'full' is still the default and still carries bodies");
+
+    const digest = tools.knowledgeQueryResult({ types: ['decision'], cap: 50, projection: 'digest' });
+    assert.equal(digest.matched_filter, 6);
+    assert.equal(digest.returned, 6, 'a digest is a projection, never a different filter — same records, less of each');
+    for (const r of digest.records) {
+      assert.ok(r.id && r.type && r.title, 'every digest carries the handle and the headline');
+      assert.ok(!('statement' in r), 'and none of the body');
+      assert.ok(!('rationale' in r), 'nor the rationale');
+    }
+
+    // The measured complaint was token cost, so the test asserts token cost.
+    const fullBytes = JSON.stringify(full.records).length;
+    const digestBytes = JSON.stringify(digest.records).length;
+    assert.ok(
+      digestBytes * 10 < fullBytes,
+      `a digest must be at least an order of magnitude cheaper (full ${fullBytes}B vs digest ${digestBytes}B)`
+    );
+
+    // The type-aware half: an anti_pattern leads with its TRIGGER, because that
+    // is what tells a reader whether the hazard applies to what they are doing.
+    // A title-only digest would have made the "what governs this path?" read —
+    // named as the single most common retrieval shape with no direct expression
+    // — still require opening every record.
+    const [hazard] = tools.knowledgeQueryResult({ types: ['anti_pattern'], file_keys: ['src/run.ts'], projection: 'digest' }).records;
+    assert.match(hazard.trigger as string, /greps for a name it expects/, 'the hazard states its own trigger');
+    assert.equal(hazard.severity, 'warn');
+    assert.ok(!('right_way' in hazard), 'without the remedy body — that is what knowledge_get is for');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a capped window says what matched_filter does NOT mean, and names the cheap way to see the whole set', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (let i = 0; i < 8; i++) {
+      tools.knowledgeCreate('decision', { title: `Garage decision ${i}`, statement: 'S', alternatives_rejected: [], rationale: 'R' });
+    }
+
+    // Reported misreading: "matched_filter: 179" against rank_terms was read as
+    // "179 records about my terms". rank_terms ORDER the filter set (ORDER BY
+    // bm25), they never narrow it — so a capped ranked window must say so.
+    const ranked = tools.knowledgeQueryResult({ types: ['decision'], rank_terms: ['garage'], cap: 3 });
+    assert.equal(ranked.capped, true);
+    assert.equal(ranked.matched_filter, 8, 'the count belongs to the FILTER, not to the terms');
+    assert.match(ranked.note ?? '', /rank_terms ORDERED those 8 and did not narrow them/);
+    assert.match(ranked.note ?? '', /NOT a measure of how many are relevant/);
+    assert.match(ranked.note ?? '', /can never establish absence/, 'the half of retrieval a capped result cannot serve');
+    assert.match(ranked.note ?? '', /projection:"digest"/, 'and the route out of the window is named, not left to be discovered');
+
+    // Unranked capped windows get the digest route without the rank caveat —
+    // an irrelevant warning on every result is the noise P1 exists to prevent.
+    const plain = tools.knowledgeQueryResult({ types: ['decision'], cap: 3 });
+    assert.match(plain.note ?? '', /projection:"digest"/);
+    assert.ok(!/rank_terms ORDERED/.test(plain.note ?? ''), 'no rank caveat where no rank_terms were passed');
+
+    // Already digesting? Then advertising the digest is noise — say raise cap.
+    const digested = tools.knowledgeQueryResult({ types: ['decision'], cap: 3, projection: 'digest' });
+    assert.ok(!/re-run with projection/.test(digested.note ?? ''), 'never advise what the caller already did');
+    assert.match(digested.note ?? '', /raise cap/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("board_query / maintenance_query take projection:'digest' — the 478 KB board read", () => {
+  const { tools, cleanup } = harness();
+  try {
+    // Board items are free text and run to several KB each; the reported audit
+    // dumped 132 of them to keyword-sweep with a regex in node.
+    for (let i = 0; i < 5; i++) {
+      tools.boardAdd({ text: `item ${i}: ${'y'.repeat(2000)}`, source: 'user', priority: 'high' });
+    }
+    tools.boardAdd({ text: `reconcile ${'z'.repeat(2000)}`, source: 'system', system_reason: 'reconcile_needed' });
+
+    const full = tools.boardQueryResult({ source: 'user' });
+    const digest = tools.boardQueryResult({ source: 'user', projection: 'digest' });
+    assert.equal(digest.returned, full.returned, 'same items');
+    assert.ok(
+      JSON.stringify(digest.records).length * 5 < JSON.stringify(full.records).length,
+      'a digested board is dramatically cheaper to hold'
+    );
+    const [item] = digest.records as Record<string, unknown>[];
+    assert.match(item.text as string, /^item 0/, 'the text is clipped, not dropped — triage needs to read it');
+    assert.match(item.text as string, /…$/);
+    assert.equal(item.priority, 'high', 'the fields you triage BY survive');
+
+    // The queue's lane is its headline: a drain sorts by system_reason.
+    const [queued] = tools.maintenanceQueryResult({ projection: 'digest' }).records as Record<string, unknown>[];
+    assert.equal(queued.system_reason, 'reconcile_needed');
+    assert.equal(queued.source, 'system');
+  } finally {
+    cleanup();
+  }
+});
+
 test('dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED naming the match — the author merges via knowledge_update or stores with dedup_override', () => {
   const { tools, cleanup } = harness();
   try {

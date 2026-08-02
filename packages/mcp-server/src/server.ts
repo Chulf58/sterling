@@ -64,7 +64,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_query',
     {
       description:
-        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read.',
+        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. matched_filter counts the FILTER only — rank_terms order that set, they never narrow it. projection:"digest" returns one headline line per record (id + slug/title, anti_pattern trigger, research_finding clocks) instead of full bodies: use it to SEE THE LANDSCAPE cheaply — a wide digest then knowledge_get on the few that matter beats a capped full-body window you can neither complete nor trust. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read.',
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
@@ -72,6 +72,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         rank_terms: z.array(z.string()).optional(),
         include_unconfirmed: z.boolean().optional(),
         cap: z.number().int().positive().optional(),
+        projection: z.enum(['full', 'digest']).optional(),
       }),
     },
     (opts) => json(tools.knowledgeQueryResult(opts))
@@ -134,11 +135,12 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description:
-        'List open board items. source=user is the board; source=system is the maintenance queue. Returns {matched_filter, returned, cap, capped, records}: capped=true means more items matched than are shown — raise cap before concluding the board or queue is shorter than it is.',
+        'List open board items. source=user is the board; source=system is the maintenance queue. Returns {matched_filter, returned, cap, capped, records}: capped=true means more items matched than are shown — raise cap before concluding the board or queue is shorter than it is. projection:"digest" returns one clipped line per item instead of its full text — board items run to several KB each, so prefer it for auditing or triaging the whole board and read the full text only for the items you act on.',
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         file_keys: z.array(z.string()).optional(),
         cap: z.number().int().positive().optional(),
+        projection: z.enum(['full', 'digest']).optional(),
       }),
     },
     (args) => json(tools.boardQueryResult(args))
@@ -237,11 +239,12 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_query',
     {
       description:
-        'List open maintenance-queue items (system todos), optionally by system_reason or file keys. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false.',
+        'List open maintenance-queue items (system todos), optionally by system_reason or file keys. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         cap: z.number().int().positive().optional(),
+        projection: z.enum(['full', 'digest']).optional(),
       }),
     },
     (args) => json(tools.maintenanceQueryResult(args))

@@ -4407,19 +4407,28 @@ var RECORD_TYPES = {
     schema: decisionSchema,
     immutable: true,
     fts: (r) => [s(r.title), s(r.statement), s(r.rationale)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? []
+    fileKeys: (r) => r.file_keys ?? [],
+    // Title only, as asked: a decision's title is written to state the ruling.
+    digest: { title: "plain" }
   },
   anti_pattern: {
     schema: antiPatternSchema,
     immutable: false,
     fts: (r) => [s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? []
+    fileKeys: (r) => r.file_keys ?? [],
+    // trigger is the field that tells a reader whether the hazard applies to
+    // what they are about to do — the whole point of scanning hazards — and
+    // severity is the order H19 already renders them in.
+    digest: { title: "plain", trigger: "clip", severity: "plain" }
   },
   research_finding: {
     schema: researchFindingSchema,
     immutable: false,
     fts: (r) => [s(r.question), s(r.answer)].join("\n"),
-    fileKeys: () => []
+    fileKeys: () => [],
+    // No title on this type — the question IS the identity. Both clocks ride
+    // along because a finding's currency decides whether it may be used at all.
+    digest: { question: "clip", source_date: "plain", capture_date: "plain" }
   },
   reference_material: {
     schema: referenceMaterialSchema,
@@ -4436,13 +4445,19 @@ var RECORD_TYPES = {
       } catch {
         return [];
       }
-    }
+    },
+    // location is this type's path-bearing field (§3.2.5), so it is what a
+    // reader needs to go open the thing.
+    digest: { title: "plain", kind: "plain", location: "plain" }
   },
   disconfirmed_hypothesis: {
     schema: disconfirmedHypothesisSchema,
     immutable: false,
     fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? []
+    fileKeys: (r) => r.file_keys ?? [],
+    // The rejected answer is the reusable half — it stops the question being
+    // re-asked and re-answered the same wrong way.
+    digest: { question: "clip", rejected_answer: "clip" }
   },
   feature_article: {
     schema: featureArticleSchema,
@@ -4450,19 +4465,28 @@ var RECORD_TYPES = {
     // concept_family joins the FTS text so a family query ranks its concept
     // article (class enumeration stays a consumer-side filter on the field).
     fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
-    fileKeys: (r) => (r.files ?? []).map((f) => f.path)
+    fileKeys: (r) => (r.files ?? []).map((f) => f.path),
+    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
+    // and the id in the envelope beside it is not. version + state say whether
+    // this is a moving target and whether it is wired yet.
+    digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
   },
   note: {
     schema: noteSchema,
     immutable: false,
     fts: (r) => s(r.raw_text),
-    fileKeys: () => []
+    fileKeys: () => [],
+    digest: { raw_text: "clip" }
   },
   todo: {
     schema: todoSchema,
     immutable: false,
     fts: (r) => s(r.text),
-    fileKeys: (r) => r.file_keys ?? []
+    fileKeys: (r) => r.file_keys ?? [],
+    // The measured worst case for full bodies: board items run to ~8 KB each,
+    // so a whole-board read spilled 478 KB. system_reason is what sorts the
+    // maintenance queue into lanes; priority/source sort the board.
+    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain" }
   },
   brief: {
     schema: briefSchema,
@@ -4471,7 +4495,8 @@ var RECORD_TYPES = {
     fileKeys: (r) => {
       const br = r.blast_radius;
       return (br?.files ?? []).map((f) => f.path);
-    }
+    },
+    digest: { slug: "plain", title: "plain", problem: "clip" }
   }
 };
 function validateRecord(input2) {

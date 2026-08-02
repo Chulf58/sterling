@@ -17,6 +17,9 @@ import {
   runRecordSchema,
   RECORD_TYPES,
   validateRecord,
+  knownFieldsFor,
+  digestRecord,
+  DIGEST_CLIP,
   SPINE_SIGNALS,
   SYSTEM_REASONS,
   DRAIN_VERBS,
@@ -318,12 +321,75 @@ test('registry: full record set registered 1:1, unregistered type rejected loudl
   for (const [name, entry] of Object.entries(RECORD_TYPES)) {
     assert.equal(typeof entry.fts, 'function', `${name} needs an fts extractor`);
     assert.equal(typeof entry.fileKeys, 'function', `${name} needs a fileKeys extractor`);
+    assert.ok(Object.keys(entry.digest).length > 0, `${name} needs at least one headline field for projection:'digest'`);
   }
   assert.equal(RECORD_TYPES.decision.immutable, true);
   const validated = validateRecord(validDecision());
   assert.equal(validated.type, 'decision');
   assert.throws(() => validateRecord({ ...envelope('escalation_log'), title: 'x' }), /unregistered record type 'escalation_log'/);
   assert.throws(() => validateRecord({ no_type: true }), /no record type/);
+});
+
+test("registry: every projection:'digest' headline field is a REAL field of its own schema (invariant 3 check)", () => {
+  // WHY THIS EXISTS. knownFieldsFor derives a type's valid fields from its
+  // schema so no second list can drift (decision 44e45931). The digest map is
+  // the one thing that CANNOT be derived — which field is a record's headline
+  // is an editorial call — so it is the one place a hand-maintained list of
+  // field names survives, and this is its consistency check.
+  //
+  // The failure it prevents is SILENT: rename anti_pattern.trigger and the
+  // digest simply stops emitting a trigger. Nothing throws, every test stays
+  // green, and the read side quietly degrades to a title-only listing — the
+  // exact "a summary of a source is not the source" rot the store exists to
+  // resist. Here it fails loudly, naming the field.
+  for (const [type, entry] of Object.entries(RECORD_TYPES)) {
+    const known = knownFieldsFor(type);
+    assert.ok(known, `${type} must resolve its known field set`);
+    for (const [field, mode] of Object.entries(entry.digest)) {
+      assert.ok(
+        known.has(field),
+        `${type}.digest names '${field}', which its schema does not define — the field was renamed or removed and the digest was not updated with it`
+      );
+      assert.ok(mode === 'plain' || mode === 'clip', `${type}.digest['${field}'] must be 'plain' or 'clip', got '${mode}'`);
+    }
+  }
+});
+
+test("digestRecord: headline only, absent fields omitted, long text clipped — the 'landscape not bodies' read", () => {
+  const antiPattern = {
+    ...envelope('anti_pattern'),
+    title: 'Path-based delivery is blind to the mechanism axis',
+    trigger: 'x'.repeat(DIGEST_CLIP + 50),
+    guidance: 'a very long body that must not reach the caller',
+    wrong_way: 'also long',
+    right_way: 'also long',
+    file_keys: ['a.ts'],
+  };
+  const d = digestRecord(antiPattern);
+
+  assert.equal(d.title, antiPattern.title, 'the headline survives whole');
+  assert.equal((d.trigger as string).length, DIGEST_CLIP + 1, 'trigger is clipped to DIGEST_CLIP plus the ellipsis');
+  assert.match(d.trigger as string, /…$/, 'a clip is marked, never silently truncated');
+  assert.ok(!('guidance' in d), 'bodies do not cross into a digest');
+  assert.ok(!('wrong_way' in d) && !('right_way' in d), 'nor do the remaining body fields');
+  assert.ok(!('file_keys' in d), 'a field the digest does not name is absent even though the record carries it');
+  assert.ok(!('severity' in d), 'an ABSENT optional headline field costs nothing — no null placeholder');
+
+  // The id stays a FULL uuid: the digest's job is to make the NEXT call cheap,
+  // so the handle it hands back has to be the one every tool accepts.
+  assert.equal(d.id, antiPattern.id);
+  assert.equal((d.id as string).length, 36, 'never a truncated citation prefix');
+  assert.equal(d.type, 'anti_pattern');
+
+  // Short text is passed through untouched — clipping is not reformatting.
+  const short = digestRecord({ ...envelope('anti_pattern'), title: 'T', trigger: 'when X happens', severity: 'block' });
+  assert.equal(short.trigger, 'when X happens');
+  assert.equal(short.severity, 'block', 'a PRESENT optional headline field is carried');
+
+  // An unregistered type degrades to the envelope instead of throwing: a
+  // projection is a read convenience and must never be why a read fails.
+  const unknown = digestRecord({ id: 'x', type: 'escalation_log', status: 'active', updated_at: NOW });
+  assert.deepEqual(unknown, { id: 'x', type: 'escalation_log', status: 'active', updated_at: NOW });
 });
 
 test('the signal enum is closed at the full nine §5.1 members', () => {
