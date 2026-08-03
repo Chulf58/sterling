@@ -31,7 +31,56 @@ if (active) {
 const into = arg('--into') ?? defaultBranch(target);
 const branch = arg('--branch') ?? currentBranch(target);
 if (branch === into) {
-  fail(`direct-merge: currently on the base branch '${into}' — checkout the branch to merge, or pass --branch`);
+  fail(
+    `direct-merge: currently on the base branch '${into}' — checkout the branch to merge, or pass --branch.\n` +
+      `If a merge just completed here, the work is ALREADY on ${into} and its branch was deleted:\n` +
+      `check 'git log --oneline -3 ${into}' before merging anything again. A gate that exits\n` +
+      `non-zero after a SUCCESSFUL merge (stale bundles / failed sweep) says so on its first line.`
+  );
+}
+
+// Cheap git precondition BEFORE the expensive checks (P1). mergeBranchInto keeps
+// its own dirty-tree gate as the invariant, but that gate sits AFTER the
+// multi-minute battery, so a dirty tree used to cost the whole battery and then
+// throw a RAW branch-manager stack. Checking here fails in ~2s with a message
+// that routes through fail(). The remedy text deliberately does NOT tell you to
+// "commit or discard": that advice was actively wrong for untracked documents
+// whose disposition is a user decision, so tracked and untracked are separated
+// and untracked files are named as a choice rather than an obstacle.
+const dirtyCheck = spawnSync('git', ['status', '--porcelain'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+if (dirtyCheck.status !== 0) {
+  fail(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || '').trim()}`);
+}
+const dirtyLines = dirtyCheck.stdout.split('\n').map((l) => l.trimEnd()).filter(Boolean);
+if (dirtyLines.length > 0) {
+  const untracked = dirtyLines.filter((l) => l.startsWith('??'));
+  // Unmerged paths carry a U on either side, plus the DD/AA both-side cases. They
+  // are dirty, but "commit or discard" is the WRONG remedy for a conflicted tree —
+  // misprescribing here is the exact defect this refusal was rewritten to stop.
+  const unmerged = dirtyLines.filter((l) => /^(DD|AA|.U|U.)/.test(l.slice(0, 2)));
+  const tracked = dirtyLines.filter((l) => !l.startsWith('??') && !unmerged.includes(l));
+  const parts = [`direct-merge: working tree is dirty — refusing before the battery (a merge must not carry uncommitted state across branches)`];
+  if (unmerged.length > 0) {
+    parts.push(
+      `\n${unmerged.length} UNMERGED path(s) — a merge or rebase is already in progress here:`,
+      ...unmerged.map((l) => `  ${l}`),
+      '  → resolve the conflicts and commit, or abort that operation',
+      '    (git merge --abort / git rebase --abort). Do NOT start another merge on top.'
+    );
+  }
+  if (tracked.length > 0) {
+    parts.push(`\n${tracked.length} tracked change(s):`, ...tracked.map((l) => `  ${l}`), '  → commit them on this branch, or discard them.');
+  }
+  if (untracked.length > 0) {
+    parts.push(
+      `\n${untracked.length} untracked path(s):`,
+      ...untracked.map((l) => `  ${l}`),
+      '  → these may not be yours to commit. Decide their disposition first —',
+      '    commit, .gitignore, move out of the repo, or remove. The gate does not',
+      '    choose for you, and "commit or discard" is not always the right answer.'
+    );
+  }
+  fail(parts.join('\n'));
 }
 
 // Gate precondition (merge.md): every affected article reconciled. Open
@@ -76,6 +125,86 @@ if (hasCheck) {
   console.error("direct-merge: no `check` script in the target's package.json — battery skipped (loud)");
 }
 
-const merged = mergeBranchInto({ cwd: target, branch, into });
-const swept = sweepMergedBranches({ cwd: target, into });
+// branch-manager throws raw Errors (it is a library, shared with the §8.1 gate and
+// the MCP server, so it cannot process.exit). Routing them through fail() here
+// gives the gate ONE failure shape instead of a stack trace after the battery.
+let merged;
+let swept;
+try {
+  merged = mergeBranchInto({ cwd: target, branch, into });
+} catch (e) {
+  fail(`direct-merge: ${e?.message ?? e}`);
+}
+// The sweep runs in its OWN try: once the merge has landed, a sweep failure must
+// not be reported as "the merge failed". That misreading is what teaches an
+// operator to hand-merge, which is the whole point of board f37e1dae.
+try {
+  swept = sweepMergedBranches({ cwd: target, into });
+} catch (e) {
+  console.error(
+    [
+      '',
+      `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — do NOT merge again.`,
+      `Only the post-merge branch sweep failed: ${e?.message ?? e}`,
+      `Sweep merged branches manually when convenient: git branch --merged ${into}`,
+    ].join('\n')
+  );
+  console.log(JSON.stringify({ ...merged, branches_swept: null, sweep_failed: true }, null, 2));
+  process.exit(1);
+}
+
+// POST-merge bundle freshness — the one staleness the battery structurally cannot
+// see. check-bundles-fresh runs BEFORE the merge, but git's auto-merge of
+// hooks/*.mjs does not equal a fresh esbuild of the MERGED source: after the
+// 2026-08-03 two-branch merge, h20's bundle had been built against pre-digest
+// store code and needed a rebuild (commit 1de585d), which the gate never flagged
+// because its battery had already passed. Re-checking after the merge closes it.
+// Sterling-specific, so it runs only where the checker exists.
+//
+// THE REBUILD IS LOAD-BEARING, NOT A CONVENIENCE (r-review finding (e)):
+// packages/*/dist/ is GITIGNORED, so it survives the checkout to `into` and still
+// holds the pre-merge build. check-bundles-fresh resolves each hook's workspace
+// imports into that dist, so a stale dist makes the temp build and the shipped
+// bundle vendor byte-IDENTICAL stale code — they compare equal and the check
+// PASSES on exactly the staleness it exists to catch. That is the 1de585d case.
+// Pre-merge this hole is covered by check-totality's stale-dist guard aborting the
+// whole battery; invoking the bundle checker ALONE has no such precondition, so
+// the dist must be rebuilt from the merged source first or the arm is theatre.
+const bundleChecker = join(target, 'scripts', 'check-bundles-fresh.mjs');
+if (existsSync(bundleChecker)) {
+  console.error('direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source…');
+  const rebuilt = defaultExec('npm', ['run', 'build'], { cwd: target, timeout: 600_000 });
+  if (rebuilt.status !== 0) {
+    console.error(
+      [
+        '',
+        `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — do NOT merge again.`,
+        'But `npm run build` FAILED on the merged tree, so bundle freshness could NOT be',
+        `verified — the merged source may not even compile. Fix this on ${into} now:`,
+        '  npm run build && npm run build:hooks',
+        (rebuilt.stdout + rebuilt.stderr).trim(),
+      ].join('\n')
+    );
+    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_unverified: true }, null, 2));
+    process.exit(1);
+  }
+  const bundles = spawnSync(process.execPath, [bundleChecker], { cwd: target, encoding: 'utf8', timeout: 300_000 });
+  if (bundles.status !== 0) {
+    console.error(
+      [
+        '',
+        `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — but the shipped bundles are now STALE.`,
+        'git auto-merged hook sources without rebuilding them, so the enforcement surface',
+        `that actually runs no longer matches its source on ${into}. Fix it now, on ${into}:`,
+        '  npm run build && npm run build:hooks',
+        '  git add -A hooks && git commit -m "fix: rebuild bundles after merge"',
+        'Checker output:',
+        (bundles.stdout + bundles.stderr).trim(),
+      ].join('\n')
+    );
+    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_stale: true }, null, 2));
+    process.exit(1);
+  }
+}
+
 console.log(JSON.stringify({ ...merged, branches_swept: swept }, null, 2));
