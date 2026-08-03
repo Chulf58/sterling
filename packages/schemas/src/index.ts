@@ -18,6 +18,8 @@ export {
   validateRecord,
   knownFieldsFor,
   unknownFieldsIn,
+  digestRecord,
+  DIGEST_CLIP,
   AGENT_MODEL_KEY,
   REVIEWER_ROLES,
   AGENT_CLASS,

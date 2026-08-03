@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, digestRecord, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import { DEFAULT_QUERY_CAP, type QueryOptions, type RecordedExit, type ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -21,7 +21,28 @@ export interface BoardFilter {
   system_reason?: string;
   file_keys?: string[];
   cap?: number;
+  projection?: Projection;
 }
+
+/**
+ * How much of each record crosses the MCP boundary (§3.4 read side).
+ *
+ * 'full'   — today's behaviour, unchanged: every content field, minus the
+ *            supersedes chain and server-owned baselines (see projectForQuery).
+ * 'digest' — the shared envelope plus the type's HEADLINE fields only
+ *            (digestRecord). Roughly 25x smaller per record, measured against
+ *            this store's own articles.
+ *
+ * Reported by a consuming project across two retrospectives as the single
+ * highest-value read-side change: full-body windows routinely blew the token
+ * cap and spilled to disk (measured there: 478 KB for one board read, 86 KB and
+ * 100 KB for two knowledge reads), and the recovery every time was to shell out
+ * and hand-write a JSON parser to recover ids and titles — "that is not using a
+ * knowledge base, that is defeating one". 'full' stays the DEFAULT so no
+ * existing caller changes behaviour; the cheap read is opt-in, and the capped
+ * note advertises it so it is discoverable at the moment it is needed.
+ */
+export type Projection = 'full' | 'digest';
 
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
@@ -32,7 +53,8 @@ export interface BoardQueryResult {
   /** exact: more matched than were returned */
   capped: boolean;
   note?: string;
-  records: DurableRecord[];
+  /** full records, or their headline digests when projection:'digest' */
+  records: DurableRecord[] | Record<string, unknown>[];
 }
 
 /** knowledge_query's disclosed result envelope (see knowledgeQueryResult). */
@@ -672,36 +694,69 @@ export class SterlingTools {
     return { record, warnings };
   }
 
-  knowledgeQueryResult(opts: QueryOptions): KnowledgeQueryResult {
-    const records = this.knowledgeQuery(opts);
-    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+  knowledgeQueryResult(opts: QueryOptions & { projection?: Projection }): KnowledgeQueryResult {
+    const { projection = 'full', ...filter } = opts;
+    const records = this.knowledgeQuery(filter);
+    const cap = filter.cap ?? DEFAULT_QUERY_CAP;
     // count() shares query()'s base filter but is rank-BLIND (rank_terms is a
     // no-op there), so this is "records matching the filter", which is exactly
     // the number a caller needs to see it is holding a window. Claiming it as
     // "records your query would return" would trade a silent lie for a loud one.
-    const matchedFilter = this.store.count(opts);
+    const matchedFilter = this.store.count(filter);
     // returned === cap is the only truthful truncation signal: the LIMIT was
     // reached, so more MAY exist past it. returned < cap guarantees nothing was
     // dropped. Deriving capped from matchedFilter alone would false-positive
     // every time rank_terms legitimately narrowed the set.
     const capped = records.length === cap;
-    const rankRestricted = (opts.rank_terms?.length ?? 0) > 0 && !capped && matchedFilter > records.length;
+    const ranked = (filter.rank_terms?.length ?? 0) > 0;
+    const rankRestricted = ranked && !capped && matchedFilter > records.length;
     return {
       matched_filter: matchedFilter,
       returned: records.length,
       cap,
       capped,
       ...(capped
-        ? {
-            note: `cap reached — showing ${records.length} of ${matchedFilter} records matching this filter; raise cap or narrow the filter (types/file_keys/rank_terms) to see the rest`,
-          }
+        ? { note: this.cappedNote(records.length, matchedFilter, ranked, projection) }
         : rankRestricted
           ? {
               note: `rank_terms restricted this to ${records.length} FTS match(es); ${matchedFilter} records match the filter alone — drop or widen rank_terms to see them`,
             }
           : {}),
-      records: records.map((r) => this.projectForQuery(r)),
+      records: records.map((r) => (projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r))),
     };
+  }
+
+  /**
+   * What a capped window means, and the cheapest way out of it.
+   *
+   * Two reported misreadings are answered here, both measured in a consuming
+   * project rather than imagined:
+   *
+   * (1) "matched_filter: 179" against rank_terms:["garage","loadout"] was read
+   *     as "179 garage decisions". It is not — rank_terms ORDER the set through
+   *     bm25, they never narrow it (store query(): ORDER BY bm25, not WHERE), so
+   *     the count belongs to types/stack_tags/file_keys alone. Saying only
+   *     "records matching this filter" was technically true and still misread,
+   *     which makes it a bad message: it let a reader believe a capped window
+   *     was a relevance ranking over a relevant set.
+   *
+   * (2) "showing 12 of 315" left no route to the landscape — "I can neither see
+   *     the whole set nor trust the sample". The digest is that route, so the
+   *     message names it rather than leaving it to be discovered in a schema.
+   */
+  private cappedNote(returned: number, matchedFilter: number, ranked: boolean, projection: Projection): string {
+    const parts = [`cap reached — showing ${returned} of ${matchedFilter} records matching the FILTER (types/stack_tags/file_keys)`];
+    if (ranked) {
+      parts.push(
+        `rank_terms ORDERED those ${matchedFilter} and did not narrow them, so this count is NOT a measure of how many are relevant — and a capped window can never establish absence`
+      );
+    }
+    parts.push(
+      projection === 'digest'
+        ? `raise cap to see the rest — at this projection every record is one headline line`
+        : `raise cap, narrow the filter, or re-run with projection:"digest" to see all ${matchedFilter} as one-line headlines (id + title/trigger, no bodies) and then knowledge_get the few you want`
+    );
+    return parts.join('; ');
   }
 
   /** Query-result projection (see knowledgeQueryResult): drop the supersedes
@@ -917,10 +972,12 @@ export class SterlingTools {
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
     const records = matching.slice(0, cap);
     const capped = records.length < matching.length;
+    const projection = filter.projection ?? 'full';
     const notes: string[] = [];
     if (capped) {
       notes.push(
-        `cap reached — showing ${records.length} of ${matching.length} matching items; raise cap to see the rest (a drain that stops at the cap leaves the tail behind)`
+        `cap reached — showing ${records.length} of ${matching.length} matching items; raise cap to see the rest (a drain that stops at the cap leaves the tail behind)` +
+          (projection === 'full' ? `, or re-run with projection:"digest" for one-line items (board items run to several KB of text each)` : '')
       );
     }
     if (scanTruncated) {
@@ -932,7 +989,7 @@ export class SterlingTools {
       cap,
       capped,
       ...(notes.length ? { note: notes.join('; ') } : {}),
-      records,
+      records: projection === 'digest' ? records.map((r) => digestRecord(r as unknown as Record<string, unknown>)) : records,
     };
   }
 
@@ -1182,8 +1239,14 @@ export class SterlingTools {
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
-  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): BoardQueryResult {
-    return this.boardQueryResult({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
+  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; cap?: number; projection?: Projection } = {}): BoardQueryResult {
+    return this.boardQueryResult({
+      source: 'system',
+      system_reason: filter.system_reason,
+      file_keys: filter.file_keys,
+      cap: filter.cap,
+      projection: filter.projection,
+    });
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------
