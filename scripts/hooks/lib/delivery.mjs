@@ -11,6 +11,101 @@ export function deliveryDir(cwd) {
   return join(cwd, '.sterling', 'transient', 'delivery');
 }
 
+// ---------------------------------------------------------------------------
+// MECHANISM-AXIS MATCHING (H20, board 62806222). Path-scoped delivery is
+// STRUCTURALLY blind to recurrence: an anti_pattern is filed against the file
+// where the incident HAPPENED, not against every file where the mistake can
+// recur, so no file-key join can ever surface it. The only thing that finds
+// these is a query on the MECHANISM — and the prose rule to run one was missed
+// twice in one session by the person who wrote it. This matches the outgoing
+// dispatch prompt's own vocabulary against stored triggers and titles instead.
+//
+// TWO STAGES, because one is not enough. Stage 1 is the store's FTS: rank_terms
+// genuinely NARROW (index.ts builds `... AND records_fts MATCH ?`), so zero
+// hits is a real zero and the hook can stay silent. But that index spans
+// rationale/right_way/guidance too (records.ts:394,400) — far too much surface
+// to inject from. Stage 2 (axisHits) re-checks against the NARROW fields only,
+// which is what the board item actually asked for: triggers and titles.
+// ---------------------------------------------------------------------------
+
+/** Ordinary function words PLUS the boilerplate that appears in essentially
+ *  every Sterling dispatch prompt. The second group is the load-bearing half: a
+ *  term present in EVERY prompt cannot discriminate BETWEEN prompts, so keeping
+ *  it guarantees false positives (every anti_pattern mentions 'record'). */
+const AXIS_STOPWORDS = new Set([
+  // function words
+  'this', 'that', 'these', 'those', 'with', 'from', 'have', 'has', 'had', 'will', 'would', 'could',
+  'should', 'must', 'your', 'you', 'into', 'then', 'than', 'when', 'what', 'which', 'there', 'their',
+  'them', 'they', 'been', 'being', 'does', 'make', 'made', 'used', 'using', 'also', 'only', 'each',
+  'more', 'most', 'some', 'such', 'very', 'just', 'like', 'over', 'after', 'before', 'because',
+  'about', 'under', 'above', 'below', 'where', 'while', 'since', 'until', 'unless', 'either',
+  'neither', 'both', 'every', 'not', 'but', 'and', 'the', 'for', 'are', 'was', 'were', 'its',
+  'here', 'how', 'why', 'who', 'whom', 'whose', 'any', 'all', 'can', 'may', 'might', 'shall',
+  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
+  'sterling', 'conductor', 'agent', 'agents', 'subagent', 'dispatch', 'report', 'return',
+  'verify', 'verified', 'evidence', 'record', 'records', 'store', 'knowledge', 'query',
+  'knowledge_get', 'knowledge_query', 'read', 'reads', 'grep', 'file', 'files', 'code',
+  'first', 'second', 'third', 'task', 'work', 'please', 'note', 'notes', 'deliverable',
+  'claim', 'claims', 'absence', 'cite', 'cites', 'citing', 'exactly', 'nothing', 'else',
+]);
+
+/** A term shorter than this is too generic to carry a mechanism. */
+export const AXIS_MIN_TERM_LEN = 4;
+
+/** How many DISTINCT extracted terms must land in a record's narrow fields
+ *  before it is worth injecting. One shared word is coincidence; two is signal.
+ *  HONEST NOTE: 2 is a starting threshold chosen on the two motivating cases
+ *  (see the hook header), NOT on measured data — tune it on hit rates, the way
+ *  board 8390f8fa says size thresholds should be set. */
+export const AXIS_MIN_HITS = 2;
+
+/** Extract candidate mechanism terms from outgoing prompt text, most
+ *  discriminating first. Ranked by TERM FREQUENCY: a dispatch prompt repeats
+ *  what it is ABOUT, so a term used three times beats a one-off mention. Ties
+ *  break by length (longer is more specific) then lexicographically, so the
+ *  result is fully deterministic for a given prompt — the same prompt must
+ *  always produce the same query.
+ *
+ *  `maxTerms` is supplied by the CALLER rather than hardcoded here: the real
+ *  ceiling is the store's MAX_RANK_TERMS, and writing 16 in a second place is
+ *  the exact drift decision b47889b7 removed. This module also stays free of
+ *  workspace imports on purpose (it is bundled into several hooks). */
+export function extractAxisTerms(text, maxTerms) {
+  const counts = new Map();
+  for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < AXIS_MIN_TERM_LEN) continue;
+    if (AXIS_STOPWORDS.has(raw)) continue;
+    if (/^\d+$/.test(raw)) continue; // bare numbers carry no mechanism
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1))
+    .slice(0, Math.max(0, maxTerms))
+    .map(([term]) => term);
+}
+
+/** The NARROW fields a mechanism match is allowed to consider — deliberately
+ *  not the whole FTS surface. An anti_pattern's trigger is its statement of WHEN
+ *  it recurs, which is precisely the axis; a decision's title and statement are
+ *  its ruling. rationale/right_way/guidance are excluded: they are long, they
+ *  discuss context rather than assert the rule, and matching them is what would
+ *  turn this into noise. */
+export function axisNarrowText(record) {
+  if (!record || typeof record !== 'object') return '';
+  if (record.type === 'anti_pattern') return `${record.title ?? ''}\n${record.trigger ?? ''}`;
+  if (record.type === 'decision') return `${record.title ?? ''}\n${record.statement ?? ''}`;
+  return '';
+}
+
+/** How many DISTINCT terms appear in the record's narrow fields. Substring
+ *  match on a word-ish boundary so 'latch' hits 'latches' and 'one-way-latch'
+ *  but not an unrelated token that merely contains the letters. */
+export function axisHits(record, terms) {
+  const hay = axisNarrowText(record).toLowerCase();
+  if (!hay) return [];
+  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(hay));
+}
+
 /** Per-agent guard: which record ids / frontier files were already delivered
  *  this session. The conductor (no agent_id) and every subagent get their own
  *  file — delivery is per-context, mirroring H13's per-agent read ledgers. */
