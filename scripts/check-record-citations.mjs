@@ -37,12 +37,19 @@ if (!existsSync(storePath)) {
 
 // Scanned: authored source and docs. NOT scanned, each for a reason:
 //   docs/historical/** — the retired spec, deliberately frozen as it was written;
+//   docs/feedback/** — consuming-project reports, kept VERBATIM as evidence
+//     (decision 42f385ea). Their ids belong to the REPORTING machine's store, not
+//     this one, so they are correct there and unresolvable here — exactly the
+//     "an id from another machine" case this check's own failure message names.
+//     They are also third-party text: the 'not-a-citation' opt-out would work
+//     mechanically, but editing markers into a document whose whole value is that
+//     it is unaltered would trade the evidence for a green check.
 //   hooks/** — generated bundles (their sources are scanned, and check-bundles-fresh
 //     already proves the two match byte for byte);
 //   config.generated_projections — architecture.md is projected FROM the articles,
 //     so its ids are the articles' business, not the tree's (the e1275166 precedent).
 const SCANNED_EXTENSIONS = ['.mjs', '.ts', '.md'];
-const EXCLUDED_PREFIXES = ['docs/historical/', 'hooks/'];
+const EXCLUDED_PREFIXES = ['docs/historical/', 'docs/feedback/', 'hooks/'];
 
 // CONSUMER-CLONE PRECONDITION, one step further in than the no-store skip above
 // (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89). A consumer machine's Sterling
