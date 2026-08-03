@@ -537,6 +537,75 @@ test('H19: decisions render as CAPPED POINTERS, never bodies, and the overflow i
   }
 });
 
+test('H19: a decision pointer carries its rejected OPTIONS beneath the statement (decision 6a3b1a46)', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(
+      decisionRecord('breach timing is never shown to the player', ['src/a.mjs'], {
+        alternatives_rejected: [
+          { option: 'a numeric countdown in the HUD', reason: 'destroys the dread the mechanic exists for' },
+          { option: 'a graphical arc that fills', reason: 'the same information in a prettier costume' },
+        ],
+      })
+    );
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(
+      ctx,
+      /ALREADY REJECTED: a numeric countdown in the HUD; a graphical arc that fills/,
+      'option texts render joined — recognising the thing you were about to propose is what stops you'
+    );
+    assert.doesNotMatch(ctx, /destroys the dread/, 'REASONS do not render — the option text is the recognition surface, the id carries the rest');
+    assert.ok(
+      ctx.indexOf('breach timing is never shown') < ctx.indexOf('ALREADY REJECTED'),
+      'the statement ORIENTS before the rejected list STOPS'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: a decision that rejected nothing renders no empty REJECTED line', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(decisionRecord('chose x', ['src/a.mjs'])); // helper defaults alternatives_rejected: []
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /→ chose x/, 'the statement pointer still renders');
+    assert.doesNotMatch(ctx, /ALREADY REJECTED/, 'no empty artifact for a decision with nothing rejected');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19: a long rejected list is clipped to its budget, not emitted whole', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(
+      decisionRecord('s', ['src/a.mjs'], {
+        alternatives_rejected: Array.from({ length: 12 }, (_, i) => ({
+          option: `rejected option number ${i} carrying enough padding text to overrun the budget`,
+          reason: 'r',
+        })),
+      })
+    );
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    const line = ctx.split('\n').find((l) => l.includes('ALREADY REJECTED'));
+    assert.ok(line, 'the rejected line renders');
+    assert.ok(line.endsWith('…'), 'and is CLIPPED rather than emitted whole — the flood half of P6 still binds');
+    assert.ok(line.length < 200, `the line stays bounded (was ${line.length} chars)`);
+  } finally {
+    cleanup();
+  }
+});
+
 test('H19: hazards and decisions are guarded per record like articles — a repeat touch re-delivers nothing', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {

@@ -5641,12 +5641,18 @@ function renderHazards(hazards, charCap) {
   );
 }
 var DECISION_POINTER_CAP = 8;
+var DECISION_STATEMENT_CLIP = 120;
+var DECISION_REJECTED_CLIP = 140;
 function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
   const shown = decisions.slice(0, cap);
   const lines = [
-    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
-    ...shown.map((d) => `  \u2192 ${clip(d.statement, 160)} (knowledge_get ${d.id})`)
+    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
+  for (const d of shown) {
+    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+    if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+  }
   if (decisions.length > shown.length) {
     lines.push(
       `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length} for the full set`

@@ -156,6 +156,11 @@ export function renderHazards(hazards, charCap) {
 /** How many decision pointers render before the rest are disclosed as dropped. */
 export const DECISION_POINTER_CAP = 8;
 
+/** Per-pointer clip budgets (decision 6a3b1a46). The statement ORIENTS — what was
+ *  decided; the rejected options STOP — what you may be about to propose. */
+export const DECISION_STATEMENT_CLIP = 120;
+export const DECISION_REJECTED_CLIP = 140;
+
 /** Decisions whose file_keys name this path, as POINTER lines — never bodies.
  *  Measured before choosing this shape (2026-07-30): packages/mcp-server/src/
  *  tools.ts carries 17 matching decisions against 0 anti-patterns, so inlining
@@ -163,13 +168,32 @@ export const DECISION_POINTER_CAP = 8;
  *  the flood half of P6 is as much a failure as starvation. The cap's overflow
  *  is STATED with the query that widens it: a silent cap reads as 'that is all
  *  there is', which is the failure mode knowledge_query's own capped envelope
- *  exists to prevent. */
+ *  exists to prevent.
+ *
+ *  SECOND LINE ADDED 2026-08-03 (decision 6a3b1a46, board 82e2969a): the header
+ *  below has promised 'and what was rejected' since 2026-07-30 while the body
+ *  carried only the statement clip — delivery advertising a field it does not
+ *  deliver, the same defect class as the frontier notice claiming 'there is no
+ *  knowledge to deliver' above a hazard block. The rejected OPTION texts render
+ *  beneath the statement (not their reasons — recognising the thing you were
+ *  about to propose is what stops you; the id is there for the reasoning).
+ *  This stays a POINTER change, so ca23c811's substance-vs-pointer asymmetry is
+ *  untouched: it ruled on rendering decision BODIES, not on which field is
+ *  clipped. alternatives_rejected needs no wider read — SterlingStore.query
+ *  rehydrates whole bodies (packages/store/src/index.ts:289). */
 export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
-    ...shown.map((d) => `  → ${clip(d.statement, 160)} (knowledge_get ${d.id})`),
   ];
+  for (const d of shown) {
+    lines.push(`  → ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
+      .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
+      .filter(Boolean)
+      .join('; ');
+    if (rejected) lines.push(`    ✗ ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+  }
   if (decisions.length > shown.length) {
     lines.push(
       `  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
