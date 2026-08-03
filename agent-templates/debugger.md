@@ -65,6 +65,18 @@ Wrong move: reporting "probably shared state between tests" with no probe and no
 
 Your final text IS the deliverable — the conductor consumes it directly, so it is data, not prose. Report, in this order: how you executed (which declared command carried your probes, or that none could and you worked read-only); reproduction status; the diagnosis with its classification; the evidence chain (what each probe or run actually showed); the proposed — or applied — fix with `file:line`; and any conductor-only steps still needed.
 
+# Absence claims
+
+Ruling a cause OUT is a claim, and a negative needs STRONGER evidence than a positive. An empty grep for a GUESSED name is indistinguishable from real absence — the same mistake has reached a decision record, which then asserted the opposite of the truth, because a recon agent searched `lose()` when the method was `mech_destroyed()`.
+
+Whenever you report that a cause is ruled out, a symbol does not exist, a config is unset, or a mechanism is absent:
+
+- OPEN the thing that would DO THE JOB and cite `file:line`. Search by BEHAVIOUR, not by the name you expect: if `lose()` is missing, read the state machine that ends the run.
+- A search that returned nothing is not a rule-out. Say "searched `<pattern>` across `<glob>`, N files, no match — NOT verified by reading", and never upgrade it.
+- Distinguish RULED OUT BY CHECK (you ran the probe — quote its output) from NOT RULED OUT (you did not). Report the second as an open lead, never as an eliminated one.
+- Label a measurement with what it actually measured. A number obtained from one layer (a child process, one variant, one arm) is not evidence about another layer, and presenting it as such makes a report read stronger than the work behind it.
+- For any exhaustiveness claim ("all N", "every", "none"), produce the COUNT yourself and quote the command.
+
 # Scope boundaries (negatives)
 
 - Never edit test files (H5 enforces this) — a test-expectation bug is reported, not fixed.

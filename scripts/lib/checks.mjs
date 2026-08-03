@@ -31,6 +31,45 @@ export function lintAgentPrompt(content, label) {
   return violations;
 }
 
+// ---------------------------------------------------------------------------
+// Absence-claim discipline (board 00d8d8c6). "A subagent's claim of absence" is
+// the dominant subagent failure mode, and it recurred three times in ONE session
+// of a consuming project — always for the same reason: THE GREP GUESSED A SYMBOL
+// NAME (`lose()` vs `mech_destroyed()`; `game/run/farm_radio.gd` vs
+// `game/audio/farm_radio.gd`). It cost a DECISION RECORD that stated mech death
+// does not end the run, when it does. An empty grep for a guessed name is
+// indistinguishable from real absence.
+//
+// WHY A TEMPLATE RULE AND NOT MORE PROSE: the failed prose was the CONDUCTOR's
+// (CLAUDE.md + H1 already carry "a subagent result is EVIDENCE, not a VERDICT").
+// Verified 2026-08-03: NO agent template said anything about verifying a
+// negative — the agents actually producing these reports were never told. So
+// this is a genuine gap, not a restatement of the status quo.
+//
+// HONEST LIMIT, stated so nobody mistakes it for more than it is: this enforces
+// that the INSTRUCTION IS PRESENT in the template, not that an agent obeys it.
+// The structural version — an absence claim carrying its verification method in
+// the handoff schema, so it is auditable rather than a sentence — is candidate
+// (b) on the board item and is NOT built.
+//
+// Deliberately scoped to the two roles the item names as reporting absence most
+// often. Widening it is a one-line change here; SIX other templates that also
+// report negatives (researcher, implementation-architect, the four reviewers)
+// remain UNCOVERED — disclosed, not silently included.
+export const ABSENCE_REPORTING_TEMPLATES = ['explorer.md', 'debugger.md'];
+export const ABSENCE_SECTION_RE = /^#+\s*absence claims\b/im;
+
+export function lintAbsenceDiscipline(content, label) {
+  if (!ABSENCE_REPORTING_TEMPLATES.includes(label)) return [];
+  if (ABSENCE_SECTION_RE.test(content)) return [];
+  return [
+    {
+      kind: 'missing_absence_discipline',
+      detail: `${label}: no 'Absence claims' section — a role that reports negatives must instruct that absence is verified by READING the thing that would do the job, not by a search for a guessed name (board 00d8d8c6)`,
+    },
+  ];
+}
+
 // §7.4 spawn contracts: every agent role declares a required-inputs manifest.
 export function checkSpawnContract(content, label) {
   const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
