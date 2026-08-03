@@ -13,6 +13,22 @@ function git(cwd, args, { allowFail = false } = {}) {
   return (r.stdout ?? '').trim();
 }
 
+// NOTE for whoever next investigates `fatal: stash failed` from the merge steps
+// below (board f37e1dae, 2026-08-03 — CAUSE STILL UNIDENTIFIED): do NOT "fix" it
+// by refreshing the index here. That was tried and reverted. `git merge` does
+// spawn `git stash create` (GIT_TRACE-confirmed on 2.53.0, even for a clean tree
+// with the single default strategy), and that child DOES exit 1 with empty stdout
+// and stderr when index entries look stat-stale while content is identical — a
+// state reachable on /mnt/c when WSL git and Windows git.exe both write one
+// .git/index, and invisible to the dirty-tree gates below because `git status
+// --porcelain` content-compares and reports clean. Detector: `git diff-files
+// --quiet` exits 1 while `status --porcelain` is empty. BUT git's own save_state()
+// calls refresh_index() and writes the index back immediately BEFORE spawning
+// that child, so git already self-cures this state: a poisoned index did not
+// break a merge in 6/6 conductor trials, and reproduction was unstable even for
+// the agent that first reported it (3/3, then 0/3, then 1/4). A pre-merge refresh
+// is therefore a no-op duplicating git's own behaviour, and cannot be the cause.
+
 export function isGitRepo(cwd) {
   return spawnSync('git', ['rev-parse', '--git-dir'], { cwd, encoding: 'utf8', timeout: 30_000 }).status === 0;
 }
