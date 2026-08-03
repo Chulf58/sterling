@@ -564,18 +564,127 @@ export type DurableRecord =
  * the shape has to be unwrapped rather than read off the top — and reference_
  * material chains two refinements, hence the loop rather than one step.
  */
-export function knownFieldsFor(type: string): Set<string> | undefined {
+function objectShapeFor(type: string): Record<string, unknown> | undefined {
   const entry = RECORD_TYPES[type];
   if (!entry) return undefined;
   let schema: unknown = entry.schema;
   // unwrap ZodEffects/ZodDefault layers until the ZodObject with .shape surfaces
   for (let i = 0; i < 10 && schema && typeof schema === 'object'; i++) {
     const shape = (schema as { shape?: Record<string, unknown> }).shape;
-    if (shape) return new Set(Object.keys(shape));
+    if (shape) return shape;
     const inner = (schema as { _def?: { schema?: unknown; innerType?: unknown } })._def;
     schema = inner?.schema ?? inner?.innerType;
   }
   return undefined;
+}
+
+export function knownFieldsFor(type: string): Set<string> | undefined {
+  const shape = objectShapeFor(type);
+  return shape ? new Set(Object.keys(shape)) : undefined;
+}
+
+/** One field's shape, as knowledge_schema reports it. */
+export interface FieldShape {
+  name: string;
+  required: boolean;
+  /** A readable rendering of the zod type: 'string', 'string[]', '{option, reason}[]', 'enum', … */
+  type: string;
+  /** Present only for closed sets — the whole point of asking. */
+  enum_values?: string[];
+}
+
+/**
+ * Render a zod type as a short readable string, plus its enum values when it is
+ * a closed set. Bounded recursion: a malformed or exotically-nested schema
+ * degrades to 'unknown' rather than throwing, because a SCHEMA READ must never
+ * be why a call fails.
+ */
+function describeZod(node: unknown, depth = 0): { type: string; enum_values?: string[] } {
+  if (!node || typeof node !== 'object' || depth > 6) return { type: 'unknown' };
+  const def = (node as { _def?: Record<string, unknown> })._def;
+  const name = def?.typeName as string | undefined;
+  switch (name) {
+    case 'ZodString':
+      return { type: 'string' };
+    case 'ZodNumber':
+      return { type: 'number' };
+    case 'ZodBoolean':
+      return { type: 'boolean' };
+    case 'ZodNull':
+      return { type: 'null' };
+    case 'ZodAny':
+    case 'ZodUnknown':
+      return { type: 'any' };
+    case 'ZodEnum': {
+      const values = (def?.values as string[] | undefined) ?? [];
+      return { type: 'enum', enum_values: values };
+    }
+    case 'ZodNativeEnum':
+      return { type: 'enum' };
+    case 'ZodLiteral':
+      return { type: `literal ${JSON.stringify(def?.value)}` };
+    case 'ZodArray': {
+      const inner = describeZod(def?.type, depth + 1);
+      return { type: `${inner.type}[]`, ...(inner.enum_values ? { enum_values: inner.enum_values } : {}) };
+    }
+    case 'ZodObject': {
+      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
+      return { type: `{${Object.keys(shape).join(', ')}}` };
+    }
+    case 'ZodRecord':
+      return { type: 'record<string, string>' };
+    case 'ZodUnion': {
+      const opts = ((def?.options as unknown[]) ?? []).map((o) => describeZod(o, depth + 1));
+      // A union of literals IS a closed set, so report it as one — that is what
+      // verifiable_at ('final' | 'phase:<n>') and similar fields actually are.
+      const literals = opts.filter((o) => o.type.startsWith('literal '));
+      if (literals.length === opts.length && opts.length) {
+        return { type: opts.map((o) => o.type.replace('literal ', '')).join(' | ') };
+      }
+      return { type: opts.map((o) => o.type).join(' | ') };
+    }
+    // Wrappers: describe what they wrap. optionality is reported separately, so
+    // it is deliberately NOT folded into the type string.
+    case 'ZodOptional':
+    case 'ZodNullable':
+    case 'ZodDefault':
+      return describeZod(def?.innerType, depth + 1);
+    case 'ZodEffects':
+      return describeZod(def?.schema, depth + 1);
+    default:
+      return { type: name ? name.replace(/^Zod/, '').toLowerCase() : 'unknown' };
+  }
+}
+
+/**
+ * The shape of a registered record type, DERIVED from its own zod schema
+ * (board 7acfbe48 / feedback §2.7).
+ *
+ * Field shapes were learnable only by having a write REJECTED. Five documented
+ * rejections across five different fields in one consuming project, three more
+ * in the session that built this — `title` required on anti_pattern then on
+ * decision then on feature_article, `version`/`history`/`live_test_refs`
+ * required, `concept_family` documented as a "mark" but actually a string,
+ * `alternatives_rejected` an array of OBJECTS not strings, `volatility_hint` a
+ * closed enum refusing the entirely plausible 'low'. The refusals are GOOD —
+ * they name the field and beat silently dropping data — but guess-and-fail is a
+ * poor way to learn a shape, and the standing workaround (query an existing
+ * record of that type and reverse-engineer it) is a workaround for a missing
+ * read.
+ *
+ * Derived, never listed: exactly like knownFieldsFor, this reads the registered
+ * schema, so a field becomes discoverable the moment it is defined and invariant
+ * 1 still holds. There is no second list to drift.
+ */
+export function schemaFor(type: string): { type: string; fields: FieldShape[] } | undefined {
+  const shape = objectShapeFor(type);
+  if (!shape) return undefined;
+  const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
+    const described = describeZod(node);
+    const required = !(node as { isOptional?: () => boolean }).isOptional?.();
+    return { name, required, type: described.type, ...(described.enum_values ? { enum_values: described.enum_values } : {}) };
+  });
+  return { type, fields };
 }
 
 /**

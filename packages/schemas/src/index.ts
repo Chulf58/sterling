@@ -18,6 +18,7 @@ export {
   validateRecord,
   knownFieldsFor,
   unknownFieldsIn,
+  schemaFor,
   digestRecord,
   DIGEST_CLIP,
   AGENT_MODEL_KEY,
@@ -25,7 +26,7 @@ export {
   AGENT_CLASS,
   PIPELINE_AGENT_TYPES,
 } from './records.js';
-export type { RecordType, RecordTypeEntry, DurableRecord } from './records.js';
+export type { RecordType, RecordTypeEntry, DurableRecord, FieldShape } from './records.js';
 export {
   SIGNALS,
   signalSchema,
