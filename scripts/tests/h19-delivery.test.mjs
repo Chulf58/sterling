@@ -709,3 +709,219 @@ test('H19: a one-hop pointer to a genuinely absent slug still says so', () => {
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// BASH POINTER DELIVERY (board 841195b1). Delivery rode Edit|Write|MultiEdit and
+// Read only, while surveying happens through grep/wc/git log — the net had a
+// hole exactly where the traffic is, and it was SILENT. These tests pin the
+// three deliberate differences from full delivery: pointer not article, always
+// enqueue (the Bash matcher is an unprobed injection cell), and silence on
+// unowned territory. AC7 still holds: no path may exit 2.
+// ---------------------------------------------------------------------------
+
+const postBash = (dir, command, extra = {}) => ({
+  hook_event_name: 'PostToolUse',
+  tool_name: 'Bash',
+  tool_input: { command },
+  cwd: dir,
+  ...extra,
+});
+
+/** The extractor is PURE, so it is tested directly rather than through a hook. */
+async function extractor() {
+  const m = await import(pathToFileURL(join(HOOKS, 'lib', 'delivery.mjs')).href);
+  return m.extractCommandPathCandidates;
+}
+
+test('bash extractor: keeps real path shapes, drops flags, globs and bare words', async () => {
+  const extract = await extractor();
+  assert.deepEqual(extract('grep -n needle src/a.mjs'), ['src/a.mjs'], 'flag and pattern dropped, path kept');
+  assert.deepEqual(extract('wc -l packages/store/src/index.ts'), ['packages/store/src/index.ts']);
+  assert.deepEqual(extract('git log --oneline -5 -- scripts/init.mjs'), ['scripts/init.mjs'], '`--` separator is not a path');
+  assert.deepEqual(extract('ls -la'), [], 'no path-shaped token at all');
+  assert.deepEqual(extract('rm -rf scripts/tests/*.test.mjs'), [], 'a glob is dropped, never half-expanded');
+  assert.deepEqual(extract('cat "packages/a b/c.ts"'), ['packages/a b/c.ts'], 'quoted path with a space is one token');
+  assert.deepEqual(extract('sed -n 1,5p scripts/a.mjs:12'), ['scripts/a.mjs'], 'grep -n style path:line is stripped');
+  assert.deepEqual(extract('node --test scripts/x.mjs scripts/x.mjs'), ['scripts/x.mjs'], 'deduped');
+  assert.deepEqual(extract('echo $HOME/x.ts'), [], 'shell expansion is unresolvable, so dropped');
+  assert.deepEqual(extract('cat package.json'), ['package.json'], 'extension with no slash still qualifies');
+});
+
+test('bash delivery: an owned path named in a command enqueues a POINTER, not the article', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'export const a = 1;\n');
+    store.create(article('owner', ['src/a.mjs']));
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n export src/a.mjs'), dir);
+    assert.equal(r.code, 0, 'AC7: delivery never blocks');
+    assert.equal(r.stdout, '', 'rung read notwithstanding, the Bash cell is unprobed — nothing is injected directly');
+    const q = pendingOf(dir);
+    assert.equal(q.length, 1, 'it went to the proven UserPromptSubmit surface instead');
+    assert.equal(q[0].kind, 'bash_pointers');
+    assert.match(q[0].payload, /STERLING KNOWLEDGE POINTERS \(H19\)/);
+    assert.match(q[0].payload, /src\/a\.mjs — article 'owner' \(active\) · knowledge_get /);
+    assert.doesNotMatch(q[0].payload, /does the owner thing/, 'the article BODY is never in a pointer payload');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: a search PATTERN that looks like a path delivers nothing', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    store.create(article('owner', ['src/a.mjs']));
+    // 'lib/missing.ts' is the grep PATTERN and exists nowhere: the existence
+    // check is what makes a shape-only extractor safe.
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -rn lib/missing.ts .'), dir);
+    assert.equal(r.code, 0);
+    assert.equal(pendingOf(dir).length, 0, 'a non-existent path-shaped token is not a touch');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: unowned territory is SILENT (no frontier signal on every grep)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'lonely.mjs'), 'x\n');
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'wc -l src/lonely.mjs'), dir);
+    assert.equal(r.code, 0);
+    assert.equal(pendingOf(dir).length, 0, 'the frontier signal is right for an edit, wrong for a survey');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: a directory argument never fans out across the files beneath it', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    store.create(article('owner', ['src/a.mjs']));
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'ls -la src/'), dir);
+    assert.equal(r.code, 0);
+    assert.equal(pendingOf(dir).length, 0, 'ownership is declared per FILE');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: hazards lead, and are pointed at even in unowned territory', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'h.mjs'), 'x\n');
+    store.create(antiPattern('never do the bad thing', ['src/h.mjs']));
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'cat src/h.mjs'), dir);
+    assert.equal(r.code, 0);
+    const q = pendingOf(dir);
+    assert.equal(q.length, 1, 'a hazard alone is worth a pointer even with no owning article');
+    assert.match(q[0].payload, /⚠ HAZARD anti_pattern 'never do the bad thing'/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: a pointer NEVER suppresses the later full-article delivery for that file', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    store.create(article('owner', ['src/a.mjs']));
+
+    const bash = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n x src/a.mjs'), dir);
+    assert.equal(bash.code, 0);
+    assert.equal(pendingOf(dir).length, 1, 'pointer delivered');
+
+    // The whole point of the separate pointer_files namespace: pointing is not
+    // delivering, so a pointer must not cost the reader the real article.
+    const read = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(read.code, 0);
+    const ctx = JSON.parse(read.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /owning knowledge for 'src\/a\.mjs'/, 'the full article still delivers after a pointer');
+    assert.match(ctx, /does the owner thing/, 'and it carries the body the pointer withheld');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: the same path is pointed at once per session', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    store.create(article('owner', ['src/a.mjs']));
+    runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n x src/a.mjs'), dir);
+    runHook('h19-bash-delivery.mjs', postBash(dir, 'wc -l src/a.mjs'), dir);
+    assert.equal(pendingOf(dir).length, 1, 'the second survey of the same file is silent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: a subagent is silent (the pending queue is the conductor\'s)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    store.create(article('owner', ['src/a.mjs']));
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n x src/a.mjs', { agent_id: 'coder-1' }), dir);
+    assert.equal(r.code, 0);
+    assert.equal(pendingOf(dir).length, 0, 'enqueueing a subagent touch would mis-route it into the conductor');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: one command cannot deliver an unbounded number of pointers', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    const paths = [];
+    for (let i = 0; i < 12; i += 1) {
+      const p = `src/f${i}.mjs`;
+      writeFileSync(join(dir, p), 'x\n');
+      paths.push(p);
+      store.create(article(`owner${i}`, [p]));
+    }
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, `wc -l ${paths.join(' ')}`), dir);
+    assert.equal(r.code, 0);
+    const q = pendingOf(dir);
+    assert.equal(q.length, 1);
+    const lines = q[0].payload.split('\n').filter((l) => l.startsWith('  • '));
+    assert.equal(lines.length, 8, 'capped at BASH_POINTER_PATH_CAP');
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: the store tree and .git are never governed territory', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('owner', ['.sterling/config.json']));
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'cat .sterling/config.json'), dir);
+    assert.equal(r.code, 0);
+    assert.equal(pendingOf(dir).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('bash delivery: a malformed or pathless command is a clean no-op', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    for (const cmd of ['', 'ls', 'echo hello world']) {
+      const r = runHook('h19-bash-delivery.mjs', postBash(dir, cmd), dir);
+      assert.equal(r.code, 0, `AC7 holds for '${cmd}'`);
+    }
+    const noInput = runHook('h19-bash-delivery.mjs', { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: {}, cwd: dir }, dir);
+    assert.equal(noInput.code, 0, 'a missing command string never blocks');
+    assert.equal(pendingOf(dir).length, 0);
+  } finally {
+    cleanup();
+  }
+});

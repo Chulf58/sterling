@@ -60,6 +60,10 @@
       {
         "matcher": "WebSearch|WebFetch|Task|Agent",
         "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h16-event-register.mjs\"" }]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" }]
       }
     ],
     "Stop": [
