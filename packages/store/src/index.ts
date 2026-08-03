@@ -199,6 +199,12 @@ export type ToolStore = Pick<
   // 27f148c2) — the citation format the whole repo writes, which get() alone
   // cannot serve because it matches a full id only.
   | 'recordIdIndex'
+  // knowledge_create resolves an exact slug through this to REFUSE a second
+  // feature_article under a slug that already exists (decision 3db7095f built it
+  // for H19's one-hop pointers and noted "a second consumer does not exist yet"
+  // — this is that second consumer). Deterministic, so the refusal can never be
+  // a ranking artefact.
+  | 'articlesBySlug'
   | 'supersede'
   | 'retireInFavorOf'
   | 'remove'

@@ -1442,3 +1442,257 @@ test('agent_exit/handoff_write/handoff_read name conductor-direct when no run is
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// FEEDBACK BATCH 2026-08-03 (§2.5, §2.7, §2.12, §3.4, §3.6, §3.9, §3.10 + board
+// fd6d8da9): slug-collision refusal, the schema read, the retirement path, the
+// queue-scoped removal, and the surgical string edit.
+// ---------------------------------------------------------------------------
+
+function articleFields(slug: string, extra: Record<string, unknown> = {}) {
+  return {
+    slug,
+    title: slug,
+    what_it_does: `${slug} does the thing`,
+    intended_behavior: `${slug} intends`,
+    files: [{ path: `src/${slug}.ts`, role: 'owner' }],
+    current_ac: [{ ac_id: 'AC1', text: 'works', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'originating brief' }],
+    live_test_refs: [],
+    ...extra,
+  };
+}
+
+test('knowledge_create REFUSES a second feature_article under an existing slug (§2.5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: first } = tools.knowledgeCreate('feature_article', articleFields('multiplayer'));
+    assert.throws(
+      () => tools.knowledgeCreate('feature_article', articleFields('multiplayer', { title: 'DUPLICATE of multiplayer' })),
+      (e: Error) => {
+        assert.match(e.message, /already exists/, 'names the collision');
+        assert.ok(e.message.includes(first.id), 'names the record to update instead — a refusal without a next step is where the tombstone workaround got invented');
+        assert.match(e.message, /knowledge_update/, 'points at fix-it-forward');
+        assert.match(e.message, /knowledge_retire/, 'and at the wholesale-replacement path');
+        return true;
+      }
+    );
+    // The refusal must not have written anything.
+    assert.equal(tools.knowledgeQuery({ types: ['feature_article'] }).length, 1, 'no duplicate landed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_create slug refusal is scoped: a different slug passes, and non-articles are unaffected', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.knowledgeCreate('feature_article', articleFields('alpha'));
+    tools.knowledgeCreate('feature_article', articleFields('beta'));
+    assert.equal(tools.knowledgeQuery({ types: ['feature_article'] }).length, 2);
+    // Two decisions may share a title — only ARTICLE SLUGS are unique.
+    const d = { title: 'same', statement: 's', alternatives_rejected: [], rationale: 'r' };
+    tools.knowledgeCreate('decision', d);
+    tools.knowledgeCreate('decision', d);
+    assert.equal(tools.knowledgeQuery({ types: ['decision'] }).length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a superseded slug does NOT block a create — only a live one does', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: v1 } = tools.knowledgeCreate('feature_article', articleFields('gamma'));
+    tools.knowledgeUpdate(v1.id, { what_it_does: 'revised' }); // v1 becomes superseded
+    // The live head still holds the slug, so a create is still refused.
+    assert.throws(() => tools.knowledgeCreate('feature_article', articleFields('gamma')), /already exists/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_schema reports required vs optional, types and closed enums (§2.7)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const dec = tools.knowledgeSchema('decision');
+    assert.ok(dec.required.includes('title'), 'title required — the field rejected three times across three types');
+    assert.ok(dec.required.includes('statement'));
+    assert.ok(dec.required.includes('rationale'));
+    assert.ok(dec.optional.includes('file_keys'), 'file_keys optional on decision');
+    const alts = dec.fields.find((f) => f.name === 'alternatives_rejected');
+    assert.ok(alts, 'alternatives_rejected is reported');
+    assert.equal(alts?.type, '{option, reason}[]', 'an array of OBJECTS, not of strings — the shape that refused a write this session');
+
+    // The closed enum the feedback documented a plausible-but-refused value for.
+    const vol = tools.knowledgeSchema('research_finding').fields.find((f) => f.name === 'volatility_hint');
+    assert.ok(vol, 'volatility_hint is reported');
+    assert.deepEqual(vol?.enum_values, ['fast', 'medium', 'stable'], "so 'low' is visibly not an option");
+
+    // feature_article's four undocumented-required fields.
+    const art = tools.knowledgeSchema('feature_article');
+    for (const f of ['slug', 'version', 'history', 'live_test_refs']) {
+      assert.ok(art.required.includes(f), `${f} reported required`);
+    }
+    assert.ok(art.optional.includes('concept_family'), 'concept_family is an optional STRING, not a boolean mark');
+    assert.equal(art.fields.find((f) => f.name === 'concept_family')?.type, 'string');
+
+    assert.throws(() => tools.knowledgeSchema('escalation_log'), (e: Error) => {
+      assert.match(e.message, /not a registered record type/);
+      assert.match(e.message, /decision/, 'lists the registered vocabulary — not knowing it is why you called');
+      return true;
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_schema is derived from the live schema — every registered type answers', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (const type of ['decision', 'anti_pattern', 'research_finding', 'reference_material', 'feature_article', 'note', 'todo', 'brief']) {
+      const s = tools.knowledgeSchema(type);
+      assert.ok(s.fields.length > 0, `${type} reports fields`);
+      assert.ok(s.required.includes('type'), `${type} reports the envelope`);
+      assert.ok(
+        s.fields.every((f) => typeof f.type === 'string' && f.type !== 'unknown'),
+        `${type} has no undescribed field types`
+      );
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_retire supersedes in favour of a survivor; queries stop serving it, id still resolves (§3.9)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: canonical } = tools.knowledgeCreate('feature_article', articleFields('runtime-architecture'));
+    const { record: dupe } = tools.knowledgeCreate('decision', {
+      title: 'DUPLICATE of runtime-architecture',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    assert.equal(tools.knowledgeQuery({ types: ['decision'] }).length, 1, 'the duplicate is served before retirement');
+
+    const { retired } = tools.knowledgeRetire(dupe.id, canonical.id);
+    assert.equal(retired.status, 'superseded');
+    assert.equal(retired.superseded_by, canonical.id, 'it forwards to the survivor — an old citation lands right');
+    assert.equal(tools.knowledgeQuery({ types: ['decision'] }).length, 0, 'retrieval stops serving it — retiring now REDUCES visibility');
+    assert.equal(tools.knowledgeGet(dupe.id).status, 'superseded', 'provenance survives: still fetchable by id');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_retire refuses self-retirement, a missing or dead survivor, and P4 record types', () => {
+  const { tools, store, cleanup } = harness();
+  try {
+    const { record: a } = tools.knowledgeCreate('decision', { title: 'a', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    const { record: b } = tools.knowledgeCreate('decision', { title: 'b', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    assert.throws(() => tools.knowledgeRetire(a.id, a.id), /cannot be retired in favour of itself/);
+    assert.throws(() => tools.knowledgeRetire(a.id, randomUUID()), /no record .* to retire in favour of/);
+    assert.throws(() => tools.knowledgeRetire(randomUUID(), b.id), /no record/);
+
+    // A survivor that is itself a tombstone would forward the reader nowhere.
+    const { record: c } = tools.knowledgeCreate('decision', { title: 'c', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    tools.knowledgeRetire(c.id, b.id);
+    assert.throws(() => tools.knowledgeRetire(a.id, c.id), /itself superseded/);
+
+    // todos/notes have their own P4 removal path and must not gain a second one.
+    const { record: todo } = tools.boardAdd({ text: 'a todo', source: 'user' });
+    assert.throws(() => tools.knowledgeRetire(todo.id, b.id), /board_remove \/ maintenance_remove/);
+    // Field set read off knowledge_schema('note') rather than guessed.
+    const note = store.create({
+      id: randomUUID(), type: 'note', created_at: NOW, updated_at: NOW, author: 'user', status: 'active',
+      superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      raw_text: 'n', captured_at: NOW, capture_source: 'conductor', derived: [],
+    } as unknown as DurableRecord);
+    assert.throws(() => tools.knowledgeRetire(note.id, b.id), /note_remove/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('maintenance_remove closes a system item and REFUSES a user board item (§2.12)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: sys } = tools.maintenanceEnqueue({ reason: 'article_missing', text: 'no article owns src/x.ts', file_keys: ['src/x.ts'] });
+    const { record: usr } = tools.boardAdd({ text: "the human's own item", source: 'user' });
+
+    // The lane the librarian could never close: no feature_link, so no auto-drain.
+    const { removed } = tools.maintenanceRemove(sys.id);
+    assert.equal(removed, sys.id);
+    assert.equal(tools.boardQuery({ source: 'system' }).length, 0, 'the queue item is closed');
+
+    assert.throws(() => tools.maintenanceRemove(usr.id), (e: Error) => {
+      assert.match(e.message, /not a maintenance-queue item/);
+      assert.match(e.message, /board_remove/, 'names the conductor path rather than only blocking');
+      return true;
+    });
+    assert.equal(tools.boardQuery({ source: 'user' }).length, 1, "the user's board is untouched");
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_edit replaces a unique passage in a long string without retransmitting it (board fd6d8da9)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record } = tools.knowledgeCreate('feature_article', articleFields('hooks-suite', {
+      what_it_does: 'TWENTY-THREE standalone .mjs hooks authored in scripts/hooks, bundled into hooks/. The set: H1 SessionStart, H2 inject, H3 gate.',
+    }));
+    const { record: v2, replaced } = tools.knowledgeEdit(record.id, 'what_it_does', 'TWENTY-THREE standalone', 'TWENTY-FOUR standalone');
+    assert.match((v2 as unknown as { what_it_does: string }).what_it_does, /^TWENTY-FOUR standalone \.mjs hooks/);
+    assert.match((v2 as unknown as { what_it_does: string }).what_it_does, /The set: H1 SessionStart, H2 inject, H3 gate\.$/, 'the rest of the field is untouched');
+    assert.equal((v2 as unknown as { version: number }).version, 2, 'a normal supersession, not a back door');
+    assert.equal(replaced.field, 'what_it_does');
+    assert.equal(replaced.chars_after, replaced.chars_before - 1, 'THREE -> FOUR is one char shorter');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_edit refuses a miss and an AMBIGUOUS match, writing nothing either way', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record } = tools.knowledgeCreate('feature_article', articleFields('amb', {
+      what_it_does: 'the hook fires. the hook fires again.',
+    }));
+    assert.throws(() => tools.knowledgeEdit(record.id, 'what_it_does', 'absent text', 'x'), (e: Error) => {
+      assert.match(e.message, /does not appear/);
+      assert.match(e.message, /nothing was written/);
+      return true;
+    });
+    assert.throws(() => tools.knowledgeEdit(record.id, 'what_it_does', 'the hook fires', 'the hook does not fire'), (e: Error) => {
+      assert.match(e.message, /appears 2 times/, 'reports the count');
+      assert.match(e.message, /nothing was written/);
+      assert.match(e.message, /Extend 'find'/, 'says how to disambiguate');
+      return true;
+    });
+    assert.equal((tools.knowledgeGet(record.id) as unknown as { version: number }).version, 1, 'no version was minted by either refusal');
+
+    // Disambiguating by extending the match is the documented remedy.
+    const { record: v2 } = tools.knowledgeEdit(record.id, 'what_it_does', 'the hook fires again', 'the hook fires once more');
+    assert.match((v2 as unknown as { what_it_does: string }).what_it_does, /once more/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_edit refuses a non-string field and an empty find', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record } = tools.knowledgeCreate('feature_article', articleFields('kinds'));
+    assert.throws(() => tools.knowledgeEdit(record.id, 'files', 'x', 'y'), /not a string/);
+    assert.throws(() => tools.knowledgeEdit(record.id, 'files', 'x', 'y'), /knowledge_append/, 'routes arrays to the right tool');
+    assert.throws(() => tools.knowledgeEdit(record.id, 'what_it_does', '', 'y'), /non-empty string/);
+    assert.throws(() => tools.knowledgeEdit(record.id, 'nonexistent_field', 'x', 'y'), /does not define/);
+  } finally {
+    cleanup();
+  }
+});

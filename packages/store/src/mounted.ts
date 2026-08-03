@@ -151,6 +151,19 @@ export class MountedStores {
     return this.all().flatMap((s) => s.recordIdIndex());
   }
 
+  /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
+   *  3db7095f's deterministic lookup, mounted). Feature articles are always
+   *  project-scoped and never promote (AC7), so in practice this reads the project
+   *  store — but it fans anyway, deliberately: its callers are H19's one-hop
+   *  pointers and knowledge_create's slug-collision refusal, and for BOTH of them
+   *  over-detecting a slug that somehow lives in a domain store is safe while
+   *  under-detecting is not. A project-only lookup would let a clash through and
+   *  serve two records under one slug, which is the failure the refusal exists to
+   *  prevent. No dedup needed — a record lives in exactly one store. */
+  articlesBySlug(slug: string): DurableRecord[] {
+    return this.all().flatMap((s) => s.articlesBySlug(slug));
+  }
+
   // -- record mutations: route to the store that HOLDS the record --------------
   // A record's scope decided where it lives at create time; a later change has to
   // land in that same store, so these route by where the id actually is — never

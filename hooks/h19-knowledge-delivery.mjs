@@ -5601,13 +5601,17 @@ function guardPath(cwd, agentId) {
 function pendingPath(cwd) {
   return join2(deliveryDir(cwd), "pending.json");
 }
+function emptyGuard() {
+  return { records: [], frontier_files: [], pointer_files: [] };
+}
 function readGuard(path) {
   try {
-    return existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : { records: [], frontier_files: [] };
+    if (!existsSync3(path)) return emptyGuard();
+    return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
-    return { records: [], frontier_files: [] };
+    return emptyGuard();
   }
 }
 function writeGuard(path, guard) {

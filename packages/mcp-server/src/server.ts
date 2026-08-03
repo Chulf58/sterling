@@ -85,6 +85,26 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_schema',
+    {
+      description:
+        'Ask what a record type requires BEFORE writing it, instead of learning by rejection. Returns {type, fields:[{name, required, type, enum_values?}], required[], optional[]} — derived from the registered zod schema, so it cannot drift from what a write will accept. Use it when you are unsure of a field name, whether a field is mandatory, whether it takes a string or an array of objects, or what a closed enum permits (volatility_hint is fast|medium|stable — "low" is refused). An unregistered type lists the registered ones.',
+      inputSchema: strict({ type: z.string() }),
+    },
+    ({ type }) => json(tools.knowledgeSchema(type))
+  );
+
+  server.registerTool(
+    'knowledge_retire',
+    {
+      description:
+        'Retire a record in favour of a surviving one: sets status=superseded and superseded_by=<in_favor_of> with NO new row, so queries stop serving it while provenance and inbound links survive and it stays fetchable by id. THIS IS NOT FOR A MERELY WRONG RECORD — fix those FORWARD with knowledge_update, which supersedes the error. Use it for the one shape update cannot repair: a genuine DUPLICATE, where two records claim to describe one thing and the reader must be sent to the survivor. in_favor_of is required and must be a live record — retiring into a void or into a tombstone leaves the reader nowhere. todos and notes are refused (they leave via board_remove / maintenance_remove / note_remove, P4).',
+      inputSchema: strict({ id: z.string(), in_favor_of: z.string() }),
+    },
+    ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of))
+  );
+
+  server.registerTool(
     'knowledge_update',
     {
       description:
@@ -102,6 +122,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       inputSchema: strict({ id: z.string(), field: z.string(), entries: z.array(z.unknown()) }),
     },
     ({ id, field, entries }) => json(tools.knowledgeAppend(id, field, entries))
+  );
+
+  server.registerTool(
+    'knowledge_edit',
+    {
+      description:
+        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). Use it to correct a stale sentence or a count in a registry-style article that has outgrown a full round-trip. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical.",
+      inputSchema: strict({ id: z.string(), field: z.string(), find: z.string(), replace: z.string() }),
+    },
+    ({ id, field, find, replace }) => json(tools.knowledgeEdit(id, field, find, replace))
   );
 
   server.registerTool(
@@ -153,6 +183,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardRemove(id))
+  );
+
+  server.registerTool(
+    'maintenance_remove',
+    {
+      description:
+        "Remove a MAINTENANCE-QUEUE item (source:'system') once its fulfilling artifact exists — board_remove narrowed to the queue, so an agent that drains the queue can close what it drains. Refuses user-source board items: that board is the human's own surface and is not an agent's to clear. Removals are logged to the §3.2.7 drain-log audit trail exactly as board_remove's are.",
+      inputSchema: strict({ id: z.string() }),
+    },
+    ({ id }) => json(tools.maintenanceRemove(id))
   );
 
   server.registerTool(

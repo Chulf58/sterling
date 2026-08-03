@@ -4081,6 +4081,18 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
+function toRepoRelative(absolutePath, repoRoot) {
+  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const abs = norm(absolutePath);
+  const root = norm(repoRoot);
+  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
+  const a = drivePrefixed ? abs.toLowerCase() : abs;
+  const r = drivePrefixed ? root.toLowerCase() : root;
+  if (!(a === r || a.startsWith(r + "/"))) {
+    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
+  }
+  return normalizeRepoPath(abs.slice(root.length + 1));
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
@@ -5562,6 +5574,20 @@ function openStore(cwd) {
   const p = join(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
+function repoRel(toolPath, cwd) {
+  if (!toolPath) return null;
+  const fwd = String(toolPath).replace(/\\/g, "/");
+  try {
+    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
+    return normalizeRepoPath(fwd);
+  } catch {
+    return null;
+  }
+}
+
+// scripts/hooks/h19-bash-delivery.mjs
+import { existsSync as existsSync4, statSync } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
@@ -5569,172 +5595,11 @@ import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
-var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
-  // function words
-  "this",
-  "that",
-  "these",
-  "those",
-  "with",
-  "from",
-  "have",
-  "has",
-  "had",
-  "will",
-  "would",
-  "could",
-  "should",
-  "must",
-  "your",
-  "you",
-  "into",
-  "then",
-  "than",
-  "when",
-  "what",
-  "which",
-  "there",
-  "their",
-  "them",
-  "they",
-  "been",
-  "being",
-  "does",
-  "make",
-  "made",
-  "used",
-  "using",
-  "also",
-  "only",
-  "each",
-  "more",
-  "most",
-  "some",
-  "such",
-  "very",
-  "just",
-  "like",
-  "over",
-  "after",
-  "before",
-  "because",
-  "about",
-  "under",
-  "above",
-  "below",
-  "where",
-  "while",
-  "since",
-  "until",
-  "unless",
-  "either",
-  "neither",
-  "both",
-  "every",
-  "not",
-  "but",
-  "and",
-  "the",
-  "for",
-  "are",
-  "was",
-  "were",
-  "its",
-  "here",
-  "how",
-  "why",
-  "who",
-  "whom",
-  "whose",
-  "any",
-  "all",
-  "can",
-  "may",
-  "might",
-  "shall",
-  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
-  "sterling",
-  "conductor",
-  "agent",
-  "agents",
-  "subagent",
-  "dispatch",
-  "report",
-  "return",
-  "verify",
-  "verified",
-  "evidence",
-  "record",
-  "records",
-  "store",
-  "knowledge",
-  "query",
-  "knowledge_get",
-  "knowledge_query",
-  "read",
-  "reads",
-  "grep",
-  "file",
-  "files",
-  "code",
-  "first",
-  "second",
-  "third",
-  "task",
-  "work",
-  "please",
-  "note",
-  "notes",
-  "deliverable",
-  "claim",
-  "claims",
-  "absence",
-  "cite",
-  "cites",
-  "citing",
-  "exactly",
-  "nothing",
-  "else"
-]);
-function outgoingProposalText(toolInput) {
-  const ti = toolInput ?? {};
-  if (typeof ti.prompt === "string" && ti.prompt.trim()) return ti.prompt;
-  if (Array.isArray(ti.questions)) {
-    return ti.questions.flatMap((q) => [
-      q?.question,
-      q?.header,
-      ...Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []
-    ]).filter((s2) => typeof s2 === "string" && s2.trim()).join("\n");
-  }
-  return "";
-}
-var AXIS_MIN_TERM_LEN = 4;
-var AXIS_MIN_HITS = 2;
-function extractAxisTerms(text, maxTerms) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (raw.length < AXIS_MIN_TERM_LEN) continue;
-    if (AXIS_STOPWORDS.has(raw)) continue;
-    if (/^\d+$/.test(raw)) continue;
-    counts.set(raw, (counts.get(raw) ?? 0) + 1);
-  }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
-}
-function axisNarrowText(record) {
-  if (!record || typeof record !== "object") return "";
-  if (record.type === "anti_pattern") return `${record.title ?? ""}
-${record.trigger ?? ""}`;
-  if (record.type === "decision") return `${record.title ?? ""}
-${record.statement ?? ""}`;
-  return "";
-}
-function axisHits(record, terms) {
-  const hay = axisNarrowText(record).toLowerCase();
-  if (!hay) return [];
-  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
-}
 function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+}
+function pendingPath(cwd) {
+  return join2(deliveryDir(cwd), "pending.json");
 }
 function emptyGuard() {
   return { records: [], frontier_files: [], pointer_files: [] };
@@ -5753,86 +5618,95 @@ function writeGuard(path, guard) {
   mkdirSync2(dirname3(path), { recursive: true });
   writeFileSync(path, JSON.stringify(guard));
 }
-function clip(text, cap) {
-  const s2 = String(text ?? "");
-  return s2.length > cap ? `${s2.slice(0, cap)}\u2026` : s2;
+function enqueuePending(path, entry) {
+  const entries = existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
+  entries.push(entry);
+  mkdirSync2(dirname3(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(entries));
 }
-var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
-function renderHazards(hazards, charCap) {
-  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).map(
-    (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
-      `TRIGGER: ${clip(ap.trigger, charCap)}`,
-      `RIGHT WAY: ${clip(ap.right_way, charCap)}`
-    ].join("\n")
-  );
-}
-var DECISION_POINTER_CAP = 8;
-var DECISION_STATEMENT_CLIP = 120;
-var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
-  const shown = decisions.slice(0, cap);
-  const lines = [
-    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
-  ];
-  for (const d of shown) {
-    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
-    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-    if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+var BASH_POINTER_PATH_CAP = 8;
+var COMMAND_PATH_SKIP = /* @__PURE__ */ new Set(["--", "-", ".", "./", "..", "../"]);
+function extractCommandPathCandidates(command2) {
+  const text = String(command2 ?? "");
+  const tokens = text.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of tokens) {
+    let t = raw;
+    if (t.startsWith('"') && t.endsWith('"') || t.startsWith("'") && t.endsWith("'")) t = t.slice(1, -1);
+    t = t.replace(/^[(<]+/, "").replace(/[),;:'"]+$/, "");
+    t = t.replace(/:\d+(:\d+)?$/, "");
+    if (!t || COMMAND_PATH_SKIP.has(t)) continue;
+    if (t.startsWith("-")) continue;
+    if (/[*?$`!]/.test(t)) continue;
+    if (!(t.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(t))) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
   }
-  if (decisions.length > shown.length) {
-    lines.push(
-      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
-    );
+  return out;
+}
+function renderBashPointers(entries) {
+  const lines = [
+    "STERLING KNOWLEDGE POINTERS (H19) \u2014 governed paths named in a Bash command.",
+    "This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here."
+  ];
+  for (const e of entries) {
+    for (const h of e.hazards) {
+      lines.push(`  \u2022 ${e.rel} \u2014 \u26A0 HAZARD anti_pattern '${h.title ?? h.slug ?? h.id}' \xB7 knowledge_get ${h.id}`);
+    }
+    for (const o of e.owners) {
+      const kind = o.type === "reference_material" ? "reference" : "article";
+      const label = o.slug ?? o.title ?? o.id;
+      const state = o.state ? ` (${o.state})` : "";
+      lines.push(`  \u2022 ${e.rel} \u2014 ${kind} '${label}'${state} \xB7 knowledge_get ${o.id}`);
+    }
   }
   return lines.join("\n");
 }
 
-// scripts/hooks/h20-mechanism-axis.mjs
-var MAX_HAZARDS = 3;
-var MAX_DECISIONS = 5;
-var NARROW_CLIP = 700;
+// scripts/hooks/h19-bash-delivery.mjs
 var input = readStdin();
-var outgoing = outgoingProposalText(input.tool_input);
-if (!outgoing) allow();
-var isQuestion = Array.isArray(input.tool_input?.questions);
+var command = input.tool_input?.command;
+if (!command) allow();
+if (input.agent_id) allow();
 var store = openStore(input.cwd);
 if (!store) allow();
 try {
-  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
-  if (terms.length < AXIS_MIN_HITS) allow();
-  const candidates = [
-    ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
-  ];
-  if (!candidates.length) allow();
-  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS).sort((a, b) => b.hits.length - a.hits.length);
-  if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
-  const fresh = scored.filter((x) => !guard.records.includes(x.record.id));
-  if (!fresh.length) allow();
-  const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, MAX_HAZARDS);
-  const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
-  if (!hazards.length && !decisions.length) allow();
-  const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
-  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to put a CHOICE TO THE USER. The store already governs this subject (matched on: ${matched}) and no file you touched would have surfaced it. READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made \u2014 and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (matched on: ${matched}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
-  const blocks = [
-    header,
-    ...renderHazards(
-      hazards.map((x) => x.record),
-      NARROW_CLIP
-    ),
-    ...decisions.length ? [renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS)] : []
-  ];
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join("\n\n") }
-    })
-  );
-  guard.records.push(...hazards.map((x) => x.record.id), ...decisions.map((x) => x.record.id));
+  const entries = [];
+  const delivered = [];
+  for (const candidate of extractCommandPathCandidates(command)) {
+    if (entries.length >= BASH_POINTER_PATH_CAP) break;
+    const rel = repoRel(candidate, input.cwd);
+    if (!rel) continue;
+    if (rel === ".git" || rel.startsWith(".git/")) continue;
+    if (rel.startsWith(".sterling/")) continue;
+    if (guard.pointer_files.includes(rel)) continue;
+    let abs;
+    try {
+      abs = join3(input.cwd, rel);
+      if (!existsSync4(abs) || !statSync(abs).isFile()) continue;
+    } catch {
+      continue;
+    }
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+    const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
+    if (!owners.length && !hazards.length) continue;
+    entries.push({ rel, owners, hazards });
+    delivered.push(rel);
+  }
+  if (!entries.length) allow();
+  enqueuePending(pendingPath(input.cwd), {
+    kind: "bash_pointers",
+    rel: delivered.join(" "),
+    payload: renderBashPointers(entries),
+    agent_id: "conductor"
+  });
+  guard.pointer_files.push(...delivered);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
-  warnNonBlocking(`H20: mechanism-axis delivery failed: ${e && e.message || e}`);
+  warnNonBlocking(`H19: bash pointer delivery failed: ${e && e.message || e}`);
 }

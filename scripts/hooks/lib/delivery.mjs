@@ -146,14 +146,26 @@ export function pendingPath(cwd) {
   return join(deliveryDir(cwd), 'pending.json');
 }
 
+/** The guard's declared shape. `pointer_files` is a SEPARATE namespace from
+ *  `records` on purpose: a Bash pointer must never consume the record's
+ *  full-article guard entry, or pointing at a path would silently suppress the
+ *  real delivery on a later Read of it — a pointer would then COST knowledge
+ *  instead of adding it. Pointers dedupe per FILE; articles dedupe per RECORD. */
+function emptyGuard() {
+  return { records: [], frontier_files: [], pointer_files: [] };
+}
+
 export function readGuard(path) {
   // Self-healing: a torn/corrupt guard resets to empty (worst case a duplicate
   // delivery) instead of disabling delivery for the rest of the session.
   try {
-    return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : { records: [], frontier_files: [] };
+    if (!existsSync(path)) return emptyGuard();
+    // Tolerate a guard written before a field existed (mid-session upgrade):
+    // a missing array must read as empty, never as undefined.
+    return { ...emptyGuard(), ...JSON.parse(readFileSync(path, 'utf8')) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} — reset to empty\n`);
-    return { records: [], frontier_files: [] };
+    return emptyGuard();
   }
 }
 
@@ -334,6 +346,96 @@ export function renderPayload(rel, blocks, { unowned = false } = {}) {
       : `STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
     ...blocks,
   ].join('\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// BASH POINTER DELIVERY (board 841195b1). Delivery rode Edit|Write|MultiEdit
+// and Read only, while the surveying that decides what to change happens
+// through grep/wc/git log — so the safety net under retrieval-first had its
+// hole exactly where the traffic is, and the hole is INVISIBLE: nothing tells
+// you an injection did not happen. Four consuming-project reports named this
+// independently; the fourth measured ~a dozen Bash investigations with zero
+// deliveries.
+//
+// WHY A POINTER AND NOT THE ARTICLE. Measured on this machine 2026-08-03: real
+// H19 payloads ran 13,010 and 17,078 bytes (payload_char_cap is applied PER
+// FIELD, so one delivery has no total ceiling). A Bash-heavy pass issues far
+// more calls than it does Reads — and issues them precisely to AVOID the cost
+// of reading the file — so full-article delivery here could cost more context
+// than the reads it exists to protect. One line per owned path is ~90% of the
+// value at ~5% of the tokens, and being cheap is what lets the extractor below
+// tolerate the occasional false positive instead of needing to be exact.
+// ---------------------------------------------------------------------------
+
+/** Max distinct owned paths a single command may deliver pointers for. A
+ *  `git log --stat` or a wide grep can name dozens; the cap keeps one command's
+ *  delivery bounded and is why precision below can stay cheap. */
+export const BASH_POINTER_PATH_CAP = 8;
+
+/** Tokens that are never a path but survive the shape tests below. */
+const COMMAND_PATH_SKIP = new Set(['--', '-', '.', './', '..', '../']);
+
+/**
+ * Candidate file paths named in a shell/PowerShell command string. PURE and
+ * deliberately SHAPE-ONLY: it does not touch the filesystem, so it is unit
+ * testable, and the caller applies the real filter (exists + is a file +
+ * governed). That split is the whole precision strategy — a search PATTERN
+ * that looks like a path (`grep -rn "tools.ts" .`) is cheap to let through
+ * here because it dies at the existence check, and a pattern that happens to
+ * name a real file costs one pointer line, not an article.
+ *
+ * Globs are dropped rather than expanded: `*`/`?` cannot be resolved without
+ * the filesystem, and a half-expanded glob would deliver for the wrong file.
+ */
+export function extractCommandPathCandidates(command) {
+  const text = String(command ?? '');
+  // Quote-aware split: a quoted argument is one token even with spaces in it.
+  const tokens = text.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of tokens) {
+    let t = raw;
+    if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) t = t.slice(1, -1);
+    // Shell punctuation that clings to an argument in real commands.
+    t = t.replace(/^[(<]+/, '').replace(/[),;:'"]+$/, '');
+    // `path:12` / `path:12:5` — grep -n output pasted back into a command.
+    t = t.replace(/:\d+(:\d+)?$/, '');
+    if (!t || COMMAND_PATH_SKIP.has(t)) continue;
+    if (t.startsWith('-')) continue; // a flag, or a flag=value
+    if (/[*?$`!]/.test(t)) continue; // glob or shell expansion — unresolvable here
+    // Must LOOK like a path: contain a separator, or carry a file extension.
+    if (!(t.includes('/') || /\.[A-Za-z0-9]{1,8}$/.test(t))) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+/**
+ * One line per governed path: what owns it, and the id to read it with. Kept to
+ * a single line per record on purpose — this is a signpost telling the reader
+ * an article EXISTS, not a substitute for reading it. Hazards lead each path's
+ * list for the same reason they lead renderArticle's payload: "do not do this
+ * here" outranks "here is what this is".
+ */
+export function renderBashPointers(entries) {
+  const lines = [
+    'STERLING KNOWLEDGE POINTERS (H19) — governed paths named in a Bash command.',
+    'This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here.',
+  ];
+  for (const e of entries) {
+    for (const h of e.hazards) {
+      lines.push(`  • ${e.rel} — ⚠ HAZARD anti_pattern '${h.title ?? h.slug ?? h.id}' · knowledge_get ${h.id}`);
+    }
+    for (const o of e.owners) {
+      const kind = o.type === 'reference_material' ? 'reference' : 'article';
+      const label = o.slug ?? o.title ?? o.id;
+      const state = o.state ? ` (${o.state})` : '';
+      lines.push(`  • ${e.rel} — ${kind} '${label}'${state} · knowledge_get ${o.id}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 /** The unowned-territory notice. `hasOtherKnowledge` is load-bearing, not

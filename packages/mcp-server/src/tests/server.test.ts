@@ -17,8 +17,16 @@ const SERVED_TOOLS = [
   'knowledge_create',
   'knowledge_query',
   'knowledge_get',
+  // Ask what a type requires instead of learning by rejection (board 7acfbe48).
+  'knowledge_schema',
   'knowledge_update',
   'knowledge_append',
+  // The string sibling of append — a surgical edit inside a field too large to
+  // retransmit (board fd6d8da9).
+  'knowledge_edit',
+  // The retirement path: supersede in favour of a survivor, so a duplicate stops
+  // being served instead of becoming MORE visible (board 77f00139).
+  'knowledge_retire',
   'knowledge_promote',
   'knowledge_link',
   'board_add',
@@ -31,6 +39,9 @@ const SERVED_TOOLS = [
   'run_signal',
   'maintenance_enqueue',
   'maintenance_query',
+  // board_remove scoped to the queue, so the librarian can close what it drains
+  // (board afeae7d9).
+  'maintenance_remove',
   'handoff_write',
   'handoff_read',
 ];

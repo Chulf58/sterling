@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, digestRecord, type DurableRecord, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, type DurableRecord, type FieldShape, type RunRecord, type SterlingConfig } from '@sterling/schemas';
 import { DEFAULT_QUERY_CAP, type QueryOptions, type RecordedExit, type ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -305,6 +305,29 @@ export class SterlingTools {
     );
   }
 
+  /**
+   * knowledge_schema — ask what a type requires instead of guessing (board
+   * 7acfbe48). Read-only, derived from the registered zod schema, so it cannot
+   * drift from what a write will actually accept. Listing the registered type
+   * names on an unknown type is deliberate: the commonest reason to call this is
+   * not knowing the vocabulary.
+   */
+  knowledgeSchema(type: string): { type: string; fields: FieldShape[]; required: string[]; optional: string[] } {
+    const described = schemaFor(type);
+    if (!described) {
+      throw new Error(`knowledge_schema: '${type}' is not a registered record type. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
+    }
+    // The split lists are redundant with `fields` on purpose — "what must I
+    // supply" is the actual question, and making the reader filter the array to
+    // answer it is how the guessing starts.
+    return {
+      type: described.type,
+      fields: described.fields,
+      required: described.fields.filter((f) => f.required).map((f) => f.name),
+      optional: described.fields.filter((f) => !f.required).map((f) => f.name),
+    };
+  }
+
   knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
     this.refuseServerOwnedFields(fields, 'knowledge_create');
     const ts = this.now();
@@ -370,8 +393,38 @@ export class SterlingTools {
         }
       }
       skipped.push(this.skip('noise-gate', this.activeRunId()));
+    } else if (type === 'feature_article') {
+      // SLUG COLLISION IS REFUSED LOUD (board 56c8a509). Two records under one
+      // slug is worse than one wrong record, because retrieval serves BOTH and
+      // they contradict — and it is worse still than that, as a consuming project
+      // proved: retiring the loser by RETITLING it made the tombstone the NEWEST
+      // record under the slug, so H19 resolved the slug to the tombstone and
+      // served "RETIRED DUPLICATE — DO NOT READ THIS ARTICLE" as the
+      // authoritative answer for a live concept. A whole article went dark.
+      // Resolution is store.articlesBySlug — deterministic, never a ranked
+      // capped query, so this refusal cannot be a bm25 artefact (decision
+      // 3db7095f). No dedup_override escape hatch, deliberately: unlike two
+      // anti_patterns that may carry genuinely distinct lessons on one file, two
+      // articles under one slug have no legitimate shape. The remedies are named
+      // in the message because "refused" without a next step is where authors
+      // invent the tombstone workaround that caused the incident.
+      const slug = (parsed as { slug?: string }).slug;
+      if (slug) {
+        const clash = this.store.articlesBySlug(slug);
+        if (clash.length) {
+          throw new Error(
+            `knowledge_create: a feature_article with slug '${slug}' already exists ('${clash[0].id}'). ` +
+              `Two records under one slug is worse than one wrong record — retrieval serves both and they contradict. ` +
+              `Revising that article: knowledge_update '${clash[0].id}' (the correction supersedes the error — fix it FORWARD). ` +
+              `Genuinely a different concept: choose a distinct slug. Replacing it wholesale: knowledge_create the new article ` +
+              `under its own slug, then knowledge_retire the old one in_favor_of the new — never leave both live.`
+          );
+        }
+      }
+      skipped.push(this.skip('dedup-merge', this.activeRunId()));
     } else {
-      // dedup guarding is defined for anti_patterns; other types skip loudly
+      // dedup guarding is defined for anti_patterns and feature_article slugs;
+      // other types skip loudly
       skipped.push(this.skip('dedup-merge', this.activeRunId()));
     }
 
@@ -658,6 +711,68 @@ export class SterlingTools {
     const next = [...((current as unknown[]) ?? []), ...entries];
     // Straight through the ONE update path — every guarantee above rides along.
     return this.knowledgeUpdate(id, { [field]: next });
+  }
+
+  /**
+   * knowledge_edit — a SURGICAL replacement inside a long STRING field (board
+   * fd6d8da9), the sibling knowledge_append never had.
+   *
+   * knowledge_append covers arrays; a string field could only be changed by
+   * retransmitting all of it. For most records that is merely wasteful, but a
+   * registry-style article eventually outgrows its own round-trip: measured
+   * 2026-08-03, the hooks-suite article's `what_it_does` is a single 26,364-token
+   * string — too large to READ in one piece, let alone re-send byte-perfect. A
+   * librarian dispatched to bump the hook count in it correctly REFUSED rather
+   * than risk a silent transcription corruption, which left the article
+   * un-reconcilable by any caller and blocked reconcile-always outright. Board
+   * 8390f8fa had already recorded that ceiling being hit twice; this was the
+   * third.
+   *
+   * FIND MUST MATCH EXACTLY ONCE. Zero matches and several matches are BOTH
+   * refused, and the count is reported. This is the same contract as the editor
+   * tools every agent already uses, for the same reason: a blind
+   * replace-first-occurrence inside a field nobody can read in full is an
+   * unreviewable write. Refusing on ambiguity costs a round-trip; guessing costs
+   * the article.
+   *
+   * Everything else rides the ONE update path — version bump, retained prior
+   * version, file_baselines re-baseline, drift-item auto-drain, coherence
+   * warnings — so an edit is a normal supersession and not a back door around
+   * any of it.
+   */
+  knowledgeEdit(id: string, field: string, find: string, replace: string): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number } } {
+    const old = this.store.get(id);
+    if (!old) throw new Error(`knowledge_edit: no record '${id}'`);
+    if (typeof find !== 'string' || find.length === 0) {
+      throw new Error(`knowledge_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
+    }
+    this.refuseServerOwnedFields({ [field]: replace }, 'knowledge_update');
+    this.refuseUnknownFields(old.type, { [field]: replace });
+    const current = (old as unknown as Record<string, unknown>)[field];
+    if (typeof current !== 'string') {
+      throw new Error(
+        `knowledge_edit: '${field}' on ${old.type} is ${current === undefined ? 'absent' : typeof current}, not a string — ` +
+          `edit replaces text inside a string field. Arrays extend with knowledge_append; anything else sets with knowledge_update.`
+      );
+    }
+    // split().length - 1 counts occurrences without a regex, so `find` needs no
+    // escaping — it is treated as the literal text the caller saw.
+    const occurrences = current.split(find).length - 1;
+    if (occurrences === 0) {
+      throw new Error(
+        `knowledge_edit: 'find' does not appear in ${old.type}.${field} — nothing was written. ` +
+          `The field is ${current.length} chars; confirm the exact text (including whitespace and punctuation) before retrying.`
+      );
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `knowledge_edit: 'find' appears ${occurrences} times in ${old.type}.${field} — refused as ambiguous, nothing was written. ` +
+          `Extend 'find' with surrounding text until it identifies exactly one site.`
+      );
+    }
+    const next = current.replace(find, replace);
+    const record = this.knowledgeUpdate(id, { [field]: next });
+    return { record, replaced: { field, chars_before: current.length, chars_after: next.length } };
   }
 
   /**
@@ -1001,6 +1116,100 @@ export class SterlingTools {
     const skipped = [this.skip('board-remove-artifact-binding', this.activeRunId())];
     this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: id, check_skipped: skipped };
+  }
+
+  /**
+   * maintenance_remove — board_remove NARROWED TO THE MAINTENANCE QUEUE, so the
+   * librarian can finish its own job (board afeae7d9).
+   *
+   * The librarian is the role defined to drain the queue, and it held
+   * maintenance_query without any removal tool: it could READ the queue and not
+   * close anything in it. Every lane WITHOUT a feature_link (article_missing,
+   * capture_owed, concept_article_missing, research_owed) is therefore
+   * unclosable by it, because those never auto-drain through knowledge_update —
+   * so they all bounced back to the conductor.
+   *
+   * WHY A SEPARATE TOOL RATHER THAN GRANTING board_remove. The MCP server has NO
+   * notion of caller identity — there is no agent_id anywhere in it — so a scope
+   * PARAMETER on board_remove would be no protection at all: the caller could
+   * simply omit it. The scoping has to live in the TOOL, and the grant then
+   * selects which surface an agent can reach. The user board (source 'user') is
+   * the human's own surface and stays read-only to every agent; this tool refuses
+   * a user item by design, naming board_remove as the conductor's path so the
+   * refusal teaches rather than merely blocks.
+   */
+  maintenanceRemove(id: string): { removed: string; check_skipped: SkippedCheck[] } {
+    const record = this.store.get(id);
+    if (!record) throw new Error(`maintenance_remove: no record '${id}'`);
+    if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
+    const source = (record as unknown as { source?: string }).source;
+    if (source !== 'system') {
+      throw new Error(
+        `maintenance_remove: '${id}' is a ${source ?? 'user'}-source board item, not a maintenance-queue item. ` +
+          `This tool removes system-source items only — the user board is the human's own surface and is not an agent's to clear. ` +
+          `If you are the conductor and this item is genuinely fulfilled, use board_remove.`
+      );
+    }
+    const skipped = [this.skip('board-remove-artifact-binding', this.activeRunId())];
+    this.store.remove(id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
+    return { removed: id, check_skipped: skipped };
+  }
+
+  /**
+   * knowledge_retire — the retirement path, built from a primitive that already
+   * existed (board 77f00139).
+   *
+   * Until now `status`/`superseded_by` were server-owned and refused from the
+   * tool surface, no delete tool existed, and `state: 'deprecated'` was the only
+   * signal an author could set — which does not remove a record from ANY result
+   * set. So retiring made a record MORE visible, not less, and if it was the
+   * newest under its slug it WON retrieval. That is how a tombstone became the
+   * authoritative answer for a live concept in a consuming project.
+   *
+   * store.retireInFavorOf already had exactly the right semantics (built for
+   * knowledge_promote's cross-store tombstone): status → superseded,
+   * superseded_by → the survivor, NO new row, provenance and inbound links
+   * intact, and query() already never serves superseded records. It was simply
+   * unreachable except through promotion. This exposes it.
+   *
+   * in_favor_of is REQUIRED, and that is the point. Retirement is not deletion:
+   * the fix-it-forward rule stands, so a record that is merely WRONG gets
+   * knowledge_update, not this. This tool is for the one shape update cannot
+   * repair — a genuine DUPLICATE, where two records both claim to describe one
+   * thing and the reader needs to be sent to the survivor. Requiring the survivor
+   * means a retired record always forwards somewhere, so an old citation lands on
+   * the right record instead of dangling.
+   */
+  knowledgeRetire(id: string, inFavorOf: string): { retired: DurableRecord } {
+    if (id === inFavorOf) throw new Error(`knowledge_retire: a record cannot be retired in favour of itself ('${id}')`);
+    const record = this.store.get(id);
+    if (!record) throw new Error(`knowledge_retire: no record '${id}'`);
+    // The transient/user surfaces have their own P4 removal paths and must not
+    // acquire a second one that leaves a superseded husk behind in a queue.
+    if (record.type === 'todo' || record.type === 'note') {
+      throw new Error(
+        `knowledge_retire: '${id}' is a ${record.type} — those leave through ${record.type === 'todo' ? 'board_remove / maintenance_remove' : 'note_remove'} (done = removed, P4), not retirement.`
+      );
+    }
+    const survivor = this.store.get(inFavorOf);
+    if (!survivor) {
+      throw new Error(
+        `knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first — ` +
+          `retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`
+      );
+    }
+    if (survivor.status === 'superseded') {
+      throw new Error(
+        `knowledge_retire: '${inFavorOf}' is itself superseded — retiring into a dead record forwards the reader to a tombstone. ` +
+          `Resolve the survivor's chain to its live head first.`
+      );
+    }
+    // No check_skipped here, deliberately: skip() reports reason 'not_built',
+    // and there is no deferred retirement check to declare. Emitting one would
+    // claim an obligation nobody planned — the opposite of what the loud-skip
+    // channel is for.
+    const retired = this.store.retireInFavorOf(id, inFavorOf, this.now());
+    return { retired };
   }
 
   /**
