@@ -28,7 +28,14 @@
       },
       {
         "matcher": "Task|Agent",
-        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h8-dispatch-cap.mjs\"" }]
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h8-dispatch-cap.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" }]
       },
       {
         "matcher": "Bash|PowerShell",

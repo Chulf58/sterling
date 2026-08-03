@@ -4081,18 +4081,6 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
-function toRepoRelative(absolutePath, repoRoot) {
-  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const abs = norm(absolutePath);
-  const root = norm(repoRoot);
-  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
-  const a = drivePrefixed ? abs.toLowerCase() : abs;
-  const r = drivePrefixed ? root.toLowerCase() : root;
-  if (!(a === r || a.startsWith(r + "/"))) {
-    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
-  }
-  return normalizeRepoPath(abs.slice(root.length + 1));
-}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
@@ -5346,13 +5334,13 @@ var SterlingStore = class {
    *  the target across every mounted store — cross-store edges are a legitimate shape
    *  (promotion itself writes them: supersedes / informed_by across project↔domain)
    *  that a store-local get cannot see. Standalone usage keeps the local check. */
-  addLink(sourceId, rel2, targetId, targetValidated = false) {
+  addLink(sourceId, rel, targetId, targetValidated = false) {
     const source = this.get(sourceId);
     if (!source)
       throw new Error(`addLink: no record '${sourceId}'`);
     if (!targetValidated && !this.get(targetId))
       throw new Error(`addLink: no target record '${targetId}'`);
-    const parsedRel = linkSchema.shape.rel.parse(rel2);
+    const parsedRel = linkSchema.shape.rel.parse(rel);
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
       return source;
     const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
@@ -5545,23 +5533,9 @@ function warnNonBlocking(message) {
   process.stderr.write(message);
   process.exit(1);
 }
-function loadConfig(cwd) {
-  const p = join(cwd, ".sterling", "config.json");
-  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
-}
 function openStore(cwd) {
   const p = join(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
-}
-function repoRel(toolPath, cwd) {
-  if (!toolPath) return null;
-  const fwd = String(toolPath).replace(/\\/g, "/");
-  try {
-    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
-    return normalizeRepoPath(fwd);
-  } catch {
-    return null;
-  }
 }
 
 // scripts/hooks/lib/delivery.mjs
@@ -5570,11 +5544,172 @@ import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
+var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
+  // function words
+  "this",
+  "that",
+  "these",
+  "those",
+  "with",
+  "from",
+  "have",
+  "has",
+  "had",
+  "will",
+  "would",
+  "could",
+  "should",
+  "must",
+  "your",
+  "you",
+  "into",
+  "then",
+  "than",
+  "when",
+  "what",
+  "which",
+  "there",
+  "their",
+  "them",
+  "they",
+  "been",
+  "being",
+  "does",
+  "make",
+  "made",
+  "used",
+  "using",
+  "also",
+  "only",
+  "each",
+  "more",
+  "most",
+  "some",
+  "such",
+  "very",
+  "just",
+  "like",
+  "over",
+  "after",
+  "before",
+  "because",
+  "about",
+  "under",
+  "above",
+  "below",
+  "where",
+  "while",
+  "since",
+  "until",
+  "unless",
+  "either",
+  "neither",
+  "both",
+  "every",
+  "not",
+  "but",
+  "and",
+  "the",
+  "for",
+  "are",
+  "was",
+  "were",
+  "its",
+  "here",
+  "how",
+  "why",
+  "who",
+  "whom",
+  "whose",
+  "any",
+  "all",
+  "can",
+  "may",
+  "might",
+  "shall",
+  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
+  "sterling",
+  "conductor",
+  "agent",
+  "agents",
+  "subagent",
+  "dispatch",
+  "report",
+  "return",
+  "verify",
+  "verified",
+  "evidence",
+  "record",
+  "records",
+  "store",
+  "knowledge",
+  "query",
+  "knowledge_get",
+  "knowledge_query",
+  "read",
+  "reads",
+  "grep",
+  "file",
+  "files",
+  "code",
+  "first",
+  "second",
+  "third",
+  "task",
+  "work",
+  "please",
+  "note",
+  "notes",
+  "deliverable",
+  "claim",
+  "claims",
+  "absence",
+  "cite",
+  "cites",
+  "citing",
+  "exactly",
+  "nothing",
+  "else"
+]);
+function outgoingProposalText(toolInput) {
+  const ti = toolInput ?? {};
+  if (typeof ti.prompt === "string" && ti.prompt.trim()) return ti.prompt;
+  if (Array.isArray(ti.questions)) {
+    return ti.questions.flatMap((q) => [
+      q?.question,
+      q?.header,
+      ...Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []
+    ]).filter((s2) => typeof s2 === "string" && s2.trim()).join("\n");
+  }
+  return "";
+}
+var AXIS_MIN_TERM_LEN = 4;
+var AXIS_MIN_HITS = 2;
+function extractAxisTerms(text, maxTerms) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < AXIS_MIN_TERM_LEN) continue;
+    if (AXIS_STOPWORDS.has(raw)) continue;
+    if (/^\d+$/.test(raw)) continue;
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
+}
+function axisNarrowText(record) {
+  if (!record || typeof record !== "object") return "";
+  if (record.type === "anti_pattern") return `${record.title ?? ""}
+${record.trigger ?? ""}`;
+  if (record.type === "decision") return `${record.title ?? ""}
+${record.statement ?? ""}`;
+  return "";
+}
+function axisHits(record, terms) {
+  const hay = axisNarrowText(record).toLowerCase();
+  if (!hay) return [];
+  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+}
 function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
-}
-function pendingPath(cwd) {
-  return join2(deliveryDir(cwd), "pending.json");
 }
 function readGuard(path) {
   try {
@@ -5589,46 +5724,9 @@ function writeGuard(path, guard) {
   mkdirSync2(dirname3(path), { recursive: true });
   writeFileSync(path, JSON.stringify(guard));
 }
-function enqueuePending(path, entry) {
-  const entries = existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
-  entries.push(entry);
-  mkdirSync2(dirname3(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(entries));
-}
 function clip(text, cap) {
   const s2 = String(text ?? "");
   return s2.length > cap ? `${s2.slice(0, cap)}\u2026` : s2;
-}
-function pointerLine(store2, kind, slug) {
-  let head = "(not in store)";
-  try {
-    const match = store2.articlesBySlug(slug).find((r) => !r.working_tree);
-    if (match) head = clip(match.what_it_does, 140);
-  } catch {
-    head = "(lookup failed)";
-  }
-  return `  \u2192 ${kind} [[${slug}]]: ${head}`;
-}
-function renderArticle(store2, article, charCap) {
-  const lines = [
-    `\u25B8 article '${article.slug}' (${article.state}${article.concept_family ? `, concept family '${article.concept_family}'` : ""})`,
-    `WHAT IT DOES: ${clip(article.what_it_does, charCap)}`,
-    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
-  ];
-  if (article.current_ac?.length) {
-    lines.push(`ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => `${a.ac_id}: ${a.text}`).join(" | ")}`);
-  }
-  const relies = article.dependencies?.relies_on ?? [];
-  const relied = article.dependencies?.relied_by ?? [];
-  if (relies.length || relied.length) {
-    lines.push("ONE-HOP (follow with knowledge_get/knowledge_query when it matters):");
-    for (const slug of relies) lines.push(pointerLine(store2, "relies_on", slug));
-    for (const slug of relied) lines.push(pointerLine(store2, "relied_by", slug));
-  }
-  return lines.join("\n");
-}
-function renderReference(ref) {
-  return `\u25B8 reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? "", 200)} \u2014 refresh via knowledge_get ${ref.id}`;
 }
 var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
 function renderHazards(hazards, charCap) {
@@ -5643,7 +5741,7 @@ function renderHazards(hazards, charCap) {
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
@@ -5655,78 +5753,57 @@ function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
   }
   if (decisions.length > shown.length) {
     lines.push(
-      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length} for the full set`
+      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
     );
   }
   return lines.join("\n");
 }
-function renderPayload(rel2, blocks, { unowned = false } = {}) {
-  return [
-    unowned ? renderFrontier(rel2, { hasOtherKnowledge: blocks.length > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
-    ...blocks
-  ].join("\n\n");
-}
-function renderFrontier(rel2, { hasOtherKnowledge = false } = {}) {
-  return `STERLING FRONTIER SIGNAL (H19): territory '${rel2}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
-}
 
-// scripts/hooks/h19-knowledge-delivery.mjs
+// scripts/hooks/h20-mechanism-axis.mjs
+var MAX_HAZARDS = 3;
+var MAX_DECISIONS = 5;
+var NARROW_CLIP = 700;
 var input = readStdin();
-var rel = repoRel(input.tool_input?.file_path, input.cwd);
-if (!rel) allow();
-if (rel === ".git" || rel.startsWith(".git/")) allow();
-if (rel.startsWith(".sterling/")) allow();
+var outgoing = outgoingProposalText(input.tool_input);
+if (!outgoing) allow();
+var isQuestion = Array.isArray(input.tool_input?.questions);
 var store = openStore(input.cwd);
 if (!store) allow();
 try {
-  const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
-  const rung = ["prompt", "read", "edit"].includes(rawRung) ? rawRung : "prompt";
-  const event = input.hook_event_name;
-  let mode;
-  if (event === "PreToolUse") {
-    mode = rung === "edit" ? "inject" : null;
-  } else {
-    if (rung === "read") mode = "inject";
-    else if (rung === "prompt") mode = "enqueue";
-    else mode = input.tool_name === "Read" ? "enqueue" : null;
-  }
-  if (!mode) allow();
-  if (mode === "enqueue" && input.agent_id) allow();
-  const run = store.getRun();
-  if (run && input.agent_id) allow();
-  const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
-  const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-  const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
+  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
+  if (terms.length < AXIS_MIN_HITS) allow();
+  const candidates = [
+    ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
+  ];
+  if (!candidates.length) allow();
+  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS).sort((a, b) => b.hits.length - a.hits.length);
+  if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
-  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
-  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
-  const unowned = owners.length === 0;
-  const frontierFresh = unowned && !guard.frontier_files.includes(rel);
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
-  const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+  const fresh = scored.filter((x) => !guard.records.includes(x.record.id));
+  if (!fresh.length) allow();
+  const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, MAX_HAZARDS);
+  const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
+  if (!hazards.length && !decisions.length) allow();
+  const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
+  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to put a CHOICE TO THE USER. The store already governs this subject (matched on: ${matched}) and no file you touched would have surfaced it. READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made \u2014 and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (matched on: ${matched}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
   const blocks = [
-    ...renderHazards(freshHazards, charCap),
-    ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
-    ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []
+    header,
+    ...renderHazards(
+      hazards.map((x) => x.record),
+      NARROW_CLIP
+    ),
+    ...decisions.length ? [renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS)] : []
   ];
-  const payload = renderPayload(rel, blocks, { unowned });
-  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
-  if (mode === "enqueue") {
-    enqueuePending(pendingPath(input.cwd), {
-      kind: unowned ? "frontier" : "delivery",
-      rel,
-      payload,
-      agent_id: input.agent_id ?? "conductor"
-    });
-  } else {
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
-  }
-  guard.records.push(...fresh.map((r) => r.id));
-  if (frontierFresh) guard.frontier_files.push(rel);
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join("\n\n") }
+    })
+  );
+  guard.records.push(...hazards.map((x) => x.record.id), ...decisions.map((x) => x.record.id));
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
-  warnNonBlocking(`H19: knowledge delivery failed for '${rel}': ${e && e.message || e}`);
+  warnNonBlocking(`H20: mechanism-axis delivery failed: ${e && e.message || e}`);
 }
