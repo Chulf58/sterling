@@ -7,11 +7,16 @@
 // where the incident HAPPENED, not against every file where the mistake can
 // RECUR — so path-scoped delivery is structurally blind to exactly the reusable
 // lesson it would be most valuable to receive. Two measured cases:
-//   * a conductor shipped a fix whose design was described VERBATIM by the
-//     trigger of anti_pattern 8021b2a6 ("a node connects a signal in _ready()
-//     but finishes initialising LATER"), filed against a file it never touched;
-//   * decision cc48ade5 (no countdown is ever shown) was violated in a brief
-//     because the countdown lived in NO file — it was a SUBJECT, not territory.
+//   * a conductor shipped a fix whose design was described VERBATIM by a stored
+//     anti_pattern's trigger ("a node connects a signal in _ready() but finishes
+//     initialising LATER"), filed against a file it never touched;
+//   * a stored ruling that no breach countdown is EVER shown was violated in a
+//     brief, because the countdown lived in NO file — it was a SUBJECT, not
+//     territory.
+// (Both records live in the CONSUMING project's store, so their ids are
+// deliberately not cited here — they resolve to nothing in this one, which is
+// what check-record-citations exists to catch. Provenance is in decision
+// 35952525-07fb-46b6-a84a-fb7d6f748f07.)
 // Both were caught by a coder refusing the work order, one step downstream of
 // N agents already reasoning from the premise.
 //
