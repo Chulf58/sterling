@@ -49,6 +49,32 @@ const AXIS_STOPWORDS = new Set([
   'claim', 'claims', 'absence', 'cite', 'cites', 'citing', 'exactly', 'nothing', 'else',
 ]);
 
+/** The OUTGOING text H20 scans, PER SURFACE — the two do not share an input
+ *  shape, and assuming they do yields a hook that silently never fires.
+ *  Task/Agent puts the whole brief in tool_input.prompt; AskUserQuestion has NO
+ *  prompt field at all, only questions[{question, header, options[{label,
+ *  description}]}]. Option text is included deliberately and is arguably the
+ *  most important part: board 4e6eb510's incident was a MOCKUP inside an
+ *  AskUserQuestion option which the user then picked, nearly overturning a
+ *  ruling whose own alternatives_rejected already contained that exact
+ *  proposal. Returns '' for any other tool, so an unrecognised surface is
+ *  INERT rather than half-scanned. */
+export function outgoingProposalText(toolInput) {
+  const ti = toolInput ?? {};
+  if (typeof ti.prompt === 'string' && ti.prompt.trim()) return ti.prompt;
+  if (Array.isArray(ti.questions)) {
+    return ti.questions
+      .flatMap((q) => [
+        q?.question,
+        q?.header,
+        ...(Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []),
+      ])
+      .filter((s) => typeof s === 'string' && s.trim())
+      .join('\n');
+  }
+  return '';
+}
+
 /** A term shorter than this is too generic to carry a mechanism. */
 export const AXIS_MIN_TERM_LEN = 4;
 

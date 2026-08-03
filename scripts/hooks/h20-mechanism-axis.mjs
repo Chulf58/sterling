@@ -41,6 +41,7 @@ import {
   writeGuard,
   extractAxisTerms,
   axisHits,
+  outgoingProposalText,
   renderHazards,
   renderDecisionPointers,
   AXIS_MIN_HITS,
@@ -56,14 +57,22 @@ const MAX_DECISIONS = 5;
 const NARROW_CLIP = 700;
 
 const input = readStdin();
-const prompt = input.tool_input?.prompt;
-if (typeof prompt !== 'string' || !prompt.trim()) allow(); // not a dispatch we can read
+// TWO SURFACES, ONE MECHANISM (board 62806222 + board 4e6eb510). Task/Agent
+// carries the brief in tool_input.prompt; AskUserQuestion has no prompt field at
+// all and carries its text in questions[]/options[]. outgoingProposalText knows
+// both and returns '' for anything else, so an unrecognised tool is inert rather
+// than half-scanned. Registering the matcher WITHOUT this would have produced a
+// hook that never fires and a probe that proves nothing, since silence is this
+// hook's default state.
+const outgoing = outgoingProposalText(input.tool_input);
+if (!outgoing) allow(); // nothing readable on this surface
+const isQuestion = Array.isArray(input.tool_input?.questions);
 
 const store = openStore(input.cwd);
 if (!store) allow(); // not a Sterling project — no ceremony (P1)
 
 try {
-  const terms = extractAxisTerms(prompt, MAX_RANK_TERMS);
+  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) allow(); // too little vocabulary to match on
 
   // STAGE 1 — narrow in the store. rank_terms genuinely FILTER (packages/store/
@@ -101,10 +110,21 @@ try {
   if (!hazards.length && !decisions.length) allow();
 
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(', ');
-  const blocks = [
-    `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to dispatch '${input.tool_input?.subagent_type ?? 'an agent'}'. ` +
+  // The header names the SURFACE, because the stakes differ and the reader should
+  // feel which one they are on. A bad dispatch wastes agent work; a bad choice put
+  // to the USER manufactures an authorised ruling that contradicts a real one, and
+  // the store then holds both (board 4e6eb510). So the question wording is
+  // deliberately the stronger of the two.
+  const header = isQuestion
+    ? `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to put a CHOICE TO THE USER. ` +
+      `The store already governs this subject (matched on: ${matched}) and no file you touched would have surfaced it. ` +
+      `READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made — ` +
+      `and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.`
+    : `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to dispatch '${input.tool_input?.subagent_type ?? 'an agent'}'. ` +
       `The store holds records matching this prompt's SUBJECT (matched on: ${matched}) rather than any file you touched. ` +
-      `Path-scoped delivery cannot find these. Check them BEFORE the brief goes out — a fan-out multiplies a bad premise by N.`,
+      `Path-scoped delivery cannot find these. Check them BEFORE the brief goes out — a fan-out multiplies a bad premise by N.`;
+  const blocks = [
+    header,
     ...renderHazards(
       hazards.map((x) => x.record),
       NARROW_CLIP

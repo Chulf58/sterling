@@ -86,6 +86,16 @@ function dispatch(dir, prompt, subagent_type = 'coder') {
   return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, cwd: dir };
 }
 
+/** The AskUserQuestion surface — note it has NO prompt field at all. */
+function askQuestion(dir, question, options = [], header = 'Choice') {
+  return {
+    hook_event_name: 'PreToolUse',
+    tool_name: 'AskUserQuestion',
+    tool_input: { questions: [{ question, header, multiSelect: false, options }] },
+    cwd: dir,
+  };
+}
+
 // --- the motivating case -----------------------------------------------------
 
 test('H20: delivers an anti_pattern whose file_keys name a file the prompt never mentions — the case no file-key join can reach', () => {
@@ -222,6 +232,80 @@ test('H20: shares H19 session guard — a second dispatch matching the same reco
     const second = runHook(dispatch(dir, p), dir);
     assert.equal(second.code, 0);
     assert.equal(second.stdout, '', 'already in this context — not re-injected');
+  } finally {
+    cleanup();
+  }
+});
+
+// --- the AskUserQuestion surface (board 4e6eb510) -----------------------------
+
+test('H20: reads the AskUserQuestion surface, which has NO prompt field — the registration is inert without this', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(
+      decisionRecord(
+        'Breach timing is never shown to the player',
+        'No surface may display when the next breach arrives — no seconds, no minutes, no numeric or graphical countdown.',
+        []
+      )
+    );
+    const r = runHook(
+      askQuestion(dir, 'How should the breach countdown be displayed?', [
+        { label: 'Numeric seconds', description: 'A countdown showing seconds until the next breach arrives' },
+        { label: 'Graphical arc', description: 'A filling arc instead of numbers' },
+      ]),
+      dir
+    );
+    assert.equal(r.code, 0, 'never blocks (AC7)');
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /No surface may display when the next breach arrives/, 'the ruling reaches the conductor BEFORE the question is asked');
+    assert.match(ctx, /put a CHOICE TO THE USER/, 'the header names the surface — a user answer becomes authoritative');
+    assert.doesNotMatch(ctx, /about to dispatch/, 'and does NOT use the dispatch wording');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H20: OPTION text alone can trigger it — the mockup-in-an-option case that motivated board 4e6eb510', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(
+      decisionRecord('Countdown ruling', 'No numeric or graphical countdown may ever be displayed to the player.', [])
+    );
+    // The QUESTION text is innocuous; only an OPTION carries the governed subject.
+    const r = runHook(
+      askQuestion(dir, 'Which layout do you prefer?', [
+        { label: 'Option A', description: 'Adds a numeric countdown displayed to the player above the dome' },
+        { label: 'Option B', description: 'Plain status bar' },
+      ]),
+      dir
+    );
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /No numeric or graphical countdown/, 'option text is scanned, not just the question');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H20: SILENT on an ungoverned question, and on an unrecognised tool shape', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(decisionRecord('Countdown ruling', 'No numeric or graphical countdown may be displayed.', []));
+    const ungoverned = runHook(
+      askQuestion(dir, 'Should the invoice export be CSV or XLSX?', [
+        { label: 'CSV', description: 'Comma separated, one row per invoice line' },
+        { label: 'XLSX', description: 'Excel workbook with a sheet per month' },
+      ]),
+      dir
+    );
+    assert.equal(ungoverned.code, 0);
+    assert.equal(ungoverned.stdout, '', 'ungoverned question injects nothing (AC10)');
+
+    // A tool carrying neither `prompt` nor `questions` is inert, never half-scanned.
+    const other = runHook({ hook_event_name: 'PreToolUse', tool_name: 'Glob', tool_input: { pattern: '**/*.gd' }, cwd: dir }, dir);
+    assert.equal(other.code, 0);
+    assert.equal(other.stdout, '');
   } finally {
     cleanup();
   }

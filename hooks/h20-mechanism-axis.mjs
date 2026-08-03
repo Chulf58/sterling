@@ -5671,6 +5671,18 @@ var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
   "nothing",
   "else"
 ]);
+function outgoingProposalText(toolInput) {
+  const ti = toolInput ?? {};
+  if (typeof ti.prompt === "string" && ti.prompt.trim()) return ti.prompt;
+  if (Array.isArray(ti.questions)) {
+    return ti.questions.flatMap((q) => [
+      q?.question,
+      q?.header,
+      ...Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []
+    ]).filter((s2) => typeof s2 === "string" && s2.trim()).join("\n");
+  }
+  return "";
+}
 var AXIS_MIN_TERM_LEN = 4;
 var AXIS_MIN_HITS = 2;
 function extractAxisTerms(text, maxTerms) {
@@ -5752,12 +5764,13 @@ var MAX_HAZARDS = 3;
 var MAX_DECISIONS = 5;
 var NARROW_CLIP = 700;
 var input = readStdin();
-var prompt = input.tool_input?.prompt;
-if (typeof prompt !== "string" || !prompt.trim()) allow();
+var outgoing = outgoingProposalText(input.tool_input);
+if (!outgoing) allow();
+var isQuestion = Array.isArray(input.tool_input?.questions);
 var store = openStore(input.cwd);
 if (!store) allow();
 try {
-  const terms = extractAxisTerms(prompt, MAX_RANK_TERMS);
+  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) allow();
   const candidates = [
     ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
@@ -5774,8 +5787,9 @@ try {
   const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
   if (!hazards.length && !decisions.length) allow();
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
+  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to put a CHOICE TO THE USER. The store already governs this subject (matched on: ${matched}) and no file you touched would have surfaced it. READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made \u2014 and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (matched on: ${matched}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
   const blocks = [
-    `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (matched on: ${matched}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`,
+    header,
     ...renderHazards(
       hazards.map((x) => x.record),
       NARROW_CLIP
