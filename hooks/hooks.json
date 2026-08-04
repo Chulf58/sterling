@@ -1,5 +1,12 @@
 {
   "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
