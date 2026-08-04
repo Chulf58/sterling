@@ -175,6 +175,13 @@ export class MountedStores {
     return this.storeHolding(args[0]).remove(...args);
   }
 
+  /** IN-PLACE todo edit (board_update) in the holding store — todos are always
+   *  project-scoped (§3.3), so this always resolves to the project store, but it
+   *  routes the same way as supersede/remove for consistency rather than assuming. */
+  updateTodo(...args: Parameters<SterlingStore['updateTodo']>): ReturnType<SterlingStore['updateTodo']> {
+    return this.storeHolding(args[0]).updateTodo(...args);
+  }
+
   /** Typed link edge, added on the source record in its holding store. The TARGET
    *  is resolved across ALL mounted stores (cross-store get, like get()) before
    *  delegating: cross-store edges are a legitimate shape — promotion itself writes

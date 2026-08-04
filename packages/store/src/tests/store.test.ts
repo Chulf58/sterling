@@ -394,6 +394,45 @@ test('remove deletes the record and all index rows (P4 todo path)', () => {
   }
 });
 
+test('updateTodo: IN-PLACE mutation — same id, same status, rebuilds file_keys + FTS indexes (§3.2.7 board_update)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const t = store.create({
+      ...envelope('todo'),
+      text: 'reconcile auth article',
+      source: 'user',
+      priority: 'low',
+      file_keys: ['src/auth.ts'],
+    });
+
+    const patched = store.updateTodo(t.id, { ...t, text: 'reconcile auth article thoroughly', priority: 'high', file_keys: ['src/auth2.ts'], updated_at: LATER });
+    assert.equal(patched.id, t.id, 'the id is stable — no new record is minted');
+    assert.equal(patched.status, 'active');
+    assert.equal(patched.created_at, t.created_at, 'created_at is untouched by an in-place edit');
+    assert.equal(patched.updated_at, LATER);
+    assert.equal(store.query({ types: ['todo'] }).length, 1, 'still exactly one record — updateTodo never supersedes');
+    assert.equal(store.get(t.id)!.id, t.id, 'the SAME row now carries the patched body');
+    assert.equal((store.get(t.id) as unknown as { text: string }).text, 'reconcile auth article thoroughly');
+
+    // the file_keys join index was rebuilt to the NEW value, not merely appended to
+    assert.equal(store.query({ file_keys: ['src/auth.ts'] }).length, 0, 'the old file_key no longer joins');
+    assert.equal(store.query({ file_keys: ['src/auth2.ts'] }).length, 1, 'the new file_key joins');
+
+    // the FTS row was refreshed too — old text no longer ranks, new text does
+    assert.equal(store.query({ rank_terms: ['thoroughly'] }).length, 1, 'FTS reflects the new text');
+
+    // refuses a non-todo id and an already-superseded id
+    const d = store.create(decision());
+    assert.throws(() => store.updateTodo(d.id, { ...d }), /not a todo/);
+    const gone = store.create({ ...envelope('todo'), text: 'x', source: 'user' });
+    store.remove(gone.id);
+    assert.throws(() => store.updateTodo(gone.id, { ...gone, text: 'y' }), /no record/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('queue drain log (§3.2.7): system removals logged + capped; user removals never logged', () => {
   const { dir, store } = tempStore();
   try {

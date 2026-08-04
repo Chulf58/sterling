@@ -154,6 +154,21 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'board_update',
+    {
+      description:
+        'IN-PLACE edit of a board/queue item — text/priority/file_keys only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one of text/priority/file_keys is required.',
+      inputSchema: strict({
+        id: z.string(),
+        text: z.string().optional(),
+        priority: z.enum(['low', 'normal', 'high']).optional(),
+        file_keys: z.array(z.string()).optional(),
+      }),
+    },
+    ({ id, ...patch }) => json(tools.boardUpdate(id, patch))
+  );
+
+  server.registerTool(
     'note_remove',
     {
       description:

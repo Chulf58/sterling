@@ -300,6 +300,60 @@ test('board tools: add/query separates board from maintenance queue; remove is t
   }
 });
 
+test('board_update: in-place edit of text/priority/file_keys — id stable, no new version, never closes an item (work order 9a06b6aa)', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user', priority: 'low' });
+
+    // A second clock, sharing the SAME store, so updated_at's refresh is
+    // actually observable — harness() freezes `now` for determinism elsewhere.
+    const LATER = '2026-06-10T13:00:00.000Z';
+    const laterTools = new SterlingTools({ store, now: () => LATER });
+
+    // update text only — id, created_at, source, status all hold
+    const afterText = laterTools.boardUpdate(original.id, { text: 'ship csv export with headers' });
+    assert.equal(afterText.id, original.id, 'the id is stable — no new record is minted');
+    assert.equal((afterText as unknown as { text: string }).text, 'ship csv export with headers');
+    assert.equal((afterText as unknown as { priority: string }).priority, 'low', 'untouched fields persist');
+    assert.equal(afterText.status, 'active');
+    assert.equal(afterText.created_at, original.created_at);
+    assert.equal(afterText.updated_at, LATER, 'updated_at is refreshed to the write-time clock');
+    assert.notEqual(afterText.updated_at, original.updated_at, 'and differs from the original');
+    assert.equal(tools.boardQuery({}).length, 1, 'still exactly one item — an update never mints a second record');
+
+    // updating never closes an item — it is still on the board afterward
+    assert.equal(tools.boardQuery({ source: 'user' }).length, 1);
+
+    // priority + file_keys together in one patch
+    const afterMulti = tools.boardUpdate(original.id, { priority: 'high', file_keys: ['src/csv.ts'] });
+    assert.equal((afterMulti as unknown as { priority: string }).priority, 'high');
+    assert.deepEqual((afterMulti as unknown as { file_keys: string[] }).file_keys, ['src/csv.ts']);
+    assert.equal(tools.boardQuery({ file_keys: ['src/csv.ts'] }).length, 1, 'the file_keys index was rebuilt for the new value');
+
+    // refuses source/system_reason/status changes, naming the valid set
+    assert.throws(() => tools.boardUpdate(original.id, { source: 'system' } as unknown as Record<string, unknown>), (err: Error) => {
+      assert.match(err.message, /'source'/, 'names the offending field');
+      assert.match(err.message, /text\/priority\/file_keys|text, priority, file_keys/, 'and the valid set');
+      return true;
+    });
+    assert.throws(() => tools.boardUpdate(original.id, { status: 'superseded' } as unknown as Record<string, unknown>), /'status'/);
+    assert.throws(() => tools.boardUpdate(original.id, { system_reason: 'reconcile_needed' } as unknown as Record<string, unknown>), /'system_reason'/);
+    assert.throws(() => tools.boardUpdate(original.id, { id: 'x' } as unknown as Record<string, unknown>), /'id'/);
+
+    // refuses an empty patch — nothing to update is not a no-op success
+    assert.throws(() => tools.boardUpdate(original.id, {}), /no fields to update/);
+
+    // refuses a non-todo id
+    const { record: d } = tools.knowledgeCreate('decision', { title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    assert.throws(() => tools.boardUpdate(d.id, { text: 'x' }), /not a todo/);
+
+    // refuses an unknown id
+    assert.throws(() => tools.boardUpdate(randomUUID(), { text: 'x' }), /no record/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('a write carrying a field the type does not define is REFUSED, never silently dropped (P5)', () => {
   const { tools, cleanup } = harness();
   try {
