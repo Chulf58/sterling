@@ -36,6 +36,20 @@ export interface BoardFilter {
   source?: 'user' | 'system';
   system_reason?: string;
   file_keys?: string[];
+  /**
+   * Narrow to items whose text contains this substring (work order d9960c98) —
+   * a genuine WHERE, not a rank: it REMOVES non-matching items from the counted
+   * set rather than merely reordering it, the distinction rank_terms already
+   * has to honour on the knowledge side (rank_terms order a set, they never
+   * narrow it). Case-insensitive plain substring match, applied in JS inside
+   * boardFiltered — never routed through records_fts MATCH — so a caller's
+   * string can never be interpreted as FTS5 query syntax (no quoting/escaping
+   * to get wrong) and always matches literally, metacharacters included. Cheap
+   * here specifically because boardFiltered already scans the bounded
+   * (BOARD_SCAN_CAP) todo set into JS for the source/system_reason filters —
+   * this adds one more JS predicate to that same pass, not a second table scan.
+   */
+  contains?: string;
   cap?: number;
   projection?: Projection;
 }
@@ -1318,6 +1332,10 @@ export class SterlingTools {
     if (filter.system_reason) {
       filtered = filtered.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason);
     }
+    if (filter.contains) {
+      const needle = filter.contains.toLowerCase();
+      filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
+    }
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
     return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
@@ -1368,6 +1386,55 @@ export class SterlingTools {
       ...(notes.length ? { note: notes.join('; ') } : {}),
       records: projection === 'digest' ? records.map((r) => digestRecord(r as unknown as Record<string, unknown>)) : records,
     };
+  }
+
+  /**
+   * IN-PLACE edit of a board/queue item's text/priority/file_keys (work order
+   * 9a06b6aa) — the id stays stable and NO new version is minted, unlike every
+   * other durable record's change primitive (knowledge_update supersedes). That
+   * asymmetry is deliberate: a todo is not in the immutable set (only decision
+   * is), and rewriting one via remove+re-add was costing full retransmission on
+   * every edit ("every retransmission is a chance to corrupt an item that was
+   * previously correct") while stranding every reference keyed on the old id
+   * (feature_link, H7/H10 items) on every edit — the id-rot complaint this
+   * closes.
+   *
+   * UPDATING NEVER CLOSES AN ITEM: board_remove, bound to the fulfilling
+   * artifact-write, remains the only exit (P4) — this is not a soft-close and
+   * must not be used as one.
+   *
+   * Only text/priority/file_keys may change through this path: source and
+   * system_reason decide which surface (board vs. queue) an item lives on, and
+   * an edit must never move an item between them; status/id/created_at/type/
+   * superseded_by are server-owned everywhere else in this store, and this
+   * surface is no exception. Anything outside that set is REFUSED BY NAME,
+   * naming the valid set — the same refuse-don't-drop convention as
+   * refuseUnknownFields/refuseServerOwnedFields (decision b47889b7 class) —
+   * rather than silently ignored, which would report success on a write that
+   * changed nothing the caller asked for. An empty patch is refused for the
+   * same reason: nothing to update is not a no-op success.
+   */
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys'] as const;
+
+  boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
+    const old = this.store.get(id);
+    if (!old) throw new Error(`board_update: no record '${id}'`);
+    if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a todo — board_update only edits board/queue items`);
+    const updatable: readonly string[] = SterlingTools.BOARD_UPDATABLE_FIELDS;
+    const unknown = Object.keys(patch).filter((k) => !updatable.includes(k));
+    if (unknown.length) {
+      throw new Error(
+        `board_update: ${unknown.map((k) => `'${k}'`).join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not editable through board_update — ` +
+          `only ${updatable.join('/')} may change in place. source/system_reason decide which surface an item lives on and must never move by edit; ` +
+          `status/id/created_at/type/superseded_by are server-owned. Updating never closes an item — board_remove, bound to the fulfilling ` +
+          `artifact-write, remains the only exit. Valid fields: ${updatable.join(', ')}.`
+      );
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
+    }
+    const next = { ...old, ...patch, updated_at: this.now() };
+    return this.store.updateTodo(id, next);
   }
 
   /** P4: done = removed. The artifact-write binding (H9/H10) is not built yet — skipped loudly, never silently. */
@@ -1703,18 +1770,26 @@ export class SterlingTools {
     });
   }
 
-  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
+  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number } = {}): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
-    // so a reason-filtered query no longer misses matches past the cap.
-    return this.boardQuery({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
+    // so a reason-filtered query no longer misses matches past the cap. contains
+    // (work order d9960c98) rides the same boardFiltered pass for the same reason.
+    return this.boardQuery({
+      source: 'system',
+      system_reason: filter.system_reason,
+      file_keys: filter.file_keys,
+      contains: filter.contains,
+      cap: filter.cap,
+    });
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
-  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; cap?: number; projection?: Projection } = {}): BoardQueryResult {
+  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number; projection?: Projection } = {}): BoardQueryResult {
     return this.boardQueryResult({
       source: 'system',
       system_reason: filter.system_reason,
       file_keys: filter.file_keys,
+      contains: filter.contains,
       cap: filter.cap,
       projection: filter.projection,
     });
