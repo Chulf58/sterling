@@ -5754,52 +5754,6 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
-// scripts/lib/reviewer-selection.mjs
-function selectReviewers({ config, diff, brief }) {
-  const rs = config.reviewer_selection;
-  const decisions = [];
-  const decide = (reviewer, dispatch, why) => decisions.push({ reviewer, dispatch, why });
-  const codeTouching = diff.length > 0;
-  decide("correctness", codeTouching, codeTouching ? "always runs on code-touching diffs (the floor)" : "no code-touching diff");
-  const pathHit = (patterns) => diff.find((f) => patterns.some((p) => new RegExp(p).test(f.path)));
-  const contentHit = (patterns) => diff.find((f) => (f.added_lines ?? []).some((l) => patterns.some((p) => new RegExp(p).test(l))));
-  const secPath = pathHit(rs.security_path_patterns);
-  const secContent = contentHit(rs.security_content_patterns);
-  const depManifest = diff.find((f) => rs.dependency_manifests.some((g) => matchesGlob(f.path, g) || f.path.endsWith(g)));
-  const secFlag = brief?.risk_flags?.includes("security_relevant");
-  if (secFlag || secPath || secContent || depManifest) {
-    decide(
-      "security",
-      true,
-      secFlag ? "brief risk flag security_relevant" : secPath ? `path signal: '${secPath.path}'` : secContent ? `content signal in '${secContent.path}'` : `dependency manifest touched: '${depManifest.path}'`
-    );
-  } else {
-    decide("security", false, "no security path/content/dependency/brief-flag signal");
-  }
-  const perfFlag = brief?.risk_flags?.includes("perf_sensitive");
-  const perfPath = pathHit(rs.perf_path_patterns);
-  const perfContent = contentHit(rs.perf_content_patterns);
-  if (perfFlag || perfPath || perfContent) {
-    decide("performance", true, perfFlag ? "brief risk flag perf_sensitive" : perfPath ? `path signal: '${perfPath.path}'` : `content signal in '${perfContent.path}'`);
-  } else {
-    decide("performance", false, "no perf signal implicated");
-  }
-  const addedTotal = diff.reduce((n, f) => n + (f.added_lines?.length ?? 0), 0);
-  const newExports = diff.reduce(
-    (n, f) => n + (f.added_lines ?? []).filter((l) => /^\s*export\s/.test(l)).length,
-    0
-  );
-  if (addedTotal >= rs.skeptic_diff_size_threshold || newExports >= rs.skeptic_new_export_threshold) {
-    decide("skeptic", true, `size/new-export threshold: ${addedTotal} added lines, ${newExports} new exports`);
-  } else {
-    decide("skeptic", false, `under thresholds (${addedTotal} added lines, ${newExports} new exports)`);
-  }
-  return {
-    dispatch: decisions.filter((d) => d.dispatch).map(({ reviewer, why }) => ({ reviewer, why })),
-    skipped: decisions.filter((d) => !d.dispatch).map(({ reviewer, why }) => ({ reviewer, why }))
-  };
-}
-
 // scripts/lib/test-integrity.mjs
 import { spawnSync } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
@@ -5939,24 +5893,16 @@ Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${J
     const parts = [];
     if (hasCaptureDuty && !captured) {
       const hasDebug = activeDebugEvents.length > 0;
-      const diff = activePaths.map((path) => ({ path, added_lines: [] }));
       if (hasDebug) {
         let capturePart = `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).
 Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).
 Or, if there is genuinely nothing durable, declare it: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).`;
-        if (activePaths.length > 0) {
-          const selection = selectReviewers({ config, diff });
-          capturePart += `
-Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.`;
-        }
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
-        const selection = selectReviewers({ config, diff });
         parts.push(
           `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).
-Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).
-Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` + integrityNote
+Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).` + integrityNote
         );
       }
     }

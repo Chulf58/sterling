@@ -1,10 +1,11 @@
 // H10 — direct-path capture check + review (spec §6 H10). Stop, soft.
 // Direct mode only: artifact-produced-but-no-capture → first Stop prompts the
 // conductor to capture inline (exit 2, soft block); still missing on the next
-// Stop → maintenance queue (capture_owed) and the session may end. Code-
-// touching work also gets the deterministic reviewer-selection result;
-// test-touching work records check_skipped {test-integrity} (script lands at
-// step 8 with the pipeline baseline machinery).
+// Stop → maintenance queue (capture_owed) and the session may end. Reviewer
+// advice is NOT this hook's business (board cac61a95) — that lives in H2's
+// selection-inject surface. Test-touching work records check_skipped
+// {test-integrity} (script lands at step 8 with the pipeline baseline
+// machinery).
 // Article demand (§6 H10, adjudicated 2026-06-11): touched files no
 // feature_article owns, at threshold or any new unowned file (vs git HEAD;
 // no-git degrades loud) → the nag demands the OWNING ARTICLE inline; still
@@ -29,7 +30,6 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking } from './lib/common.mjs';
-import { selectReviewers } from '../lib/reviewer-selection.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 
@@ -215,26 +215,22 @@ try {
     const parts = [];
 
     // Capture duty nag (touches or debug events present, nothing captured).
+    // Reviewer advice is NOT this hook's business (board cac61a95): it repeated
+    // identically on every firing and had gone unread; H2's selection-inject
+    // surface is the place for that, not a capture-demand message.
     if (hasCaptureDuty && !captured) {
       const hasDebug = activeDebugEvents.length > 0;
-      const diff = activePaths.map((path) => ({ path, added_lines: [] }));
       if (hasDebug) {
         let capturePart =
           `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).\n` +
           `Capture what was learned inline — expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).\n` +
           `Or, if there is genuinely nothing durable, declare it: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).`;
-        if (activePaths.length > 0) {
-          const selection = selectReviewers({ config, diff });
-          capturePart += `\nReviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.`;
-        }
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
-        const selection = selectReviewers({ config, diff });
         parts.push(
           `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
-            `Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).\n` +
-            `Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` +
+            `Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).` +
             integrityNote
         );
       }

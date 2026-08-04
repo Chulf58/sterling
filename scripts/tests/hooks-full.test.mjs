@@ -701,7 +701,7 @@ test('H9: Stop blocked only while completing, naming outstanding promotion condi
 
 // --------------------------- H10 ---------------------------
 
-test('H10: capture nag once with reviewer selection, then capture_owed and release; capture clears it', () => {
+test('H10: capture nag once (no reviewer-selection block — board cac61a95, that is H2s job), then capture_owed and release; capture clears it', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src', 'auth'), { recursive: true });
@@ -713,8 +713,8 @@ test('H10: capture nag once with reviewer selection, then capture_owed and relea
     const nag = stop();
     assert.equal(nag.code, 2);
     assert.match(nag.stderr, /nothing was captured/);
-    assert.match(nag.stderr, /"reviewer":"correctness"/, 'deterministic reviewer selection is included');
-    assert.match(nag.stderr, /"reviewer":"security"/, 'auth/ path signal dispatches security');
+    assert.doesNotMatch(nag.stderr, /Reviewer selection for this diff/, 'the reviewer-selection block is demoted out of the H10 nag (board cac61a95)');
+    assert.doesNotMatch(nag.stderr, /"reviewer":/, 'no reviewer-selection JSON leaks into the capture nag');
 
     const second = stop();
     assert.equal(second.code, 0, 'second stop releases the session');
