@@ -246,7 +246,7 @@ const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
     live_test_refs: [],
   }).record;
 
-test('knowledge_update drains the article\'s drift maintenance items (reconcile_needed/refresh_reference) but never promotion_review — P4 lifecycle-bind', () => {
+test('knowledge_update drains the article\'s drift maintenance items (reconcile_needed/refresh_reference) but RE-POINTS an open promotion_review rather than draining it — P4 lifecycle-bind + todo 6202a0f5', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -255,19 +255,39 @@ test('knowledge_update drains the article\'s drift maintenance items (reconcile_
     // promotion review for `thing`, and unrelated drift debt for `other`.
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'thing'`, file_keys: ['src/thing.ts'], feature_link: article.id });
     tools.maintenanceEnqueue({ reason: 'refresh_reference', text: `refresh 'thing'`, file_keys: ['src/thing.ts'], feature_link: article.id });
-    tools.maintenanceEnqueue({ reason: 'promotion_review', text: `promote 'thing'`, feature_link: article.id });
+    const review = tools.maintenanceEnqueue({ reason: 'promotion_review', text: `promote 'thing'`, feature_link: article.id });
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'other'`, file_keys: ['src/other.ts'], feature_link: other.id });
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 4);
 
-    tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
+    const updated = tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
 
     const open = tools.maintenanceQuery({ cap: 1000 });
     const has = (reason: string, link: string) =>
       open.some((t) => (t as { system_reason?: string }).system_reason === reason && (t as { feature_link?: string }).feature_link === link);
     assert.equal(has('reconcile_needed', article.id), false, 'reconcile_needed drained by the reconcile');
     assert.equal(has('refresh_reference', article.id), false, 'refresh_reference drained by the reconcile');
-    assert.equal(has('promotion_review', article.id), true, 'promotion_review survives — promotion is a human gate (P1)');
+    assert.equal(has('promotion_review', article.id), false, 'promotion_review no longer points at the now-superseded id — it must not strand there');
+    assert.equal(has('promotion_review', updated.id), true, 'promotion_review re-pointed to the superseding version — same review, same lineage, still owed');
+    assert.equal(open.length, 2, 'still exactly 2 open items: the unrelated other-article debt and the re-pointed review');
     assert.equal(has('reconcile_needed', other.id), true, "an unrelated article's debt is untouched");
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).find((t) => t.id === review.record.id)?.id, review.record.id, 'same item id — re-pointed in place, not replaced');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_update re-points a promotion_review through the whole supersede CHAIN, and leaves other lanes/records untouched (todo 6202a0f5)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
+    const review = tools.maintenanceEnqueue({ reason: 'promotion_review', text: `promote 'thing'`, feature_link: v1.id });
+    const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'v2' });
+    // the review now points at v2 — reconcile again (v2 -> v3) and it must follow
+    // via the chain, exactly as reconcile_needed already does for ancestor links.
+    const v3 = tools.knowledgeUpdate(v2.id, { what_it_does: 'v3' });
+    const item = tools.maintenanceQuery({ cap: 1000 }).find((t) => t.id === review.record.id) as unknown as { feature_link?: string } | undefined;
+    assert.ok(item, 'the review item still exists — never drained');
+    assert.equal(item?.feature_link, v3.id, 'followed the chain to the CURRENT version, not just the immediate successor');
   } finally {
     cleanup();
   }
