@@ -299,6 +299,35 @@ export class SterlingTools {
     }
   }
 
+  /**
+   * Does this files[] entry's own ROLE TEXT disclaim ownership of the path
+   * (board b7269100 / feedback §2.10)?
+   *
+   * The degenerate case a consuming project found: an article owns a 2717-line
+   * file and its own role text says the entry is HISTORICAL — a leftover from
+   * proving something once — then redirects the reader to three other articles
+   * for the file's actual behaviour. So it owns a file it makes no claims about,
+   * and every future edit to that file, for any reason, enqueues an already-paid
+   * no-op against it. Forever, by construction, and nothing noticed.
+   *
+   * Detection is a HINT, so it is tuned for precision over recall: only phrases
+   * that state the entry is not really this article's business count. A false
+   * positive would tell someone to drop a path they actually own, which is the
+   * expensive direction, so borderline wording is deliberately left undetected.
+   */
+  private disclaimsOwnership(role: string | undefined): boolean {
+    if (!role) return false;
+    return [
+      /\bhistorical\b/i,
+      /\bleftover\b/i,
+      /\bno longer (?:owns?|describes?|governs?|relevant)\b/i,
+      /\bnot (?:the )?(?:owner|owned|this article's)\b/i,
+      /\bsee .{0,40}\bfor (?:the )?(?:actual|real)\b/i,
+      /\bmakes no claims?\b/i,
+      /\bvestigial\b/i,
+    ].some((re) => re.test(role));
+  }
+
   /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read. */
   private hashFile(rel: string, root: string | undefined = this.repoRoot): string | undefined {
     if (!root) return undefined;
@@ -688,7 +717,8 @@ export class SterlingTools {
       // the article and enqueues ONE reconcile_needed item (same feature_link
       // dedup as H7 — one drain surface regardless of trigger).
       if (record.type === 'feature_article' && this.repoRoot) {
-        const a = record as unknown as { id: string; slug: string; files?: { path: string }[]; file_baselines?: Record<string, string> };
+        const a = record as unknown as { id: string; slug: string; files?: { path: string; role?: string }[]; file_baselines?: Record<string, string> };
+        const roleFor = (p: string) => (a.files ?? []).find((f) => f.path === p)?.role;
         // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a copy-
         // describing article's files are stat'd against ITS tree — resolving
         // against the project root produced false "out-of-band deletion" items
@@ -743,11 +773,21 @@ export class SterlingTools {
           // and doing it here as well as in the store would put the dedup rule in
           // two places, which is how the four copies drifted apart to begin with.
           for (const d of drifts.slice(0, DRIFT_ITEMS_PER_READ)) {
+            // If the article's OWN role text disclaims the path, say so on the
+            // item (board b7269100). Otherwise this exact no-op gets re-audited
+            // on every future edit to that file, forever — the item is the only
+            // place a reader will ever look, so it is where the observation has
+            // to land, and offering the real remedy converts a permanent
+            // irritant into one decision taken once.
+            const disclaimed = this.disclaimsOwnership(roleFor(d.path))
+              ? ` NOTE: this article's own files[] role for ${d.path} disclaims ownership of it, so this item will recur on every future edit to that file and each one will be a no-op. Consider REMOVING ${d.path} from files[] instead of reconciling — check the co-owners first (knowledge_query file_keys:["${d.path}"]) so the path is not left orphaned.`
+              : '';
             this.maintenanceEnqueue({
               reason: 'reconcile_needed',
-              text: d.missing
-                ? `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
-                : `reconcile article '${a.slug}' — owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`,
+              text:
+                (d.missing
+                  ? `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
+                  : `reconcile article '${a.slug}' — owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`) + disclaimed,
               file_keys: [d.path],
               feature_link: a.id,
             });

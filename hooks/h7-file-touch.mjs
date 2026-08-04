@@ -5630,6 +5630,33 @@ var SterlingStore = class {
 };
 
 // scripts/hooks/lib/common.mjs
+function changedLineRanges(toolInput, content) {
+  if (typeof content !== "string") return [];
+  const pieces = [];
+  if (typeof toolInput?.new_string === "string") pieces.push(toolInput.new_string);
+  for (const e of Array.isArray(toolInput?.edits) ? toolInput.edits : []) {
+    if (typeof e?.new_string === "string") pieces.push(e.new_string);
+  }
+  const ranges = [];
+  for (const p of pieces) {
+    if (!p) continue;
+    const idx = content.indexOf(p);
+    if (idx === -1) continue;
+    const start = content.slice(0, idx).split("\n").length;
+    ranges.push([start, start + p.split("\n").length - 1]);
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]);
+    else merged.push([...r]);
+  }
+  return merged;
+}
+function formatLineRanges(ranges) {
+  return (ranges ?? []).map(([a, b]) => a === b ? `${a}` : `${a}-${b}`).join(", ");
+}
 function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
@@ -5682,6 +5709,13 @@ try {
     for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
   } else {
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    let where = "";
+    try {
+      const ranges = changedLineRanges(input.tool_input, readFileSync2(join2(input.cwd, rel), "utf8"));
+      if (ranges.length) where = `, near line${ranges.length > 1 || ranges[0][0] !== ranges[0][1] ? "s" : ""} ${formatLineRanges(ranges)}`;
+    } catch {
+      where = "";
+    }
     for (const article of owners) {
       store.enqueueSystemTodo({
         id: randomUUID2(),
@@ -5694,7 +5728,7 @@ try {
         links: [],
         scope: "project",
         stack_tags: [],
-        text: article.type === "reference_material" ? `reconcile reference '${article.title}' \u2014 its document was touched in direct mode; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${article.slug}' \u2014 files it owns were touched in direct mode (${rel})`,
+        text: article.type === "reference_material" ? `reconcile reference '${article.title}' \u2014 its document was touched in direct mode; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${article.slug}' \u2014 owned file ${rel} was touched in direct mode${where}`,
         source: "system",
         system_reason: "reconcile_needed",
         file_keys: [rel],

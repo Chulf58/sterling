@@ -6,6 +6,59 @@ import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 
 /**
+ * WHICH LINES an Edit/MultiEdit changed, as merged 1-based [start, end] ranges
+ * (board b7269100). PURE — takes the post-edit CONTENT, so the caller owns the
+ * file read and this stays unit-testable.
+ *
+ * Why it exists: a reconcile item said only that a file changed. On a 2717-line
+ * file that fires against every article owning the path regardless of whether the
+ * changed lines are anywhere near what those articles assert, and a consuming
+ * project audited 27 items to find that only FOUR needed a prose change. Naming
+ * the lines lets a reader dismiss an irrelevant item in seconds instead of
+ * re-reading an article.
+ *
+ * The material was always there and always discarded: PostToolUse carries the
+ * tool_input of the very call that fired the hook, so new_string (or edits[]) is
+ * in hand, and locating it in the post-edit file gives the range.
+ *
+ * APPROXIMATE BY CONSTRUCTION, and that is acceptable for a hint that only has to
+ * be good enough to triage: a new_string occurring more than once resolves to the
+ * FIRST occurrence, and a Write (whole-file replace) carries no new_string at all
+ * so it yields nothing rather than a guess. An empty new_string (a pure deletion)
+ * is skipped — indexOf('') is 0 and would report a bogus range at line 1.
+ */
+export function changedLineRanges(toolInput, content) {
+  if (typeof content !== 'string') return [];
+  const pieces = [];
+  if (typeof toolInput?.new_string === 'string') pieces.push(toolInput.new_string);
+  for (const e of Array.isArray(toolInput?.edits) ? toolInput.edits : []) {
+    if (typeof e?.new_string === 'string') pieces.push(e.new_string);
+  }
+  const ranges = [];
+  for (const p of pieces) {
+    if (!p) continue;
+    const idx = content.indexOf(p);
+    if (idx === -1) continue; // a later edit moved it; no honest range to report
+    const start = content.slice(0, idx).split('\n').length;
+    ranges.push([start, start + p.split('\n').length - 1]);
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    // Adjacent ranges join: "12-14, 15-18" is noise where "12-18" is a fact.
+    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]);
+    else merged.push([...r]);
+  }
+  return merged;
+}
+
+/** "12" for a single line, "12-18" for a span, comma-joined. */
+export function formatLineRanges(ranges) {
+  return (ranges ?? []).map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(', ');
+}
+
+/**
  * Nearest ancestor of `from` holding .sterling/sterling.db, or null when the walk
  * reaches the filesystem root without finding one (= not a Sterling project, so
  * hooks stay silent — P1, no ceremony outside Sterling repos).

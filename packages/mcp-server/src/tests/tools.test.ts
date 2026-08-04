@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
@@ -1864,5 +1864,83 @@ test('knowledge_update does NOT auto-drain a file_parked item — no write chang
     );
   } finally {
     cleanup();
+  }
+});
+
+test('an article whose own role text DISCLAIMS a path is told so on the item (§2.10 forever-item)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-disclaim-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'main.ts'), 'v1\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    // The degenerate shape a consuming project found: the article owns the file
+    // and its own role says the entry is historical, redirecting the reader
+    // elsewhere. Every future edit to that file enqueues an already-paid no-op.
+    const art = tools.knowledgeCreate('feature_article', {
+      slug: 'dev-toolchain-setup',
+      title: 'dev-toolchain-setup',
+      what_it_does: 'proves the LSP resolves symbols',
+      intended_behavior: 'x',
+      files: [{ path: 'src/main.ts', role: 'HISTORICAL — a leftover from proving the LSP could resolve symbols; see world-visuals for the actual behaviour' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    }).record;
+
+    // A real out-of-band content change, so the drift wire fires.
+    writeFileSync(join(dir, 'src', 'main.ts'), 'v2 changed\n');
+    const future = new Date(Date.parse(NOW) + 86_400_000);
+    utimesSync(join(dir, 'src', 'main.ts'), future, future);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const [item] = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 10 }) as unknown as { text: string; feature_link?: string }[];
+    assert.equal(item.feature_link, art.id);
+    assert.match(item.text, /disclaims ownership of it/, 'the observation lands on the item — the only place a reader will look');
+    assert.match(item.text, /will recur on every future edit/, 'and says why this is not just noise');
+    assert.match(item.text, /Consider REMOVING src\/main\.ts from files\[\]/, 'offering the real remedy');
+    assert.match(item.text, /check the co-owners first/, 'without inviting an orphaned path');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary role text gets NO disclaimer note — the hint is tuned for precision', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-noclaim-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'own.ts'), 'v1\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    tools.knowledgeCreate('feature_article', {
+      slug: 'real-owner',
+      title: 'real-owner',
+      what_it_does: 'x',
+      intended_behavior: 'x',
+      // Mentions another article WITHOUT disclaiming: a false positive here would
+      // tell someone to drop a path they actually own, the expensive direction.
+      files: [{ path: 'src/own.ts', role: 'the serializer; see world-visuals for the rendering side' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    });
+    writeFileSync(join(dir, 'src', 'own.ts'), 'v2 changed\n');
+    const future = new Date(Date.parse(NOW) + 86_400_000);
+    utimesSync(join(dir, 'src', 'own.ts'), future, future);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const [item] = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 10 }) as unknown as { text: string }[];
+    assert.doesNotMatch(item.text, /disclaims ownership/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

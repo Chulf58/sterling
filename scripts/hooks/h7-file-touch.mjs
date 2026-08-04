@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { readStdin, allow, warnNonBlocking, openStore, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, openStore, repoRel, changedLineRanges, formatLineRanges } from './lib/common.mjs';
 
 const input = readStdin();
 const rel = repoRel(input.tool_input?.file_path, input.cwd);
@@ -34,6 +34,17 @@ try {
   } else {
     // direct mode: maintenance queue (deduped per record) + transient touch register for H10
     const now = new Date().toISOString();
+    // WHERE the file changed, so a co-owner can dismiss an irrelevant item without
+    // re-auditing its article (board b7269100). Best-effort by design: a failed
+    // read or a Write with no new_string yields no hint, never an error and never
+    // a guess — this is triage help, not a claim.
+    let where = '';
+    try {
+      const ranges = changedLineRanges(input.tool_input, readFileSync(join(input.cwd, rel), 'utf8'));
+      if (ranges.length) where = `, near line${ranges.length > 1 || ranges[0][0] !== ranges[0][1] ? 's' : ''} ${formatLineRanges(ranges)}`;
+    } catch {
+      where = '';
+    }
     for (const article of owners) {
       // ONE dedup definition, in the store, ATOMIC (board 2ded3b4b). This used to
       // be a hand-rolled query-then-insert keyed on the ARTICLE — one of four
@@ -57,7 +68,7 @@ try {
         text:
           article.type === 'reference_material'
             ? `reconcile reference '${article.title}' — its document was touched in direct mode; refresh summary + source_date (§3.2.5)`
-            : `reconcile article '${article.slug}' — files it owns were touched in direct mode (${rel})`,
+            : `reconcile article '${article.slug}' — owned file ${rel} was touched in direct mode${where}`,
         source: 'system',
         system_reason: 'reconcile_needed',
         file_keys: [rel],
