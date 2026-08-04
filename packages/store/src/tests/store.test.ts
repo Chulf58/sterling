@@ -476,6 +476,113 @@ test('queue drain log (§3.2.7): system removals logged + capped; user removals 
   }
 });
 
+test('activity log (board 39d6462d): create/supersede/link/remove/retire/promote each log exactly one row', () => {
+  const { dir, store } = tempStore();
+  try {
+    // create → 'created', title-or-slug clipped (article carries both; title wins)
+    const d = store.create(decision({ title: 'Use SQLite' }));
+    let rows = store.listActivityLog(10);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(
+      { verb: rows[0].verb, type: rows[0].type, id: rows[0].id, title: rows[0].title },
+      { verb: 'created', type: 'decision', id: d.id, title: 'Use SQLite' }
+    );
+
+    // supersede → 'updated', logged against the NEW record's id
+    const d2 = store.supersede(d.id, decision({ title: 'Use SQLite v2', updated_at: LATER }));
+    rows = store.listActivityLog(10);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].verb, 'updated');
+    assert.equal(rows[0].id, d2.id);
+    assert.equal(rows[0].title, 'Use SQLite v2');
+
+    // addLink → 'linked'; an identical (deduped) edge does NOT log a second row
+    const target = store.create(decision({ title: 'target' }));
+    store.addLink(d2.id, 'cites', target.id);
+    rows = store.listActivityLog(10);
+    const afterFirstLink = rows.length;
+    assert.equal(rows[0].verb, 'linked');
+    assert.equal(rows[0].id, d2.id);
+    store.addLink(d2.id, 'cites', target.id); // identical edge — dedups, no new row
+    assert.equal(store.listActivityLog(10).length, afterFirstLink, 'a deduped identical edge logs no second row');
+
+    // remove on a NON-todo (note_remove's primitive) → 'removed'
+    const note = store.create({ ...envelope('note'), raw_text: 'a captured note', captured_at: NOW, capture_source: 'command', derived: [] });
+    store.remove(note.id);
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'removed');
+    assert.equal(rows[0].type, 'note');
+    assert.equal(rows[0].id, note.id);
+
+    // remove on a USER todo → 'removed' in the activity log (never in the drain log)
+    const userTodo = store.create({ ...envelope('todo'), text: 'a user todo', source: 'user' });
+    store.remove(userTodo.id, LATER);
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'removed');
+    assert.equal(rows[0].id, userTodo.id);
+
+    // remove on a SYSTEM todo → already covered by queue_drain_log; NOT double-logged here
+    const sysTodo = store.create({ ...envelope('todo'), text: 'reconcile x', source: 'system', system_reason: 'reconcile_needed' });
+    const afterCreate = store.listActivityLog(50).length; // the create() itself logs 'created'
+    store.remove(sysTodo.id, LATER);
+    assert.equal(store.listActivityLog(50).length, afterCreate, 'a system-todo removal is not double-logged (queue_drain_log already covers it)');
+    assert.equal(store.listQueueDrain(1)[0].text, 'reconcile x', 'the drain log still gets it');
+
+    // retireInFavorOf default verb → 'retired'
+    const dup = store.create(decision({ title: 'a duplicate decision' }));
+    const survivor = store.create(decision({ title: 'the survivor' }));
+    store.retireInFavorOf(dup.id, survivor.id, LATER);
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'retired');
+    assert.equal(rows[0].id, dup.id);
+    assert.equal(rows[0].title, 'a duplicate decision');
+
+    // retireInFavorOf with an explicit verb → 'promoted' (knowledgePromote's call shape)
+    const promotedOriginal = store.create(decision({ title: 'promotable finding' }));
+    const domainCopy = store.create({ ...decision({ title: 'promotable finding' }), scope: 'domain:node', id: randomUUID() });
+    store.retireInFavorOf(promotedOriginal.id, domainCopy.id, LATER, 'promoted');
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'promoted');
+    assert.equal(rows[0].id, promotedOriginal.id);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity log title-or-slug: todo/note fall back to their first text line; feature_article uses title over slug', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'csv-export', title: 'CSV export' }));
+    assert.equal(store.listActivityLog(1)[0].title, 'CSV export', 'title wins over slug when both exist');
+
+    const t = store.create({ ...envelope('todo'), text: 'first line\nsecond line', source: 'user' });
+    assert.equal(store.listActivityLog(1)[0].title, 'first line', 'todo falls back to its first text line, clipped');
+
+    const n = store.create({ ...envelope('note'), raw_text: 'note first line\nrest', captured_at: NOW, capture_source: 'command', derived: [] });
+    assert.equal(store.listActivityLog(1)[0].title, 'note first line', 'note falls back to its first raw_text line');
+    void a; void t; void n;
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity log is capped at 50 rows, oldest pruned in the same transaction', () => {
+  const { dir, store } = tempStore();
+  try {
+    for (let i = 0; i < 60; i++) store.create(decision({ title: `decision ${i}` }));
+    const all = store.listActivityLog(100);
+    assert.equal(all.length, 50, 'capped at 50');
+    assert.equal(all[0].title, 'decision 59', 'newest first');
+    assert.ok(!all.some((e) => e.title === 'decision 0'), 'oldest entries pruned');
+    assert.equal(store.listActivityLog(15).length, 15, 'reader limit');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('concurrent access: a second connection reads while the first is open (WAL, §3.1 c6)', () => {
   const { dir, store } = tempStore();
   try {

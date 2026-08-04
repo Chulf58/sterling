@@ -1376,8 +1376,10 @@ export class SterlingTools {
       scope: `domain:${domain}`,
       links: [{ rel: 'informed_by', target_id: id }],
     });
-    // tombstone the project original, pointing forward to the promoted copy
-    this.store.retireInFavorOf(id, promoted.id, ts);
+    // tombstone the project original, pointing forward to the promoted copy —
+    // 'promoted' (not the default 'retired') so the activity feed names this
+    // for what it is (board 39d6462d)
+    this.store.retireInFavorOf(id, promoted.id, ts, 'promoted');
     const review = this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 }).find(
       (t) => (t as { feature_link?: string }).feature_link === id
     );

@@ -310,6 +310,24 @@ export function completedQueueLines(store: SterlingStore, now: () => Date = () =
   });
 }
 
+/** Activity-section lines (board 39d6462d, §11 format): `HH:mm <verb> · <target>`
+ *  (MM-dd HH:mm when older than today) — the same stamp convention as
+ *  completedQueueLines, over the store's activity_log instead of the drain
+ *  log. verb/target are already the plain human-readable values logActivity
+ *  wrote (no DRAIN_VERBS translation needed here). Ordering is the log's seq
+ *  (newest first) — the stamp is cosmetic, never a sort key. Log lines, not
+ *  records: never selectable, mirroring the completed section exactly. */
+export function activityLines(store: SterlingStore, now: () => Date = () => new Date()): string[] {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const today = now();
+  return store.listActivityLog(15).map((e) => {
+    const at = new Date(e.at);
+    const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
+    const stamp = `${sameDay ? '' : `${pad(at.getMonth() + 1)}-${pad(at.getDate())} `}${pad(at.getHours())}:${pad(at.getMinutes())}`;
+    return `${stamp} ${e.verb} · ${e.title}`;
+  });
+}
+
 export function noteCards(store: SterlingStore): Card[] {
   return store.query({ types: ['note'], cap: 200 }).map((n) => {
     const note = n as unknown as { id: string; raw_text: string; captured_at: string; derived: string[] };
