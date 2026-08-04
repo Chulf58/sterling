@@ -4056,7 +4056,7 @@ var coerce = {
 };
 var NEVER = INVALID;
 
-// ../../../packages/schemas/dist/paths.js
+// packages/schemas/dist/paths.js
 function normalizeRepoPath(input2) {
   const fwd = input2.replace(/\\/g, "/");
   if (/^[A-Za-z]:/.test(fwd)) {
@@ -4115,7 +4115,7 @@ function matchesGlob(path, glob) {
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
 
-// ../../../packages/schemas/dist/envelope.js
+// packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
@@ -4149,7 +4149,7 @@ function refineSupersession(rec, ctx) {
   }
 }
 
-// ../../../packages/schemas/dist/records.js
+// packages/schemas/dist/records.js
 var verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
 var base = external_exports.object(envelopeFields);
 var decisionSchema = base.extend({
@@ -4534,7 +4534,7 @@ function validateRecord(input2) {
   return entry.schema.parse(input2);
 }
 
-// ../../../packages/schemas/dist/transient.js
+// packages/schemas/dist/transient.js
 var SIGNALS = [
   "complete",
   "research-needed",
@@ -4605,7 +4605,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4668,7 +4668,7 @@ var runRecordSchema = external_exports.object({
   }).optional()
 });
 
-// ../../../packages/schemas/dist/config.js
+// packages/schemas/dist/config.js
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
@@ -4869,7 +4869,7 @@ function parseConfig(raw) {
   return configSchema.parse(raw);
 }
 
-// ../../../packages/schemas/dist/registry.js
+// packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
   // identity: the project root, absolute POSIX (machine-global, like backup_path —
   // NOT a repo-relative file_key, so it does not go through the path invariant).
@@ -4889,7 +4889,7 @@ var projectRegistrationSchema = external_exports.object({
   last_seen_at: external_exports.string().nullable().default(null)
 });
 
-// ../../../packages/schemas/dist/staleness.js
+// packages/schemas/dist/staleness.js
 var runtimeMarkerSchema = external_exports.object({
   /** the content build-id the running server loaded at boot */
   build_id: external_exports.string(),
@@ -4897,16 +4897,16 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
-// ../../../packages/store/dist/index.js
+// packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
-// ../../../packages/store/dist/registry.js
+// packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
-// ../../../packages/store/dist/index.js
+// packages/store/dist/index.js
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
