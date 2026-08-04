@@ -15,7 +15,7 @@ import { join as join2 } from "node:path";
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
 
-// node_modules/zod/v3/external.js
+// ../../../node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -127,7 +127,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// node_modules/zod/v3/helpers/util.js
+// ../../../node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -261,7 +261,7 @@ var getParsedType = (data) => {
   }
 };
 
-// node_modules/zod/v3/ZodError.js
+// ../../../node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -379,7 +379,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// node_modules/zod/v3/locales/en.js
+// ../../../node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -482,7 +482,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// node_modules/zod/v3/errors.js
+// ../../../node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -491,7 +491,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// node_modules/zod/v3/helpers/parseUtil.js
+// ../../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -601,14 +601,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// node_modules/zod/v3/helpers/errorUtil.js
+// ../../../node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// node_modules/zod/v3/types.js
+// ../../../node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -4613,7 +4613,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -5845,52 +5845,6 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
-// scripts/lib/reviewer-selection.mjs
-function selectReviewers({ config, diff, brief }) {
-  const rs = config.reviewer_selection;
-  const decisions = [];
-  const decide = (reviewer, dispatch, why) => decisions.push({ reviewer, dispatch, why });
-  const codeTouching = diff.length > 0;
-  decide("correctness", codeTouching, codeTouching ? "always runs on code-touching diffs (the floor)" : "no code-touching diff");
-  const pathHit = (patterns) => diff.find((f) => patterns.some((p) => new RegExp(p).test(f.path)));
-  const contentHit = (patterns) => diff.find((f) => (f.added_lines ?? []).some((l) => patterns.some((p) => new RegExp(p).test(l))));
-  const secPath = pathHit(rs.security_path_patterns);
-  const secContent = contentHit(rs.security_content_patterns);
-  const depManifest = diff.find((f) => rs.dependency_manifests.some((g) => matchesGlob(f.path, g) || f.path.endsWith(g)));
-  const secFlag = brief?.risk_flags?.includes("security_relevant");
-  if (secFlag || secPath || secContent || depManifest) {
-    decide(
-      "security",
-      true,
-      secFlag ? "brief risk flag security_relevant" : secPath ? `path signal: '${secPath.path}'` : secContent ? `content signal in '${secContent.path}'` : `dependency manifest touched: '${depManifest.path}'`
-    );
-  } else {
-    decide("security", false, "no security path/content/dependency/brief-flag signal");
-  }
-  const perfFlag = brief?.risk_flags?.includes("perf_sensitive");
-  const perfPath = pathHit(rs.perf_path_patterns);
-  const perfContent = contentHit(rs.perf_content_patterns);
-  if (perfFlag || perfPath || perfContent) {
-    decide("performance", true, perfFlag ? "brief risk flag perf_sensitive" : perfPath ? `path signal: '${perfPath.path}'` : `content signal in '${perfContent.path}'`);
-  } else {
-    decide("performance", false, "no perf signal implicated");
-  }
-  const addedTotal = diff.reduce((n, f) => n + (f.added_lines?.length ?? 0), 0);
-  const newExports = diff.reduce(
-    (n, f) => n + (f.added_lines ?? []).filter((l) => /^\s*export\s/.test(l)).length,
-    0
-  );
-  if (addedTotal >= rs.skeptic_diff_size_threshold || newExports >= rs.skeptic_new_export_threshold) {
-    decide("skeptic", true, `size/new-export threshold: ${addedTotal} added lines, ${newExports} new exports`);
-  } else {
-    decide("skeptic", false, `under thresholds (${addedTotal} added lines, ${newExports} new exports)`);
-  }
-  return {
-    dispatch: decisions.filter((d) => d.dispatch).map(({ reviewer, why }) => ({ reviewer, why })),
-    skipped: decisions.filter((d) => !d.dispatch).map(({ reviewer, why }) => ({ reviewer, why }))
-  };
-}
-
 // scripts/lib/test-integrity.mjs
 import { spawnSync } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
@@ -5962,14 +5916,19 @@ try {
     const at = e.at ?? now;
     if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
   }
-  const hasCaptureDuty = paths.length > 0 || debugEvents.length > 0;
+  const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
+  const latestNoCapture = noCaptureEvents.length ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1) : null;
+  const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync3(join2(input.cwd, p)));
+  const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
+  const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const hasResearchDuty = researchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     clearRegisters();
     allow();
   }
-  const allTimestamps = [...touches.map((t) => t.at), ...sessionEvents.map((e) => e.at)].filter(Boolean).sort();
+  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
   const captured = store.query({ types: ["decision", "anti_pattern", "note", "feature_article", "research_finding", "disconfirmed_hypothesis"], cap: 1e3, include_unconfirmed: true }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
   let researchSatisfied = true;
@@ -6012,7 +5971,7 @@ try {
   }
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = "";
-  if (hasCaptureDuty && !captured && paths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
+  if (hasCaptureDuty && !captured && activePaths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
     const ti = gitTestIntegrity({ cwd: input.cwd, testGlobs });
     if (ti.no_git) store.recordCheckSkipped("test-integrity", "no_git", void 0, now);
     else if (ti.modified.length || ti.deleted.length) {
@@ -6024,24 +5983,17 @@ Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${J
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [];
     if (hasCaptureDuty && !captured) {
-      const hasDebug = debugEvents.length > 0;
-      const diff = paths.map((path) => ({ path, added_lines: [] }));
+      const hasDebug = activeDebugEvents.length > 0;
       if (hasDebug) {
         let capturePart = `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).
-Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).`;
-        if (paths.length > 0) {
-          const selection = selectReviewers({ config, diff });
-          capturePart += `
-Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.`;
-        }
+Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).
+Or, if there is genuinely nothing durable, declare it: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).`;
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
-        const selection = selectReviewers({ config, diff });
         parts.push(
-          `H10: direct-mode work touched ${paths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).
-Capture what was learned inline (knowledge_create), or state explicitly that nothing durable was learned.
-Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` + integrityNote
+          `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).
+Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).` + integrityNote
         );
       }
     }
@@ -6081,10 +6033,10 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `capture owed: direct-mode session touched ${paths.length} file(s) and ended without capture`,
+        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
         source: "system",
         system_reason: "capture_owed",
-        file_keys: paths.slice(0, 20)
+        file_keys: activePaths.slice(0, 20)
       });
     }
   }

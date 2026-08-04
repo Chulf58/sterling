@@ -65,27 +65,45 @@ try {
   // Grep/Glob served again.
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
 
+  // Quote-strip the FIRST whitespace-separated token, for MATCH PURPOSES ONLY
+  // (board f49466f5, decision 398adceb): the executed command, the operator
+  // gate above, and the fs-helper quoted-path branch are all untouched — this
+  // ONLY widens what the run-command prefix match accepts. Stripping applies
+  // ONLY when the quoted content itself contains no whitespace: a single quoted
+  // token — '"node" --test …' — becomes 'node --test …' and is matched
+  // normally. A quoted MULTI-WORD span — '"node --test" x' — is NOT a single
+  // executable token; matching it would let quoting smuggle a whole prefix (and
+  // anything after it) past the allowlist as one opaque blob, so the content
+  // class here (\S without quote/space chars) refuses to consume the internal
+  // space and the whole match fails, leaving the literal (quoted) string to be
+  // tested as-is — which cannot match, and stays denied. Mismatched quotes
+  // ("node' …) fail the same way: the backreference requires the SAME quote
+  // character to close, so there is nothing to strip.
+  const strictQuote = command.match(/^(["'])([^\s"']*)\1(?=\s|$)/);
+  const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
+
+  const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + ' '));
+
   const allowed =
-    runCommandPrefixes.some((p) => command === p || command.startsWith(p + ' ')) || isFsHelper || isReadOnlySearch;
+    matchesPrefix(command) || (strictUnquoted !== null && matchesPrefix(strictUnquoted)) || isFsHelper || isReadOnlySearch;
 
   if (!allowed) {
     // QUOTING DIAGNOSTIC (reported from a consuming project 2026-07-30, decision
-    // 398adceb). The prefix match above is literal, so quoting an allowlisted
-    // absolute exe path — the instinct when it contains spaces — fails to match,
-    // and the generic denial never named quoting as the discriminator. Two agents
-    // hit it; one worked it out by trial. The trap was well hidden because the
-    // fs-helper branch above DOES accept a quoted path, so quoting works in one
-    // branch of this hook and silently fails in the other. The command stays
-    // DENIED — the allow surface is unchanged deliberately, since loosening a
-    // blocking gate is not a message fix — and the agent is pointed at the
-    // unquoted form, which works even for paths containing spaces (a literal
-    // prefix match does not care about spaces).
-    // Both quoting instincts, not just double quotes: a single-quoted exe path
-    // hits the identical literal-match failure, so diagnosing only one form
-    // leaves the same trap open for the other (correctness review 2026-07-30).
-    const unquoted = command.replace(/^(["'])([^"']+)\1/, '$2');
-    const matchedPrefix = runCommandPrefixes.find((p) => unquoted === p || unquoted.startsWith(p + ' '));
-    const quotingIsTheCause = unquoted !== command && !!matchedPrefix;
+    // 398adceb; matching now strips a single-word quoted first token above, so a
+    // command reaching this deny branch was NOT fixed by that — quoting can only
+    // still be "the cause" here for a quoted span that is GENUINELY unmatchable:
+    // a multi-word quoted token ('"node --test" x') or mismatched quotes
+    // ("node' …). Diagnose with a LOOSE strip (content may contain whitespace,
+    // but not a quote char, and the same quote character must close it) purely
+    // to explain WHY — this never feeds back into the allow decision above.
+    const looseQuote = command.match(/^(["'])([^"']*)\1/);
+    const looseUnquoted = looseQuote ? looseQuote[2] + command.slice(looseQuote[0].length) : null;
+    const matchedPrefix = looseUnquoted !== null ? runCommandPrefixes.find((p) => looseUnquoted === p || looseUnquoted.startsWith(p + ' ')) : undefined;
+    // Only a MULTI-WORD quoted span reaches here as a quoting story — a
+    // single-word quoted token that matches was already accepted above, so it
+    // never denies. quotingIsTheCause therefore means "the quoted-as-one-token
+    // form can never match; here is the unquoted equivalent that can."
+    const quotingIsTheCause = !!matchedPrefix && /\s/.test(looseQuote[2]);
     // "Re-run it unquoted" is true about THIS matcher and can still be false
     // about the outcome: if the space sits inside the executable PATH rather than
     // separating arguments, the shell word-splits the unquoted form and the
@@ -99,7 +117,7 @@ try {
     deny(
       `H14: command not on the allowlist: '${command}'.${
         quotingIsTheCause
-          ? ` THE QUOTES ARE THE CAUSE: the allowlist matches command prefixes LITERALLY, so a quoted executable path does not match. Re-run it unquoted: '${unquoted}'.${
+          ? ` THE QUOTED FORM IS GENUINELY UNMATCHABLE: quoting the whole command as ONE token cannot match the allowlist (a single-word quoted first token — e.g. a quoted exe path — is already accepted; a multi-word quoted span is not, so it cannot smuggle a prefix past this gate). Re-run it unquoted: '${looseUnquoted}'.${
               prefixHasSpace
                 ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell — meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).`
                 : ''

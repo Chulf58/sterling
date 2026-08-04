@@ -9,7 +9,7 @@ var __export = (target, all) => {
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-// node_modules/zod/v3/external.js
+// ../../../node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -121,7 +121,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// node_modules/zod/v3/helpers/util.js
+// ../../../node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -255,7 +255,7 @@ var getParsedType = (data) => {
   }
 };
 
-// node_modules/zod/v3/ZodError.js
+// ../../../node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -373,7 +373,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// node_modules/zod/v3/locales/en.js
+// ../../../node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -476,7 +476,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// node_modules/zod/v3/errors.js
+// ../../../node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -485,7 +485,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// node_modules/zod/v3/helpers/parseUtil.js
+// ../../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -595,14 +595,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// node_modules/zod/v3/helpers/errorUtil.js
+// ../../../node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// node_modules/zod/v3/types.js
+// ../../../node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -4471,7 +4471,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4825,14 +4825,18 @@ try {
   const helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
   const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
-  const allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper || isReadOnlySearch;
+  const strictQuote = command.match(/^(["'])([^\s"']*)\1(?=\s|$)/);
+  const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
+  const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + " "));
+  const allowed = matchesPrefix(command) || strictUnquoted !== null && matchesPrefix(strictUnquoted) || isFsHelper || isReadOnlySearch;
   if (!allowed) {
-    const unquoted = command.replace(/^(["'])([^"']+)\1/, "$2");
-    const matchedPrefix = runCommandPrefixes.find((p) => unquoted === p || unquoted.startsWith(p + " "));
-    const quotingIsTheCause = unquoted !== command && !!matchedPrefix;
+    const looseQuote = command.match(/^(["'])([^"']*)\1/);
+    const looseUnquoted = looseQuote ? looseQuote[2] + command.slice(looseQuote[0].length) : null;
+    const matchedPrefix = looseUnquoted !== null ? runCommandPrefixes.find((p) => looseUnquoted === p || looseUnquoted.startsWith(p + " ")) : void 0;
+    const quotingIsTheCause = !!matchedPrefix && /\s/.test(looseQuote[2]);
     const prefixHasSpace = quotingIsTheCause && matchedPrefix.includes(" ");
     deny(
-      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTES ARE THE CAUSE: the allowlist matches command prefixes LITERALLY, so a quoted executable path does not match. Re-run it unquoted: '${unquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
+      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTED FORM IS GENUINELY UNMATCHABLE: quoting the whole command as ONE token cannot match the allowlist (a single-word quoted first token \u2014 e.g. a quoted exe path \u2014 is already accepted; a multi-word quoted span is not, so it cannot smuggle a prefix past this gate). Re-run it unquoted: '${looseUnquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();

@@ -418,7 +418,7 @@ test('§11 drain verbs: every maintenance lane has its completed-section verb (t
 
 // ------------------- session-event register (run r-0501: session-event-register) -------------------
 
-test('sessionEventSchema: the three register kinds parse; unknown kind + missing fields rejected (interface slice 1)', async () => {
+test('sessionEventSchema: the five register kinds parse; unknown kind + missing fields rejected (interface slice 1; no_capture added board 7bbec3bd)', async () => {
   // dynamic import + cast: sessionEventSchema does not exist until this phase ships, so a
   // missing export must fail an ASSERTION below — never a compile-time reference to a
   // not-yet-declared symbol (that would break the package build; a crash-red proves nothing).
@@ -435,9 +435,11 @@ test('sessionEventSchema: the three register kinds parse; unknown kind + missing
   assert.equal(s.parse({ kind: 'debug_scope', detail: 'src/a.mjs', at: NOW }).kind, 'debug_scope');
   // concept_designed (decision 7208729b): detail carries the concept FAMILY slug
   assert.equal(s.parse({ kind: 'concept_designed', detail: 'weapons', at: NOW }).kind, 'concept_designed');
+  // no_capture (board 7bbec3bd): detail carries the REASON for the declaration
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'read-only investigation, nothing durable', at: NOW }).kind, 'no_capture');
 
-  // kind is a closed enum of exactly the four register writers
-  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the four writers is rejected');
+  // kind is a closed enum of exactly the five register writers
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the five writers is rejected');
   // detail is a required string; at is required
   assert.throws(() => s.parse({ kind: 'research_tool', at: NOW }), 'detail is required');
   assert.throws(() => s.parse({ kind: 'research_tool', detail: 42, at: NOW }), 'detail must be a string');
