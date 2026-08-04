@@ -9,7 +9,7 @@ var __export = (target, all) => {
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
 
-// node_modules/zod/v3/external.js
+// ../../../node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -121,7 +121,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// node_modules/zod/v3/helpers/util.js
+// ../../../node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -255,7 +255,7 @@ var getParsedType = (data) => {
   }
 };
 
-// node_modules/zod/v3/ZodError.js
+// ../../../node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -373,7 +373,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// node_modules/zod/v3/locales/en.js
+// ../../../node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -476,7 +476,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// node_modules/zod/v3/errors.js
+// ../../../node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -485,7 +485,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// node_modules/zod/v3/helpers/parseUtil.js
+// ../../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -595,14 +595,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// node_modules/zod/v3/helpers/errorUtil.js
+// ../../../node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// node_modules/zod/v3/types.js
+// ../../../node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -5057,7 +5057,67 @@ var SterlingStore = class {
   }
   get(id) {
     const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
-    return row ? JSON.parse(row.body) : void 0;
+    if (!row)
+      return void 0;
+    return this.withDerivedReliedBy(JSON.parse(row.body));
+  }
+  /**
+   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
+   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
+   * feature_article's relies_on naming this article's slug — not the stored
+   * field. relies_on stays author-written; relied_by cannot drift because it is
+   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
+   * domain-mounted articles are out of scope for this derivation (each mounted
+   * store derives its own; MountedStores does not cross-join relies_on across
+   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
+   * slug-collision check already make.
+   *
+   * Never a hidden lie (constraint 2 of the board item): when the stored
+   * relied_by differs from the derived set (as a sorted-deduped set — order and
+   * duplicates in the stored array don't count as drift), the returned record
+   * carries dependencies.relied_by_stored_stale: true alongside the derived
+   * value actually served. The stored field is left untouched in the DB — this
+   * derivation never writes.
+   */
+  withDerivedReliedBy(record, relations) {
+    if (record.type !== "feature_article")
+      return record;
+    const article = record;
+    const derived = this.deriveReliedBy(article.slug, relations);
+    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
+    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
+    return {
+      ...record,
+      dependencies: {
+        relies_on: article.dependencies?.relies_on ?? [],
+        relied_by: derived,
+        ...stale ? { relied_by_stored_stale: true } : {}
+      }
+    };
+  }
+  /**
+   * Every active feature_article's slug + relies_on, in ONE scan — shared by
+   * withDerivedReliedBy across a whole query() result so a capped list of N
+   * articles costs one table scan, not N.
+   */
+  activeArticleRelations() {
+    const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
+    return rows.map((r) => {
+      const rec = JSON.parse(r.body);
+      return { slug: rec.slug ?? "", reliesOn: rec.dependencies?.relies_on ?? [] };
+    });
+  }
+  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
+  deriveReliedBy(slug, relations) {
+    const rels = relations ?? this.activeArticleRelations();
+    const set = /* @__PURE__ */ new Set();
+    for (const r of rels) {
+      if (r.slug === slug)
+        continue;
+      if (r.reliesOn.includes(slug))
+        set.add(r.slug);
+    }
+    return [...set].sort();
   }
   /**
    * Every record id in this store at ANY status, tombstones included, with its
@@ -5095,7 +5155,11 @@ var SterlingStore = class {
     const rows = this.db.prepare(`SELECT body FROM records
           WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    return rows.map((r) => JSON.parse(r.body));
+    const records = rows.map((r) => JSON.parse(r.body));
+    if (!records.length)
+      return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
   /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
@@ -5151,7 +5215,7 @@ var SterlingStore = class {
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
         const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return rows2.map((x) => JSON.parse(x.body));
+        return this.withDerivedReliedByAll(rows2.map((x) => JSON.parse(x.body)));
       }
     }
     const orderBy = [];
@@ -5164,7 +5228,16 @@ var SterlingStore = class {
     const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return rows.map((x) => JSON.parse(x.body));
+    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body)));
+  }
+  /** query()'s two return paths share this: one relations scan for the whole
+   *  result set (not one per feature_article row) before applying the derived
+   *  relied_by to each. */
+  withDerivedReliedByAll(records) {
+    if (!records.some((r) => r.type === "feature_article"))
+      return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
   /**
    * Versioned change (§3.2.3, §3.1 criterion 3): the new record supersedes the

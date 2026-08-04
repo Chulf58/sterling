@@ -1135,3 +1135,106 @@ test('enqueueSystemTodo: file_keys ORDER does not create a false distinction', (
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// relied_by DERIVED AT READ TIME (board 9641e01b, option (b)): relies_on stays
+// author-written; relied_by is computed from the union of every other active
+// feature_article's relies_on naming this article's slug — on get() AND
+// query() alike, so neither read surface can serve the stale stored field.
+// ---------------------------------------------------------------------------
+
+test('derived relied_by reflects a fresh relies_on immediately — no backfill of the depended-on article needed', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] } }));
+    // 'a' has never had its own relied_by touched — proving the union is
+    // computed from OTHER articles' relies_on, not from anything stored on 'a'.
+    assert.deepEqual((store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, []);
+
+    store.create(article({ slug: 'b', dependencies: { relies_on: ['a'], relied_by: [] } }));
+
+    const viaGet = store.get(a.id) as unknown as { dependencies: { relied_by: string[] } };
+    assert.deepEqual(viaGet.dependencies.relied_by, ['b'], 'get() serves the derived set the instant b declares it');
+
+    const viaQuery = store.query({ types: ['feature_article'], cap: 100 }).find((r) => (r as unknown as { slug: string }).slug === 'a') as unknown as {
+      dependencies: { relied_by: string[] };
+    };
+    assert.deepEqual(viaQuery.dependencies.relied_by, ['b'], 'query() agrees with get()');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relied_by_stored_stale discloses a stored value that no longer matches the derived set, and stays absent when it matches', () => {
+  const { dir, store } = tempStore();
+  try {
+    // 'a' stores a relied_by lie: a slug that names nothing real, and omits the
+    // sibling that actually relies on it.
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: ['ghost-slug'] } }));
+    store.create(article({ slug: 'b', dependencies: { relies_on: ['a'], relied_by: [] } }));
+
+    const stale = store.get(a.id) as unknown as { dependencies: { relied_by: string[]; relied_by_stored_stale?: boolean } };
+    assert.deepEqual(stale.dependencies.relied_by, ['b'], 'the SERVED value is always the derived one');
+    assert.equal(stale.dependencies.relied_by_stored_stale, true, 'never a hidden lie — the mismatch is disclosed');
+
+    // Now correct the stored field to genuinely match the derived set.
+    store.supersede(a.id, article({ slug: 'a', dependencies: { relies_on: [], relied_by: ['b'] }, version: 2 }));
+    const fresh = store
+      .query({ types: ['feature_article'], cap: 100 })
+      .find((r) => (r as unknown as { slug: string }).slug === 'a') as unknown as {
+      dependencies: { relied_by: string[]; relied_by_stored_stale?: boolean };
+    };
+    assert.deepEqual(fresh.dependencies.relied_by, ['b']);
+    assert.equal(fresh.dependencies.relied_by_stored_stale, undefined, 'a matching stored value discloses nothing');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('derived relied_by is deduped and sorted regardless of authoring order or duplicate declarations', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] } }));
+    // 'c' names 'a' twice (author error) and 'z' names 'a' once — inserted in an
+    // order that would NOT already be sorted if left alone.
+    store.create(article({ slug: 'z', dependencies: { relies_on: ['a'], relied_by: [] } }));
+    store.create(article({ slug: 'c', dependencies: { relies_on: ['a', 'a'], relied_by: [] } }));
+
+    const got = store.get(a.id) as unknown as { dependencies: { relied_by: string[] } };
+    assert.deepEqual(got.dependencies.relied_by, ['c', 'z'], 'deduped (c counted once) and sorted, not insertion order');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a superseded article is excluded from derivation on BOTH sides: its relies_on no longer contributes, and it no longer receives derived edges', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] } }));
+    const b = store.create(article({ slug: 'b', dependencies: { relies_on: ['a'], relied_by: [] } }));
+    assert.deepEqual((store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, ['b']);
+
+    // Supersede b with a new version that no longer relies on 'a'.
+    store.supersede(b.id, article({ slug: 'b', dependencies: { relies_on: [], relied_by: [] }, version: 2 }));
+    assert.deepEqual(
+      (store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by,
+      [],
+      "b's superseded (old) relies_on no longer counts toward a's derived relied_by"
+    );
+
+    // Now supersede 'a' itself out of existence (a's own record becomes a tombstone).
+    store.create(article({ slug: 'c', dependencies: { relies_on: ['a'], relied_by: [] } }));
+    assert.deepEqual((store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, ['c']);
+    store.supersede(a.id, article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] }, version: 2 }));
+    // The new head of 'a' is a DIFFERENT id but the same slug — derivation is
+    // slug-keyed, so 'c' still resolves to the live head of 'a'.
+    const newHeadId = store.articlesBySlug('a')[0].id;
+    assert.deepEqual((store.get(newHeadId) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, ['c']);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
