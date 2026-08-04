@@ -330,7 +330,71 @@ export class SterlingStore {
 
   get(id: string): DurableRecord | undefined {
     const row = this.db.prepare('SELECT body FROM records WHERE id = ?').get(id) as { body: string } | undefined;
-    return row ? (JSON.parse(row.body) as DurableRecord) : undefined;
+    if (!row) return undefined;
+    return this.withDerivedReliedBy(JSON.parse(row.body) as DurableRecord);
+  }
+
+  /**
+   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
+   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
+   * feature_article's relies_on naming this article's slug — not the stored
+   * field. relies_on stays author-written; relied_by cannot drift because it is
+   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
+   * domain-mounted articles are out of scope for this derivation (each mounted
+   * store derives its own; MountedStores does not cross-join relies_on across
+   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
+   * slug-collision check already make.
+   *
+   * Never a hidden lie (constraint 2 of the board item): when the stored
+   * relied_by differs from the derived set (as a sorted-deduped set — order and
+   * duplicates in the stored array don't count as drift), the returned record
+   * carries dependencies.relied_by_stored_stale: true alongside the derived
+   * value actually served. The stored field is left untouched in the DB — this
+   * derivation never writes.
+   */
+  private withDerivedReliedBy(record: DurableRecord, relations?: { slug: string; reliesOn: string[] }[]): DurableRecord {
+    if (record.type !== 'feature_article') return record;
+    const article = record as DurableRecord & {
+      slug: string;
+      dependencies: { relies_on: string[]; relied_by: string[] };
+    };
+    const derived = this.deriveReliedBy(article.slug, relations);
+    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
+    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
+    return {
+      ...record,
+      dependencies: {
+        relies_on: article.dependencies?.relies_on ?? [],
+        relied_by: derived,
+        ...(stale ? { relied_by_stored_stale: true } : {}),
+      },
+    } as DurableRecord;
+  }
+
+  /**
+   * Every active feature_article's slug + relies_on, in ONE scan — shared by
+   * withDerivedReliedBy across a whole query() result so a capped list of N
+   * articles costs one table scan, not N.
+   */
+  private activeArticleRelations(): { slug: string; reliesOn: string[] }[] {
+    const rows = this.db
+      .prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`)
+      .all() as { body: string }[];
+    return rows.map((r) => {
+      const rec = JSON.parse(r.body) as { slug?: string; dependencies?: { relies_on?: string[] } };
+      return { slug: rec.slug ?? '', reliesOn: rec.dependencies?.relies_on ?? [] };
+    });
+  }
+
+  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
+  private deriveReliedBy(slug: string, relations?: { slug: string; reliesOn: string[] }[]): string[] {
+    const rels = relations ?? this.activeArticleRelations();
+    const set = new Set<string>();
+    for (const r of rels) {
+      if (r.slug === slug) continue;
+      if (r.reliesOn.includes(slug)) set.add(r.slug);
+    }
+    return [...set].sort();
   }
 
   /**
@@ -378,7 +442,10 @@ export class SterlingStore {
           ORDER BY updated_at DESC`
       )
       .all(slug) as { body: string }[];
-    return rows.map((r) => JSON.parse(r.body) as DurableRecord);
+    const records = rows.map((r) => JSON.parse(r.body) as DurableRecord);
+    if (!records.length) return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
 
   /**
@@ -449,7 +516,7 @@ export class SterlingStore {
           WHERE ${where.join(' AND ')} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
         const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string }[];
-        return rows.map((x) => JSON.parse(x.body) as DurableRecord);
+        return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body) as DurableRecord));
       }
     }
     // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at desc.
@@ -465,7 +532,16 @@ export class SterlingStore {
     const sql = `SELECT r.body FROM records r WHERE ${where.join(' AND ')}
       ORDER BY ${orderBy.join(', ')} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string }[];
-    return rows.map((x) => JSON.parse(x.body) as DurableRecord);
+    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body) as DurableRecord));
+  }
+
+  /** query()'s two return paths share this: one relations scan for the whole
+   *  result set (not one per feature_article row) before applying the derived
+   *  relied_by to each. */
+  private withDerivedReliedByAll(records: DurableRecord[]): DurableRecord[] {
+    if (!records.some((r) => r.type === 'feature_article')) return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
 
   /**
