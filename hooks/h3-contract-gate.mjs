@@ -4173,7 +4173,15 @@ var featureArticleSchema = base.extend({
   title: external_exports.string().min(1),
   what_it_does: external_exports.string().min(1),
   intended_behavior: external_exports.string().min(1),
-  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1) })),
+  // `unverified` marks a files[] entry whose ROLE has not yet been written from
+  // the actual source — an honest "I do not know this yet" (board db7cd16c).
+  // A consuming project had been expressing exactly this in prose ("⚠⚠ ROLE NOT
+  // YET WRITTEN FROM THE FILE"), which is the right instinct and the wrong
+  // mechanism: a marker buried in a role string only helps if somebody reads it,
+  // while a flag is QUERYABLE and the read-time state check can surface it. Set
+  // it when creating an article ahead of the code; clear it by rewriting the
+  // role from the file.
+  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional() })),
   // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
@@ -4305,8 +4313,23 @@ var SYSTEM_REASONS = [
   // §6 H10: direct-mode work in unowned territory ended without its owning article
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
-  "concept_article_missing"
+  "concept_article_missing",
   // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // An owned file is absent from the working tree but ALIVE on another git ref
+  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
+  // reconcile, because no write can change the fact and the article is already
+  // correct (the path becomes valid again on merge). It exists so the absence
+  // arm stops minting an unclosable reconcile_needed that re-fires on every
+  // read, and so the drain has somewhere honest to put the finding.
+  "file_parked",
+  // An article's METADATA contradicts reality: it claims `planned` while the code
+  // it owns is demonstrably written, or it carries files[] roles still marked
+  // unverified. Nothing watched the state field before — the hooks watch content
+  // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
+  // feature, and anyone querying it would have concluded the feature did not
+  // exist. The PROSE was right; the metadata was the lie, and metadata is what a
+  // reader trusts first.
+  "state_review"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4982,6 +5005,77 @@ var SterlingStore = class {
     const record = validateRecord(input2);
     this.tx(() => this.insertRecord(record));
     return record;
+  }
+  /**
+   * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
+   * definition, replacing four hand-rolled copies (board 2ded3b4b).
+   *
+   * THE BUG THIS CLOSES IS TWO BUGS. Four producers minted maintenance items
+   * (h7-file-touch, the read-time drift check in tools.ts, fs-remove, fs-move),
+   * each with its own copy-pasted "does an open item already exist?" query
+   * followed by a separate insert, and no uniqueness constraint anywhere:
+   *
+   *  (1) DUPLICATES. Two producers both read "no open item" before either insert
+   *      committed, and both inserted — classic TOCTOU. A consuming project
+   *      measured SEVEN byte-identical pairs created 2-3 MILLISECONDS apart, 52%
+   *      of a 27-item queue. The cost was judgement rather than writes: the
+   *      deep-queue threshold trips early, and anyone sizing a drain from the raw
+   *      count sees double the work that exists.
+   *  (2) SILENT LOSS — the worse half, and not in the report. All four checks
+   *      keyed on (feature_link, system_reason) and OMITTED the file, so a second
+   *      drifting file on the same article was suppressed. And because
+   *      knowledge_update re-baselines EVERY owned file, reconciling the first
+   *      file absorbed the second file's drift into a fresh baseline: the finding
+   *      neither queued nor survived.
+   *
+   * The key is therefore (system_reason, feature_link, file_keys SET), and the
+   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
+   * concurrent caller blocks on the write lock and then SEES the committed row
+   * instead of racing it.
+   *
+   * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
+   * severity — edited today, deleted tomorrow, both reconcile_needed, the first
+   * not yet drained — would otherwise be swallowed as a duplicate, losing the more
+   * urgent fact. Todos carry no version chain (P4: done = removed), so the text is
+   * replaced in place and updated_at moved; file_keys are identical by
+   * construction, so no index maintenance is needed.
+   */
+  enqueueSystemTodo(input2) {
+    const candidate = validateRecord(input2);
+    if (candidate.type !== "todo" || candidate.source !== "system") {
+      throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
+    }
+    const keyOf = (t) => {
+      const files = [...t.file_keys ?? []].sort();
+      const identified = !!t.feature_link || files.length > 0;
+      return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
+    };
+    const wantKey = keyOf(candidate);
+    let existing;
+    let textUpdated = false;
+    this.tx(() => {
+      const rows = this.db.prepare("SELECT body FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      for (const r of rows) {
+        const t = JSON.parse(r.body);
+        if (t.source !== "system")
+          continue;
+        if (keyOf(t) !== wantKey)
+          continue;
+        existing = t;
+        break;
+      }
+      if (!existing) {
+        this.insertRecord(candidate);
+        return;
+      }
+      if ((existing.text ?? "") !== (candidate.text ?? "")) {
+        const merged = { ...existing, text: candidate.text, updated_at: candidate.updated_at };
+        this.db.prepare("UPDATE records SET body = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(merged), candidate.updated_at, existing.id);
+        existing = merged;
+        textUpdated = true;
+      }
+    });
+    return existing ? { record: existing, deduped: true, text_updated: textUpdated } : { record: candidate, deduped: false, text_updated: false };
   }
   get(id) {
     const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);

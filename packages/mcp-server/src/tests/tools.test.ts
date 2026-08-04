@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
@@ -1692,6 +1693,386 @@ test('knowledge_edit refuses a non-string field and an empty find', () => {
     assert.throws(() => tools.knowledgeEdit(record.id, 'files', 'x', 'y'), /knowledge_append/, 'routes arrays to the right tool');
     assert.throws(() => tools.knowledgeEdit(record.id, 'what_it_does', '', 'y'), /non-empty string/);
     assert.throws(() => tools.knowledgeEdit(record.id, 'nonexistent_field', 'x', 'y'), /does not define/);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PARKED vs DELETED (board 1d6a721a / feedback §2.3+§2.4). Every existence check
+// evaluates the CHECKED-OUT tree, so a file on an unmerged branch read as an
+// out-of-band deletion — and that reconcile_needed could never be closed, because
+// the trigger is absence and no write makes a file appear. It re-fired on every
+// read. These tests pin: git is asked before concluding, a parked file gets an
+// INFORMATIONAL lane instead, and a genuinely absent file still flags.
+// ---------------------------------------------------------------------------
+
+function gitRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-parked-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const git = (...a: string[]) => {
+    const r = spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')} failed: ${r.stderr}`);
+  };
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 't@t.t');
+  git('config', 'user.name', 't');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  return { dir, store, tools, git, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+const systemQueue = (tools: SterlingTools) =>
+  tools.boardQuery({ source: 'system' }) as unknown as { id: string; system_reason: string; text: string; file_keys?: string[]; feature_link?: string }[];
+
+test('a file parked on an unmerged branch is file_parked, NOT an out-of-band deletion', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'seed.ts'), 'export const s = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+
+    // The owned file exists ONLY on a side branch — exactly the reported case.
+    git('checkout', '-q', '-b', 'feat/parked');
+    mkdirSync(join(dir, 'game'), { recursive: true });
+    writeFileSync(join(dir, 'game', 'terrain.gd'), 'extends Node\n');
+    git('add', '-A');
+    git('commit', '-qm', 'terrain on a branch');
+    git('checkout', '-q', 'main');
+    assert.ok(!existsSync(join(dir, 'game', 'terrain.gd')), 'precondition: absent from the working tree');
+
+    const article = mkArticle(tools, 'world-generation', 'game/terrain.gd');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 0, 'no unclosable reconcile item for a file that is merely elsewhere');
+    const parkedItems = queue.filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parkedItems.length, 1, 'the informational lane carries it instead');
+    assert.match(parkedItems[0].text, /ALIVE on 'feat\/parked'/, 'and names the ref that holds it');
+    assert.match(parkedItems[0].text, /DO NOT DROP game\/terrain\.gd/, 'warns against the tempting wrong fix');
+    assert.equal(parkedItems[0].feature_link, article.id);
+
+    // The article's claims are accurate, so a reader must NOT be told to verify.
+    const [served] = tools.knowledgeQueryResult({ types: ['feature_article'] }).records as unknown as { verify_before_use?: boolean }[];
+    assert.ok(!served.verify_before_use, 'a parked file is not staleness — the article is correct as written');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a parked file is recorded ONCE however many times the article is read', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    git('checkout', '-q', '-b', 'side');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'gone.ts'), 'export const g = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add');
+    git('checkout', '-q', 'main');
+
+    mkArticle(tools, 'parked-twice', 'src/gone.ts');
+    for (let i = 0; i < 4; i++) tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(systemQueue(tools).filter((t) => t.system_reason === 'file_parked').length, 1, 'a pure-function-of-disk read path must not pile up copies');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a file that exists on NO ref still flags as an out-of-band deletion — the arm is trustworthy, not disabled', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+
+    mkArticle(tools, 'really-gone', 'src/never-existed.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0, 'nothing to park — it lives nowhere');
+    const reconciles = queue.filter((t) => t.system_reason === 'reconcile_needed');
+    assert.equal(reconciles.length, 1, 'the deletion finding survives the change');
+    assert.match(reconciles[0].text, /no longer exists \(out-of-band deletion\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a file present in HEAD but deleted from the working tree parks against HEAD', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'committed.ts'), 'export const c = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    rmSync(join(dir, 'src', 'committed.ts')); // deleted on disk, still in HEAD
+
+    mkArticle(tools, 'head-parked', 'src/committed.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const parkedItems = systemQueue(tools).filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parkedItems.length, 1);
+    assert.match(parkedItems[0].text, /ALIVE on 'HEAD'/, 'HEAD is probed first — the commonest shape, in one call');
+  } finally {
+    cleanup();
+  }
+});
+
+test('outside a git repo the deletion arm behaves exactly as before (the probe degrades in the safe direction)', () => {
+  // No git init: every probe fails, so nothing is parked and the deletion item
+  // still fires. A missing or broken git must never SUPPRESS a real finding.
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-nogit-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    mkArticle(tools, 'nogit', 'src/absent.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 1, 'the deletion finding is preserved');
+    assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('knowledge_update does NOT auto-drain a file_parked item — no write changes where the file lives', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    git('checkout', '-q', '-b', 'side');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'p.ts'), 'export const p = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add');
+    git('checkout', '-q', 'main');
+
+    const article = mkArticle(tools, 'no-drain', 'src/p.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(systemQueue(tools).filter((t) => t.system_reason === 'file_parked').length, 1);
+
+    tools.knowledgeUpdate(article.id, { what_it_does: 'revised' });
+    assert.equal(
+      systemQueue(tools).filter((t) => t.system_reason === 'file_parked').length,
+      1,
+      'the drift auto-drain is scoped to the two drift lanes; this fact is still true after the write'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('an article whose own role text DISCLAIMS a path is told so on the item (§2.10 forever-item)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-disclaim-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'main.ts'), 'v1\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    // The degenerate shape a consuming project found: the article owns the file
+    // and its own role says the entry is historical, redirecting the reader
+    // elsewhere. Every future edit to that file enqueues an already-paid no-op.
+    const art = tools.knowledgeCreate('feature_article', {
+      slug: 'dev-toolchain-setup',
+      title: 'dev-toolchain-setup',
+      what_it_does: 'proves the LSP resolves symbols',
+      intended_behavior: 'x',
+      files: [{ path: 'src/main.ts', role: 'HISTORICAL — a leftover from proving the LSP could resolve symbols; see world-visuals for the actual behaviour' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    }).record;
+
+    // A real out-of-band content change, so the drift wire fires.
+    writeFileSync(join(dir, 'src', 'main.ts'), 'v2 changed\n');
+    const future = new Date(Date.parse(NOW) + 86_400_000);
+    utimesSync(join(dir, 'src', 'main.ts'), future, future);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const [item] = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 10 }) as unknown as { text: string; feature_link?: string }[];
+    assert.equal(item.feature_link, art.id);
+    assert.match(item.text, /disclaims ownership of it/, 'the observation lands on the item — the only place a reader will look');
+    assert.match(item.text, /will recur on every future edit/, 'and says why this is not just noise');
+    assert.match(item.text, /Consider REMOVING src\/main\.ts from files\[\]/, 'offering the real remedy');
+    assert.match(item.text, /check the co-owners first/, 'without inviting an orphaned path');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary role text gets NO disclaimer note — the hint is tuned for precision', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-noclaim-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'own.ts'), 'v1\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    tools.knowledgeCreate('feature_article', {
+      slug: 'real-owner',
+      title: 'real-owner',
+      what_it_does: 'x',
+      intended_behavior: 'x',
+      // Mentions another article WITHOUT disclaiming: a false positive here would
+      // tell someone to drop a path they actually own, the expensive direction.
+      files: [{ path: 'src/own.ts', role: 'the serializer; see world-visuals for the rendering side' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    });
+    writeFileSync(join(dir, 'src', 'own.ts'), 'v2 changed\n');
+    const future = new Date(Date.parse(NOW) + 86_400_000);
+    utimesSync(join(dir, 'src', 'own.ts'), future, future);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const [item] = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 10 }) as unknown as { text: string }[];
+    assert.doesNotMatch(item.text, /disclaims ownership/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// STATE HONESTY (board db7cd16c / feedback §2.8). Nothing watched the state
+// field — the hooks watch content hashes — so an article sat at `planned` over a
+// shipped, wired, probe-verified feature whose ten ACs all held. The prose was
+// right; the METADATA was the lie, and metadata is what a reader trusts first.
+// ---------------------------------------------------------------------------
+
+function stateProject() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-state-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  return { dir, store, tools, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+const stateReviews = (tools: SterlingTools) =>
+  tools.maintenanceQuery({ system_reason: 'state_review', cap: 50 }) as unknown as { text: string; file_keys?: string[]; feature_link?: string }[];
+
+const shippedArticle = (tools: SterlingTools, over: Record<string, unknown> = {}) =>
+  tools.knowledgeCreate('feature_article', {
+    slug: 'housing',
+    title: 'housing',
+    what_it_does: 'houses the dome farmers',
+    intended_behavior: 'x',
+    files: [{ path: 'src/housing.ts', role: 'impl' }],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'planned',
+    version: 1,
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+    ...over,
+  }).record;
+
+test("an article claiming 'planned' over real code raises state_review", () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    // 674 lines was the measured case; anything past a placeholder qualifies.
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n'.repeat(300));
+    const art = shippedArticle(tools);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].feature_link, art.id);
+    assert.match(items[0].text, /declares state 'planned' while the files it owns hold \d+ bytes/);
+    assert.match(items[0].text, /Check the prose against the code before changing anything/, 'the fix is usually metadata, not a rewrite');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a small file does NOT raise it — a scaffolded placeholder is legitimately planned', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), '// TODO: build housing\n');
+    shippedArticle(tools);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an 'active' article over real code raises nothing — the metadata is honest", () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n'.repeat(300));
+    shippedArticle(tools, { state: 'active' });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an unverified files[] role raises state_review whatever the state, and names the paths', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n');
+    shippedArticle(tools, {
+      state: 'active',
+      files: [{ path: 'src/housing.ts', role: 'ROLE NOT YET WRITTEN FROM THE FILE', unverified: true }],
+    });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1, 'the honest "I do not know this yet" is now acted on rather than buried in prose');
+    assert.match(items[0].text, /roles for src\/housing\.ts are still flagged unverified/);
+    assert.deepEqual(items[0].file_keys, ['src/housing.ts'], 'and the item is keyed to the file whose role is owed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('state_review is minted ONCE across repeated reads, and clearing the flag stops it', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n');
+    const art = shippedArticle(tools, {
+      state: 'active',
+      files: [{ path: 'src/housing.ts', role: 'not written yet', unverified: true }],
+    });
+    for (let i = 0; i < 3; i++) tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 1, 'the atomic dedup covers this lane too');
+
+    // Writing the role from the file is the fulfilling artifact.
+    tools.knowledgeUpdate(art.id, { files: [{ path: 'src/housing.ts', role: 'exports x, consumed by the dome loop' }] });
+    const after = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal((after[0] as unknown as { files: { unverified?: boolean }[] }).files[0].unverified, undefined, 'the flag is gone');
+    // The state_review item is NOT auto-drained (that drain is scoped to the two
+    // drift lanes), so it is still open — but nothing NEW is minted.
+    assert.equal(stateReviews(tools).length, 1, 'no second item once the condition is gone');
+  } finally {
+    cleanup();
+  }
+});
+
+test("state_review does NOT double-report a deletion the drift arm already named", () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    // 'active' with an absent file: the deletion item covers it; a second lane on
+    // the same fact is the double-reporting this batch reduces.
+    shippedArticle(tools, { state: 'active' });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0);
+    assert.equal(tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 10 }).length, 1, 'the deletion IS reported, once');
   } finally {
     cleanup();
   }

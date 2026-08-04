@@ -46,17 +46,15 @@ try {
   for (const article of store.query({ types: ['feature_article'], file_keys: [to], cap: 100 })) {
     if (run) store.appendRunReconcileNeeded(run.id, article.id);
     else {
-      const open = store
-        .query({ types: ['todo'], cap: 1000 })
-        .some((t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && t.feature_link === article.id);
-      if (!open) {
-        store.create({
-          id: randomUUID(), type: 'todo', created_at: now, updated_at: now, author: 'system', status: 'active',
-          superseded_by: null, links: [], scope: 'project', stack_tags: [],
-          text: `reconcile article '${article.slug}' — '${from}' was renamed to '${to}'`,
-          source: 'system', system_reason: 'reconcile_needed', file_keys: [to], feature_link: article.id,
-        });
-      }
+      // Atomic, (reason, feature_link, file)-keyed dedup in the store — one
+      // definition instead of the four hand-rolled copies that raced each other
+      // and dropped a second file's finding (board 2ded3b4b).
+      store.enqueueSystemTodo({
+        id: randomUUID(), type: 'todo', created_at: now, updated_at: now, author: 'system', status: 'active',
+        superseded_by: null, links: [], scope: 'project', stack_tags: [],
+        text: `reconcile article '${article.slug}' — '${from}' was renamed to '${to}'`,
+        source: 'system', system_reason: 'reconcile_needed', file_keys: [to], feature_link: article.id,
+      });
     }
   }
   console.log(JSON.stringify({ moved: { from, to }, records_rewritten: rewritten }));

@@ -2220,3 +2220,89 @@ test('H8 AC2: the SAME config field governs the breadth backstop — a custom di
     tight.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// RECONCILE RELEVANCE (board b7269100 / feedback §2.9+§2.10). An item said only
+// that a file changed, so on a 2717-line file it fired against every article
+// owning the path — 27 items audited, FOUR needed a prose change. The material
+// for a better item was always in hand and always discarded: PostToolUse carries
+// the tool_input of the very call that fired the hook.
+// ---------------------------------------------------------------------------
+
+test('changedLineRanges: locates an Edit, merges adjacent MultiEdit hunks, and refuses to guess', async () => {
+  const { changedLineRanges, formatLineRanges } = await import(pathToFileURL(join(HOOKS, 'lib', 'common.mjs')).href);
+  const content = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].join('\n');
+
+  assert.deepEqual(changedLineRanges({ new_string: 'c' }, content), [[3, 3]], 'single line');
+  assert.deepEqual(changedLineRanges({ new_string: 'c\nd' }, content), [[3, 4]], 'a span');
+  assert.deepEqual(
+    changedLineRanges({ edits: [{ new_string: 'b' }, { new_string: 'g' }] }, content),
+    [[2, 2], [7, 7]],
+    'two separate hunks stay separate'
+  );
+  assert.deepEqual(
+    changedLineRanges({ edits: [{ new_string: 'b' }, { new_string: 'c' }] }, content),
+    [[2, 3]],
+    'adjacent hunks MERGE — "2-2, 3-3" is noise where "2-3" is a fact'
+  );
+
+  // The honest-absence cases: no guessing.
+  assert.deepEqual(changedLineRanges({}, content), [], 'a Write carries no new_string — no hint rather than a guess');
+  assert.deepEqual(changedLineRanges({ new_string: 'zzz' }, content), [], 'text not present (a later edit moved it) reports nothing');
+  assert.deepEqual(changedLineRanges({ new_string: '' }, content), [], 'a pure deletion is skipped — indexOf("") would report line 1');
+  assert.deepEqual(changedLineRanges({ new_string: 'a' }, undefined), [], 'no content, no claim');
+
+  assert.equal(formatLineRanges([[3, 3], [7, 9]]), '3, 7-9');
+  assert.equal(formatLineRanges([]), '');
+});
+
+test('H7 names WHERE the file changed, so a co-owner can dismiss an irrelevant item in seconds', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`);
+    lines[24] = 'CHANGED HERE';
+    writeFileSync(join(dir, 'src', 'big.mjs'), lines.join('\n'));
+    article(store, 'owner', ['src/big.mjs']);
+
+    const r = runHook(
+      'h7-file-touch.mjs',
+      hookInput(dir, {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: join(dir, 'src', 'big.mjs'), old_string: 'line 25', new_string: 'CHANGED HERE' },
+      }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    const [item] = store.query({ types: ['todo'], cap: 10 });
+    assert.match(item.text, /owned file src\/big\.mjs was touched in direct mode, near line 25/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H7 omits the hint rather than inventing one when the tool gives it nothing', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'w.mjs'), 'whole file replaced\n');
+    article(store, 'owner', ['src/w.mjs']);
+
+    // Write carries no new_string: there is no honest range to report.
+    const r = runHook(
+      'h7-file-touch.mjs',
+      hookInput(dir, {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Write',
+        tool_input: { file_path: join(dir, 'src', 'w.mjs'), content: 'whole file replaced\n' },
+      }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    const [item] = store.query({ types: ['todo'], cap: 10 });
+    assert.match(item.text, /owned file src\/w\.mjs was touched in direct mode$/, 'no trailing "near lines" clause');
+  } finally {
+    cleanup();
+  }
+});

@@ -2,7 +2,7 @@
 // the logic is unit-testable; server.ts wires them to MCP. Coarse tools are
 // safe because schemas are exact: every write revalidates at the store.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -14,6 +14,22 @@ import { react, type BrainAction, type ResolvedExit } from './brain.js';
 export interface SkippedCheck {
   check: string;
   reason: string;
+}
+
+/**
+ * knowledge_create's result. `deduped`/`text_updated` appear only for a SYSTEM
+ * maintenance item that hit the atomic dedup path (board 2ded3b4b) — they are
+ * DECLARED rather than spread-in-silently, because a caller that cannot see
+ * "this returned the existing item" in the type is a caller that will treat a
+ * dedup as a fresh insert.
+ */
+export interface CreateResult {
+  record: DurableRecord;
+  check_skipped: SkippedCheck[];
+  /** The item already existed; `record` is that existing item, not a new row. */
+  deduped?: boolean;
+  /** The existing item's text was refreshed because this attempt said something different. */
+  text_updated?: boolean;
 }
 
 export interface BoardFilter {
@@ -133,6 +149,27 @@ const DEFAULT_BOARD_CAP = 50;
 // The bounded todo scan the filter runs over. A full scan means the reported
 // count is a floor; boardQueryResult says so rather than under-reporting.
 const BOARD_SCAN_CAP = 1000;
+// How many local branches the parked-file probe will interrogate for ONE absent
+// file (board 1d6a721a). Bounded because the probe shells out per ref: a repo
+// with a long tail of stale branches must not turn one missing file into
+// hundreds of subprocesses. Overrunning it degrades to today's behaviour — the
+// deletion item — which is the safe direction, since that lane demands work and
+// the parked lane does not.
+const PARKED_REF_PROBE_CAP = 40;
+// Per-file drift items one read may mint for ONE article (board 2ded3b4b). One
+// item per FILE is the point — an item that names the changed file is actionable
+// where an article-level one is not, and the old article-level dedup is what
+// suppressed a second file's finding entirely. But an article owning twenty files
+// through a whole-area refactor should not become twenty items, so the remainder
+// is folded into ONE summary item that NAMES the paths it covers: a cap that
+// truncates silently would read as "everything is accounted for" (P5).
+const DRIFT_ITEMS_PER_READ = 3;
+// Bytes of owned code past which `state: 'planned'` stops being credible (board
+// db7cd16c). Deliberately generous: the point is to catch an article sitting at
+// 'planned' over a SHIPPED feature (the measured case was 674 lines), not to
+// nag about a stub someone scaffolded five minutes ago. A whole file under this
+// is plausibly still a placeholder; several hundred lines is not.
+const PLANNED_CREDIBLE_BYTES = 2000;
 
 export class SterlingTools {
   private store: ToolStore;
@@ -217,6 +254,84 @@ export class SterlingTools {
    */
   private isGeneratedProjection(rel: string): boolean {
     return this.config.generated_projections.includes(rel);
+  }
+
+  /**
+   * A file absent from the working tree may still be ALIVE on another git ref —
+   * parked on an unmerged branch rather than deleted (board 1d6a721a). Returns
+   * the first ref that holds it, or undefined if it exists nowhere (in which
+   * case the deletion reading is correct, and now trustworthy).
+   *
+   * ONLY CALLED ON THE ALREADY-RARE MISSING-FILE PATH, never on the hot read
+   * path: shelling out per owned file per query would be a real regression, and
+   * the whole point is that absence is unusual. Bounded by PARKED_REF_PROBE_CAP
+   * so a repo with hundreds of stale branches cannot turn one absent file into
+   * hundreds of subprocesses.
+   *
+   * HEAD is probed FIRST and separately: a file present in HEAD but not on disk
+   * is the commonest shape (someone deleted it without committing), and catching
+   * it in one call avoids walking the branch list at all.
+   *
+   * Every git failure is swallowed to undefined, which degrades to today's
+   * behaviour — a deletion item. That direction is deliberate: a missing git, a
+   * non-repo tree root, or a corrupt ref must not SUPPRESS a real deletion
+   * finding, because the informational lane demands nothing and the reconcile
+   * lane is the one that gets acted on.
+   */
+  private parkedOnRef(rel: string, treeRoot: string): string | undefined {
+    const has = (ref: string): boolean => {
+      try {
+        return spawnSync('git', ['-C', treeRoot, 'cat-file', '-e', `${ref}:${rel}`], { encoding: 'utf8', windowsHide: true }).status === 0;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      if (has('HEAD')) return 'HEAD';
+      const refs = spawnSync('git', ['-C', treeRoot, 'for-each-ref', '--format=%(refname:short)', 'refs/heads'], {
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+      if (refs.status !== 0 || typeof refs.stdout !== 'string') return undefined;
+      const branches = refs.stdout
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, PARKED_REF_PROBE_CAP);
+      for (const b of branches) if (has(b)) return b;
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Does this files[] entry's own ROLE TEXT disclaim ownership of the path
+   * (board b7269100 / feedback §2.10)?
+   *
+   * The degenerate case a consuming project found: an article owns a 2717-line
+   * file and its own role text says the entry is HISTORICAL — a leftover from
+   * proving something once — then redirects the reader to three other articles
+   * for the file's actual behaviour. So it owns a file it makes no claims about,
+   * and every future edit to that file, for any reason, enqueues an already-paid
+   * no-op against it. Forever, by construction, and nothing noticed.
+   *
+   * Detection is a HINT, so it is tuned for precision over recall: only phrases
+   * that state the entry is not really this article's business count. A false
+   * positive would tell someone to drop a path they actually own, which is the
+   * expensive direction, so borderline wording is deliberately left undetected.
+   */
+  private disclaimsOwnership(role: string | undefined): boolean {
+    if (!role) return false;
+    return [
+      /\bhistorical\b/i,
+      /\bleftover\b/i,
+      /\bno longer (?:owns?|describes?|governs?|relevant)\b/i,
+      /\bnot (?:the )?(?:owner|owned|this article's)\b/i,
+      /\bsee .{0,40}\bfor (?:the )?(?:actual|real)\b/i,
+      /\bmakes no claims?\b/i,
+      /\bvestigial\b/i,
+    ].some((re) => re.test(role));
   }
 
   /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read. */
@@ -328,7 +443,7 @@ export class SterlingTools {
     };
   }
 
-  knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
+  knowledgeCreate(type: string, fields: Record<string, unknown>): CreateResult {
     this.refuseServerOwnedFields(fields, 'knowledge_create');
     const ts = this.now();
     // The envelope is SERVER-OWNED: strip these keys from caller fields before
@@ -428,6 +543,26 @@ export class SterlingTools {
       skipped.push(this.skip('dedup-merge', this.activeRunId()));
     }
 
+    // A SYSTEM maintenance item takes the ATOMIC dedup path (board 2ded3b4b):
+    // check-and-insert in one transaction, keyed (system_reason, feature_link,
+    // file_keys). Every producer funnels through here, so the four hand-rolled
+    // query-then-insert copies that raced each other are gone, and the key now
+    // includes the FILE — which fixes the opposite bug in the same stroke, where
+    // a second drifting file was suppressed and then absorbed by the next
+    // re-baseline. A duplicate returns the EXISTING item rather than throwing:
+    // producers are mechanisms reporting a fact, and a fact reported twice is
+    // not an error.
+    const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
+    if (isSystemTodo) {
+      const res = this.store.enqueueSystemTodo(candidate);
+      this.surfacePromotionCandidate(res.record, type);
+      return {
+        record: res.record,
+        check_skipped: skipped,
+        ...(res.deduped ? { deduped: true } : {}),
+        ...(res.text_updated ? { text_updated: true } : {}),
+      };
+    }
     const record = this.store.create(candidate);
     if (type === 'note') {
       const failed = this.dispatchNoteStructuring(record, fields);
@@ -588,7 +723,8 @@ export class SterlingTools {
       // the article and enqueues ONE reconcile_needed item (same feature_link
       // dedup as H7 — one drain surface regardless of trigger).
       if (record.type === 'feature_article' && this.repoRoot) {
-        const a = record as unknown as { id: string; slug: string; files?: { path: string }[]; file_baselines?: Record<string, string> };
+        const a = record as unknown as { id: string; slug: string; files?: { path: string; role?: string }[]; file_baselines?: Record<string, string> };
+        const roleFor = (p: string) => (a.files ?? []).find((f) => f.path === p)?.role;
         // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a copy-
         // describing article's files are stat'd against ITS tree — resolving
         // against the project root produced false "out-of-band deletion" items
@@ -596,13 +732,39 @@ export class SterlingTools {
         const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
         if (tree.unresolved) return { ...record, verify_before_use: true };
         const treeRoot = tree.root ?? this.repoRoot;
-        let drift: { path: string; missing: boolean } | undefined;
+        // EVERY drifting file, not just the first (board 2ded3b4b). This loop used
+        // to `break` on the first drift, and the enqueue dedup keyed on the
+        // ARTICLE — so a second drifting file never got an item, and because
+        // knowledge_update re-baselines EVERY owned file, reconciling the first
+        // absorbed the second's drift into a fresh baseline. The finding neither
+        // queued nor survived. One item per FILE is also what makes an item
+        // actionable: it names the thing that changed.
+        const drifts: { path: string; missing: boolean }[] = [];
+        const parkedFiles: { path: string; ref: string }[] = [];
+        // Owned bytes that actually exist — the evidence for the state check below.
+        // Free here: the stat is already being taken for the drift comparison.
+        let liveBytes = 0;
         for (const f of a.files ?? []) {
           const stat = statSync(join(treeRoot, f.path), { throwIfNoEntry: false });
           if (!stat) {
-            drift = { path: f.path, missing: true };
-            break;
+            // ABSENT FROM THE WORKING TREE IS NOT THE SAME AS DELETED (board
+            // 1d6a721a). Every check here evaluates the CHECKED-OUT tree, so a
+            // file parked on an unmerged branch read as an out-of-band deletion
+            // — and that item could never be closed, because the trigger is
+            // absence and no write makes a file appear. It re-fired on every
+            // subsequent read (this arm is a pure function of disk state), which
+            // pushed a drain toward exactly the no-op version bumps the closing
+            // rule calls drift. Ask git before concluding anything: `ls` proves
+            // working-tree absence and nothing else.
+            const ref = this.parkedOnRef(f.path, treeRoot);
+            if (ref) {
+              parkedFiles.push({ path: f.path, ref });
+              continue; // the article is CORRECT — the path returns on merge
+            }
+            drifts.push({ path: f.path, missing: true });
+            continue;
           }
+          liveBytes += stat.size;
           // mtime newer than updated_at is the cheap pre-filter; confirm a real
           // content change against the baseline before flagging, so a git
           // merge/checkout's mtime reset is not mistaken for an out-of-band edit.
@@ -610,25 +772,115 @@ export class SterlingTools {
           // changes it by design and the merge gate's check-projection-fresh
           // guards its currency; its DELETION still lands in the missing arm above.
           if (stat.mtimeMs > Date.parse(record.updated_at) && !this.isGeneratedProjection(f.path) && this.contentChanged(f.path, a.file_baselines, treeRoot)) {
-            drift = { path: f.path, missing: false };
-            break;
+            drifts.push({ path: f.path, missing: false });
           }
         }
-        if (drift) {
-          const open = this.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).some(
-            (t) => (t as { feature_link?: string }).feature_link === a.id
-          );
-          if (!open) {
+        if (drifts.length) {
+          // NO PRE-CHECK: enqueueSystemTodo is atomic and keyed
+          // (reason, feature_link, file), so re-enqueueing an already-open item
+          // returns it instead of duplicating it. The old pre-check keyed on the
+          // ARTICLE, which is exactly what suppressed a second file's finding —
+          // and doing it here as well as in the store would put the dedup rule in
+          // two places, which is how the four copies drifted apart to begin with.
+          for (const d of drifts.slice(0, DRIFT_ITEMS_PER_READ)) {
+            // If the article's OWN role text disclaims the path, say so on the
+            // item (board b7269100). Otherwise this exact no-op gets re-audited
+            // on every future edit to that file, forever — the item is the only
+            // place a reader will ever look, so it is where the observation has
+            // to land, and offering the real remedy converts a permanent
+            // irritant into one decision taken once.
+            const disclaimed = this.disclaimsOwnership(roleFor(d.path))
+              ? ` NOTE: this article's own files[] role for ${d.path} disclaims ownership of it, so this item will recur on every future edit to that file and each one will be a no-op. Consider REMOVING ${d.path} from files[] instead of reconciling — check the co-owners first (knowledge_query file_keys:["${d.path}"]) so the path is not left orphaned.`
+              : '';
             this.maintenanceEnqueue({
               reason: 'reconcile_needed',
-              text: drift.missing
-                ? `reconcile article '${a.slug}' — owned file ${drift.path} no longer exists (out-of-band deletion)`
-                : `reconcile article '${a.slug}' — owned file ${drift.path} changed on disk after the article's last update (out-of-band edit)`,
-              file_keys: [drift.path],
+              text:
+                (d.missing
+                  ? `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
+                  : `reconcile article '${a.slug}' — owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`) + disclaimed,
+              file_keys: [d.path],
+              feature_link: a.id,
+            });
+          }
+          if (drifts.length > DRIFT_ITEMS_PER_READ) {
+            // Never truncate SILENTLY (P5): the remainder is named on the item
+            // that did land, so a reader knows the queue is a floor here.
+            this.maintenanceEnqueue({
+              reason: 'reconcile_needed',
+              text:
+                `reconcile article '${a.slug}' — ${drifts.length} owned files drifted in one read; ` +
+                `the first ${DRIFT_ITEMS_PER_READ} have their own items and the remainder (${drifts
+                  .slice(DRIFT_ITEMS_PER_READ)
+                  .map((d) => d.path)
+                  .join(', ')}) are covered by this one. A drift this wide usually means a whole-area change — reconcile the article as a whole.`,
+              file_keys: drifts.slice(DRIFT_ITEMS_PER_READ).map((d) => d.path),
               feature_link: a.id,
             });
           }
           return { ...record, verify_before_use: true };
+        }
+        // A PARKED file is recorded once and does NOT raise verify_before_use:
+        // the article's claims are accurate, the path is simply not in this
+        // checkout, and telling a reader to verify before use would be false
+        // alarm. Deduped on (feature_link, file) so a read loop cannot pile up
+        // copies. Not auto-drained by knowledge_update either — that drain is
+        // scoped to the two drift lanes — because no article write changes
+        // where the file lives.
+        for (const p of parkedFiles.slice(0, DRIFT_ITEMS_PER_READ)) {
+          this.maintenanceEnqueue({
+            reason: 'file_parked',
+            text:
+              `article '${a.slug}' — owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. ` +
+              `INFORMATIONAL: no reconcile is owed and the article is correct as written. ` +
+              `DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] — the path becomes valid again when that branch merges. ` +
+              `This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
+            file_keys: [p.path],
+            feature_link: a.id,
+          });
+        }
+
+        // STATE HONESTY (board db7cd16c). Nothing watched the state field: the
+        // hooks watch content hashes, so an article sat at `planned` over a
+        // shipped, wired, probe-verified feature whose ten acceptance criteria all
+        // held. The PROSE was right and the METADATA was the lie — and metadata is
+        // what a reader trusts first, so anyone querying it would have concluded a
+        // working feature did not exist.
+        //
+        // Two triggers, both cheap here because the stats are already taken:
+        //  - `planned` (or `dormant`) over more owned bytes than a placeholder;
+        //  - any files[] entry still flagged `unverified`, i.e. a role never
+        //    written from the source. That flag exists to make the honest "I don't
+        //    know this yet" cheap, and it is only worth having if something acts on
+        //    it (board db7cd16c) — otherwise it is the ⚠⚠-in-prose it replaced.
+        //
+        // NOT a trigger, deliberately: `built`/`active` while the files are ABSENT.
+        // The report asks for it, but the deletion arm above already mints an item
+        // naming the missing file, and a second lane on the same fact is the
+        // double-reporting this batch exists to reduce.
+        const state = (record as unknown as { state?: string }).state;
+        const unverifiedPaths = (a.files ?? []).filter((f) => (f as { unverified?: boolean }).unverified).map((f) => f.path);
+        const overStated = (state === 'planned' || state === 'dormant') && liveBytes > PLANNED_CREDIBLE_BYTES;
+        if (overStated || unverifiedPaths.length) {
+          const reasons: string[] = [];
+          if (overStated) {
+            reasons.push(
+              `it declares state '${state}' while the files it owns hold ${liveBytes} bytes of code on disk — 'planned' over written code reads as "this does not exist yet" to everyone who queries it`
+            );
+          }
+          if (unverifiedPaths.length) {
+            reasons.push(
+              `its files[] roles for ${unverifiedPaths.join(', ')} are still flagged unverified — the role was never written from the source, so the article does not yet describe what those files do`
+            );
+          }
+          this.maintenanceEnqueue({
+            reason: 'state_review',
+            text:
+              `review article '${a.slug}' metadata against reality: ${reasons.join('; and ')}. ` +
+              `Check the prose against the code before changing anything — in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. ` +
+              `Then knowledge_update the state (and clear the unverified flags you have written from the file).`,
+            file_keys: unverifiedPaths.length ? unverifiedPaths : (a.files ?? []).map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
+            feature_link: a.id,
+          });
         }
       }
       const basis = (record as unknown as { basis?: string }).basis;
@@ -1036,7 +1288,7 @@ export class SterlingTools {
 
   // -- board (§3.2.7) ----------------------------------------------------------
 
-  boardAdd(args: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
+  boardAdd(args: Record<string, unknown>): CreateResult {
     const { text, source, ...rest } = args;
     return this.knowledgeCreate('todo', { text, source, ...rest });
   }

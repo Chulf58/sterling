@@ -32,7 +32,15 @@ export const featureArticleSchema = base
     title: z.string().min(1),
     what_it_does: z.string().min(1),
     intended_behavior: z.string().min(1),
-    files: z.array(z.object({ path: repoPath, role: z.string().min(1) })),
+    // `unverified` marks a files[] entry whose ROLE has not yet been written from
+    // the actual source — an honest "I do not know this yet" (board db7cd16c).
+    // A consuming project had been expressing exactly this in prose ("⚠⚠ ROLE NOT
+    // YET WRITTEN FROM THE FILE"), which is the right instinct and the wrong
+    // mechanism: a marker buried in a role string only helps if somebody reads it,
+    // while a flag is QUERYABLE and the read-time state check can surface it. Set
+    // it when creating an article ahead of the code; clear it by rewriting the
+    // role from the file.
+    files: z.array(z.object({ path: repoPath, role: z.string().min(1), unverified: z.boolean().optional() })),
     // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
     // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
     // drift check confirms a content change against this before flagging, so a
@@ -203,6 +211,21 @@ export const SYSTEM_REASONS = [
   'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
   'research_owed', // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   'concept_article_missing', // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // An owned file is absent from the working tree but ALIVE on another git ref
+  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
+  // reconcile, because no write can change the fact and the article is already
+  // correct (the path becomes valid again on merge). It exists so the absence
+  // arm stops minting an unclosable reconcile_needed that re-fires on every
+  // read, and so the drain has somewhere honest to put the finding.
+  'file_parked',
+  // An article's METADATA contradicts reality: it claims `planned` while the code
+  // it owns is demonstrably written, or it carries files[] roles still marked
+  // unverified. Nothing watched the state field before — the hooks watch content
+  // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
+  // feature, and anyone querying it would have concluded the feature did not
+  // exist. The PROSE was right; the metadata was the lie, and metadata is what a
+  // reader trusts first.
+  'state_review',
 ] as const;
 
 // §11 queue drain verbs: draining means the fulfilling artifact was written,
@@ -219,6 +242,13 @@ export const DRAIN_VERBS = {
   article_missing: 'created',
   research_owed: 'captured',
   concept_article_missing: 'created',
+  // 'merged', not 'updated': the item closes when the branch holding the file
+  // lands, which is an event rather than a write. Naming it after a write would
+  // invite exactly the no-op version bump the closing rule forbids.
+  file_parked: 'merged',
+  // The deed is fixing the metadata to match the code (or confirming it already
+  // does) — not reconciling the prose, which may well be correct already.
+  state_review: 'corrected',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:

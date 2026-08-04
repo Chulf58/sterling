@@ -4168,7 +4168,15 @@ var featureArticleSchema = base.extend({
   title: external_exports.string().min(1),
   what_it_does: external_exports.string().min(1),
   intended_behavior: external_exports.string().min(1),
-  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1) })),
+  // `unverified` marks a files[] entry whose ROLE has not yet been written from
+  // the actual source — an honest "I do not know this yet" (board db7cd16c).
+  // A consuming project had been expressing exactly this in prose ("⚠⚠ ROLE NOT
+  // YET WRITTEN FROM THE FILE"), which is the right instinct and the wrong
+  // mechanism: a marker buried in a role string only helps if somebody reads it,
+  // while a flag is QUERYABLE and the read-time state check can surface it. Set
+  // it when creating an article ahead of the code; clear it by rewriting the
+  // role from the file.
+  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional() })),
   // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
@@ -4300,8 +4308,23 @@ var SYSTEM_REASONS = [
   // §6 H10: direct-mode work in unowned territory ended without its owning article
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
-  "concept_article_missing"
+  "concept_article_missing",
   // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // An owned file is absent from the working tree but ALIVE on another git ref
+  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
+  // reconcile, because no write can change the fact and the article is already
+  // correct (the path becomes valid again on merge). It exists so the absence
+  // arm stops minting an unclosable reconcile_needed that re-fires on every
+  // read, and so the drain has somewhere honest to put the finding.
+  "file_parked",
+  // An article's METADATA contradicts reality: it claims `planned` while the code
+  // it owns is demonstrably written, or it carries files[] roles still marked
+  // unverified. Nothing watched the state field before — the hooks watch content
+  // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
+  // feature, and anyone querying it would have concluded the feature did not
+  // exist. The PROSE was right; the metadata was the lie, and metadata is what a
+  // reader trusts first.
+  "state_review"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
