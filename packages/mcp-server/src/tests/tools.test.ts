@@ -448,6 +448,45 @@ test('board_query / maintenance_query DISCLOSE their depth — a queue that unde
   }
 });
 
+test('contains narrows board_query and maintenance_query — a genuine WHERE, not a rank (work order d9960c98)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.boardAdd({ text: 'ship csv export', source: 'user' });
+    tools.boardAdd({ text: 'fix the login bug', source: 'user' });
+    tools.boardAdd({ text: 'reconcile CSV importer article', source: 'system', system_reason: 'reconcile_needed' });
+    tools.boardAdd({ text: 'refresh the models catalog', source: 'system', system_reason: 'refresh_reference' });
+
+    // board_query: case-insensitive substring, and matched_filter reflects the
+    // NARROWED count — this is a WHERE, not an ORDER, so the filter count itself
+    // must shrink (unlike rank_terms, which orders the filter set and never
+    // narrows it).
+    const boardHit = tools.boardQueryResult({ source: 'user', contains: 'CSV' });
+    assert.equal(boardHit.matched_filter, 1, 'matched_filter reflects the narrowed count, not the unfiltered board');
+    assert.equal(boardHit.returned, 1);
+    assert.match((boardHit.records[0] as unknown as { text: string }).text, /csv export/i);
+
+    const boardMiss = tools.boardQueryResult({ source: 'user', contains: 'nonexistent-term' });
+    assert.equal(boardMiss.matched_filter, 0);
+
+    // maintenance_query inherits the SAME shared filter (boardFiltered) —
+    // decision d9960c98's point (b): one definition, both surfaces.
+    const queueHit = tools.maintenanceQueryResult({ contains: 'csv' });
+    assert.equal(queueHit.matched_filter, 1);
+    assert.match((queueHit.records[0] as unknown as { text: string }).text, /CSV importer/);
+
+    // FTS5 metacharacters must not crash the filter and must match LITERALLY —
+    // contains never goes near records_fts MATCH, so quoting/escaping is moot.
+    tools.boardAdd({ text: 'handle the "quoted" OR* weird case', source: 'user' });
+    const metachar = tools.boardQueryResult({ source: 'user', contains: '"quoted" OR*' });
+    assert.equal(metachar.matched_filter, 1, 'FTS5 syntax characters are matched literally, not interpreted as query syntax');
+
+    // absent contains means no filtering at all — unchanged behaviour
+    assert.equal(tools.boardQueryResult({ source: 'user' }).matched_filter, 3);
+  } finally {
+    cleanup();
+  }
+});
+
 test('stale-at-read (§3.4): research findings get both clocks + flag; platform basis gets verify_before_use', () => {
   const { store, tools, cleanup } = harness();
   try {

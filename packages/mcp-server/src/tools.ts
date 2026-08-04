@@ -20,6 +20,20 @@ export interface BoardFilter {
   source?: 'user' | 'system';
   system_reason?: string;
   file_keys?: string[];
+  /**
+   * Narrow to items whose text contains this substring (work order d9960c98) —
+   * a genuine WHERE, not a rank: it REMOVES non-matching items from the counted
+   * set rather than merely reordering it, the distinction rank_terms already
+   * has to honour on the knowledge side (rank_terms order a set, they never
+   * narrow it). Case-insensitive plain substring match, applied in JS inside
+   * boardFiltered — never routed through records_fts MATCH — so a caller's
+   * string can never be interpreted as FTS5 query syntax (no quoting/escaping
+   * to get wrong) and always matches literally, metacharacters included. Cheap
+   * here specifically because boardFiltered already scans the bounded
+   * (BOARD_SCAN_CAP) todo set into JS for the source/system_reason filters —
+   * this adds one more JS predicate to that same pass, not a second table scan.
+   */
+  contains?: string;
   cap?: number;
 }
 
@@ -886,6 +900,10 @@ export class SterlingTools {
     if (filter.system_reason) {
       filtered = filtered.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason);
     }
+    if (filter.contains) {
+      const needle = filter.contains.toLowerCase();
+      filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
+    }
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
     return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
@@ -1224,15 +1242,28 @@ export class SterlingTools {
     });
   }
 
-  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
+  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number } = {}): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
-    // so a reason-filtered query no longer misses matches past the cap.
-    return this.boardQuery({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
+    // so a reason-filtered query no longer misses matches past the cap. contains
+    // (work order d9960c98) rides the same boardFiltered pass for the same reason.
+    return this.boardQuery({
+      source: 'system',
+      system_reason: filter.system_reason,
+      file_keys: filter.file_keys,
+      contains: filter.contains,
+      cap: filter.cap,
+    });
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
-  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): BoardQueryResult {
-    return this.boardQueryResult({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
+  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number } = {}): BoardQueryResult {
+    return this.boardQueryResult({
+      source: 'system',
+      system_reason: filter.system_reason,
+      file_keys: filter.file_keys,
+      contains: filter.contains,
+      cap: filter.cap,
+    });
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------
