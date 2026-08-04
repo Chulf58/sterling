@@ -573,7 +573,9 @@ test('contains narrows board_query and maintenance_query — a genuine WHERE, no
     assert.equal(boardMiss.matched_filter, 0);
 
     // maintenance_query inherits the SAME shared filter (boardFiltered) —
-    // decision d9960c98's point (b): one definition, both surfaces.
+    // board d9960c98's point (b): one definition, both surfaces. (A board id:
+    // the item was drained on fulfillment, so it must not be cited as a
+    // resolvable record — the citation check exempts board ids.)
     const queueHit = tools.maintenanceQueryResult({ contains: 'csv' });
     assert.equal(queueHit.matched_filter, 1);
     assert.match((queueHit.records[0] as unknown as { text: string }).text, /CSV importer/);
