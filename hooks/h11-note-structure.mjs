@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
 
-// ../../../node_modules/zod/v3/external.js
+// node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -128,7 +128,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// ../../../node_modules/zod/v3/helpers/util.js
+// node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -262,7 +262,7 @@ var getParsedType = (data) => {
   }
 };
 
-// ../../../node_modules/zod/v3/ZodError.js
+// node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -380,7 +380,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// ../../../node_modules/zod/v3/locales/en.js
+// node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -483,7 +483,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// ../../../node_modules/zod/v3/errors.js
+// node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -492,7 +492,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// ../../../node_modules/zod/v3/helpers/parseUtil.js
+// node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -602,14 +602,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// ../../../node_modules/zod/v3/helpers/errorUtil.js
+// node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// ../../../node_modules/zod/v3/types.js
+// node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -4791,16 +4791,6 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
-  // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
-  // a value to infer. 'authoring' is declared once, by hand, on the machine
-  // where Sterling work lands and merges; a successful /sterling:update stamps
-  // 'consumer' into a clone that has it absent, and never overwrites an
-  // existing value (so an authoring machine that occasionally pulls stays
-  // 'authoring'). H1 reads this — never store_authority, whose 'primary'
-  // default would mislabel every consumer that never opted in (the rejected
-  // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
-  machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
@@ -5194,6 +5184,49 @@ var SterlingStore = class {
       }
     });
     return newRecord;
+  }
+  /**
+   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
+   * exception to "every change is a supersession". todo is deliberately NOT in
+   * the immutable set (only decision is), and every board item is a DURABLE
+   * record in the same store as knowledge, so the established change primitive
+   * (supersede: mint a new id, retain the old) would rot every reference keyed
+   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
+   * id, created_at, status and superseded_by stay exactly as they were; only the
+   * caller's patched fields and updated_at change — same row, same identity.
+   *
+   * `newInput` is the FULL merged candidate (old record + patch), mirroring
+   * supersede's own calling convention: this method validates and persists, the
+   * tool layer decides which fields may be patched and builds the merge. A
+   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
+   * and the UPDATE is guarded on that status inside the transaction to close the
+   * same concurrent-supersede race.
+   */
+  updateTodo(id, newInput) {
+    const old = this.get(id);
+    if (!old)
+      throw new Error(`updateTodo: no record '${id}'`);
+    if (old.type !== "todo")
+      throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo \u2014 board_update only mutates todos`);
+    if (old.status === "superseded")
+      throw new Error(`updateTodo: record '${id}' is already superseded`);
+    const candidate = { ...newInput };
+    const updated = validateRecord(candidate);
+    if (updated.type !== "todo")
+      throw new Error(`updateTodo: type mismatch ('${updated.type}' is not 'todo')`);
+    const entry = RECORD_TYPES.todo;
+    this.tx(() => {
+      const res = this.db.prepare("UPDATE records SET updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run(updated.updated_at, JSON.stringify(updated), id);
+      if (res.changes === 0) {
+        throw new Error(`updateTodo: record '${id}' was concurrently removed or superseded \u2014 retry against the current version`);
+      }
+      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+      for (const path of new Set(entry.fileKeys(updated))) {
+        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
+      }
+      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(updated), id);
+    });
+    return updated;
   }
   /**
    * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a

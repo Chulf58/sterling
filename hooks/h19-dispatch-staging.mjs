@@ -5,10 +5,10 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// .claude/worktrees/agent-a308c5e2d7a5828d8/scripts/hooks/h19-dispatch-staging.mjs
+// scripts/hooks/h19-dispatch-staging.mjs
 import { existsSync as existsSync5 } from "node:fs";
 
-// .claude/worktrees/agent-a308c5e2d7a5828d8/scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
 
@@ -5194,6 +5194,49 @@ var SterlingStore = class {
     return newRecord;
   }
   /**
+   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
+   * exception to "every change is a supersession". todo is deliberately NOT in
+   * the immutable set (only decision is), and every board item is a DURABLE
+   * record in the same store as knowledge, so the established change primitive
+   * (supersede: mint a new id, retain the old) would rot every reference keyed
+   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
+   * id, created_at, status and superseded_by stay exactly as they were; only the
+   * caller's patched fields and updated_at change — same row, same identity.
+   *
+   * `newInput` is the FULL merged candidate (old record + patch), mirroring
+   * supersede's own calling convention: this method validates and persists, the
+   * tool layer decides which fields may be patched and builds the merge. A
+   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
+   * and the UPDATE is guarded on that status inside the transaction to close the
+   * same concurrent-supersede race.
+   */
+  updateTodo(id, newInput) {
+    const old = this.get(id);
+    if (!old)
+      throw new Error(`updateTodo: no record '${id}'`);
+    if (old.type !== "todo")
+      throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo \u2014 board_update only mutates todos`);
+    if (old.status === "superseded")
+      throw new Error(`updateTodo: record '${id}' is already superseded`);
+    const candidate = { ...newInput };
+    const updated = validateRecord(candidate);
+    if (updated.type !== "todo")
+      throw new Error(`updateTodo: type mismatch ('${updated.type}' is not 'todo')`);
+    const entry = RECORD_TYPES.todo;
+    this.tx(() => {
+      const res = this.db.prepare("UPDATE records SET updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run(updated.updated_at, JSON.stringify(updated), id);
+      if (res.changes === 0) {
+        throw new Error(`updateTodo: record '${id}' was concurrently removed or superseded \u2014 retry against the current version`);
+      }
+      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+      for (const path of new Set(entry.fileKeys(updated))) {
+        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
+      }
+      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(updated), id);
+    });
+    return updated;
+  }
+  /**
    * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
    * replacement that lives in ANOTHER store (the promoted copy in a domain
    * store). supersede can't cross stores and always inserts a same-store
@@ -5643,7 +5686,7 @@ var SterlingStore = class {
   }
 };
 
-// .claude/worktrees/agent-a308c5e2d7a5828d8/scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/common.mjs
 function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
@@ -5686,7 +5729,7 @@ function repoRel(toolPath, cwd) {
   }
 }
 
-// .claude/worktrees/agent-a308c5e2d7a5828d8/scripts/hooks/lib/transcript.mjs
+// scripts/hooks/lib/transcript.mjs
 import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
@@ -5703,7 +5746,7 @@ function readTail(path, bytes = TAIL_BYTES) {
   }
 }
 
-// .claude/worktrees/agent-a308c5e2d7a5828d8/scripts/hooks/lib/delivery.mjs
+// scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync4, rmSync } from "node:fs";
 import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
@@ -5712,13 +5755,17 @@ function deliveryDir(cwd) {
 function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
+function emptyGuard() {
+  return { records: [], frontier_files: [], pointer_files: [] };
+}
 function readGuard(path) {
   try {
-    return existsSync4(path) ? JSON.parse(readFileSync2(path, "utf8")) : { records: [], frontier_files: [] };
+    if (!existsSync4(path)) return emptyGuard();
+    return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
-    return { records: [], frontier_files: [] };
+    return emptyGuard();
   }
 }
 function writeGuard(path, guard) {
@@ -5771,12 +5818,18 @@ function renderHazards(hazards, charCap) {
   );
 }
 var DECISION_POINTER_CAP = 8;
+var DECISION_STATEMENT_CLIP = 120;
+var DECISION_REJECTED_CLIP = 140;
 function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
   const shown = decisions.slice(0, cap);
   const lines = [
-    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
-    ...shown.map((d) => `  \u2192 ${clip(d.statement, 160)} (knowledge_get ${d.id})`)
+    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
+  for (const d of shown) {
+    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+    if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+  }
   if (decisions.length > shown.length) {
     lines.push(
       `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
@@ -5794,7 +5847,7 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
   return `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
 }
 
-// .claude/worktrees/agent-a308c5e2d7a5828d8/scripts/hooks/h19-dispatch-staging.mjs
+// scripts/hooks/h19-dispatch-staging.mjs
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
