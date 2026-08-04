@@ -6104,7 +6104,9 @@ try {
   }
   const bPath = baselineFile(cwd, runId);
   if (!existsSync3(bPath)) {
-    deny(`H17: baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5).`);
+    deny(
+      `H17: baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`
+    );
   }
   let baseline;
   try {

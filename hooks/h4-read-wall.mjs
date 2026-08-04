@@ -4890,8 +4890,14 @@ try {
       if (matchesGlob(rel, glob)) allow();
     }
   }
+  const isTestDir = config.toolchains.some(
+    (tc) => (tc.test_globs ?? []).some((glob) => {
+      const dir = glob.slice(0, glob.indexOf("*") === -1 ? glob.length : glob.indexOf("*")).replace(/\/[^/]*$/, "");
+      return dir === rel || dir.startsWith(`${rel}/`);
+    })
+  );
   deny(
-    `H4: '${rel}' is implementation \u2014 the test-writer never reads code (\xA76 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
+    isTestDir ? `H4: '${rel}' is a TEST directory, not implementation (\xA76 H4) \u2014 content-mode Grep on a directory shows no content here regardless of its kind. Scope content to a specific test FILE inside it (matching a declared test glob), or locate first with output_mode files_with_matches.` : `H4: '${rel}' is implementation \u2014 the test-writer never reads code (\xA76 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
   );
 } catch (e) {
   deny(`H4: read-wall evaluation failed (${e && e.message || e}) \u2014 failing closed (P5)`);

@@ -50,7 +50,7 @@ if (!decision) {
 }
 if (decision !== 'merge' && decision !== 'reject') {
   store.close();
-  fail("merge-gate: --decision must be 'merge' or 'reject'");
+  fail(`merge-gate: --decision must be 'merge' or 'reject' — received '${decision}'`);
 }
 
 // Branch operations through the §8.1 branch manager; non-git projects degrade loud.

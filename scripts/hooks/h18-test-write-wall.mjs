@@ -13,7 +13,7 @@
 // Deliberately store-free beyond config: it must gate even if the store is down.
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { matchesGlob } from '@sterling/schemas';
+import { matchesGlob, normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { readStdin, deny, allow, loadConfig, repoRel } from './lib/common.mjs';
 import { isEnforcementSurface } from './lib/contract.mjs';
 
@@ -37,7 +37,22 @@ try {
 
   const rel = repoRel(toolPath, input.cwd);
   if (!rel) {
-    deny(`H18: '${toolPath}' is outside the repository — the test-writer writes ONLY test files inside the repo (§6 H18)`);
+    // repoRel collapses every failure to null; recompute here ONLY to tell an
+    // in-repo path that normalizes to nothing (the repo root itself, or '.') from
+    // a genuinely outside-the-repo path — both denials, but "outside the
+    // repository" is false for the former and misdirects the fix.
+    let emptyNormalize = false;
+    try {
+      if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith('/')) toRepoRelative(fwd, input.cwd);
+      else normalizeRepoPath(fwd);
+    } catch (e) {
+      emptyNormalize = /empty path/.test((e && e.message) || '');
+    }
+    deny(
+      emptyNormalize
+        ? `H18: '${toolPath}' normalizes to an empty path (it resolves to the repo root itself, not a file inside it) — the test-writer writes ONLY test files inside the repo (§6 H18)`
+        : `H18: '${toolPath}' is outside the repository — the test-writer writes ONLY test files inside the repo (§6 H18)`
+    );
   }
   if (isEnforcementSurface(rel)) {
     deny(`H18 [self-protection]: '${rel}' is enforcement surface (${['.claude/settings*.json', '.claude/agents/**', '.sterling/config.json'].join(', ')}) — never test-writer-writable, in any mode (§6)`);

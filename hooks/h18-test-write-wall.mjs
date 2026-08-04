@@ -4880,7 +4880,16 @@ try {
   }
   const rel = repoRel(toolPath, input.cwd);
   if (!rel) {
-    deny(`H18: '${toolPath}' is outside the repository \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)`);
+    let emptyNormalize = false;
+    try {
+      if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) toRepoRelative(fwd, input.cwd);
+      else normalizeRepoPath(fwd);
+    } catch (e) {
+      emptyNormalize = /empty path/.test(e && e.message || "");
+    }
+    deny(
+      emptyNormalize ? `H18: '${toolPath}' normalizes to an empty path (it resolves to the repo root itself, not a file inside it) \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)` : `H18: '${toolPath}' is outside the repository \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)`
+    );
   }
   if (isEnforcementSurface(rel)) {
     deny(`H18 [self-protection]: '${rel}' is enforcement surface (${[".claude/settings*.json", ".claude/agents/**", ".sterling/config.json"].join(", ")}) \u2014 never test-writer-writable, in any mode (\xA76)`);

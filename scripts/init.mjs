@@ -73,11 +73,12 @@ if (existsSync(configPath)) {
   }
 }
 if (!recorded) {
+  const noConfigAt = `no recorded config found at '${target}' (.sterling/config.json absent) — these declarations are required only on a first init; if this target is wrong, pass the intended --target`;
   if (!backupPathFlag && !backupOptOutFlag) {
-    fail('init REFUSED: a backup path is required, or an EXPLICIT opt-out (--backup-opt-out) — the knowledge base must not live in exactly one gitignored file (§2.3)', 2);
+    fail(`init REFUSED: a backup path is required, or an EXPLICIT opt-out (--backup-opt-out) — ${noConfigAt}. The knowledge base must not live in exactly one gitignored file (§2.3)`, 2);
   }
-  if (!declaredToolchains.length) fail('init REFUSED: at least one --toolchain <adapter>:<globs> declaration is required (§9.1)', 2);
-  if (!stackTagsFlag.length) fail('init REFUSED: --stack-tags is required (ask, don’t guess — §12 mini-grill)', 2);
+  if (!declaredToolchains.length) fail(`init REFUSED: at least one --toolchain <adapter>:<globs> declaration is required — ${noConfigAt} (§9.1)`, 2);
+  if (!stackTagsFlag.length) fail(`init REFUSED: --stack-tags is required — ${noConfigAt} (ask, don’t guess — §12 mini-grill)`, 2);
 }
 
 // effective declarations: recorded config wins; flags only seed a fresh config

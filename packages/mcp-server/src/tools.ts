@@ -407,7 +407,7 @@ export class SterlingTools {
    * want either and pointing at retirement alone would trade a stale denial for an
    * invitation to retire away every error instead of correcting it.
    */
-  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update'): void {
+  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append'): void {
     const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
     const attempted = SERVER_OWNED.filter((k) => k in fields);
     if (attempted.length === 0) return;
@@ -434,12 +434,12 @@ export class SterlingTools {
    * derives paths from location) cost a round-trip each to learn otherwise.
    * An unregistered type is left to validateRecord's louder rejection.
    */
-  private refuseUnknownFields(type: string, candidate: Record<string, unknown>): void {
+  private refuseUnknownFields(type: string, candidate: Record<string, unknown>, op: string = 'knowledge write'): void {
     const unknown = unknownFieldsIn(type, candidate);
     if (unknown.length === 0) return;
     const valid = [...(knownFieldsFor(type) ?? [])].sort().join(', ');
     throw new Error(
-      `knowledge write: '${type}' does not define ${unknown.map((k) => `'${k}'`).join(', ')} — ` +
+      `${op}: '${type}' does not define ${unknown.map((k) => `'${k}'`).join(', ')} — ` +
         `the field would have been silently dropped and the write reported success. Valid fields: ${valid}.`
     );
   }
@@ -525,8 +525,14 @@ export class SterlingTools {
       if (!dedupOverride) {
         const match = this.findAntiPatternOverlap(parsed);
         if (match) {
+          const { record, predicate, dice } = match;
+          const predicateDesc =
+            predicate === 'title_trigger'
+              ? `title+trigger Dice similarity ${dice.toFixed(2)} >= ${0.5} on their own`
+              : `title+trigger Dice similarity ${dice.toFixed(2)} >= ${0.3}, assisted by a shared file_key (the false-positive-prone branch — a busy multi-concern file can host distinct lessons)`;
           throw new Error(
-            `knowledge_create: this anti_pattern overlaps existing '${match.id}' — "${(match as { title?: string }).title ?? ''}". ` +
+            `knowledge_create: this anti_pattern overlaps existing '${record.id}' — "${(record as { title?: string }).title ?? ''}" ` +
+              `(matched on ${predicateDesc}). ` +
               `Same finding: knowledge_update that record, appending your source_evidence. Distinct lesson: re-submit with dedup_override: true.`
           );
         }
@@ -642,7 +648,9 @@ export class SterlingTools {
     });
   }
 
-  private findAntiPatternOverlap(candidate: Record<string, unknown>): DurableRecord | undefined {
+  private findAntiPatternOverlap(
+    candidate: Record<string, unknown>
+  ): { record: DurableRecord; predicate: 'title_trigger' | 'key_assisted'; dice: number } | undefined {
     const existing = this.store.query({ types: ['anti_pattern'], cap: 1000 });
     const candKeys = new Set(((candidate.file_keys as string[]) ?? []).map((p) => p.replace(/\\/g, '/')));
     const tokens = (r: Record<string, unknown>) =>
@@ -664,17 +672,19 @@ export class SterlingTools {
     // lowers the token bar for records that already sound alike.
     const DICE_OVERLAP_THRESHOLD = 0.5;
     const DICE_KEY_ASSISTED_THRESHOLD = 0.3;
-    return existing.find((e) => {
+    for (const e of existing) {
       const rec = e as unknown as Record<string, unknown>;
       const recTokens = tokens(rec);
       const denom = candTokens.size + recTokens.size;
-      if (denom === 0) return false;
+      if (denom === 0) continue;
       let shared = 0;
       for (const t of recTokens) if (candTokens.has(t)) shared++;
       const dice = (2 * shared) / denom;
       const keyOverlap = ((rec.file_keys as string[]) ?? []).some((k) => candKeys.has(k));
-      return dice >= DICE_OVERLAP_THRESHOLD || (keyOverlap && dice >= DICE_KEY_ASSISTED_THRESHOLD);
-    });
+      if (dice >= DICE_OVERLAP_THRESHOLD) return { record: e, predicate: 'title_trigger', dice };
+      if (keyOverlap && dice >= DICE_KEY_ASSISTED_THRESHOLD) return { record: e, predicate: 'key_assisted', dice };
+    }
+    return undefined;
   }
 
   /**
@@ -976,8 +986,8 @@ export class SterlingTools {
     if (field === 'links') {
       throw new Error(`knowledge_append: 'links' is not appendable here — use knowledge_link, which also maintains the record_links index`);
     }
-    this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_update');
-    this.refuseUnknownFields(old.type, { [field]: entries });
+    this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_append');
+    this.refuseUnknownFields(old.type, { [field]: entries }, 'knowledge_append');
     const current = (old as unknown as Record<string, unknown>)[field];
     if (current !== undefined && !Array.isArray(current)) {
       throw new Error(
