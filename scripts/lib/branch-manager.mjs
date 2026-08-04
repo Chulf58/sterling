@@ -8,7 +8,13 @@ import { spawnSync } from 'node:child_process';
 function git(cwd, args, { allowFail = false } = {}) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000 });
   if (r.status !== 0 && !allowFail) {
-    throw new Error(`git ${args.join(' ')} failed (${r.status}): ${(r.stderr || r.stdout || '').trim()}`);
+    // Evidence capture for the unreproduced 'fatal: stash failed' class (board
+    // aa01da07): a spawnSync that never ran or timed out has status null and an
+    // error/signal — name that state instead of printing 'failed (null)', so a
+    // recurrence is distinguishable from a real git nonzero exit at the message.
+    const spawnState =
+      r.error ? `spawn-error ${r.error.code ?? r.error.message}` : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
+    throw new Error(`git ${args.join(' ')} failed (${spawnState}): ${(r.stderr || r.stdout || '').trim()}`);
   }
   return (r.stdout ?? '').trim();
 }
