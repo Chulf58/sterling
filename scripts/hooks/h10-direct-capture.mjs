@@ -12,11 +12,14 @@
 // does NOT satisfy the demand — only ownership does (the unowned set
 // recomputes per Stop, so creating the article clears it mechanically).
 // Session-event register (run r-a6cf): H10 also reads session-events.json
-// (written by H16/debug-scope/concept-designed). Dual-register entry: proceeds
-// if touches OR events are non-empty. Capture duty: touches ∪ debug_scope
-// events. Research duty: research_tool ∪ configured agent_dispatch events not
-// followed by a durable capture → nag once (shared marker), then research_owed
-// on release. Concept duty (decision 7208729b): concept_designed events (detail
+// (written by H16/debug-scope/concept-designed/no-capture). Dual-register entry:
+// proceeds if touches OR events are non-empty. Capture duty: touches ∪
+// debug_scope events, MINUS any covered by a no_capture declaration (board
+// 7bbec3bd) — an explicit "nothing durable" event satisfies the duty for every
+// touch/debug_scope event EARLIER than it; work arriving after re-arms it.
+// Research duty: research_tool ∪ configured agent_dispatch events not followed
+// by a durable capture → nag once (shared marker), then research_owed on
+// release. Concept duty (decision 7208729b): concept_designed events (detail
 // = family slug) not followed by that family's concept article
 // (feature_article.concept_family) → shared nag, then one
 // concept_article_missing item per family on release.
@@ -96,21 +99,39 @@ try {
     if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
   }
 
-  // Capture duty: triggered by file-touching work OR debug-scope events.
-  const hasCaptureDuty = paths.length > 0 || debugEvents.length > 0;
+  // No-capture declaration (board 7bbec3bd): scripts/no-capture.mjs appends a
+  // no_capture event the moment the conductor judges a Stop produced nothing
+  // durable. It SATISFIES the capture duty for every touch/debug_scope event
+  // EARLIER than the LATEST such declaration; work arriving AFTER it re-arms
+  // the duty (a declaration cannot cover work that hasn't happened yet). A
+  // missing/malformed `at` is treated as arriving AFTER the cutoff — the safe
+  // direction, since it keeps the duty armed rather than silently clearing it.
+  const noCaptureEvents = sessionEvents.filter((e) => e.kind === 'no_capture');
+  const latestNoCapture = noCaptureEvents.length
+    ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1)
+    : null;
+  const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
+  const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
+
+  // Capture duty: triggered by file-touching work OR debug-scope events not
+  // already covered by a no-capture declaration.
+  const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   // Research duty: triggered by research events (research_tool or configured agent).
   const hasResearchDuty = researchEvents.length > 0;
   // Concept duty: a settled design must produce/refresh its concept article.
   const hasConceptDuty = conceptFamilies.size > 0;
 
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
-    // No duties to enforce (e.g. only non-research dispatches recorded) — clear and release.
+    // No duties to enforce (e.g. only non-research dispatches recorded, or a
+    // no-capture declaration covered every touch/debug event) — clear and release.
     clearRegisters();
     allow();
   }
 
-  // Earliest timestamp across touches ∪ events (the captured-set window anchor).
-  const allTimestamps = [...touches.map((t) => t.at), ...sessionEvents.map((e) => e.at)].filter(Boolean).sort();
+  // Earliest timestamp across the ACTIVE touches ∪ debug events (the
+  // captured-set window anchor) — a no-capture declaration moves this forward.
+  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
 
   // Widened captured set: decision|anti_pattern|note|feature_article|research_finding|disconfirmed_hypothesis
@@ -181,7 +202,7 @@ try {
   // test-touching → test-integrity vs git HEAD (§8.2); non-git degrades loud.
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = '';
-  if (hasCaptureDuty && !captured && paths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
+  if (hasCaptureDuty && !captured && activePaths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
     const ti = gitTestIntegrity({ cwd: input.cwd, testGlobs });
     if (ti.no_git) store.recordCheckSkipped('test-integrity', 'no_git', undefined, now);
     else if (ti.modified.length || ti.deleted.length) {
@@ -195,13 +216,14 @@ try {
 
     // Capture duty nag (touches or debug events present, nothing captured).
     if (hasCaptureDuty && !captured) {
-      const hasDebug = debugEvents.length > 0;
-      const diff = paths.map((path) => ({ path, added_lines: [] }));
+      const hasDebug = activeDebugEvents.length > 0;
+      const diff = activePaths.map((path) => ({ path, added_lines: [] }));
       if (hasDebug) {
         let capturePart =
           `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).\n` +
-          `Capture what was learned inline — expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).`;
-        if (paths.length > 0) {
+          `Capture what was learned inline — expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).\n` +
+          `Or, if there is genuinely nothing durable, declare it: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).`;
+        if (activePaths.length > 0) {
           const selection = selectReviewers({ config, diff });
           capturePart += `\nReviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.`;
         }
@@ -210,8 +232,8 @@ try {
       } else {
         const selection = selectReviewers({ config, diff });
         parts.push(
-          `H10: direct-mode work touched ${paths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
-            `Capture what was learned inline (knowledge_create), or state explicitly that nothing durable was learned.\n` +
+          `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
+            `Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).\n` +
             `Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` +
             integrityNote
         );
@@ -265,10 +287,10 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `capture owed: direct-mode session touched ${paths.length} file(s) and ended without capture`,
+        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
         source: 'system',
         system_reason: 'capture_owed',
-        file_keys: paths.slice(0, 20),
+        file_keys: activePaths.slice(0, 20),
       });
     }
   }

@@ -15,7 +15,7 @@ import { join as join2 } from "node:path";
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
 
-// node_modules/zod/v3/external.js
+// ../../../node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -127,7 +127,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// node_modules/zod/v3/helpers/util.js
+// ../../../node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -261,7 +261,7 @@ var getParsedType = (data) => {
   }
 };
 
-// node_modules/zod/v3/ZodError.js
+// ../../../node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -379,7 +379,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// node_modules/zod/v3/locales/en.js
+// ../../../node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -482,7 +482,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// node_modules/zod/v3/errors.js
+// ../../../node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -491,7 +491,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// node_modules/zod/v3/helpers/parseUtil.js
+// ../../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -601,14 +601,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// node_modules/zod/v3/helpers/errorUtil.js
+// ../../../node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// node_modules/zod/v3/types.js
+// ../../../node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -4056,7 +4056,7 @@ var coerce = {
 };
 var NEVER = INVALID;
 
-// packages/schemas/dist/paths.js
+// ../../../packages/schemas/dist/paths.js
 function normalizeRepoPath(input2) {
   const fwd = input2.replace(/\\/g, "/");
   if (/^[A-Za-z]:/.test(fwd)) {
@@ -4115,7 +4115,7 @@ function matchesGlob(path, glob) {
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
 
-// packages/schemas/dist/envelope.js
+// ../../../packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
@@ -4149,7 +4149,7 @@ function refineSupersession(rec, ctx) {
   }
 }
 
-// packages/schemas/dist/records.js
+// ../../../packages/schemas/dist/records.js
 var verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
 var base = external_exports.object(envelopeFields);
 var decisionSchema = base.extend({
@@ -4534,7 +4534,7 @@ function validateRecord(input2) {
   return entry.schema.parse(input2);
 }
 
-// packages/schemas/dist/transient.js
+// ../../../packages/schemas/dist/transient.js
 var SIGNALS = [
   "complete",
   "research-needed",
@@ -4668,7 +4668,7 @@ var runRecordSchema = external_exports.object({
   }).optional()
 });
 
-// packages/schemas/dist/config.js
+// ../../../packages/schemas/dist/config.js
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
@@ -4869,7 +4869,7 @@ function parseConfig(raw) {
   return configSchema.parse(raw);
 }
 
-// packages/schemas/dist/registry.js
+// ../../../packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
   // identity: the project root, absolute POSIX (machine-global, like backup_path —
   // NOT a repo-relative file_key, so it does not go through the path invariant).
@@ -4889,7 +4889,7 @@ var projectRegistrationSchema = external_exports.object({
   last_seen_at: external_exports.string().nullable().default(null)
 });
 
-// packages/schemas/dist/staleness.js
+// ../../../packages/schemas/dist/staleness.js
 var runtimeMarkerSchema = external_exports.object({
   /** the content build-id the running server loaded at boot */
   build_id: external_exports.string(),
@@ -4897,16 +4897,16 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
-// packages/store/dist/index.js
+// ../../../packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
-// packages/store/dist/registry.js
+// ../../../packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
-// packages/store/dist/index.js
+// ../../../packages/store/dist/index.js
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -5871,14 +5871,19 @@ try {
     const at = e.at ?? now;
     if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
   }
-  const hasCaptureDuty = paths.length > 0 || debugEvents.length > 0;
+  const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
+  const latestNoCapture = noCaptureEvents.length ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1) : null;
+  const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync3(join2(input.cwd, p)));
+  const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
+  const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const hasResearchDuty = researchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     clearRegisters();
     allow();
   }
-  const allTimestamps = [...touches.map((t) => t.at), ...sessionEvents.map((e) => e.at)].filter(Boolean).sort();
+  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
   const captured = store.query({ types: ["decision", "anti_pattern", "note", "feature_article", "research_finding", "disconfirmed_hypothesis"], cap: 1e3, include_unconfirmed: true }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
   let researchSatisfied = true;
@@ -5921,7 +5926,7 @@ try {
   }
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = "";
-  if (hasCaptureDuty && !captured && paths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
+  if (hasCaptureDuty && !captured && activePaths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
     const ti = gitTestIntegrity({ cwd: input.cwd, testGlobs });
     if (ti.no_git) store.recordCheckSkipped("test-integrity", "no_git", void 0, now);
     else if (ti.modified.length || ti.deleted.length) {
@@ -5933,12 +5938,13 @@ Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${J
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [];
     if (hasCaptureDuty && !captured) {
-      const hasDebug = debugEvents.length > 0;
-      const diff = paths.map((path) => ({ path, added_lines: [] }));
+      const hasDebug = activeDebugEvents.length > 0;
+      const diff = activePaths.map((path) => ({ path, added_lines: [] }));
       if (hasDebug) {
         let capturePart = `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).
-Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).`;
-        if (paths.length > 0) {
+Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).
+Or, if there is genuinely nothing durable, declare it: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).`;
+        if (activePaths.length > 0) {
           const selection = selectReviewers({ config, diff });
           capturePart += `
 Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.`;
@@ -5948,8 +5954,8 @@ Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}
       } else {
         const selection = selectReviewers({ config, diff });
         parts.push(
-          `H10: direct-mode work touched ${paths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).
-Capture what was learned inline (knowledge_create), or state explicitly that nothing durable was learned.
+          `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).
+Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).
 Reviewer selection for this diff: dispatch ${JSON.stringify(selection.dispatch)}; skipped ${JSON.stringify(selection.skipped)}.` + integrityNote
         );
       }
@@ -5990,10 +5996,10 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `capture owed: direct-mode session touched ${paths.length} file(s) and ended without capture`,
+        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
         source: "system",
         system_reason: "capture_owed",
-        file_keys: paths.slice(0, 20)
+        file_keys: activePaths.slice(0, 20)
       });
     }
   }

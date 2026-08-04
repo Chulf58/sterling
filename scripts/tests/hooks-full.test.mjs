@@ -1703,6 +1703,98 @@ test('H10 AC5: a debug_scope event with zero touches and no capture triggers the
   }
 });
 
+// ---- no-capture declaration (board 7bbec3bd: H10 fires on file count, not substance) ----
+// scripts/no-capture.mjs writes a no_capture session event; H10's capture duty treats
+// it as satisfying every touch/debug_scope event EARLIER than the declaration, while
+// work arriving AFTER it re-arms the duty.
+function writeTouchesAt(dir, entries) {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  for (const { path } of entries) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), '// touched\n');
+  }
+  writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify(entries));
+}
+const ncEvent = (reason, at = R_EVENT_AT) => ({ kind: 'no_capture', detail: reason, at });
+
+test('no-capture.mjs: --reason is required and refused when blank; a valid declaration appends a no_capture event', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const run = (args) => spawnSync(process.execPath, [join(root, 'scripts', 'no-capture.mjs'), ...args], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+
+    assert.notEqual(run([]).status, 0, 'no --reason at all is refused');
+    assert.notEqual(run(['--reason', '   ']).status, 0, 'a blank/whitespace-only reason is refused');
+    assert.equal(readSessionEvents(dir).length, 0, 'a refused declaration writes nothing');
+
+    const ok = run(['--reason', 'read-only investigation, nothing durable']);
+    assert.equal(ok.status, 0, ok.stderr);
+    const ev = readSessionEvents(dir).filter((e) => e.kind === 'no_capture');
+    assert.equal(ev.length, 1);
+    assert.equal(ev[0].detail, 'read-only investigation, nothing durable');
+    assert.ok(typeof ev[0].at === 'string' && ev[0].at.length > 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 no-capture duty: a declaration BEFORE the Stop covers earlier touches/debug events — no nag, registers clear', () => {
+  const touches = makeProject();
+  try {
+    writeTouchesAt(touches.dir, [{ path: 'src/a.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(touches.dir, [ncEvent('nothing durable', LATE_EVENT_AT)]); // declared AFTER the touch
+    const r = runHook('h10-direct-capture.mjs', hookInput(touches.dir, { hook_event_name: 'Stop' }), touches.dir);
+    assert.equal(r.code, 0, 'a no_capture declaration later than the touch satisfies the capture duty');
+    assert.equal(existsSync(join(touches.dir, '.sterling', 'transient', 'touches.json')), false, 'touches.json cleared');
+    assert.equal(existsSync(eventsPath(touches.dir)), false, 'session-events.json cleared');
+    assert.equal(owed(touches.store, 'capture_owed').length, 0, 'nothing owed — the duty was satisfied, not deferred');
+  } finally {
+    touches.cleanup();
+  }
+  const debug = makeProject();
+  try {
+    writeSessionEvents(debug.dir, [dEvent('src/probe.mjs', R_EVENT_AT), ncEvent('dead end, nothing to capture', LATE_EVENT_AT)]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(debug.dir, { hook_event_name: 'Stop' }), debug.dir);
+    assert.equal(r.code, 0, 'a no_capture declaration later than the debug_scope event also satisfies the duty');
+    assert.equal(existsSync(eventsPath(debug.dir)), false, 'session-events.json cleared');
+  } finally {
+    debug.cleanup();
+  }
+});
+
+test('H10 no-capture duty: work arriving AFTER the declaration re-arms it — nag fires for the new touch only', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/old.mjs', at: R_EVENT_AT }, { path: 'src/new.mjs', at: LATE_EVENT_AT }]);
+    writeSessionEvents(dir, [ncEvent('old work already declared', CAPTURE_AT)]); // between old and new
+    const stop = (over = {}) => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', ...over }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'the touch AFTER the declaration re-arms the capture duty');
+    assert.match(nag.stderr, /touched 1 file/, 'only the post-declaration touch counts — the declared one does not');
+    assert.match(nag.stderr, /no-capture\.mjs/, 'the nag names the no-capture escape hatch');
+    assert.match(nag.stderr, /false declaration is drift/, 'and warns that a false declaration is drift');
+
+    const release = stop();
+    assert.equal(release.code, 0, 'second Stop releases');
+    const items = owed(store, 'capture_owed');
+    assert.equal(items.length, 1);
+    assert.deepEqual([...items[0].file_keys], ['src/new.mjs'], 'the owed item carries only the re-armed touch');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 no-capture duty: an old declaration does not retroactively cover a LATER unrelated debug_scope event', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [ncEvent('first thing, nothing durable', R_EVENT_AT), dEvent('src/second.mjs', LATE_EVENT_AT)]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2, 'the debug_scope event postdates the declaration, so the duty is armed again');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H10 AC6: every terminal path clears touches.json + session-events.json + the nag marker together; allow-only while a run is active', () => {
   // (a) satisfied path clears both registers AND the nag marker (proven by a fresh nag afterward)
   const sat = makeProject();
