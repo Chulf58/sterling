@@ -192,6 +192,56 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
   }
 });
 
+test('H1 machine role (todo cabbc10f, decision a9b98b7d): stated only on a Sterling clone itself, one line per declared state', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // STERLING_PLUGIN_ROOT makes this tmp project LOOK like the plugin's own
+    // clone to pluginRoot() — the real walk-up always resolves to the actual
+    // repo the test process runs from, which this tmp dir is not.
+    const selfHosted = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: dir };
+
+    // absent → UNDECLARED, the safe posture
+    const undeclared = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    assert.match(undeclared.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED — treat as CONSUMER/);
+
+    // declared 'authoring'
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
+    const authoring = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    assert.match(authoring.hookSpecificOutput.additionalContext, /MACHINE ROLE: AUTHORING \(declared in \.sterling\/config\.json machine_role\)/);
+
+    // declared 'consumer'
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'consumer' }));
+    const consumer = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    assert.match(consumer.hookSpecificOutput.additionalContext, /MACHINE ROLE: CONSUMER — this clone consumes via \/sterling:update/);
+    assert.match(consumer.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions still present alongside the role line');
+
+    // NOT a clone (no STERLING_PLUGIN_ROOT override — this tmp dir is not the
+    // real plugin root the unmocked walk-up would find): no role line at all,
+    // even with machine_role declared.
+    const notAClone = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
+    assert.ok(!/MACHINE ROLE/.test(notAClone.hookSpecificOutput.additionalContext), 'no role line off the plugin\'s own clone');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 machine role: a malformed config on the plugin\'s own clone costs only the role line\'s specificity, never a crash', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
+    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, {
+      NO_COLOR: '1',
+      STERLING_PLUGIN_ROOT: dir,
+    });
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.match(out.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions survive a corrupt config even on the self-hosted clone');
+    assert.match(out.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED/, 'a malformed config reads as absent, the safe default — never a crash');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H1: shared project registry — touches this project last_seen + makes the CONDUCTOR aware of live siblings via additionalContext, not systemMessage (decision 8f9e6db2)', () => {
   const { dir, cleanup } = makeProject();
   const regPath = join(dir, 'registry.db');

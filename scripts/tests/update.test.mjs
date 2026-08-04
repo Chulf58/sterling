@@ -8,10 +8,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate } from '../lib/update.mjs';
+import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent } from '../lib/update.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
 
@@ -491,6 +491,129 @@ test('the init ensure pass runs only when the clone is itself initialized', asyn
   } finally {
     rmSync(withConfig, { recursive: true, force: true });
     rmSync(without, { recursive: true, force: true });
+  }
+});
+
+// ── 3. machine-role stamp (todo cabbc10f, decision a9b98b7d) ────────────────
+
+test('stampConsumerRoleIfAbsent: stamps consumer when machine_role is absent, preserving other fields', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ backup_path: '/tmp/backups', stack_tags: ['node'] }, null, 2));
+
+    const lines = [];
+    stampConsumerRoleIfAbsent(dir, (l) => lines.push(l));
+
+    const written = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.equal(written.machine_role, 'consumer');
+    assert.equal(written.backup_path, '/tmp/backups', 'other fields survive the read-modify-write');
+    assert.deepEqual(written.stack_tags, ['node']);
+    assert.ok(lines.some((l) => l.includes("stamped 'consumer'")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stampConsumerRoleIfAbsent: never overwrites a declared role, either value', () => {
+  for (const role of ['authoring', 'consumer']) {
+    const dir = scratchCwd();
+    try {
+      mkdirSync(join(dir, '.sterling'), { recursive: true });
+      const configPath = join(dir, '.sterling', 'config.json');
+      writeFileSync(configPath, JSON.stringify({ machine_role: role }));
+
+      const lines = [];
+      stampConsumerRoleIfAbsent(dir, (l) => lines.push(l));
+
+      const written = JSON.parse(readFileSync(configPath, 'utf8'));
+      assert.equal(written.machine_role, role, 'a declared role is never flipped, in either direction');
+      assert.ok(lines.some((l) => l.includes('not overwritten')));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('stampConsumerRoleIfAbsent: an unwritable config warns loudly but does not throw', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({}));
+    chmodSync(configPath, 0o444); // read-only — the write must fail, not the read
+    chmodSync(join(dir, '.sterling'), 0o555); // and block a same-name replace too
+
+    const lines = [];
+    assert.doesNotThrow(() => stampConsumerRoleIfAbsent(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => l.includes('FAILED') && l.includes('nonfatal')), 'the failure is loud');
+  } finally {
+    chmodSync(join(dir, '.sterling'), 0o755);
+    chmodSync(join(dir, '.sterling', 'config.json'), 0o644);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stampConsumerRoleIfAbsent: no .sterling/config.json prints a skip note, does not throw', () => {
+  const dir = scratchCwd();
+  try {
+    const lines = [];
+    assert.doesNotThrow(() => stampConsumerRoleIfAbsent(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => l.includes('SKIPPED')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runUpdate stamps the consumer role after a successful update, once build+check+test complete', async () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({}));
+
+    const { exec } = fakeExec({ behind: 1 });
+    const report = await runUpdate({ cwd: dir, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(report.exit, 0);
+    const written = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.equal(written.machine_role, 'consumer');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runUpdate never overwrites a declared machine_role, even after a real rebuild', async () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ machine_role: 'authoring' }));
+
+    const { exec } = fakeExec({ behind: 1 });
+    await runUpdate({ cwd: dir, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).machine_role, 'authoring');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runUpdate does not stamp when the update is a no-op (already current) — the stamp step never runs', async () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({}));
+
+    const { exec } = fakeExec({ behind: 0 });
+    const report = await runUpdate({ cwd: dir, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(report.exit, 0);
+    assert.ok(!Object.prototype.hasOwnProperty.call(JSON.parse(readFileSync(configPath, 'utf8')), 'machine_role'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
