@@ -132,6 +132,38 @@ export function axisHits(record, terms) {
   return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(hay));
 }
 
+/** UNIVERSAL coding vocabulary — words that show up in essentially every
+ *  dispatch prompt regardless of SUBJECT, so a match confined to this set
+ *  cannot discriminate between one dispatch and the next. Tuned on the
+ *  measured 15/15 fire rate (board 648bb497, research_finding bf74c65f,
+ *  2026-08-04): AXIS_MIN_HITS=2 was trivially satisfied by generic vocabulary
+ *  alone in a store whose own records are about this repo's machinery.
+ *
+ *  DELIBERATELY EXCLUDES Sterling domain words ('board', 'decision',
+ *  'article', 'triage', 'user', ...) even though several read as ordinary
+ *  English — in THIS store they discriminate, because the store's subject
+ *  IS Sterling's own mechanism. Widening this set to catch those too would
+ *  silence exactly the matches H20 exists to deliver. This is the honest
+ *  boundary chosen 2026-08-04: narrow and universal-only, not "words that
+ *  merely look generic." */
+export const GENERIC_DEV_TERMS = new Set([
+  'test', 'tests', 'testing', 'script', 'scripts', 'commit', 'commits', 'branch', 'merge',
+  'build', 'builds', 'check', 'checks', 'node', 'file', 'files', 'path', 'paths', 'run', 'runs',
+  'running', 'item', 'items', 'text', 'change', 'changed', 'changes', 'code', 'repo', 'line',
+  'lines', 'error', 'errors', 'string', 'value', 'values', 'field', 'fields', 'message',
+  'messages', 'output', 'input', 'name', 'names', 'list', 'exact', 'existing', 'touched',
+  'untouched', 'through', 'actually', 'behavior', 'still',
+]);
+
+/** True once at least one matched term escapes GENERIC_DEV_TERMS. This is the
+ *  floor H20 applies ON TOP OF AXIS_MIN_HITS: two hits of pure universal
+ *  vocabulary ("test", "check") describe every dispatch ever written, so they
+ *  can never be the reason to interrupt one — a real match needs at least one
+ *  term that actually says something about THIS prompt's subject. */
+export function hasDiscriminatingHit(hits) {
+  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+}
+
 /** Per-agent guard: which record ids / frontier files were already delivered
  *  this session. The conductor (no agent_id) and every subagent get their own
  *  file — delivery is per-context, mirroring H13's per-agent read ledgers. */

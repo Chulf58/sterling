@@ -32,7 +32,12 @@
 // WHY IT DOES NOT BECOME NOISE (the P1 half, and the reason board 7bbec3bd
 // exists): it is SILENT unless a real match survives both stages. A hook that
 // fires on every dispatch would train the reader to skip it, which is precisely
-// the H10 file-count failure this must not repeat.
+// the H10 file-count failure this must not repeat. Measured 2026-08-04
+// (board 648bb497, research_finding bf74c65f): on THIS repo it was firing
+// 15/15, dominated by universal dev vocabulary that AXIS_MIN_HITS alone could
+// not exclude — stage 2 now also requires hasDiscriminatingHit, a third floor
+// that a match matching ONLY generic terms (test, check, file, ...) cannot
+// clear on its own.
 import { readStdin, allow, warnNonBlocking, openStore } from './lib/common.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
@@ -45,6 +50,7 @@ import {
   renderHazards,
   renderDecisionPointers,
   AXIS_MIN_HITS,
+  hasDiscriminatingHit,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -90,9 +96,14 @@ try {
   // STAGE 2 — require precision against the NARROW fields (trigger/title, not
   // rationale). Stage 1's index spans long discursive fields, so an FTS hit is
   // not yet a reason to interrupt anyone.
+  // GENERIC-TERM FLOOR (board 648bb497, tuned on the measured 15/15 fire
+  // rate in research_finding bf74c65f): AXIS_MIN_HITS alone is satisfied by
+  // universal dev vocabulary in a store whose own subject IS this repo's
+  // machinery, so a payload matched PURELY on generic terms goes silent here
+  // — at least one matched term must actually discriminate.
   const scored = candidates
     .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-    .filter((x) => x.hits.length >= AXIS_MIN_HITS)
+    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits))
     .sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
 
