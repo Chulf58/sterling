@@ -19,9 +19,12 @@ const NOW = '2026-08-03T12:00:00.000Z';
 let SterlingStore;
 let extractAxisTerms;
 let axisHits;
+let hasDiscriminatingHit;
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
-  ({ extractAxisTerms, axisHits } = await import(pathToFileURL(join(HOOKS, 'lib', 'delivery.mjs')).href));
+  ({ extractAxisTerms, axisHits, hasDiscriminatingHit } = await import(
+    pathToFileURL(join(HOOKS, 'lib', 'delivery.mjs')).href
+  ));
 });
 
 function runHook(input, cwd) {
@@ -349,6 +352,113 @@ test('extractAxisTerms: drops dispatch boilerplate and short words, so they cann
   const terms = extractAxisTerms('Please verify the record in the store and report the evidence for this file', 16);
   for (const noise of ['verify', 'record', 'store', 'report', 'evidence', 'file', 'this', 'the']) {
     assert.ok(!terms.includes(noise), `'${noise}' must not survive extraction`);
+  }
+});
+
+// --- the generic-term floor (board 648bb497, research_finding bf74c65f) ----
+//
+// FROZEN over the REAL matched-term sets captured 2026-08-03/04 in this
+// repo's own session transcripts (the 'matched on:' list H20 prints in every
+// payload header). AXIS_MIN_HITS=2 alone was trivially satisfied by universal
+// dev vocabulary; the floor added above requires at least one matched term to
+// escape GENERIC_DEV_TERMS.
+//
+// THE HONEST BOUNDARY, chosen and documented here rather than left implicit:
+// GENERIC_DEV_TERMS is UNIVERSAL coding vocabulary only (test, check, file,
+// commit, ...) — it deliberately does NOT include Sterling's own domain
+// words ('board', 'decision', 'triage', 'user', 'recommendation',
+// 'dependencies', 'open', 'full', 'anything', 'itself'). Those read as
+// ordinary English, but in THIS store — whose subject is Sterling's own
+// mechanism — they discriminate between dispatches, so widening the generic
+// set to swallow them would silence exactly the matches H20 exists to
+// deliver. Consequence: a real observed set that mixes generic terms with
+// even one of those domain words STILL FIRES. Only a set that is generic
+// start-to-finish goes silent.
+test('hasDiscriminatingHit: a real matched-term set mixing generic and Sterling-domain vocabulary STILL FIRES', () => {
+  // Verbatim from a captured H20 payload header (research_finding bf74c65f).
+  // 'board', 'decision', 'triage', 'user', 'recommendation', 'dependencies',
+  // 'open', 'full', 'anything', 'itself' are NOT in GENERIC_DEV_TERMS (they are
+  // Sterling-domain, not universal-coding), so this set clears the floor.
+  const hits = [
+    'item', 'board', 'decision', 'text', 'items', 'open', 'full', 'triage',
+    'anything', 'itself', 'user', 'behavior', 'recommendation', 'dependencies',
+  ];
+  assert.equal(hasDiscriminatingHit(hits), true, 'board/decision/triage/... discriminate in this store — not generic');
+});
+
+test('hasDiscriminatingHit: a set already dominated by domain-discriminating terms STILL FIRES', () => {
+  // Verbatim from a captured H20 payload header — machine/authoring/config/
+  // consumer/update/json/clone are all Sterling-mechanism vocabulary.
+  const hits = ['machine', 'authoring', 'config', 'consumer', 'update', 'json', 'clone'];
+  assert.equal(hasDiscriminatingHit(hits), true, 'authoring/consumer/clone are domain-discriminating, not generic boilerplate');
+});
+
+test('hasDiscriminatingHit: judged honestly — a third real set STILL FIRES on its non-generic terms', () => {
+  // Verbatim from a captured H20 payload header. 'test' and 'commit' and
+  // 'check' are generic, but 'empty', 'brief', 'refusal', 'article' are not.
+  const hits = ['test', 'empty', 'commit', 'brief', 'check', 'refusal', 'article'];
+  assert.equal(hasDiscriminatingHit(hits), true, 'empty/brief/refusal/article are not universal coding vocabulary');
+});
+
+test('hasDiscriminatingHit: SILENT only when EVERY matched term is strictly generic', () => {
+  // The strictly-generic subset of the finding's own "dominated by" list
+  // (test/tests, scripts, commit, check, node, build, branch, merge, text,
+  // item(s)) — with the non-generic outliers the finding also names ('board',
+  // 'open', 'hooks') removed, since those are Sterling-domain under the chosen
+  // boundary. This is the honest positive case: a match confined ENTIRELY to
+  // universal vocabulary goes silent.
+  const hits = ['test', 'tests', 'scripts', 'commit', 'check', 'node', 'build', 'branch', 'merge', 'text', 'item', 'items'];
+  assert.equal(hasDiscriminatingHit(hits), false, 'purely generic — must not be a reason to interrupt a dispatch');
+});
+
+test('H20: end-to-end SILENT when the only matched terms are universal dev vocabulary', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // Title/statement built ENTIRELY from GENERIC_DEV_TERMS so axisHits can only
+    // ever return generic terms, however many — the floor, not AXIS_MIN_HITS,
+    // is what must silence this.
+    store.create(
+      decisionRecord(
+        'Commit checks run tests before every build',
+        'The build script runs tests and checks on every commit; errors and messages go to the output file.',
+        []
+      )
+    );
+    const r = runHook(
+      dispatch(dir, 'Run the tests and checks before this commit, then build and review the output file for errors and messages.'),
+      dir
+    );
+    assert.equal(r.code, 0, 'never blocks (AC7)');
+    assert.equal(r.stdout, '', 'matched purely on generic dev vocabulary — the new floor silences it');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H20: end-to-end STILL FIRES when a domain-discriminating term rides alongside generic ones', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(
+      decisionRecord(
+        'Board triage runs before every commit check',
+        'Every commit check first runs a board triage pass; the build script tests and checks the item list.',
+        []
+      )
+    );
+    const r = runHook(
+      dispatch(dir, 'Run the tests and checks before this commit, then triage the board item list and build.'),
+      dir
+    );
+    assert.equal(r.code, 0);
+    // Decision pointers render the STATEMENT, not the title (ca23c811) — assert
+    // on what is actually delivered.
+    assert.match(
+      JSON.parse(r.stdout).hookSpecificOutput.additionalContext,
+      /Every commit check first runs a board triage pass/,
+      "'board'/'triage' are Sterling-domain, not generic — one such term is enough to fire"
+    );
+  } finally {
+    cleanup();
   }
 });
 
