@@ -5,7 +5,7 @@
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
-import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
+import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
 export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run', 'System'] as const;
@@ -178,6 +178,16 @@ export interface DashboardState {
     lines: string[];
     /** present when pending was clipped at the divider: '… N more pending' */
     overflow?: string;
+  };
+  /** queue tab only: the ACTIVITY section (board 39d6462d) — every knowledge
+   *  write (create/update/link/remove/retire/promote), newest first. A
+   *  SEPARATE section from queueCompleted: that section's meaning stays
+   *  'maintenance debt paid' (drain log), unchanged; this one is "what has
+   *  been done" across the whole store. Drawn immediately below the completed
+   *  section (render.ts), same log-line convention: dim, never selectable. */
+  queueActivity?: {
+    header: string;
+    lines: string[];
   };
   /** banner rows (§11), width-aware: the full 3-row wordmark, a 1-line
    *  fallback, or [] when suppressed/too narrow — the renderer paints them with
@@ -582,6 +592,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
   // layer so the click hit-test and the screen agree by construction; the
   // completed (drain log) section owns the lower half (§3.2.7/§11)
   let queueCompleted: DashboardState['queueCompleted'];
+  let queueActivity: DashboardState['queueActivity'];
   if (ui.tab === QUEUE_TAB) {
     const totalLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
     const startRow = Number.isFinite(maxBodyLines) ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalLines;
@@ -601,6 +612,11 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       header: '— completed —',
       lines: completed.length ? completed : ['(nothing completed yet)'],
       ...(overflow ? { overflow } : {}),
+    };
+    const activity = activityLines(store);
+    queueActivity = {
+      header: '— activity —',
+      lines: activity.length ? activity : ['(no activity yet)'],
     };
   }
   // body scroll (scrollable card tabs only): clamp the persisted offset to the
@@ -638,6 +654,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : ''),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : undefined,
     queueCompleted,
+    queueActivity,
     banner,
     projectName,
     bodyTop,

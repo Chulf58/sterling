@@ -96,6 +96,14 @@ CREATE TABLE IF NOT EXISTS queue_drain_log (
   text TEXT NOT NULL,
   file_keys TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS activity_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
 `;
 
 /** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
@@ -137,6 +145,19 @@ export function catalogStatus(
   const age = Math.floor((Date.parse(nowISO) - Date.parse(anchor)) / CATALOG_DAY_MS);
   const staleDate = new Date(Date.parse(anchor) + thresholdDays * CATALOG_DAY_MS).toISOString();
   return { present: true, stale: age > thresholdDays, staleDate };
+}
+
+/**
+ * Board 39d6462d activity feed: the "title-or-slug clipped" the record is
+ * shown under on the Queue tab's activity section. Most types carry `title`;
+ * feature_article also carries `slug` but title wins when both exist; todo/
+ * note carry neither and fall back to their first text line. Clipped to 80
+ * chars — the same clip the note-card title already uses (viewmodel.ts).
+ */
+function activityTitleOf(record: DurableRecord): string {
+  const r = record as unknown as { title?: string; slug?: string; text?: string; raw_text?: string; id: string };
+  const raw = r.title ?? r.slug ?? r.text?.split('\n')[0] ?? r.raw_text?.split('\n')[0] ?? r.id;
+  return raw.slice(0, 80);
 }
 
 function deepReplaceString(value: unknown, from: string, to: string): unknown {
@@ -242,7 +263,10 @@ export class SterlingStore {
   /** The one validated write path. Unregistered type or malformed record throws; nothing is written. */
   create(input: unknown): DurableRecord {
     const record = validateRecord(input);
-    this.tx(() => this.insertRecord(record));
+    this.tx(() => {
+      this.insertRecord(record);
+      this.logActivity('created', record, record.created_at);
+    });
     return record;
   }
 
@@ -586,6 +610,7 @@ export class SterlingStore {
       if (res.changes === 0) {
         throw new Error(`supersede: record '${oldId}' was concurrently superseded — retry against the current version`);
       }
+      this.logActivity('updated', newRecord, newRecord.updated_at);
     });
     return newRecord;
   }
@@ -643,7 +668,16 @@ export class SterlingStore {
    * the cross-store id with NO new row. Provenance and inbound links survive;
    * default queries already hide superseded records, so it never double-serves.
    */
-  retireInFavorOf(id: string, replacementId: string, at: string): DurableRecord {
+  /**
+   * `verb` names what this retirement IS for the activity feed (board
+   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
+   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
+   * two existing callers, distinguished so a promotion reads as "promoted",
+   * not as an unrelated-looking "retired". Defaults to 'retired' so the
+   * pre-promotion caller (and any future one) keeps that meaning without
+   * having to know the parameter exists.
+   */
+  retireInFavorOf(id: string, replacementId: string, at: string, verb: string = 'retired'): DurableRecord {
     const record = this.get(id);
     if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
     // Same relaxation + in-tx guard as supersede (audit findings 13/43 + 29/43):
@@ -658,6 +692,7 @@ export class SterlingStore {
       if (res.changes === 0) {
         throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded — retry`);
       }
+      this.logActivity(verb, retired as DurableRecord, at);
     });
     return retired;
   }
@@ -671,7 +706,8 @@ export class SterlingStore {
   remove(id: string, drainedAt?: string): void {
     this.tx(() => {
       const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[] }) | undefined;
-      if (record && record.type === 'todo' && record.source === 'system') {
+      const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
+      if (isSystemDrain && record) {
         this.db
           .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)')
           .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []));
@@ -679,6 +715,12 @@ export class SterlingStore {
         this.db
           .prepare('DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)')
           .run();
+      }
+      // A system-todo removal is already visible via queue_drain_log above — the
+      // activity log covers what THAT log does not (board 39d6462d), so it is
+      // deliberately skipped here to avoid double-logging the same removal.
+      if (record && !isSystemDrain) {
+        this.logActivity('removed', record, drainedAt ?? new Date().toISOString());
       }
       this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
       this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
@@ -698,6 +740,33 @@ export class SterlingStore {
       .prepare('SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?')
       .all(limit) as { drained_at: string; system_reason: string; text: string; file_keys: string }[];
     return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) as string[] }));
+  }
+
+  /**
+   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
+   * through, so the Queue tab's activity section shows "what has been done"
+   * without a second, separate write path (§3.1 invariant: one write path).
+   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
+   * verb that primitive actually performed; NOT called from insertRecord
+   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
+   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
+   * remove()'s system-todo branch, which already has a completed-section home
+   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
+   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
+   * items never build up here either.
+   */
+  private logActivity(verb: string, record: DurableRecord, at: string): void {
+    this.db
+      .prepare('INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)')
+      .run(at, verb, record.type, record.id, activityTitleOf(record));
+    this.db.prepare('DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)').run();
+  }
+
+  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
+  listActivityLog(limit = 15): { at: string; verb: string; type: string; id: string; title: string }[] {
+    return this.db
+      .prepare('SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?')
+      .all(limit) as { at: string; verb: string; type: string; id: string; title: string }[];
   }
 
   /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
@@ -994,12 +1063,15 @@ export class SterlingStore {
     if (!targetValidated && !this.get(targetId)) throw new Error(`addLink: no target record '${targetId}'`);
     const parsedRel = linkSchema.shape.rel.parse(rel);
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
-    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
+    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
     this.tx(() => {
       this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(updated), sourceId);
       this.db.prepare('INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)').run(sourceId, parsedRel, targetId);
+      // addLink does not bump updated_at (the edge is metadata, not content) —
+      // the activity row still needs a real timestamp, so it stamps "now".
+      this.logActivity('linked', updated, new Date().toISOString());
     });
-    return updated as DurableRecord;
+    return updated;
   }
 
   /**

@@ -91,6 +91,21 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
       screen.put({ x: 0, y: cy, attr: { dim: true } }, line);
       cy += 1;
     }
+    // ACTIVITY section (board 39d6462d): drawn immediately below completed,
+    // same log-line convention (dim, never selectable) — a separate section,
+    // not a change to what queueCompleted means.
+    if (state.queueActivity) {
+      const qa = state.queueActivity;
+      if (cy <= lastBodyLine) {
+        screen.put({ x: 0, y: cy, attr: { dim: true } }, qa.header);
+        cy += 1;
+      }
+      for (const line of qa.lines) {
+        if (cy > lastBodyLine) break;
+        screen.put({ x: 0, y: cy, attr: { dim: true } }, line);
+        cy += 1;
+      }
+    }
   }
   if (state.run && y <= lastBodyLine) {
     const head = `run ${state.run.id} — `;
