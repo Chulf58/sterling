@@ -77,14 +77,27 @@ function paint(rows) {
 }
 
 /** The plugin root — the dir holding .claude-plugin/plugin.json — by a bounded
- *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle). */
+ *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle).
+ *  STERLING_PLUGIN_ROOT overrides for tests (mirrors STERLING_SERVER_DIST
+ *  below): the real walk always resolves to the one clone the test process
+ *  runs from, so a test cannot otherwise put cwd AT the plugin root without
+ *  faking fixtures inside that live clone's own .sterling/. */
 function pluginRoot() {
+  if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
     if (existsSync(join(dir, '.claude-plugin', 'plugin.json'))) return dir;
     dir = dirname(dir);
   }
   return null;
+}
+
+/** POSIX-ish path equality for the self-hosted-clone check below: strips a
+ *  trailing slash and normalizes backslashes, but does NOT resolve symlinks —
+ *  both sides already come from path.resolve/dirname/join in this process. */
+function samePath(a, b) {
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '');
+  return norm(a) === norm(b);
 }
 
 /** Plugin version, fail-open (no version, no line). */
@@ -114,6 +127,34 @@ try {
   config = loadConfig(input.cwd);
 } catch {
   config = null;
+}
+
+// MACHINE ROLE (todo cabbc10f, decision a9b98b7d): stated ONLY when this
+// session's project IS a Sterling clone itself — comparing the normalized
+// input.cwd to pluginRoot(). Every OTHER Sterling project (a consumer of the
+// plugin, not a clone of it) never sees this line; it exists because the
+// committed CLAUDE.md's "this machine authors" prose travels with every
+// clone and misleads a session opened inside one. Guarded exactly like the
+// config read above — H1 is soft, so a malformed config costs this line, never
+// the conventions injection.
+let roleContext = '';
+try {
+  const root = pluginRoot();
+  if (root && samePath(input.cwd, root)) {
+    const role = config?.machine_role;
+    if (role === 'authoring') {
+      roleContext =
+        '\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) — Sterling work lands and merges here; CLAUDE.md\'s authoring contract applies.';
+    } else if (role === 'consumer') {
+      roleContext =
+        '\n\nMACHINE ROLE: CONSUMER — this clone consumes via /sterling:update. The committed CLAUDE.md\'s "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.';
+    } else {
+      roleContext =
+        '\n\nMACHINE ROLE: UNDECLARED — treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
+    }
+  }
+} catch {
+  // fail-open — a malformed config or unresolved plugin root costs only this line
 }
 
 let counts = { todos: 0, maintenance: 0 };
@@ -284,7 +325,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + roleContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();
