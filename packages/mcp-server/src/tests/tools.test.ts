@@ -1944,3 +1944,136 @@ test('an ordinary role text gets NO disclaimer note — the hint is tuned for pr
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// STATE HONESTY (board db7cd16c / feedback §2.8). Nothing watched the state
+// field — the hooks watch content hashes — so an article sat at `planned` over a
+// shipped, wired, probe-verified feature whose ten ACs all held. The prose was
+// right; the METADATA was the lie, and metadata is what a reader trusts first.
+// ---------------------------------------------------------------------------
+
+function stateProject() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-state-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  return { dir, store, tools, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+const stateReviews = (tools: SterlingTools) =>
+  tools.maintenanceQuery({ system_reason: 'state_review', cap: 50 }) as unknown as { text: string; file_keys?: string[]; feature_link?: string }[];
+
+const shippedArticle = (tools: SterlingTools, over: Record<string, unknown> = {}) =>
+  tools.knowledgeCreate('feature_article', {
+    slug: 'housing',
+    title: 'housing',
+    what_it_does: 'houses the dome farmers',
+    intended_behavior: 'x',
+    files: [{ path: 'src/housing.ts', role: 'impl' }],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'planned',
+    version: 1,
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+    ...over,
+  }).record;
+
+test("an article claiming 'planned' over real code raises state_review", () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    // 674 lines was the measured case; anything past a placeholder qualifies.
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n'.repeat(300));
+    const art = shippedArticle(tools);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].feature_link, art.id);
+    assert.match(items[0].text, /declares state 'planned' while the files it owns hold \d+ bytes/);
+    assert.match(items[0].text, /Check the prose against the code before changing anything/, 'the fix is usually metadata, not a rewrite');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a small file does NOT raise it — a scaffolded placeholder is legitimately planned', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), '// TODO: build housing\n');
+    shippedArticle(tools);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an 'active' article over real code raises nothing — the metadata is honest", () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n'.repeat(300));
+    shippedArticle(tools, { state: 'active' });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an unverified files[] role raises state_review whatever the state, and names the paths', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n');
+    shippedArticle(tools, {
+      state: 'active',
+      files: [{ path: 'src/housing.ts', role: 'ROLE NOT YET WRITTEN FROM THE FILE', unverified: true }],
+    });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1, 'the honest "I do not know this yet" is now acted on rather than buried in prose');
+    assert.match(items[0].text, /roles for src\/housing\.ts are still flagged unverified/);
+    assert.deepEqual(items[0].file_keys, ['src/housing.ts'], 'and the item is keyed to the file whose role is owed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('state_review is minted ONCE across repeated reads, and clearing the flag stops it', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n');
+    const art = shippedArticle(tools, {
+      state: 'active',
+      files: [{ path: 'src/housing.ts', role: 'not written yet', unverified: true }],
+    });
+    for (let i = 0; i < 3; i++) tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 1, 'the atomic dedup covers this lane too');
+
+    // Writing the role from the file is the fulfilling artifact.
+    tools.knowledgeUpdate(art.id, { files: [{ path: 'src/housing.ts', role: 'exports x, consumed by the dome loop' }] });
+    const after = tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal((after[0] as unknown as { files: { unverified?: boolean }[] }).files[0].unverified, undefined, 'the flag is gone');
+    // The state_review item is NOT auto-drained (that drain is scoped to the two
+    // drift lanes), so it is still open — but nothing NEW is minted.
+    assert.equal(stateReviews(tools).length, 1, 'no second item once the condition is gone');
+  } finally {
+    cleanup();
+  }
+});
+
+test("state_review does NOT double-report a deletion the drift arm already named", () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    // 'active' with an absent file: the deletion item covers it; a second lane on
+    // the same fact is the double-reporting this batch reduces.
+    shippedArticle(tools, { state: 'active' });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0);
+    assert.equal(tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 10 }).length, 1, 'the deletion IS reported, once');
+  } finally {
+    cleanup();
+  }
+});

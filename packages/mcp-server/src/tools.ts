@@ -164,6 +164,12 @@ const PARKED_REF_PROBE_CAP = 40;
 // is folded into ONE summary item that NAMES the paths it covers: a cap that
 // truncates silently would read as "everything is accounted for" (P5).
 const DRIFT_ITEMS_PER_READ = 3;
+// Bytes of owned code past which `state: 'planned'` stops being credible (board
+// db7cd16c). Deliberately generous: the point is to catch an article sitting at
+// 'planned' over a SHIPPED feature (the measured case was 674 lines), not to
+// nag about a stub someone scaffolded five minutes ago. A whole file under this
+// is plausibly still a placeholder; several hundred lines is not.
+const PLANNED_CREDIBLE_BYTES = 2000;
 
 export class SterlingTools {
   private store: ToolStore;
@@ -735,6 +741,9 @@ export class SterlingTools {
         // actionable: it names the thing that changed.
         const drifts: { path: string; missing: boolean }[] = [];
         const parkedFiles: { path: string; ref: string }[] = [];
+        // Owned bytes that actually exist — the evidence for the state check below.
+        // Free here: the stat is already being taken for the drift comparison.
+        let liveBytes = 0;
         for (const f of a.files ?? []) {
           const stat = statSync(join(treeRoot, f.path), { throwIfNoEntry: false });
           if (!stat) {
@@ -755,6 +764,7 @@ export class SterlingTools {
             drifts.push({ path: f.path, missing: true });
             continue;
           }
+          liveBytes += stat.size;
           // mtime newer than updated_at is the cheap pre-filter; confirm a real
           // content change against the baseline before flagging, so a git
           // merge/checkout's mtime reset is not mistaken for an out-of-band edit.
@@ -825,6 +835,50 @@ export class SterlingTools {
               `DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] — the path becomes valid again when that branch merges. ` +
               `This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
             file_keys: [p.path],
+            feature_link: a.id,
+          });
+        }
+
+        // STATE HONESTY (board db7cd16c). Nothing watched the state field: the
+        // hooks watch content hashes, so an article sat at `planned` over a
+        // shipped, wired, probe-verified feature whose ten acceptance criteria all
+        // held. The PROSE was right and the METADATA was the lie — and metadata is
+        // what a reader trusts first, so anyone querying it would have concluded a
+        // working feature did not exist.
+        //
+        // Two triggers, both cheap here because the stats are already taken:
+        //  - `planned` (or `dormant`) over more owned bytes than a placeholder;
+        //  - any files[] entry still flagged `unverified`, i.e. a role never
+        //    written from the source. That flag exists to make the honest "I don't
+        //    know this yet" cheap, and it is only worth having if something acts on
+        //    it (board db7cd16c) — otherwise it is the ⚠⚠-in-prose it replaced.
+        //
+        // NOT a trigger, deliberately: `built`/`active` while the files are ABSENT.
+        // The report asks for it, but the deletion arm above already mints an item
+        // naming the missing file, and a second lane on the same fact is the
+        // double-reporting this batch exists to reduce.
+        const state = (record as unknown as { state?: string }).state;
+        const unverifiedPaths = (a.files ?? []).filter((f) => (f as { unverified?: boolean }).unverified).map((f) => f.path);
+        const overStated = (state === 'planned' || state === 'dormant') && liveBytes > PLANNED_CREDIBLE_BYTES;
+        if (overStated || unverifiedPaths.length) {
+          const reasons: string[] = [];
+          if (overStated) {
+            reasons.push(
+              `it declares state '${state}' while the files it owns hold ${liveBytes} bytes of code on disk — 'planned' over written code reads as "this does not exist yet" to everyone who queries it`
+            );
+          }
+          if (unverifiedPaths.length) {
+            reasons.push(
+              `its files[] roles for ${unverifiedPaths.join(', ')} are still flagged unverified — the role was never written from the source, so the article does not yet describe what those files do`
+            );
+          }
+          this.maintenanceEnqueue({
+            reason: 'state_review',
+            text:
+              `review article '${a.slug}' metadata against reality: ${reasons.join('; and ')}. ` +
+              `Check the prose against the code before changing anything — in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. ` +
+              `Then knowledge_update the state (and clear the unverified flags you have written from the file).`,
+            file_keys: unverifiedPaths.length ? unverifiedPaths : (a.files ?? []).map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
             feature_link: a.id,
           });
         }
