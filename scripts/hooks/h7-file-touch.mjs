@@ -35,31 +35,34 @@ try {
     // direct mode: maintenance queue (deduped per record) + transient touch register for H10
     const now = new Date().toISOString();
     for (const article of owners) {
-      const open = store
-        .query({ types: ['todo'], cap: 1000 })
-        .some((t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && t.feature_link === article.id);
-      if (!open) {
-        store.create({
-          id: randomUUID(),
-          type: 'todo',
-          created_at: now,
-          updated_at: now,
-          author: 'system',
-          status: 'active',
-          superseded_by: null,
-          links: [],
-          scope: 'project',
-          stack_tags: [],
-          text:
-            article.type === 'reference_material'
-              ? `reconcile reference '${article.title}' — its document was touched in direct mode; refresh summary + source_date (§3.2.5)`
-              : `reconcile article '${article.slug}' — files it owns were touched in direct mode`,
-          source: 'system',
-          system_reason: 'reconcile_needed',
-          file_keys: [rel],
-          feature_link: article.id,
-        });
-      }
+      // ONE dedup definition, in the store, ATOMIC (board 2ded3b4b). This used to
+      // be a hand-rolled query-then-insert keyed on the ARTICLE — one of four
+      // such copies, all racing each other (two concurrent producers each read
+      // "no open item" before either insert committed, which is how a consuming
+      // project measured seven byte-identical pairs 2-3ms apart) and all omitting
+      // the FILE from the key, which silently suppressed a second drifting file's
+      // item. enqueueSystemTodo does the check inside the insert transaction and
+      // keys on (reason, feature_link, file), so this hook just states the fact.
+      store.enqueueSystemTodo({
+        id: randomUUID(),
+        type: 'todo',
+        created_at: now,
+        updated_at: now,
+        author: 'system',
+        status: 'active',
+        superseded_by: null,
+        links: [],
+        scope: 'project',
+        stack_tags: [],
+        text:
+          article.type === 'reference_material'
+            ? `reconcile reference '${article.title}' — its document was touched in direct mode; refresh summary + source_date (§3.2.5)`
+            : `reconcile article '${article.slug}' — files it owns were touched in direct mode (${rel})`,
+        source: 'system',
+        system_reason: 'reconcile_needed',
+        file_keys: [rel],
+        feature_link: article.id,
+      });
     }
     const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');
     mkdirSync(dirname(touchesPath), { recursive: true });

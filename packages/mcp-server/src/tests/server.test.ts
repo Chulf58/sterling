@@ -409,10 +409,16 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     assert.equal(arts.find((r) => r.id === b.id)?.verify_before_use, true, 'deleted owned file flags the article');
     assert.match((reconciled('feat-b')[0] as { text: string }).text, /no longer exists/);
 
-    // an open H7-style reconcile_needed item (same feature_link) suppresses a
-    // second enqueue — seeded with a DIFFERENT file key so this pins that the
-    // dedup is feature_link-based, not file_keys-based. A REAL content edit
-    // triggers the drift wire so the dedup path is actually exercised.
+    // DEDUP IS PER (reason, feature_link, FILE) — this assertion REVERSED on
+    // 2026-08-04 (board 2ded3b4b, decision 30d18443's sibling), deliberately.
+    // It used to assert that an open item on src/other.mjs SUPPRESSED a new item
+    // for src/c.mjs, on the reasoning that one article should present "one drain
+    // surface". That conflated one SURFACE (the queue) with one ITEM, and the
+    // conflation lost data: because knowledge_update re-baselines EVERY owned
+    // file, reconciling the seeded file absorbed c.mjs's drift into a fresh
+    // baseline, so the second finding neither queued nor survived. Two DIFFERENT
+    // files are two real obligations and get two items; the same file twice is
+    // the duplicate, and that still collapses (asserted below).
     const cPath = join(dir, 'src', 'c.mjs');
     writeFileSync(cPath, 'v1');
     utimesSync(cPath, old, old);
@@ -421,8 +427,23 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     writeFileSync(cPath, 'v2');
     utimesSync(cPath, future, future);
     tools.knowledgeQuery({ types: ['feature_article'] });
-    const cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter((t) => (t as { feature_link?: string }).feature_link === c.id);
-    assert.equal(cItems.length, 1, 'H7 item and drift wire share one drain surface');
+    const cReason = (t: unknown) => (t as { feature_link?: string }).feature_link === c.id;
+    let cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter(cReason);
+    assert.equal(cItems.length, 2, 'a DIFFERENT owned file is a distinct obligation, not a duplicate');
+    assert.deepEqual(
+      cItems.map((t) => (t as { file_keys?: string[] }).file_keys?.[0]).sort(),
+      ['src/c.mjs', 'src/other.mjs'],
+      'and each item names the file it is about'
+    );
+
+    // The duplicate half: re-reading re-enqueues the SAME (reason, link, file)
+    // and must return the existing item rather than adding a second. This is the
+    // 52%-of-the-queue bug, and it is closed atomically in the store rather than
+    // by a pre-check each producer re-implements.
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter(cReason);
+    assert.equal(cItems.length, 2, 'repeat reads of the same drift add nothing');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

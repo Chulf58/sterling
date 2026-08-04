@@ -16,6 +16,22 @@ export interface SkippedCheck {
   reason: string;
 }
 
+/**
+ * knowledge_create's result. `deduped`/`text_updated` appear only for a SYSTEM
+ * maintenance item that hit the atomic dedup path (board 2ded3b4b) — they are
+ * DECLARED rather than spread-in-silently, because a caller that cannot see
+ * "this returned the existing item" in the type is a caller that will treat a
+ * dedup as a fresh insert.
+ */
+export interface CreateResult {
+  record: DurableRecord;
+  check_skipped: SkippedCheck[];
+  /** The item already existed; `record` is that existing item, not a new row. */
+  deduped?: boolean;
+  /** The existing item's text was refreshed because this attempt said something different. */
+  text_updated?: boolean;
+}
+
 export interface BoardFilter {
   source?: 'user' | 'system';
   system_reason?: string;
@@ -140,6 +156,14 @@ const BOARD_SCAN_CAP = 1000;
 // deletion item — which is the safe direction, since that lane demands work and
 // the parked lane does not.
 const PARKED_REF_PROBE_CAP = 40;
+// Per-file drift items one read may mint for ONE article (board 2ded3b4b). One
+// item per FILE is the point — an item that names the changed file is actionable
+// where an article-level one is not, and the old article-level dedup is what
+// suppressed a second file's finding entirely. But an article owning twenty files
+// through a whole-area refactor should not become twenty items, so the remainder
+// is folded into ONE summary item that NAMES the paths it covers: a cap that
+// truncates silently would read as "everything is accounted for" (P5).
+const DRIFT_ITEMS_PER_READ = 3;
 
 export class SterlingTools {
   private store: ToolStore;
@@ -384,7 +408,7 @@ export class SterlingTools {
     };
   }
 
-  knowledgeCreate(type: string, fields: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
+  knowledgeCreate(type: string, fields: Record<string, unknown>): CreateResult {
     this.refuseServerOwnedFields(fields, 'knowledge_create');
     const ts = this.now();
     // The envelope is SERVER-OWNED: strip these keys from caller fields before
@@ -484,6 +508,26 @@ export class SterlingTools {
       skipped.push(this.skip('dedup-merge', this.activeRunId()));
     }
 
+    // A SYSTEM maintenance item takes the ATOMIC dedup path (board 2ded3b4b):
+    // check-and-insert in one transaction, keyed (system_reason, feature_link,
+    // file_keys). Every producer funnels through here, so the four hand-rolled
+    // query-then-insert copies that raced each other are gone, and the key now
+    // includes the FILE — which fixes the opposite bug in the same stroke, where
+    // a second drifting file was suppressed and then absorbed by the next
+    // re-baseline. A duplicate returns the EXISTING item rather than throwing:
+    // producers are mechanisms reporting a fact, and a fact reported twice is
+    // not an error.
+    const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
+    if (isSystemTodo) {
+      const res = this.store.enqueueSystemTodo(candidate);
+      this.surfacePromotionCandidate(res.record, type);
+      return {
+        record: res.record,
+        check_skipped: skipped,
+        ...(res.deduped ? { deduped: true } : {}),
+        ...(res.text_updated ? { text_updated: true } : {}),
+      };
+    }
     const record = this.store.create(candidate);
     if (type === 'note') {
       const failed = this.dispatchNoteStructuring(record, fields);
@@ -652,8 +696,15 @@ export class SterlingTools {
         const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
         if (tree.unresolved) return { ...record, verify_before_use: true };
         const treeRoot = tree.root ?? this.repoRoot;
-        let drift: { path: string; missing: boolean } | undefined;
-        let parked: { path: string; ref: string } | undefined;
+        // EVERY drifting file, not just the first (board 2ded3b4b). This loop used
+        // to `break` on the first drift, and the enqueue dedup keyed on the
+        // ARTICLE — so a second drifting file never got an item, and because
+        // knowledge_update re-baselines EVERY owned file, reconciling the first
+        // absorbed the second's drift into a fresh baseline. The finding neither
+        // queued nor survived. One item per FILE is also what makes an item
+        // actionable: it names the thing that changed.
+        const drifts: { path: string; missing: boolean }[] = [];
+        const parkedFiles: { path: string; ref: string }[] = [];
         for (const f of a.files ?? []) {
           const stat = statSync(join(treeRoot, f.path), { throwIfNoEntry: false });
           if (!stat) {
@@ -668,11 +719,11 @@ export class SterlingTools {
             // working-tree absence and nothing else.
             const ref = this.parkedOnRef(f.path, treeRoot);
             if (ref) {
-              parked = { path: f.path, ref };
+              parkedFiles.push({ path: f.path, ref });
               continue; // the article is CORRECT — the path returns on merge
             }
-            drift = { path: f.path, missing: true };
-            break;
+            drifts.push({ path: f.path, missing: true });
+            continue;
           }
           // mtime newer than updated_at is the cheap pre-filter; confirm a real
           // content change against the baseline before flagging, so a git
@@ -681,21 +732,38 @@ export class SterlingTools {
           // changes it by design and the merge gate's check-projection-fresh
           // guards its currency; its DELETION still lands in the missing arm above.
           if (stat.mtimeMs > Date.parse(record.updated_at) && !this.isGeneratedProjection(f.path) && this.contentChanged(f.path, a.file_baselines, treeRoot)) {
-            drift = { path: f.path, missing: false };
-            break;
+            drifts.push({ path: f.path, missing: false });
           }
         }
-        if (drift) {
-          const open = this.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).some(
-            (t) => (t as { feature_link?: string }).feature_link === a.id
-          );
-          if (!open) {
+        if (drifts.length) {
+          // NO PRE-CHECK: enqueueSystemTodo is atomic and keyed
+          // (reason, feature_link, file), so re-enqueueing an already-open item
+          // returns it instead of duplicating it. The old pre-check keyed on the
+          // ARTICLE, which is exactly what suppressed a second file's finding —
+          // and doing it here as well as in the store would put the dedup rule in
+          // two places, which is how the four copies drifted apart to begin with.
+          for (const d of drifts.slice(0, DRIFT_ITEMS_PER_READ)) {
             this.maintenanceEnqueue({
               reason: 'reconcile_needed',
-              text: drift.missing
-                ? `reconcile article '${a.slug}' — owned file ${drift.path} no longer exists (out-of-band deletion)`
-                : `reconcile article '${a.slug}' — owned file ${drift.path} changed on disk after the article's last update (out-of-band edit)`,
-              file_keys: [drift.path],
+              text: d.missing
+                ? `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
+                : `reconcile article '${a.slug}' — owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`,
+              file_keys: [d.path],
+              feature_link: a.id,
+            });
+          }
+          if (drifts.length > DRIFT_ITEMS_PER_READ) {
+            // Never truncate SILENTLY (P5): the remainder is named on the item
+            // that did land, so a reader knows the queue is a floor here.
+            this.maintenanceEnqueue({
+              reason: 'reconcile_needed',
+              text:
+                `reconcile article '${a.slug}' — ${drifts.length} owned files drifted in one read; ` +
+                `the first ${DRIFT_ITEMS_PER_READ} have their own items and the remainder (${drifts
+                  .slice(DRIFT_ITEMS_PER_READ)
+                  .map((d) => d.path)
+                  .join(', ')}) are covered by this one. A drift this wide usually means a whole-area change — reconcile the article as a whole.`,
+              file_keys: drifts.slice(DRIFT_ITEMS_PER_READ).map((d) => d.path),
               feature_link: a.id,
             });
           }
@@ -708,22 +776,17 @@ export class SterlingTools {
         // copies. Not auto-drained by knowledge_update either — that drain is
         // scoped to the two drift lanes — because no article write changes
         // where the file lives.
-        if (parked) {
-          const alreadyKnown = this.maintenanceQuery({ system_reason: 'file_parked', file_keys: [parked.path], cap: 1000 }).some(
-            (t) => (t as { feature_link?: string }).feature_link === a.id
-          );
-          if (!alreadyKnown) {
-            this.maintenanceEnqueue({
-              reason: 'file_parked',
-              text:
-                `article '${a.slug}' — owned file ${parked.path} is absent from the working tree but ALIVE on '${parked.ref}'. ` +
-                `INFORMATIONAL: no reconcile is owed and the article is correct as written. ` +
-                `DO NOT DROP ${parked.path} FROM THIS ARTICLE'S files[] — the path becomes valid again when that branch merges. ` +
-                `This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
-              file_keys: [parked.path],
-              feature_link: a.id,
-            });
-          }
+        for (const p of parkedFiles.slice(0, DRIFT_ITEMS_PER_READ)) {
+          this.maintenanceEnqueue({
+            reason: 'file_parked',
+            text:
+              `article '${a.slug}' — owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. ` +
+              `INFORMATIONAL: no reconcile is owed and the article is correct as written. ` +
+              `DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] — the path becomes valid again when that branch merges. ` +
+              `This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
+            file_keys: [p.path],
+            feature_link: a.id,
+          });
         }
       }
       const basis = (record as unknown as { basis?: string }).basis;
@@ -1131,7 +1194,7 @@ export class SterlingTools {
 
   // -- board (§3.2.7) ----------------------------------------------------------
 
-  boardAdd(args: Record<string, unknown>): { record: DurableRecord; check_skipped: SkippedCheck[] } {
+  boardAdd(args: Record<string, unknown>): CreateResult {
     const { text, source, ...rest } = args;
     return this.knowledgeCreate('todo', { text, source, ...rest });
   }

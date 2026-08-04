@@ -953,3 +953,146 @@ test('articlesBySlug serves the live head only, newest first — superseded vers
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// ATOMIC MAINTENANCE DEDUP (board 2ded3b4b / feedback §2.2). Four producers each
+// ran their own query-then-insert with no uniqueness constraint: two could both
+// read "no open item" before either committed (seven byte-identical pairs 2-3ms
+// apart, 52% of a 27-item queue), and every one of the four keys omitted the
+// FILE — so a second drifting file was suppressed and then absorbed by the next
+// re-baseline. One definition now, inside the insert transaction.
+// ---------------------------------------------------------------------------
+
+const storeHarness = () => {
+  const { dir, store } = tempStore();
+  return { store, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+};
+
+const ART_1 = randomUUID();
+const ART_2 = randomUUID();
+
+const sysTodo = (over: Record<string, unknown> = {}) => ({
+  id: randomUUID(),
+  type: 'todo',
+  created_at: NOW,
+  updated_at: NOW,
+  author: 'system',
+  status: 'active',
+  superseded_by: null,
+  links: [],
+  scope: 'project',
+  stack_tags: [],
+  text: 'reconcile article x',
+  source: 'system',
+  system_reason: 'reconcile_needed',
+  file_keys: ['src/a.ts'],
+  feature_link: ART_1,
+  ...over,
+});
+
+test('enqueueSystemTodo: the same (reason, link, file) returns the EXISTING item instead of duplicating', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const first = store.enqueueSystemTodo(sysTodo());
+    assert.equal(first.deduped, false);
+    const second = store.enqueueSystemTodo(sysTodo());
+    assert.equal(second.deduped, true, 'the duplicate is collapsed');
+    assert.equal(second.record.id, first.record.id, 'and the caller gets the item that already exists');
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: a DIFFERENT file on the same article is a distinct obligation', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'] }));
+    store.enqueueSystemTodo(sysTodo({ file_keys: ['src/b.ts'] }));
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 2, 'this is the silent-loss half of the bug');
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: a different reason, or a different article, is also distinct', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo());
+    store.enqueueSystemTodo(sysTodo({ system_reason: 'file_parked' }));
+    store.enqueueSystemTodo(sysTodo({ feature_link: ART_2 }));
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 3);
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: a match whose TEXT differs is UPDATED, not discarded (escalating severity)', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const first = store.enqueueSystemTodo(sysTodo({ text: "reconcile article 'x' — src/a.ts changed on disk (out-of-band edit)" }));
+    // Same file, worse news, first item not yet drained. Swallowing this as a
+    // duplicate would lose the more urgent fact.
+    const second = store.enqueueSystemTodo(
+      sysTodo({ text: "reconcile article 'x' — src/a.ts no longer exists (out-of-band deletion)", updated_at: '2026-06-11T00:00:00.000Z' })
+    );
+    assert.equal(second.deduped, true, 'still one item');
+    assert.equal(second.text_updated, true, 'but its text was refreshed');
+    assert.equal(second.record.id, first.record.id);
+    const [only] = store.query({ types: ['todo'], cap: 100 }) as unknown as { text: string; updated_at: string }[];
+    assert.match(only.text, /no longer exists/, 'the queue carries the newer, more urgent fact');
+    assert.equal(only.updated_at, '2026-06-11T00:00:00.000Z', 'and its timestamp moved');
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: identical text is NOT an update — a repeat report changes nothing', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo());
+    const again = store.enqueueSystemTodo(sysTodo({ updated_at: '2026-06-11T00:00:00.000Z' }));
+    assert.equal(again.text_updated, false);
+    const [only] = store.query({ types: ['todo'], cap: 100 }) as unknown as { updated_at: string }[];
+    assert.equal(only.updated_at, NOW, 'no churn on a re-report of the same fact');
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: items with NO link and NO file_keys stay distinct by text', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    // capture_owed / research_owed carry neither, so keying on the reason alone
+    // would merge unrelated obligations — trading one bug for a worse one.
+    const bare = { file_keys: undefined, feature_link: undefined, system_reason: 'capture_owed' };
+    store.enqueueSystemTodo(sysTodo({ ...bare, text: 'capture the decision about X' }));
+    store.enqueueSystemTodo(sysTodo({ ...bare, text: 'capture the anti-pattern about Y' }));
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 2, 'two different obligations survive');
+    store.enqueueSystemTodo(sysTodo({ ...bare, text: 'capture the decision about X' }));
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 2, 'an exact duplicate still collapses');
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo refuses anything that is not a system-source todo', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    assert.throws(() => store.enqueueSystemTodo(sysTodo({ source: 'user' })), /expects a system-source todo/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: file_keys ORDER does not create a false distinction', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts', 'src/b.ts'] }));
+    const second = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/b.ts', 'src/a.ts'] }));
+    assert.equal(second.deduped, true, 'the key is a SET — the same pair in another order is the same item');
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 1);
+  } finally {
+    cleanup();
+  }
+});

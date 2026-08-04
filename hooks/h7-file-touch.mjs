@@ -4963,6 +4963,77 @@ var SterlingStore = class {
     this.tx(() => this.insertRecord(record));
     return record;
   }
+  /**
+   * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
+   * definition, replacing four hand-rolled copies (board 2ded3b4b).
+   *
+   * THE BUG THIS CLOSES IS TWO BUGS. Four producers minted maintenance items
+   * (h7-file-touch, the read-time drift check in tools.ts, fs-remove, fs-move),
+   * each with its own copy-pasted "does an open item already exist?" query
+   * followed by a separate insert, and no uniqueness constraint anywhere:
+   *
+   *  (1) DUPLICATES. Two producers both read "no open item" before either insert
+   *      committed, and both inserted — classic TOCTOU. A consuming project
+   *      measured SEVEN byte-identical pairs created 2-3 MILLISECONDS apart, 52%
+   *      of a 27-item queue. The cost was judgement rather than writes: the
+   *      deep-queue threshold trips early, and anyone sizing a drain from the raw
+   *      count sees double the work that exists.
+   *  (2) SILENT LOSS — the worse half, and not in the report. All four checks
+   *      keyed on (feature_link, system_reason) and OMITTED the file, so a second
+   *      drifting file on the same article was suppressed. And because
+   *      knowledge_update re-baselines EVERY owned file, reconciling the first
+   *      file absorbed the second file's drift into a fresh baseline: the finding
+   *      neither queued nor survived.
+   *
+   * The key is therefore (system_reason, feature_link, file_keys SET), and the
+   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
+   * concurrent caller blocks on the write lock and then SEES the committed row
+   * instead of racing it.
+   *
+   * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
+   * severity — edited today, deleted tomorrow, both reconcile_needed, the first
+   * not yet drained — would otherwise be swallowed as a duplicate, losing the more
+   * urgent fact. Todos carry no version chain (P4: done = removed), so the text is
+   * replaced in place and updated_at moved; file_keys are identical by
+   * construction, so no index maintenance is needed.
+   */
+  enqueueSystemTodo(input2) {
+    const candidate = validateRecord(input2);
+    if (candidate.type !== "todo" || candidate.source !== "system") {
+      throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
+    }
+    const keyOf = (t) => {
+      const files = [...t.file_keys ?? []].sort();
+      const identified = !!t.feature_link || files.length > 0;
+      return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
+    };
+    const wantKey = keyOf(candidate);
+    let existing;
+    let textUpdated = false;
+    this.tx(() => {
+      const rows = this.db.prepare("SELECT body FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      for (const r of rows) {
+        const t = JSON.parse(r.body);
+        if (t.source !== "system")
+          continue;
+        if (keyOf(t) !== wantKey)
+          continue;
+        existing = t;
+        break;
+      }
+      if (!existing) {
+        this.insertRecord(candidate);
+        return;
+      }
+      if ((existing.text ?? "") !== (candidate.text ?? "")) {
+        const merged = { ...existing, text: candidate.text, updated_at: candidate.updated_at };
+        this.db.prepare("UPDATE records SET body = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(merged), candidate.updated_at, existing.id);
+        existing = merged;
+        textUpdated = true;
+      }
+    });
+    return existing ? { record: existing, deduped: true, text_updated: textUpdated } : { record: candidate, deduped: false, text_updated: false };
+  }
   get(id) {
     const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
     return row ? JSON.parse(row.body) : void 0;
@@ -5612,26 +5683,23 @@ try {
   } else {
     const now = (/* @__PURE__ */ new Date()).toISOString();
     for (const article of owners) {
-      const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link === article.id);
-      if (!open) {
-        store.create({
-          id: randomUUID2(),
-          type: "todo",
-          created_at: now,
-          updated_at: now,
-          author: "system",
-          status: "active",
-          superseded_by: null,
-          links: [],
-          scope: "project",
-          stack_tags: [],
-          text: article.type === "reference_material" ? `reconcile reference '${article.title}' \u2014 its document was touched in direct mode; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${article.slug}' \u2014 files it owns were touched in direct mode`,
-          source: "system",
-          system_reason: "reconcile_needed",
-          file_keys: [rel],
-          feature_link: article.id
-        });
-      }
+      store.enqueueSystemTodo({
+        id: randomUUID2(),
+        type: "todo",
+        created_at: now,
+        updated_at: now,
+        author: "system",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        text: article.type === "reference_material" ? `reconcile reference '${article.title}' \u2014 its document was touched in direct mode; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${article.slug}' \u2014 files it owns were touched in direct mode (${rel})`,
+        source: "system",
+        system_reason: "reconcile_needed",
+        file_keys: [rel],
+        feature_link: article.id
+      });
     }
     const touchesPath = join2(input.cwd, ".sterling", "transient", "touches.json");
     mkdirSync2(dirname3(touchesPath), { recursive: true });

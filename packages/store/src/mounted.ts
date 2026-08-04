@@ -68,6 +68,16 @@ export class MountedStores {
     return this.storeFor(record.scope).create(record);
   }
 
+  /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
+   *  state and never shared, so this resolves to the project store in practice —
+   *  and the dedup key is therefore evaluated within that ONE store rather than
+   *  across the fan, which is right: two projects' queues are independent, and a
+   *  cross-store key would let one project's item suppress another's. */
+  enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
+    const record = validateRecord(input);
+    return this.storeFor(record.scope).enqueueSystemTodo(record);
+  }
+
   private storeFor(scope: string): SterlingStore {
     if (scope === 'project') return this.project;
     const m = /^domain:(.+)$/.exec(scope);
