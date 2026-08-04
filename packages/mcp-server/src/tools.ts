@@ -380,9 +380,18 @@ export class SterlingTools {
    * a retirement that had never happened.
    *
    * So the message must not merely refuse: for status/superseded_by it has to say
-   * that NO retire path exists on this surface, because a caller reaching for
-   * these fields is trying to do something the surface cannot do, and silence let
-   * them believe otherwise.
+   * where the caller's actual intent belongs, because reaching for these fields
+   * means wanting something these fields cannot do, and silence let them believe
+   * otherwise.
+   *
+   * CORRECTED 2026-08-04: this message used to end "There is NO way to retire a
+   * record to a non-serving state through this surface". True when written, and
+   * outlived five days later by knowledge_retire (decision 9948475b) — which
+   * rewrote the same claim in CLAUDE.md and missed this copy. It now NAMES the
+   * retirement path and its boundary in one breath: retirement is for a genuine
+   * DUPLICATE, never for a record that is merely wrong, because a caller here may
+   * want either and pointing at retirement alone would trade a stale denial for an
+   * invitation to retire away every error instead of correcting it.
    */
   private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update'): void {
     const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
@@ -394,8 +403,9 @@ export class SterlingTools {
         `the value would have been discarded and the write reported success. ` +
         (retiring
           ? `status/superseded_by are set only by supersession: knowledge_update writes a NEW version and retires the prior one automatically. ` +
-            `There is NO way to retire a record to a non-serving state through this surface — /sterling:cleanup never hard-deletes knowledge either. ` +
-            `To correct a wrong record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug.`
+            `To correct a WRONG record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug. ` +
+            `The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, ` +
+            `never for a record that is merely wrong — /sterling:cleanup never hard-deletes knowledge either.`
           : `id and the clocks are assigned at write; type is fixed at create.`)
     );
   }

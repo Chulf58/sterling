@@ -991,7 +991,12 @@ test('knowledge_create: caller cannot override the server-owned envelope (id/tim
         assert.match(err.message, /SERVER-OWNED/);
         assert.match(err.message, /'id'/, 'the refusal names every attempted key');
         assert.match(err.message, /'status'/);
-        assert.match(err.message, /NO way to retire/, 'reaching for status gets told the retire path does not exist');
+        // Corrected 2026-08-04: the message used to assert that NO retire path
+        // exists, which knowledge_retire made false. It must now NAME the path and
+        // its duplicate-only boundary, so neither half can rot silently again.
+        assert.match(err.message, /knowledge_retire\(id, in_favor_of\)/, 'reaching for status gets pointed at the retirement path');
+        assert.match(err.message, /genuine DUPLICATE/, 'and told the boundary, so it is not read as retire-away-your-errors');
+        assert.doesNotMatch(err.message, /NO way to retire/, 'the superseded denial is gone');
         return true;
       }
     );
@@ -1013,7 +1018,7 @@ test('knowledge_create: caller cannot override the server-owned envelope (id/tim
 
     // The measured silent no-op, now loud: the retirement attempt that returned
     // status:'active' and superseded_by:null with no error (2026-07-29).
-    assert.throws(() => tools.knowledgeUpdate(record.id, { status: 'superseded', superseded_by: randomUUID() }), /NO way to retire/);
+    assert.throws(() => tools.knowledgeUpdate(record.id, { status: 'superseded', superseded_by: randomUUID() }), /knowledge_retire/);
     assert.equal(tools.knowledgeGet(record.id).status, 'active', 'the refused update changed nothing');
   } finally {
     cleanup();
