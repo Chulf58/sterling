@@ -2,7 +2,7 @@
 // the logic is unit-testable; server.ts wires them to MCP. Coarse tools are
 // safe because schemas are exact: every write revalidates at the store.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -133,6 +133,13 @@ const DEFAULT_BOARD_CAP = 50;
 // The bounded todo scan the filter runs over. A full scan means the reported
 // count is a floor; boardQueryResult says so rather than under-reporting.
 const BOARD_SCAN_CAP = 1000;
+// How many local branches the parked-file probe will interrogate for ONE absent
+// file (board 1d6a721a). Bounded because the probe shells out per ref: a repo
+// with a long tail of stale branches must not turn one missing file into
+// hundreds of subprocesses. Overrunning it degrades to today's behaviour — the
+// deletion item — which is the safe direction, since that lane demands work and
+// the parked lane does not.
+const PARKED_REF_PROBE_CAP = 40;
 
 export class SterlingTools {
   private store: ToolStore;
@@ -217,6 +224,55 @@ export class SterlingTools {
    */
   private isGeneratedProjection(rel: string): boolean {
     return this.config.generated_projections.includes(rel);
+  }
+
+  /**
+   * A file absent from the working tree may still be ALIVE on another git ref —
+   * parked on an unmerged branch rather than deleted (board 1d6a721a). Returns
+   * the first ref that holds it, or undefined if it exists nowhere (in which
+   * case the deletion reading is correct, and now trustworthy).
+   *
+   * ONLY CALLED ON THE ALREADY-RARE MISSING-FILE PATH, never on the hot read
+   * path: shelling out per owned file per query would be a real regression, and
+   * the whole point is that absence is unusual. Bounded by PARKED_REF_PROBE_CAP
+   * so a repo with hundreds of stale branches cannot turn one absent file into
+   * hundreds of subprocesses.
+   *
+   * HEAD is probed FIRST and separately: a file present in HEAD but not on disk
+   * is the commonest shape (someone deleted it without committing), and catching
+   * it in one call avoids walking the branch list at all.
+   *
+   * Every git failure is swallowed to undefined, which degrades to today's
+   * behaviour — a deletion item. That direction is deliberate: a missing git, a
+   * non-repo tree root, or a corrupt ref must not SUPPRESS a real deletion
+   * finding, because the informational lane demands nothing and the reconcile
+   * lane is the one that gets acted on.
+   */
+  private parkedOnRef(rel: string, treeRoot: string): string | undefined {
+    const has = (ref: string): boolean => {
+      try {
+        return spawnSync('git', ['-C', treeRoot, 'cat-file', '-e', `${ref}:${rel}`], { encoding: 'utf8', windowsHide: true }).status === 0;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      if (has('HEAD')) return 'HEAD';
+      const refs = spawnSync('git', ['-C', treeRoot, 'for-each-ref', '--format=%(refname:short)', 'refs/heads'], {
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+      if (refs.status !== 0 || typeof refs.stdout !== 'string') return undefined;
+      const branches = refs.stdout
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, PARKED_REF_PROBE_CAP);
+      for (const b of branches) if (has(b)) return b;
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read. */
@@ -597,9 +653,24 @@ export class SterlingTools {
         if (tree.unresolved) return { ...record, verify_before_use: true };
         const treeRoot = tree.root ?? this.repoRoot;
         let drift: { path: string; missing: boolean } | undefined;
+        let parked: { path: string; ref: string } | undefined;
         for (const f of a.files ?? []) {
           const stat = statSync(join(treeRoot, f.path), { throwIfNoEntry: false });
           if (!stat) {
+            // ABSENT FROM THE WORKING TREE IS NOT THE SAME AS DELETED (board
+            // 1d6a721a). Every check here evaluates the CHECKED-OUT tree, so a
+            // file parked on an unmerged branch read as an out-of-band deletion
+            // — and that item could never be closed, because the trigger is
+            // absence and no write makes a file appear. It re-fired on every
+            // subsequent read (this arm is a pure function of disk state), which
+            // pushed a drain toward exactly the no-op version bumps the closing
+            // rule calls drift. Ask git before concluding anything: `ls` proves
+            // working-tree absence and nothing else.
+            const ref = this.parkedOnRef(f.path, treeRoot);
+            if (ref) {
+              parked = { path: f.path, ref };
+              continue; // the article is CORRECT — the path returns on merge
+            }
             drift = { path: f.path, missing: true };
             break;
           }
@@ -629,6 +700,30 @@ export class SterlingTools {
             });
           }
           return { ...record, verify_before_use: true };
+        }
+        // A PARKED file is recorded once and does NOT raise verify_before_use:
+        // the article's claims are accurate, the path is simply not in this
+        // checkout, and telling a reader to verify before use would be false
+        // alarm. Deduped on (feature_link, file) so a read loop cannot pile up
+        // copies. Not auto-drained by knowledge_update either — that drain is
+        // scoped to the two drift lanes — because no article write changes
+        // where the file lives.
+        if (parked) {
+          const alreadyKnown = this.maintenanceQuery({ system_reason: 'file_parked', file_keys: [parked.path], cap: 1000 }).some(
+            (t) => (t as { feature_link?: string }).feature_link === a.id
+          );
+          if (!alreadyKnown) {
+            this.maintenanceEnqueue({
+              reason: 'file_parked',
+              text:
+                `article '${a.slug}' — owned file ${parked.path} is absent from the working tree but ALIVE on '${parked.ref}'. ` +
+                `INFORMATIONAL: no reconcile is owed and the article is correct as written. ` +
+                `DO NOT DROP ${parked.path} FROM THIS ARTICLE'S files[] — the path becomes valid again when that branch merges. ` +
+                `This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
+              file_keys: [parked.path],
+              feature_link: a.id,
+            });
+          }
         }
       }
       const basis = (record as unknown as { basis?: string }).basis;

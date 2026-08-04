@@ -203,6 +203,13 @@ export const SYSTEM_REASONS = [
   'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
   'research_owed', // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   'concept_article_missing', // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // An owned file is absent from the working tree but ALIVE on another git ref
+  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
+  // reconcile, because no write can change the fact and the article is already
+  // correct (the path becomes valid again on merge). It exists so the absence
+  // arm stops minting an unclosable reconcile_needed that re-fires on every
+  // read, and so the drain has somewhere honest to put the finding.
+  'file_parked',
 ] as const;
 
 // §11 queue drain verbs: draining means the fulfilling artifact was written,
@@ -219,6 +226,10 @@ export const DRAIN_VERBS = {
   article_missing: 'created',
   research_owed: 'captured',
   concept_article_missing: 'created',
+  // 'merged', not 'updated': the item closes when the branch holding the file
+  // lands, which is an event rather than a write. Naming it after a write would
+  // invite exactly the no-op version bump the closing rule forbids.
+  file_parked: 'merged',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:

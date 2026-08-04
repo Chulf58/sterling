@@ -4268,8 +4268,15 @@ var SYSTEM_REASONS = [
   // §6 H10: direct-mode work in unowned territory ended without its owning article
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
-  "concept_article_missing"
+  "concept_article_missing",
   // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // An owned file is absent from the working tree but ALIVE on another git ref
+  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
+  // reconcile, because no write can change the fact and the article is already
+  // correct (the path becomes valid again on merge). It exists so the absence
+  // arm stops minting an unclosable reconcile_needed that re-fires on every
+  // read, and so the drain has somewhere honest to put the finding.
+  "file_parked"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),

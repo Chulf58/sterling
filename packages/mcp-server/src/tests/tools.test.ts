@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
@@ -1692,6 +1693,175 @@ test('knowledge_edit refuses a non-string field and an empty find', () => {
     assert.throws(() => tools.knowledgeEdit(record.id, 'files', 'x', 'y'), /knowledge_append/, 'routes arrays to the right tool');
     assert.throws(() => tools.knowledgeEdit(record.id, 'what_it_does', '', 'y'), /non-empty string/);
     assert.throws(() => tools.knowledgeEdit(record.id, 'nonexistent_field', 'x', 'y'), /does not define/);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PARKED vs DELETED (board 1d6a721a / feedback §2.3+§2.4). Every existence check
+// evaluates the CHECKED-OUT tree, so a file on an unmerged branch read as an
+// out-of-band deletion — and that reconcile_needed could never be closed, because
+// the trigger is absence and no write makes a file appear. It re-fired on every
+// read. These tests pin: git is asked before concluding, a parked file gets an
+// INFORMATIONAL lane instead, and a genuinely absent file still flags.
+// ---------------------------------------------------------------------------
+
+function gitRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-parked-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const git = (...a: string[]) => {
+    const r = spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')} failed: ${r.stderr}`);
+  };
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 't@t.t');
+  git('config', 'user.name', 't');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  return { dir, store, tools, git, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+const systemQueue = (tools: SterlingTools) =>
+  tools.boardQuery({ source: 'system' }) as unknown as { id: string; system_reason: string; text: string; file_keys?: string[]; feature_link?: string }[];
+
+test('a file parked on an unmerged branch is file_parked, NOT an out-of-band deletion', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'seed.ts'), 'export const s = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+
+    // The owned file exists ONLY on a side branch — exactly the reported case.
+    git('checkout', '-q', '-b', 'feat/parked');
+    mkdirSync(join(dir, 'game'), { recursive: true });
+    writeFileSync(join(dir, 'game', 'terrain.gd'), 'extends Node\n');
+    git('add', '-A');
+    git('commit', '-qm', 'terrain on a branch');
+    git('checkout', '-q', 'main');
+    assert.ok(!existsSync(join(dir, 'game', 'terrain.gd')), 'precondition: absent from the working tree');
+
+    const article = mkArticle(tools, 'world-generation', 'game/terrain.gd');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 0, 'no unclosable reconcile item for a file that is merely elsewhere');
+    const parkedItems = queue.filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parkedItems.length, 1, 'the informational lane carries it instead');
+    assert.match(parkedItems[0].text, /ALIVE on 'feat\/parked'/, 'and names the ref that holds it');
+    assert.match(parkedItems[0].text, /DO NOT DROP game\/terrain\.gd/, 'warns against the tempting wrong fix');
+    assert.equal(parkedItems[0].feature_link, article.id);
+
+    // The article's claims are accurate, so a reader must NOT be told to verify.
+    const [served] = tools.knowledgeQueryResult({ types: ['feature_article'] }).records as unknown as { verify_before_use?: boolean }[];
+    assert.ok(!served.verify_before_use, 'a parked file is not staleness — the article is correct as written');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a parked file is recorded ONCE however many times the article is read', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    git('checkout', '-q', '-b', 'side');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'gone.ts'), 'export const g = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add');
+    git('checkout', '-q', 'main');
+
+    mkArticle(tools, 'parked-twice', 'src/gone.ts');
+    for (let i = 0; i < 4; i++) tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(systemQueue(tools).filter((t) => t.system_reason === 'file_parked').length, 1, 'a pure-function-of-disk read path must not pile up copies');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a file that exists on NO ref still flags as an out-of-band deletion — the arm is trustworthy, not disabled', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+
+    mkArticle(tools, 'really-gone', 'src/never-existed.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0, 'nothing to park — it lives nowhere');
+    const reconciles = queue.filter((t) => t.system_reason === 'reconcile_needed');
+    assert.equal(reconciles.length, 1, 'the deletion finding survives the change');
+    assert.match(reconciles[0].text, /no longer exists \(out-of-band deletion\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a file present in HEAD but deleted from the working tree parks against HEAD', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'committed.ts'), 'export const c = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    rmSync(join(dir, 'src', 'committed.ts')); // deleted on disk, still in HEAD
+
+    mkArticle(tools, 'head-parked', 'src/committed.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const parkedItems = systemQueue(tools).filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parkedItems.length, 1);
+    assert.match(parkedItems[0].text, /ALIVE on 'HEAD'/, 'HEAD is probed first — the commonest shape, in one call');
+  } finally {
+    cleanup();
+  }
+});
+
+test('outside a git repo the deletion arm behaves exactly as before (the probe degrades in the safe direction)', () => {
+  // No git init: every probe fails, so nothing is parked and the deletion item
+  // still fires. A missing or broken git must never SUPPRESS a real finding.
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-nogit-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    mkArticle(tools, 'nogit', 'src/absent.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 1, 'the deletion finding is preserved');
+    assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('knowledge_update does NOT auto-drain a file_parked item — no write changes where the file lives', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    git('checkout', '-q', '-b', 'side');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'p.ts'), 'export const p = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add');
+    git('checkout', '-q', 'main');
+
+    const article = mkArticle(tools, 'no-drain', 'src/p.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(systemQueue(tools).filter((t) => t.system_reason === 'file_parked').length, 1);
+
+    tools.knowledgeUpdate(article.id, { what_it_does: 'revised' });
+    assert.equal(
+      systemQueue(tools).filter((t) => t.system_reason === 'file_parked').length,
+      1,
+      'the drift auto-drain is scoped to the two drift lanes; this fact is still true after the write'
+    );
   } finally {
     cleanup();
   }

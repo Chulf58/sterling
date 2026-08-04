@@ -207,4 +207,35 @@ if (existsSync(bundleChecker)) {
   }
 }
 
-console.log(JSON.stringify({ ...merged, branches_swept: swept }, null, 2));
+// PARKED-FILE ITEMS CLOSE ON THE MERGE, because the merge is the event that ends
+// their life (P4 — board 1d6a721a). A file_parked item says "this owned file is
+// absent here but alive on another ref"; landing that ref makes the statement
+// false, and no WRITE can close it, so it has no artifact-write binding like the
+// drift lanes do. Without this sweep it would linger as permanent noise — which
+// is the same complaint the lane was created to answer, one lane over.
+//
+// Deliberately AFTER the merge and outside any fail() path: this is bookkeeping,
+// so a failure here must never be reported as a merge problem. It reopens the
+// store because the gate closed it during the preflight.
+let parkedClosed = 0;
+try {
+  const { store: post } = openProject(target);
+  try {
+    for (const t of post.query({ types: ['todo'], cap: 1000 })) {
+      if (t.source !== 'system' || t.system_reason !== 'file_parked') continue;
+      // Close only when EVERY path the item names is now present — a multi-path
+      // item whose second file is still parked is still true.
+      const paths = t.file_keys ?? [];
+      if (paths.length > 0 && paths.every((k) => existsSync(join(target, k)))) {
+        post.remove(t.id, new Date().toISOString());
+        parkedClosed += 1;
+      }
+    }
+  } finally {
+    post.close();
+  }
+} catch (e) {
+  console.error(`direct-merge: the merge succeeded; the parked-file sweep did not run (${e?.message ?? e}). Harmless — /sterling:drain will close them.`);
+}
+
+console.log(JSON.stringify({ ...merged, branches_swept: swept, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
