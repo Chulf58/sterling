@@ -25,7 +25,13 @@ import { dirname, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { openMounted, openProject } from './lib/project.mjs';
-import { lintRecordCitations, UNCITED_RECORD_WORDS, CITATION_OPT_OUT, countCitationOptOuts } from './lib/checks.mjs';
+import {
+  lintRecordCitations,
+  lintCitationCurrency,
+  UNCITED_RECORD_WORDS,
+  CITATION_OPT_OUT,
+  countCitationOptOuts,
+} from './lib/checks.mjs';
 
 const root = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..');
 const storePath = join(root, '.sterling', 'sterling.db');
@@ -79,11 +85,13 @@ const { store, config } = openMounted(root);
 let index;
 try {
   index = store.recordIdIndex();
-} finally {
+} catch (e) {
   store.close();
+  throw e;
 }
 
 const fullIds = new Set(index.map((r) => r.id));
+const byId = new Map(index.map((r) => [r.id, r]));
 const byPrefix = new Map();
 for (const r of index) {
   const p = r.id.slice(0, 8);
@@ -92,17 +100,27 @@ for (const r of index) {
 }
 
 /** undefined = nothing anywhere (the only failure), 'ambiguous' = prefix hits
- *  several records, otherwise the resolved record. A FULL id must match a full
- *  id: a prefix collision must never let a wrong-record citation pass. */
+ *  several records, otherwise the resolved {id,type,status} row — a FULL id.
+ *  A FULL id must match a full id: a prefix collision must never let a
+ *  wrong-record citation pass. The returned row's `.id` and `.status` are what
+ *  the currency check (lintCitationCurrency) needs on top of plain existence. */
 function resolve(id) {
-  if (id.length > 8) return fullIds.has(id) ? { status: 'full' } : undefined;
+  if (id.length > 8) return fullIds.has(id) ? byId.get(id) : undefined;
   const hits = byPrefix.get(id);
   if (!hits || hits.length === 0) return undefined;
   return hits.length > 1 ? 'ambiguous' : hits[0];
 }
 
+// Full-body lookup for the currency walk ONLY — recordIdIndex (above) omits
+// superseded_by by design (it is the cheap id/type/status projection every
+// existence check needs; a currency walk needs the chain, so it pays for a
+// get() per hop instead of widening that index for every caller). Kept open
+// across the whole file loop below, closed once at every exit path.
+const getById = (id) => store.get(id);
+
 const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', timeout: 60_000 });
 if (tracked.status !== 0) {
+  store.close();
   console.error(`record citations FAILED: git ls-files did not run in '${root}': ${tracked.stderr ?? ''}`);
   process.exit(1);
 }
@@ -116,6 +134,10 @@ const files = tracked.stdout
   .filter((f) => !excludedFiles.has(f));
 
 const violations = [];
+// Currency (board 9d0fb893): WARN-only, scoped to pointer surfaces (CLAUDE.md,
+// templates/target-claude-md.md, skills/**, commands/**) — see lib/checks.mjs
+// for the full rationale. Never affects the exit code below.
+const currencyWarnings = [];
 let citations = 0;
 let optOuts = 0;
 for (const file of files) {
@@ -130,6 +152,14 @@ for (const file of files) {
     return resolve(id);
   });
   violations.push(...found);
+  currencyWarnings.push(...lintCitationCurrency(content, file, resolve, getById));
+}
+store.close();
+
+function printCurrencyWarnings() {
+  if (currencyWarnings.length === 0) return;
+  console.log(`record citations: ${currencyWarnings.length} currency warning(s) — WARN ONLY, exit code unaffected:`);
+  for (const w of currencyWarnings) console.log(`  [${w.kind}] ${w.detail}`);
 }
 
 // STORE AUTHORITY, one step further in than the consumer-clone skip above (config
@@ -140,7 +170,10 @@ for (const file of files) {
 // dangling for want of that id namespace, so the arm reports and passes instead
 // of halting a check run nobody there can fix (P1). Never silent: the full list
 // still prints, and the ok line names the setting, so a weakened arm is never
-// mistaken for a clean one (P5).
+// mistaken for a clean one (P5). Currency warnings need no separate authority
+// branch: on a secondary store a foreign citation mostly fails to resolve at
+// all, so `resolve()` already returns falsy and lintCitationCurrency never
+// gets a hit to walk — the same conditional posture falls out for free.
 const authority = config?.store_authority ?? 'primary';
 
 if (violations.length > 0 && authority === 'secondary') {
@@ -151,6 +184,7 @@ if (violations.length > 0 && authority === 'secondary') {
   console.log(
     "  This store did not mint the ids the tree cites, so a dangling id here is expected rather than a defect — and by the same token a citation written HERE is unchecked. On the store that mints them, leave store_authority='primary' (the default), where these must resolve."
   );
+  printCurrencyWarnings();
   process.exit(0);
 }
 
@@ -160,12 +194,15 @@ if (violations.length > 0) {
   console.error(
     '  Fix the citation to name a record that exists in this store (an id from another machine is the usual cause), or drop the id.'
   );
+  printCurrencyWarnings();
   process.exit(1);
 }
 
+printCurrencyWarnings();
 console.log(
   `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${index.length} records; ` +
     `${optOuts} line(s) opted out via '${CITATION_OPT_OUT}'; ` +
     `store_authority=${authority}; ` +
+    `${currencyWarnings.length} currency warning(s) on pointer surfaces (superseded citation still resolving elsewhere); ` +
     `${UNCITED_RECORD_WORDS.join('/')} ids excluded by design — those records are removed when drained)`
 );

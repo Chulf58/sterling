@@ -332,3 +332,75 @@ export function lintRecordCitations(content, label, resolve) {
   }
   return violations;
 }
+
+// -- citation CURRENCY (board 9d0fb893) --------------------------------------
+// check-record-citations verifies EXISTENCE, not CURRENCY: a citation two
+// supersessions stale passes clean (CLAUDE.md cited decision 0956a464 — the
+// verify-at-build register — while the live record was 19678617, which
+// supersedes 0956a464 AND fe543519; the existence check passed every run
+// because superseded records are retained by design, rule 3 above).
+//
+// Scoped to POINTER SURFACES ONLY: CLAUDE.md, templates/target-claude-md.md,
+// skills/**, commands/** — places a citation SENDS the reader somewhere, so a
+// stale destination actually misleads. Article history entries and code
+// comments are deliberately untouched: citing a superseded id there is often
+// CORRECT (pinned history — "the decision that justified this design AT THE
+// TIME"), so currency is not even evaluated outside pointer surfaces.
+//
+// WARN-ONLY, unconditionally: unlike lintRecordCitations' hard failures, a
+// currency finding never changes the exit code. The existing existence
+// contract (fail on nothing, pass on any tombstone) is unchanged; this adds a
+// SEPARATE, softer signal on top of a citation that already resolved. This
+// also means the check's store_authority='secondary' posture falls out for
+// free: on a secondary store, citations to ids this store did not mint mostly
+// fail to resolve at all (reported, not failed), so `hit` here is already
+// falsy and no currency warning is produced — no extra gating needed.
+export const POINTER_SURFACE_FILES = ['CLAUDE.md', 'templates/target-claude-md.md'];
+export const POINTER_SURFACE_PREFIXES = ['skills/', 'commands/'];
+
+export function isPointerSurface(file) {
+  return POINTER_SURFACE_FILES.includes(file) || POINTER_SURFACE_PREFIXES.some((p) => file.startsWith(p));
+}
+
+/** Walks a supersession chain forward to its live head. `getById(fullId)`
+ *  returns {status, superseded_by} (a full-body record) or undefined for a
+ *  full id — the store retains the whole chain (rule 3), so this always
+ *  terminates at an active record in practice; the visited-set guard is
+ *  defensive only; a broken or missing link along the way (getById returns
+ *  undefined, or a superseded record with no superseded_by) stops the walk at
+ *  the last id resolved rather than throwing — the store setting
+ *  superseded_by is itself invariant-enforced elsewhere. */
+export function resolveSupersessionHead(id, getById) {
+  let current = id;
+  const seen = new Set();
+  while (!seen.has(current)) {
+    seen.add(current);
+    const rec = getById(current);
+    if (!rec || rec.status !== 'superseded' || !rec.superseded_by) return current;
+    current = rec.superseded_by;
+  }
+  return current; // cycle guard: store data should never cycle, but never loop forever if it did
+}
+
+/** Currency warnings for one pointer-surface file. `resolve` is the SAME
+ *  existence resolver lintRecordCitations uses (a hit's `.id` is always the
+ *  full id, whether the citation itself was a full id or a resolved prefix).
+ *  `getById` is a full-body lookup used ONLY for citations that already
+ *  resolved as superseded — the small set actually worth a body fetch,
+ *  instead of paying it for every citation. Non-pointer files short-circuit
+ *  to [] without calling resolve at all. */
+export function lintCitationCurrency(content, label, resolve, getById) {
+  if (!isPointerSurface(label)) return [];
+  const warnings = [];
+  for (const c of collectRecordCitations(content)) {
+    const hit = resolve(c.id);
+    if (!hit || hit === 'ambiguous' || hit.status !== 'superseded') continue;
+    const head = resolveSupersessionHead(hit.id, getById);
+    if (head === hit.id) continue; // defensive: getById disagrees with resolve about status
+    warnings.push({
+      kind: 'citation_stale',
+      detail: `${label}:${c.line}: '${c.word} ${c.id}' cites a SUPERSEDED record — live successor is ${head}`,
+    });
+  }
+  return warnings;
+}
