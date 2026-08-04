@@ -368,6 +368,29 @@ test('node adapter static_wiring: test-only exports flagged; wired and renamed e
   }
 });
 
+test('node adapter static_wiring: a same-module caller wires an export even when only a test imports it directly (board 5ef993c1)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-wiring-samefile-'));
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    // helper is exported only so the frozen test oracle can exercise it
+    // directly, but every runtime call is same-module (publicApi calls it
+    // internally) — that must not read as built-but-not-wired.
+    writeFileSync(
+      join(dir, 'src', 'internal.mjs'),
+      "export function helper() { return 1; }\nexport function publicApi() { return helper() + 1; }\n"
+    );
+    writeFileSync(
+      join(dir, 'tests', 'internal.test.mjs'),
+      "import { helper } from '../src/internal.mjs';\nhelper();\n"
+    );
+    const result = staticWiring({ cwd: dir, scope: ['src/internal.mjs'] });
+    assert.deepEqual(result.test_only_exports, [], 'helper is wired via same-module use by publicApi, not just the test import');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // H13 reads ledger + clear
 // ---------------------------------------------------------------------------
