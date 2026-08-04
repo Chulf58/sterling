@@ -226,6 +226,14 @@ export const SYSTEM_REASONS = [
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
   'state_review',
+  // A feature_article's serialized size (as knowledge_get would return it)
+  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
+  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // the only moment anyone is looking; deduped per article via file_keys (a
+  // feature_article's id changes on every version, so id-keyed dedup would not
+  // survive the next reconcile — the article's owned files do).
+  'article_oversize',
 ] as const;
 
 // §11 queue drain verbs: draining means the fulfilling artifact was written,
@@ -249,6 +257,9 @@ export const DRAIN_VERBS = {
   // The deed is fixing the metadata to match the code (or confirming it already
   // does) — not reconciling the prose, which may well be correct already.
   state_review: 'corrected',
+  // The deed is splitting the article (concept-article granularity rubric) —
+  // or, if a re-measure shows it back under threshold, confirming that.
+  article_oversize: 'split',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:

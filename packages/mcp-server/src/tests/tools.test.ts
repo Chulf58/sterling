@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
-import { REVIEWER_ROLES } from '@sterling/schemas';
+import { REVIEWER_ROLES, parseConfig } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools, type NoteExtractionPayload } from '../tools.js';
 
@@ -16,6 +16,17 @@ function harness() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-'));
   const store = new SterlingStore(join(dir, 'sterling.db'));
   const tools = new SterlingTools({ store, now: () => NOW });
+  const cleanup = () => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { store, tools, cleanup };
+}
+
+function harnessWithConfig(configOverrides: Record<string, unknown>) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, config: parseConfig(configOverrides) });
   const cleanup = () => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -144,7 +155,8 @@ test('knowledge_append extends an array without retransmitting it, and inherits 
     // reason this tool exists — the cost of keeping a record true was scaling with
     // how much truth it already held.
     const appended = tools.knowledgeAppend(v1.id, 'history', [{ date: NOW, event: 'second entry' }]);
-    const v2 = appended as unknown as {
+    assert.deepEqual(appended.warnings, [], 'well under the oversize threshold — no warning');
+    const v2 = appended.record as unknown as {
       id: string;
       history: { event: string }[];
       version: number;
@@ -167,7 +179,7 @@ test('knowledge_append extends an array without retransmitting it, and inherits 
 
     // Any array field, not just history — and note the id CHANGED with the append,
     // which is the identity half of the problem this tool only half-solves.
-    const v3 = tools.knowledgeAppend(v2.id, 'current_ac', [{ ac_id: 'AC2', text: 'header row included', verifiable_at: 'final' }]) as unknown as {
+    const v3 = tools.knowledgeAppend(v2.id, 'current_ac', [{ ac_id: 'AC2', text: 'header row included', verifiable_at: 'final' }]).record as unknown as {
       id: string;
       current_ac: { ac_id: string }[];
     };
@@ -256,6 +268,77 @@ test('knowledge_update drains the article\'s drift maintenance items (reconcile_
     assert.equal(has('refresh_reference', article.id), false, 'refresh_reference drained by the reconcile');
     assert.equal(has('promotion_review', article.id), true, 'promotion_review survives — promotion is a human gate (P1)');
     assert.equal(has('reconcile_needed', other.id), true, "an unrelated article's debt is untouched");
+  } finally {
+    cleanup();
+  }
+});
+
+test('article_oversize: under threshold, knowledge_update warns nothing and queues nothing (board 8390f8fa)', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 60000 });
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    // state-only change: no coherence warning in play, isolating the oversize check.
+    const result = tools.knowledgeUpdateResult(article.id, { state: 'active' });
+    assert.deepEqual(result.warnings, [], 'well under threshold — no warning');
+    assert.equal(tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }).length, 0, 'nothing queued');
+  } finally {
+    cleanup();
+  }
+});
+
+test('article_oversize: over threshold, knowledge_update warns via the coherence-warning channel and queues exactly one deduped item', () => {
+  // A tiny threshold makes the article oversize without needing a 60KB fixture.
+  const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 200 });
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    // state-only change: no coherence warning in play, isolating the oversize check.
+    const result = tools.knowledgeUpdateResult(article.id, { state: 'active' });
+    assert.equal(result.warnings.length, 1, 'exactly one oversize warning');
+    assert.match(result.warnings[0], /article_oversize_chars threshold/);
+    assert.match(result.warnings[0], /'thing'/, 'names the article');
+    assert.match(result.warnings[0], /split it/, 'names the split remedy');
+    assert.match(result.warnings[0], /knowledge_edit|knowledge_append/, 'names the surgical-write remedy');
+
+    const items = tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 });
+    assert.equal(items.length, 1, 'exactly one item');
+    assert.match((items[0] as unknown as { text: string }).text, /article_oversize_chars threshold/);
+
+    // Second write while the item is still open: no duplicate (dedup by file_keys,
+    // stable across the article's version bump — the id itself changed).
+    const head2 = (tools.knowledgeQuery({ types: ['feature_article'] })[0] as unknown as { id: string }).id;
+    tools.knowledgeUpdateResult(head2, { state: 'active' });
+    assert.equal(tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }).length, 1, 'no duplicate — same open item');
+  } finally {
+    cleanup();
+  }
+});
+
+test('article_oversize lane is registered: SYSTEM_REASONS/DRAIN_VERBS totality holds', async () => {
+  const { SYSTEM_REASONS, DRAIN_VERBS } = await import('@sterling/schemas');
+  assert.ok((SYSTEM_REASONS as readonly string[]).includes('article_oversize'), 'article_oversize must join SYSTEM_REASONS');
+  assert.equal(typeof (DRAIN_VERBS as Record<string, string>)['article_oversize'], 'string', 'article_oversize needs a DRAIN_VERBS entry');
+  assert.deepEqual(
+    Object.keys(DRAIN_VERBS as Record<string, string>).sort(),
+    [...(SYSTEM_REASONS as readonly string[])].sort(),
+    'DRAIN_VERBS and SYSTEM_REASONS stay 1:1 (a half-registered lane fails this)'
+  );
+});
+
+test('article_oversize: knowledge_append and knowledge_edit carry the same warning on the same channel', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 200 });
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const appended = tools.knowledgeAppend(article.id, 'history', [{ date: NOW, event: 'grew past threshold' }]);
+    assert.equal(appended.warnings.length, 1, 'knowledge_append warns too — same channel');
+    assert.match(appended.warnings[0], /article_oversize_chars threshold/);
+
+    const head = appended.record.id;
+    const edited = tools.knowledgeEdit(head, 'what_it_does', 'does', 'does, edited');
+    assert.equal(edited.warnings.length, 1, 'knowledge_edit warns too — same channel');
+    assert.match(edited.warnings[0], /article_oversize_chars threshold/);
+
+    // one producer, one article, one open item throughout — both writes deduped.
+    assert.equal(tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }).length, 1);
   } finally {
     cleanup();
   }

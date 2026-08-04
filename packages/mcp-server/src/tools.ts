@@ -967,7 +967,7 @@ export class SterlingTools {
    * value is not an array, an empty entry list, and `links` — typed edges have
    * their own tool and a second path would let the record_links index drift.
    */
-  knowledgeAppend(id: string, field: string, entries: unknown[]): DurableRecord {
+  knowledgeAppend(id: string, field: string, entries: unknown[]): { record: DurableRecord; warnings: string[] } {
     const old = this.store.get(id);
     if (!old) throw new Error(`knowledge_append: no record '${id}'`);
     if (!Array.isArray(entries) || entries.length === 0) {
@@ -985,8 +985,11 @@ export class SterlingTools {
       );
     }
     const next = [...((current as unknown[]) ?? []), ...entries];
-    // Straight through the ONE update path — every guarantee above rides along.
-    return this.knowledgeUpdate(id, { [field]: next });
+    // Straight through the ONE update path — every guarantee above rides along,
+    // including the oversize check (board 8390f8fa): the write's result carries
+    // a warning on the SAME channel knowledge_update uses.
+    const record = this.knowledgeUpdate(id, { [field]: next });
+    return { record, warnings: this.articleOversizeWarnings(record) };
   }
 
   /**
@@ -1016,7 +1019,12 @@ export class SterlingTools {
    * warnings — so an edit is a normal supersession and not a back door around
    * any of it.
    */
-  knowledgeEdit(id: string, field: string, find: string, replace: string): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number } } {
+  knowledgeEdit(
+    id: string,
+    field: string,
+    find: string,
+    replace: string
+  ): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number }; warnings: string[] } {
     const old = this.store.get(id);
     if (!old) throw new Error(`knowledge_edit: no record '${id}'`);
     if (typeof find !== 'string' || find.length === 0) {
@@ -1048,7 +1056,60 @@ export class SterlingTools {
     }
     const next = current.replace(find, replace);
     const record = this.knowledgeUpdate(id, { [field]: next });
-    return { record, replaced: { field, chars_before: current.length, chars_after: next.length } };
+    return {
+      record,
+      replaced: { field, chars_before: current.length, chars_after: next.length },
+      warnings: this.articleOversizeWarnings(record),
+    };
+  }
+
+  /**
+   * Board 8390f8fa: warn a registry-style article BEFORE it outgrows its own
+   * round-trip. Measured, not guessed — every knowledge_append to
+   * mcp-tool-surface (29 history entries) blew the MCP token cap on its own
+   * response (68KB, then 70KB), and hooks-suite's what_it_does alone is a
+   * 26,364-token string. The AC that was supposed to catch this ("split before
+   * it blocks a write") is prose inside the very article it governs, and prose
+   * is something a caller must CHOOSE to check — it did not fire. This does,
+   * on every write that can grow a feature_article: knowledge_update (direct),
+   * knowledge_append and knowledge_edit (both delegate to knowledgeUpdate, so
+   * calling this once here — from THEM, on the record it returns — covers all
+   * three without a second definition).
+   *
+   * Rides the EXISTING coherence-warning channel (decision 8ed62c1b) rather
+   * than inventing a second one: knowledge_update already returns
+   * {record, warnings[]} via knowledgeUpdateResult, and append/edit now carry
+   * the same shape. WARNS, never refuses — same reasoning as the coherence
+   * check: the write already landed, and ceremony on every partial update
+   * would train callers to over-transmit, which is the problem this exists to
+   * prevent.
+   *
+   * Size is measured as knowledge_get would return the record — i.e. the
+   * record itself, since a direct-id hit in knowledge_get is exactly store.get
+   * with no further projection. Deduped per ARTICLE via file_keys, not the
+   * record id: a feature_article mints a new id on every version, so an
+   * id-keyed maintenance item would silently stop matching the very next
+   * reconcile (the same stranding bug board 6202a0f5 reports for
+   * promotion_review) — the article's owned files are what stays stable.
+   */
+  private articleOversizeWarnings(record: DurableRecord): string[] {
+    if (record.type !== 'feature_article') return [];
+    const size = JSON.stringify(record).length;
+    const threshold = this.config.article_oversize_chars;
+    if (size <= threshold) return [];
+    const a = record as unknown as { slug: string; files?: { path: string }[] };
+    const remedy =
+      'split it (one feature_article per concept FAMILY — the concept-article granularity rubric; a sub-concept splits out only when it accrues its own intent + interactions distinct from the parent) ' +
+      'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
+    this.maintenanceEnqueue({
+      reason: 'article_oversize',
+      text: `article '${a.slug}' is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
+      file_keys: (a.files ?? []).map((f) => f.path),
+    });
+    return [
+      `feature_article '${a.slug}' is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
+        `A deduped article_oversize maintenance item has been queued.`,
+    ];
   }
 
   /**
@@ -1082,6 +1143,7 @@ export class SterlingTools {
         );
       }
     }
+    warnings.push(...this.articleOversizeWarnings(record));
     return { record, warnings };
   }
 

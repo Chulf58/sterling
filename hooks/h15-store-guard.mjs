@@ -13,7 +13,7 @@ import { join as join2 } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-// node_modules/zod/v3/external.js
+// ../../../node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -125,7 +125,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// node_modules/zod/v3/helpers/util.js
+// ../../../node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -259,7 +259,7 @@ var getParsedType = (data) => {
   }
 };
 
-// node_modules/zod/v3/ZodError.js
+// ../../../node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -377,7 +377,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// node_modules/zod/v3/locales/en.js
+// ../../../node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -480,7 +480,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// node_modules/zod/v3/errors.js
+// ../../../node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -489,7 +489,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// node_modules/zod/v3/helpers/parseUtil.js
+// ../../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -599,14 +599,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// node_modules/zod/v3/helpers/errorUtil.js
+// ../../../node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// node_modules/zod/v3/types.js
+// ../../../node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -4293,7 +4293,15 @@ var SYSTEM_REASONS = [
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
-  "state_review"
+  "state_review",
+  // A feature_article's serialized size (as knowledge_get would return it)
+  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
+  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // the only moment anyone is looking; deduped per article via file_keys (a
+  // feature_article's id changes on every version, so id-keyed dedup would not
+  // survive the next reconcile — the article's owned files do).
+  "article_oversize"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4651,6 +4659,16 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Board 8390f8fa: a registry-style feature_article can outgrow its own
+  // round-trip — knowledge_append responses on mcp-tool-surface (29 history
+  // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
+  // token cap. Measured: mcp-tool-surface serializes ~104KB. Set well below
+  // that observed failure and above every healthy article; a knowledge_update/
+  // append/edit that lands a feature_article over this many chars (as
+  // knowledge_get would return it) warns via the write's result envelope and
+  // enqueues one deduped article_oversize maintenance item. Tunable per
+  // machine, not architecture.
+  article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
