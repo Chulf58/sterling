@@ -99,30 +99,48 @@ export function verifyPromotionConditions({ store, config, run }) {
     }
   }
 
-  // AC-traced tests promoted
+  // AC-traced tests promoted: UNION across every brief-linked article, not just
+  // articles[0] of a query result with NO ordering guarantee (board a9b70305). A
+  // run commonly histories an owning article PLUS a concept-family one (decision
+  // 7208729b); the trace may legitimately sit on either, so an AC passes when it
+  // is traced on ANY of them. `article` (articles[0]) is still returned below as
+  // the representative record for callers that need one knowledge_summary target
+  // (neither current caller reads it — see dispose-run.mjs / h9-stop-backstop.mjs
+  // — but the shape is kept so a future one has a sane default); the tracing and
+  // fulfilled-todo checks themselves now read `articles`, all of them.
+  //
+  // A live_test_refs entry whose test_paths is empty (or missing/non-array) is
+  // NOT a trace — same refusal as no entry at all. A vacuous pass here is worse
+  // than no gate, because it reports success (board 3800d559).
   if (article) {
-    const traced = new Set(article.live_test_refs.map((r) => r.ac_id));
-    // `article` is articles[0] of a query result with NO ordering guarantee. When a
-    // run historied MORE than one article (an owning article plus a concept-family
-    // one, say), the trace may legitimately sit on a sibling and this check would
-    // still refuse — so the pick is DISCLOSED rather than presented as the only
-    // candidate, which is what led to duplicate live_test_refs being added to
-    // whichever article the message happened to name. The gate's semantics are
-    // unchanged here on purpose; whether it should check the UNION of brief-linked
-    // articles is a behaviour question, boarded rather than decided inside a
-    // message fix.
-    const others = articles.filter((a) => a.id !== article.id).map((a) => a.slug);
-    const pick =
-      others.length > 0
-        ? ` (checked against '${article.slug}', 1 of ${articles.length} articles historied to this brief — the others are ${others.join(', ')}; if the trace lives on one of THOSE, move or add it here rather than duplicating it)`
-        : ` on article '${article.slug}'`;
-    for (const ac of brief.acceptance_criteria) {
-      if (!traced.has(ac.ac_id)) refuse('ac_untraced', `AC '${ac.ac_id}' has no live_test_refs entry${pick}`);
+    const tracedOn = new Map(); // ac_id -> slug of the first article found tracing it
+    for (const a of articles) {
+      for (const ref of a.live_test_refs) {
+        if (Array.isArray(ref.test_paths) && ref.test_paths.length > 0 && !tracedOn.has(ref.ac_id)) {
+          tracedOn.set(ref.ac_id, a.slug);
+        }
+      }
     }
-    // fulfilled todos removed: done = removed (P4)
-    for (const link of article.links.filter((l) => l.rel === 'fulfills')) {
-      if (store.get(link.target_id)) {
-        refuse('fulfilled_todo_still_on_board', `article fulfills todo '${link.target_id}' but it is still in the store — done = removed (P4)`);
+    const checkedNames = articles.map((a) => a.slug).join(', ');
+    for (const ac of brief.acceptance_criteria) {
+      if (!tracedOn.has(ac.ac_id)) {
+        refuse(
+          'ac_untraced',
+          `AC '${ac.ac_id}' has no live_test_refs entry with a non-empty test_paths on any of the ` +
+            `${articles.length} article(s) historied to this brief (checked: ${checkedNames})`
+        );
+      }
+    }
+    // fulfilled todos removed: done = removed (P4) — same union as tracing above,
+    // since fulfilled_todo_still_on_board inherited the same arbitrary pick.
+    for (const a of articles) {
+      for (const link of a.links.filter((l) => l.rel === 'fulfills')) {
+        if (store.get(link.target_id)) {
+          refuse(
+            'fulfilled_todo_still_on_board',
+            `article '${a.slug}' fulfills todo '${link.target_id}' but it is still in the store — done = removed (P4)`
+          );
+        }
       }
     }
   }
