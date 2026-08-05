@@ -20,6 +20,9 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+// builtins-only module — safe at load time on an unbuilt clone (see the
+// bootstrap-independence note in scripts/update.mjs).
+import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -384,6 +387,17 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         report.exit = report.exit === 0 ? 1 : report.exit;
       } else {
         log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : 'up to date'}`);
+      }
+      // Deliver the double-click updater to every registered project — the
+      // update event is how a machine receives new artifacts, so a project
+      // init'd before this launcher existed gets one here rather than waiting
+      // on someone remembering a per-project re-init (P4). Ensure semantics:
+      // never overwrites what it cannot prove it generated; nonfatal always.
+      try {
+        const launcher = ensureUpdateLauncher(p.repo_path, cwd);
+        if (launcher.status !== 'matches') log(`      ${UPDATE_LAUNCHER_NAME}: ${launcher.status} — ${launcher.detail}`);
+      } catch (err) {
+        log(`      ⚠ ${UPDATE_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
       }
     }
   } else if (opts.projects === false) {

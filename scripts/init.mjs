@@ -29,6 +29,7 @@ import { arg, argAll, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
+import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const target = resolve(arg('--target') ?? process.cwd());
@@ -347,6 +348,13 @@ if (winNode) {
   items.push({ item: 'sterling-windows.bat', status: 'skipped', detail: 'Windows node not found via `where.exe node` — add the node dir to the Windows PATH and re-run init to generate the native launcher' });
 }
 
+// (5) the double-click updater entry: brings the machine's Sterling CLONE to
+// origin's default branch with NO Claude session in the loop (the updater is
+// deterministic; a session interpreting its refusals is what kept going wrong).
+// Ensure logic shared with /sterling:update's project fan-out, which delivers
+// this launcher to projects whose init predates it.
+items.push({ item: UPDATE_LAUNCHER_NAME, ...ensureUpdateLauncher(target, pluginRoot) });
+
 // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
 // up_to_date | locally-modified left | refuse-on-local-modification
 const vars = { NODE: `"${fwd(process.execPath)}"`, HOOKS_DIR: fwd(join(pluginRoot, 'hooks')) };
@@ -492,7 +500,7 @@ items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the
 // gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');
 const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
-const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', '.claude/agents/'];
+const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
 if (fwd(target) === fwd(pluginRoot)) entries.push('.claude-plugin/sterling-mcp.json', '.claude-plugin/sterling-mcp-win.json');

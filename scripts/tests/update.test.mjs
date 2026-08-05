@@ -8,10 +8,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent } from '../lib/update.mjs';
+import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
 
@@ -675,4 +676,65 @@ test('the dirty refusal splits committed BUILD OUTPUTS from source and gives eac
     /SOURCE CHANGES/,
     'the authored hook SOURCE under scripts/ is source, not a build output'
   );
+});
+
+// --------------------------- sterling-update.bat delivery ---------------------------
+
+const BAT_TEMPLATE = '@echo off\r\nrem updater\r\n"wt.exe" wsl.exe --cd "{{WIN_PLUGIN_DIR}}" -- bash -lic "bash scripts/update-console.sh"\r\n';
+
+function cloneWithTemplate() {
+  const clone = mkdtempSync(join(tmpdir(), 'sterling-launcher-clone-'));
+  mkdirSync(join(clone, 'templates'));
+  writeFileSync(join(clone, 'templates', 'update-win.bat'), BAT_TEMPLATE);
+  return clone;
+}
+
+test('ensureUpdateLauncher: created / matches / differs / skipped — never overwrites, and the gitignore entry is ensured', () => {
+  const clone = cloneWithTemplate();
+  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
+  try {
+    const created = ensureUpdateLauncher(target, clone);
+    assert.equal(created.status, 'created');
+    const content = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
+    assert.doesNotMatch(content, /\{\{WIN_PLUGIN_DIR\}\}/, 'the plugin dir placeholder is substituted');
+    // this clone lives under /tmp (ext4, no /mnt/<d> form): the POSIX path must
+    // pass through unchanged — backslashifying it yields a path valid nowhere,
+    // and wsl.exe --cd accepts absolute Linux paths
+    assert.ok(content.includes(`--cd "${clone}"`), 'an ext4 clone bakes its POSIX path, never a backslashified non-path');
+    assert.match(readFileSync(join(target, '.gitignore'), 'utf8'), /^sterling-update\.bat$/m, 'a machine artifact never surfaces as untracked noise');
+
+    assert.equal(ensureUpdateLauncher(target, clone).status, 'matches', 'idempotent on a second run');
+    const ignoreEntries = readFileSync(join(target, '.gitignore'), 'utf8').split(/\r?\n/).filter((l) => l === UPDATE_LAUNCHER_NAME);
+    assert.equal(ignoreEntries.length, 1, 'the gitignore entry is not duplicated');
+
+    writeFileSync(join(target, UPDATE_LAUNCHER_NAME), 'hand edited');
+    assert.equal(ensureUpdateLauncher(target, clone).status, 'differs');
+    assert.equal(readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8'), 'hand edited', 'a differing launcher is left untouched');
+
+    assert.equal(ensureUpdateLauncher(join(target, 'does-not-exist'), clone).status, 'skipped', 'a missing target skips, never throws');
+    const bare = mkdtempSync(join(tmpdir(), 'sterling-launcher-bare-'));
+    try {
+      assert.equal(ensureUpdateLauncher(target, bare).status, 'skipped', 'a clone without the template skips, never throws');
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test('the fan-out delivers sterling-update.bat to each registered project (a project init\'d before the launcher existed still receives one)', async () => {
+  const cwd = cloneWithTemplate();
+  const proj = mkdtempSync(join(tmpdir(), 'sterling-launcher-proj-'));
+  try {
+    const { exec } = fakeExec({ behind: 1 });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: proj }], opts: {} });
+    assert.equal(report.exit, 0);
+    assert.ok(existsSync(join(proj, UPDATE_LAUNCHER_NAME)), 'the launcher landed in the consuming project');
+    assert.match(readFileSync(join(proj, '.gitignore'), 'utf8'), /^sterling-update\.bat$/m);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+  }
 });

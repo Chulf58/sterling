@@ -4,7 +4,8 @@
 // invisible; this is its visibility pressure. Banner art goes to stderr
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
@@ -155,6 +156,78 @@ try {
   }
 } catch {
   // fail-open — a malformed config or unresolved plugin root costs only this line
+}
+
+// CLONE-CURRENCY SIGNAL (closes the gap decision be9168e8 surfaced and parked:
+// "a machine that never runs /sterling:update has no passive signal that it is
+// behind"). Probes the CLONE at pluginRoot() — not this project — so every
+// session on the machine states whether Sterling is current. Throttle: the one
+// networked step (git fetch) runs at most once per TTL (default 24h), stamped
+// in .git/sterling-update-check.json; the behind-count is computed LOCALLY
+// against the last-fetched ref on every session start, so an applied update
+// goes silent immediately without waiting out the TTL. checked_at is stamped
+// even when the fetch fails — an offline machine must not pay the timeout on
+// every session start. Skipped entirely on a declared-authoring clone (it
+// lives on branches and ahead-of-origin states, where "behind" is noise) and
+// off the default branch. Fail-open and silent on any error (P1); the
+// definitive probe stays /sterling:update --check.
+// STERLING_CURRENCY_DISABLE=1 skips the probe entirely (test hermeticity: the
+// hook test battery must never fetch — it RUNS during /sterling:update itself).
+let currencyWarning = '';
+let currencyContext = '';
+try {
+  const root = process.env.STERLING_CURRENCY_DISABLE === '1' ? null : pluginRoot();
+  const gitDir = root ? join(root, '.git') : null;
+  // .git as a FILE is a worktree — an authoring-machine shape; skip (fail-open).
+  if (gitDir && existsSync(gitDir) && statSync(gitDir).isDirectory()) {
+    let role = null;
+    try {
+      role = JSON.parse(readFileSync(join(root, '.sterling', 'config.json'), 'utf8')).machine_role;
+    } catch {
+      // no config or malformed — the safe posture is consumer (mirrors the role line above)
+    }
+    if (role !== 'authoring') {
+      const git = (args, timeout = 5_000) => {
+        const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', timeout });
+        return r.status === 0 ? (r.stdout ?? '').trim() : null;
+      };
+      const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+      const hasOrigin = (git(['remote']) ?? '').split('\n').includes('origin');
+      const defaultBranch = hasOrigin
+        ? (git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']) ?? '').replace(/^origin\//, '') || 'main'
+        : null;
+      if (hasOrigin && branch && branch === defaultBranch) {
+        const cachePath = join(gitDir, 'sterling-update-check.json');
+        const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1000);
+        let fresh = false;
+        try {
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync(cachePath, 'utf8')).checked_at) < ttl;
+        } catch {
+          // no cache yet — probe
+        }
+        if (!fresh) {
+          // GIT_TERMINAL_PROMPT=0: a fetch that would prompt for credentials
+          // must fail immediately, not hang SessionStart until the timeout.
+          spawnSync('git', ['fetch', 'origin', '--quiet'], { cwd: root, encoding: 'utf8', timeout: 10_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+          try {
+            writeFileSync(cachePath, JSON.stringify({ checked_at: new Date().toISOString() }) + '\n');
+          } catch {
+            // unwritable cache costs only the throttle, never the signal
+          }
+        }
+        const behind = Number.parseInt(git(['rev-list', '--count', `HEAD..origin/${defaultBranch}`]) ?? '', 10);
+        if (Number.isFinite(behind) && behind > 0) {
+          currencyWarning = `⚠ Sterling is ${behind} update(s) behind — double-click sterling-update.bat (or run /sterling:update), then restart the session. `;
+          currencyContext =
+            `\n\nSTERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. ` +
+            `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse, decision e6240afe), ` +
+            `and remind them a session RESTART follows a successful update.`;
+        }
+      }
+    }
+  }
+} catch {
+  // fail-open — the currency probe must never break or delay SessionStart beyond its timeouts
 }
 
 let counts = { todos: 0, maintenance: 0 };
@@ -324,8 +397,8 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + roleContext + registryContext + machineContext + queueContext },
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

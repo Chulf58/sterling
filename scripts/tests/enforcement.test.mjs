@@ -930,6 +930,12 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
         encoding: 'utf8',
         cwd: dir,
         timeout: 30_000,
+        // H1's clone-currency probe would otherwise run against the LIVE clone
+        // (no STERLING_PLUGIN_ROOT here, so pluginRoot() walks up to it) and
+        // fetch from the real origin inside the test battery — which runs
+        // during /sterling:update itself. Hermeticity by construction, not by
+        // this machine's declared role.
+        env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
       });
       assert.equal(res.status, 0, `${file} on benign ${event}: exit ${res.status} — ${res.stderr}`);
     }

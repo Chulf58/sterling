@@ -6,7 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync } from "node:fs";
+import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname as dirname5, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6070,6 +6071,52 @@ MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The comm
   }
 } catch {
 }
+var currencyWarning = "";
+var currencyContext = "";
+try {
+  const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
+  const gitDir = root ? join4(root, ".git") : null;
+  if (gitDir && existsSync3(gitDir) && statSync(gitDir).isDirectory()) {
+    let role = null;
+    try {
+      role = JSON.parse(readFileSync2(join4(root, ".sterling", "config.json"), "utf8")).machine_role;
+    } catch {
+    }
+    if (role !== "authoring") {
+      const git = (args, timeout = 5e3) => {
+        const r = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout });
+        return r.status === 0 ? (r.stdout ?? "").trim() : null;
+      };
+      const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
+      const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
+      const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
+      if (hasOrigin && branch && branch === defaultBranch) {
+        const cachePath = join4(gitDir, "sterling-update-check.json");
+        const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
+        let fresh = false;
+        try {
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync2(cachePath, "utf8")).checked_at) < ttl;
+        } catch {
+        }
+        if (!fresh) {
+          spawnSync("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+          try {
+            writeFileSync(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+          } catch {
+          }
+        }
+        const behind = Number.parseInt(git(["rev-list", "--count", `HEAD..origin/${defaultBranch}`]) ?? "", 10);
+        if (Number.isFinite(behind) && behind > 0) {
+          currencyWarning = `\u26A0 Sterling is ${behind} update(s) behind \u2014 double-click sterling-update.bat (or run /sterling:update), then restart the session. `;
+          currencyContext = `
+
+STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it \u2014 fast-forward-or-refuse, decision e6240afe), and remind them a session RESTART follows a successful update.`;
+        }
+      }
+    }
+  }
+} catch {
+}
 var counts = { todos: 0, maintenance: 0 };
 var queueReasons = [];
 try {
@@ -6167,8 +6214,8 @@ if (process.env.STERLING_NO_BANNER !== "1") {
 ${versionLine}`);
 }
 var output = {
-  systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + roleContext + registryContext + machineContext + queueContext }
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

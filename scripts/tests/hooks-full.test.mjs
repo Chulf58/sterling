@@ -28,7 +28,10 @@ function runHook(script, input, cwd, env = {}) {
     encoding: 'utf8',
     cwd,
     timeout: 60_000,
-    env: { ...process.env, ...env },
+    // H1's clone-currency probe is disabled by default: this battery runs
+    // DURING /sterling:update, so a hook test must never fetch. The currency
+    // test re-enables it against a local file remote.
+    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', ...env },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -239,6 +242,65 @@ test('H1 machine role: a malformed config on the plugin\'s own clone costs only 
     assert.match(out.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED/, 'a malformed config reads as absent, the safe default — never a crash');
   } finally {
     cleanup();
+  }
+});
+
+test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer clone behind origin warns BOTH surfaces; current or declared-authoring stays silent', () => {
+  const { dir, cleanup } = makeProject();
+  const base = mkdtempSync(join(tmpdir(), 'sterling-currency-'));
+  // real git against a LOCAL file remote — the probe's fetch works offline
+  const sh = (cwd, args) => {
+    const r = spawnSync('git', ['-c', 'user.email=t@sterling.test', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  try {
+    const origin = join(base, 'origin.git');
+    const author = join(base, 'author');
+    const clone = join(base, 'clone');
+    mkdirSync(author);
+    sh(base, ['init', '--bare', '--initial-branch=main', origin]);
+    sh(base, ['init', '--initial-branch=main', author]);
+    writeFileSync(join(author, 'f.txt'), 'v1\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'one']);
+    sh(author, ['remote', 'add', 'origin', origin]);
+    sh(author, ['push', '-u', 'origin', 'main']);
+    sh(base, ['clone', origin, clone]);
+    // origin moves ahead of the clone
+    writeFileSync(join(author, 'f.txt'), 'v2\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'two']);
+    sh(author, ['push']);
+
+    // TTL 0 → the fetch throttle never reads as fresh, so each run probes
+    const env = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: clone, STERLING_CURRENCY_DISABLE: '0', STERLING_CURRENCY_TTL_MS: '0' };
+    const behind = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    assert.match(behind.systemMessage, /Sterling is 1 update\(s\) behind/, 'the human is told, with the double-click remedy');
+    assert.match(behind.systemMessage, /sterling-update\.bat/);
+    assert.match(behind.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND \(H1\)/, 'the conductor is told');
+    assert.match(behind.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions intact alongside the signal');
+    assert.ok(existsSync(join(clone, '.git', 'sterling-update-check.json')), 'the fetch throttle is stamped');
+
+    // fast-forward the clone → silent IMMEDIATELY: behind is computed locally
+    // per session, never served from the cache
+    sh(clone, ['merge', '--ff-only', 'origin/main']);
+    const current = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    assert.doesNotMatch(current.systemMessage, /behind/, 'silent once current (P1)');
+    assert.doesNotMatch(current.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND/);
+
+    // a declared-authoring clone is never probed, even when genuinely behind
+    // (it lives on branches and ahead-of-origin states, where "behind" is noise)
+    writeFileSync(join(author, 'f.txt'), 'v3\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'three']);
+    sh(author, ['push']);
+    mkdirSync(join(clone, '.sterling'), { recursive: true });
+    writeFileSync(join(clone, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
+    const authoring = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    assert.doesNotMatch(authoring.systemMessage, /behind/, 'authoring machines opt out via their declared role');
+  } finally {
+    cleanup();
+    rmSync(base, { recursive: true, force: true });
   }
 });
 
