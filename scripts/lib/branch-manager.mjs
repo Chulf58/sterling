@@ -150,12 +150,18 @@ export function mergeBranchInto({ cwd, branch, into, message }) {
   return { merged_into: into, branch_merged: branch };
 }
 
-/** Delete every local branch already fully merged into `into` (safe -d; never `into` or the current branch). Returns the deleted names. */
+/** Delete every local branch already fully merged into `into` (safe -d; never `into` or the current branch). Returns the deleted names.
+ *  A `+`-prefixed line is a branch CHECKED OUT IN A WORKTREE — git refuses to
+ *  delete it, so attempting to made the whole sweep (and the gate's exit code)
+ *  fail over housekeeping (observed 2026-08-05: nine leftover agent worktrees).
+ *  Skipped instead: the branch is merged, deleting it loses nothing, and the
+ *  next sweep after the worktree is removed picks it up. */
 export function sweepMergedBranches({ cwd, into }) {
   const cur = currentBranch(cwd);
   const candidates = git(cwd, ['branch', '--merged', into])
     .split('\n')
-    .map((l) => l.replace(/^[*+]?\s*/, '').trim())
+    .filter((l) => !l.startsWith('+'))
+    .map((l) => l.replace(/^\*?\s*/, '').trim())
     .filter((b) => b && b !== into && b !== cur && !b.startsWith('('));
   const deleted = [];
   for (const b of candidates) {

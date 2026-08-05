@@ -100,6 +100,48 @@ if (debt.length > 0) {
   );
 }
 
+// VERSION MOVES WITH THE MERGE (decision be9168e8 + user directive 2026-08-05
+// "bump the version when you push"). The plugin version is the clone-currency
+// signal consumers read, and be9168e8 deferred automating the bump "until the
+// rule is observed to fail" — it failed on 2026-08-05 (a feature merge shipped
+// unbumped), so the gate now holds it: a branch whose diff goes beyond the
+// generated projections must move BOTH version fields together (be9168e8:
+// package.json and plugin.json move in the same commit). Fixture repos and
+// consuming projects have no plugin manifest — skipped loud. --allow-same-version
+// is the deliberate escape for a merge that genuinely deserves no bump.
+const GENERATED_ONLY = new Set(['architecture.md', 'rulings.md']);
+const pluginManifestRel = '.claude-plugin/plugin.json';
+if (existsSync(join(target, pluginManifestRel))) {
+  const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
+  if (substantive.length > 0 && !process.argv.includes('--allow-same-version')) {
+    const readVersion = (raw, label) => {
+      try {
+        return JSON.parse(raw).version ?? null;
+      } catch {
+        fail(`direct-merge: could not parse ${label} while checking the version bump`);
+      }
+    };
+    const pkgPath = join(target, 'package.json');
+    const branchPlugin = readVersion(readFileSync(join(target, pluginManifestRel), 'utf8'), pluginManifestRel);
+    const branchPkg = existsSync(pkgPath) ? readVersion(readFileSync(pkgPath, 'utf8'), 'package.json') : null;
+    const baseShow = spawnSync('git', ['show', `${into}:${pluginManifestRel}`], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+    const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
+    if (branchPkg !== null && branchPlugin !== branchPkg) {
+      fail(
+        `direct-merge: version fields DIVERGED — ${pluginManifestRel} is ${branchPlugin}, package.json is ${branchPkg}. ` +
+          `They move together in the same commit (decision be9168e8). Align them, commit, rerun.`
+      );
+    }
+    if (basePlugin !== null && branchPlugin === basePlugin) {
+      fail(
+        `direct-merge: the plugin version (${branchPlugin}) did not move, but this branch changes ${substantive.length} file(s) beyond the generated projections.\n` +
+          `The version is the clone-currency signal consumers read (decision be9168e8): bump BOTH ${pluginManifestRel} and package.json\n` +
+          `(0.x rule: breaking → MINOR, additive → PATCH), commit, rerun. If this merge genuinely deserves no bump, rerun with --allow-same-version.`
+      );
+    }
+  }
+}
+
 // Consistency-check battery at the gate (R2 board 2e443375): the invariant-3
 // checkers were bound to no mechanical event — `npm run check` existed but only
 // prose invoked it, so registry/skill/bundle/projection drift could merge
@@ -238,4 +280,56 @@ try {
   console.error(`direct-merge: the merge succeeded; the parked-file sweep did not run (${e?.message ?? e}). Harmless — /sterling:drain will close them.`);
 }
 
-console.log(JSON.stringify({ ...merged, branches_swept: swept, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
+// PUSH THE MERGE TO ORIGIN — work has not "landed" until consumers can
+// fast-forward to it: /sterling:update reads origin, so a merged-but-unpushed
+// base leaves every consumer machine behind with nothing anywhere saying so.
+// Binding the push to the merge event (P4) closes that gap; --no-push opts out
+// for local-only work. A repo with no origin (test fixtures, consuming
+// projects) skips LOUD. On WSL a plain `git push` can fail where `git.exe`
+// succeeds (credentials live in Git Credential Manager on the Windows side),
+// so that interop path is tried before declaring failure. A push failure is
+// NEVER reported as a merge failure — the merge stands; the exit code still
+// goes non-zero so an unpushed base cannot read as a clean gate.
+let pushed = false;
+if (process.argv.includes('--no-push')) {
+  console.error('direct-merge: push to origin SKIPPED (--no-push) — consumers cannot see this merge until you push.');
+} else {
+  const remotes = spawnSync('git', ['remote'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  const hasOrigin = remotes.status === 0 && remotes.stdout.split('\n').map((r) => r.trim()).includes('origin');
+  if (!hasOrigin) {
+    console.error("direct-merge: no 'origin' remote — push skipped (loud).");
+  } else {
+    const tryPush = (cmd) =>
+      spawnSync(cmd, ['push', 'origin', into], {
+        cwd: target,
+        encoding: 'utf8',
+        timeout: 120_000,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      });
+    let push = tryPush('git');
+    if (push.status !== 0 && process.platform !== 'win32') {
+      console.error('direct-merge: `git push` failed — retrying through git.exe (Windows credential manager)…');
+      const winPush = tryPush('git.exe');
+      if (!winPush.error) push = winPush; // git.exe absent (spawn error) → keep the original failure
+    }
+    if (push.status === 0) {
+      pushed = true;
+      console.error(`direct-merge: pushed ${into} to origin.`);
+    } else {
+      console.error(
+        [
+          '',
+          `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — but the PUSH to origin FAILED,`,
+          `so consumer machines cannot see it (/sterling:update reads origin). Push ${into} manually:`,
+          `  git push origin ${into}   (on WSL, try: git.exe push origin ${into} — credentials live in GCM)`,
+          `A 'Repository not found' here usually means a wrong-account GCM credential.`,
+          (push.stderr || push.stdout || String(push.error?.message ?? '')).trim(),
+        ].join('\n')
+      );
+      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false }, null, 2));
+      process.exit(1);
+    }
+  }
+}
+
+console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
