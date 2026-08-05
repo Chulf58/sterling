@@ -36,6 +36,20 @@ export interface BoardFilter {
   source?: 'user' | 'system';
   system_reason?: string;
   file_keys?: string[];
+  /**
+   * Narrow to items whose text contains this substring (work order d9960c98) —
+   * a genuine WHERE, not a rank: it REMOVES non-matching items from the counted
+   * set rather than merely reordering it, the distinction rank_terms already
+   * has to honour on the knowledge side (rank_terms order a set, they never
+   * narrow it). Case-insensitive plain substring match, applied in JS inside
+   * boardFiltered — never routed through records_fts MATCH — so a caller's
+   * string can never be interpreted as FTS5 query syntax (no quoting/escaping
+   * to get wrong) and always matches literally, metacharacters included. Cheap
+   * here specifically because boardFiltered already scans the bounded
+   * (BOARD_SCAN_CAP) todo set into JS for the source/system_reason filters —
+   * this adds one more JS predicate to that same pass, not a second table scan.
+   */
+  contains?: string;
   cap?: number;
   projection?: Projection;
 }
@@ -393,7 +407,7 @@ export class SterlingTools {
    * want either and pointing at retirement alone would trade a stale denial for an
    * invitation to retire away every error instead of correcting it.
    */
-  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update'): void {
+  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append'): void {
     const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
     const attempted = SERVER_OWNED.filter((k) => k in fields);
     if (attempted.length === 0) return;
@@ -420,12 +434,12 @@ export class SterlingTools {
    * derives paths from location) cost a round-trip each to learn otherwise.
    * An unregistered type is left to validateRecord's louder rejection.
    */
-  private refuseUnknownFields(type: string, candidate: Record<string, unknown>): void {
+  private refuseUnknownFields(type: string, candidate: Record<string, unknown>, op: string = 'knowledge write'): void {
     const unknown = unknownFieldsIn(type, candidate);
     if (unknown.length === 0) return;
     const valid = [...(knownFieldsFor(type) ?? [])].sort().join(', ');
     throw new Error(
-      `knowledge write: '${type}' does not define ${unknown.map((k) => `'${k}'`).join(', ')} — ` +
+      `${op}: '${type}' does not define ${unknown.map((k) => `'${k}'`).join(', ')} — ` +
         `the field would have been silently dropped and the write reported success. Valid fields: ${valid}.`
     );
   }
@@ -511,8 +525,14 @@ export class SterlingTools {
       if (!dedupOverride) {
         const match = this.findAntiPatternOverlap(parsed);
         if (match) {
+          const { record, predicate, dice } = match;
+          const predicateDesc =
+            predicate === 'title_trigger'
+              ? `title+trigger Dice similarity ${dice.toFixed(2)} >= ${0.5} on their own`
+              : `title+trigger Dice similarity ${dice.toFixed(2)} >= ${0.3}, assisted by a shared file_key (the false-positive-prone branch — a busy multi-concern file can host distinct lessons)`;
           throw new Error(
-            `knowledge_create: this anti_pattern overlaps existing '${match.id}' — "${(match as { title?: string }).title ?? ''}". ` +
+            `knowledge_create: this anti_pattern overlaps existing '${record.id}' — "${(record as { title?: string }).title ?? ''}" ` +
+              `(matched on ${predicateDesc}). ` +
               `Same finding: knowledge_update that record, appending your source_evidence. Distinct lesson: re-submit with dedup_override: true.`
           );
         }
@@ -628,7 +648,9 @@ export class SterlingTools {
     });
   }
 
-  private findAntiPatternOverlap(candidate: Record<string, unknown>): DurableRecord | undefined {
+  private findAntiPatternOverlap(
+    candidate: Record<string, unknown>
+  ): { record: DurableRecord; predicate: 'title_trigger' | 'key_assisted'; dice: number } | undefined {
     const existing = this.store.query({ types: ['anti_pattern'], cap: 1000 });
     const candKeys = new Set(((candidate.file_keys as string[]) ?? []).map((p) => p.replace(/\\/g, '/')));
     const tokens = (r: Record<string, unknown>) =>
@@ -650,17 +672,19 @@ export class SterlingTools {
     // lowers the token bar for records that already sound alike.
     const DICE_OVERLAP_THRESHOLD = 0.5;
     const DICE_KEY_ASSISTED_THRESHOLD = 0.3;
-    return existing.find((e) => {
+    for (const e of existing) {
       const rec = e as unknown as Record<string, unknown>;
       const recTokens = tokens(rec);
       const denom = candTokens.size + recTokens.size;
-      if (denom === 0) return false;
+      if (denom === 0) continue;
       let shared = 0;
       for (const t of recTokens) if (candTokens.has(t)) shared++;
       const dice = (2 * shared) / denom;
       const keyOverlap = ((rec.file_keys as string[]) ?? []).some((k) => candKeys.has(k));
-      return dice >= DICE_OVERLAP_THRESHOLD || (keyOverlap && dice >= DICE_KEY_ASSISTED_THRESHOLD);
-    });
+      if (dice >= DICE_OVERLAP_THRESHOLD) return { record: e, predicate: 'title_trigger', dice };
+      if (keyOverlap && dice >= DICE_KEY_ASSISTED_THRESHOLD) return { record: e, predicate: 'key_assisted', dice };
+    }
+    return undefined;
   }
 
   /**
@@ -953,7 +977,7 @@ export class SterlingTools {
    * value is not an array, an empty entry list, and `links` — typed edges have
    * their own tool and a second path would let the record_links index drift.
    */
-  knowledgeAppend(id: string, field: string, entries: unknown[]): DurableRecord {
+  knowledgeAppend(id: string, field: string, entries: unknown[]): { record: DurableRecord; warnings: string[] } {
     const old = this.store.get(id);
     if (!old) throw new Error(`knowledge_append: no record '${id}'`);
     if (!Array.isArray(entries) || entries.length === 0) {
@@ -962,8 +986,8 @@ export class SterlingTools {
     if (field === 'links') {
       throw new Error(`knowledge_append: 'links' is not appendable here — use knowledge_link, which also maintains the record_links index`);
     }
-    this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_update');
-    this.refuseUnknownFields(old.type, { [field]: entries });
+    this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_append');
+    this.refuseUnknownFields(old.type, { [field]: entries }, 'knowledge_append');
     const current = (old as unknown as Record<string, unknown>)[field];
     if (current !== undefined && !Array.isArray(current)) {
       throw new Error(
@@ -971,8 +995,11 @@ export class SterlingTools {
       );
     }
     const next = [...((current as unknown[]) ?? []), ...entries];
-    // Straight through the ONE update path — every guarantee above rides along.
-    return this.knowledgeUpdate(id, { [field]: next });
+    // Straight through the ONE update path — every guarantee above rides along,
+    // including the oversize check (board 8390f8fa): the write's result carries
+    // a warning on the SAME channel knowledge_update uses.
+    const record = this.knowledgeUpdate(id, { [field]: next });
+    return { record, warnings: this.articleOversizeWarnings(record) };
   }
 
   /**
@@ -1002,7 +1029,12 @@ export class SterlingTools {
    * warnings — so an edit is a normal supersession and not a back door around
    * any of it.
    */
-  knowledgeEdit(id: string, field: string, find: string, replace: string): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number } } {
+  knowledgeEdit(
+    id: string,
+    field: string,
+    find: string,
+    replace: string
+  ): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number }; warnings: string[] } {
     const old = this.store.get(id);
     if (!old) throw new Error(`knowledge_edit: no record '${id}'`);
     if (typeof find !== 'string' || find.length === 0) {
@@ -1034,7 +1066,60 @@ export class SterlingTools {
     }
     const next = current.replace(find, replace);
     const record = this.knowledgeUpdate(id, { [field]: next });
-    return { record, replaced: { field, chars_before: current.length, chars_after: next.length } };
+    return {
+      record,
+      replaced: { field, chars_before: current.length, chars_after: next.length },
+      warnings: this.articleOversizeWarnings(record),
+    };
+  }
+
+  /**
+   * Board 8390f8fa: warn a registry-style article BEFORE it outgrows its own
+   * round-trip. Measured, not guessed — every knowledge_append to
+   * mcp-tool-surface (29 history entries) blew the MCP token cap on its own
+   * response (68KB, then 70KB), and hooks-suite's what_it_does alone is a
+   * 26,364-token string. The AC that was supposed to catch this ("split before
+   * it blocks a write") is prose inside the very article it governs, and prose
+   * is something a caller must CHOOSE to check — it did not fire. This does,
+   * on every write that can grow a feature_article: knowledge_update (direct),
+   * knowledge_append and knowledge_edit (both delegate to knowledgeUpdate, so
+   * calling this once here — from THEM, on the record it returns — covers all
+   * three without a second definition).
+   *
+   * Rides the EXISTING coherence-warning channel (decision 8ed62c1b) rather
+   * than inventing a second one: knowledge_update already returns
+   * {record, warnings[]} via knowledgeUpdateResult, and append/edit now carry
+   * the same shape. WARNS, never refuses — same reasoning as the coherence
+   * check: the write already landed, and ceremony on every partial update
+   * would train callers to over-transmit, which is the problem this exists to
+   * prevent.
+   *
+   * Size is measured as knowledge_get would return the record — i.e. the
+   * record itself, since a direct-id hit in knowledge_get is exactly store.get
+   * with no further projection. Deduped per ARTICLE via file_keys, not the
+   * record id: a feature_article mints a new id on every version, so an
+   * id-keyed maintenance item would silently stop matching the very next
+   * reconcile (the same stranding bug board 6202a0f5 reports for
+   * promotion_review) — the article's owned files are what stays stable.
+   */
+  private articleOversizeWarnings(record: DurableRecord): string[] {
+    if (record.type !== 'feature_article') return [];
+    const size = JSON.stringify(record).length;
+    const threshold = this.config.article_oversize_chars;
+    if (size <= threshold) return [];
+    const a = record as unknown as { slug: string; files?: { path: string }[] };
+    const remedy =
+      'split it (one feature_article per concept FAMILY — the concept-article granularity rubric; a sub-concept splits out only when it accrues its own intent + interactions distinct from the parent) ' +
+      'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
+    this.maintenanceEnqueue({
+      reason: 'article_oversize',
+      text: `article '${a.slug}' is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
+      file_keys: (a.files ?? []).map((f) => f.path),
+    });
+    return [
+      `feature_article '${a.slug}' is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
+        `A deduped article_oversize maintenance item has been queued.`,
+    ];
   }
 
   /**
@@ -1068,6 +1153,7 @@ export class SterlingTools {
         );
       }
     }
+    warnings.push(...this.articleOversizeWarnings(record));
     return { record, warnings };
   }
 
@@ -1223,6 +1309,14 @@ export class SterlingTools {
       next.file_baselines = this.computeBaselines(next);
     }
     const updated = this.store.supersede(id, next);
+    // The item's feature_link points to whatever version was current when it was
+    // raised, which may now be an ancestor, so match the whole supersede chain —
+    // computed for every type, since promotion_review (below) can point at any
+    // supersedable record, not only feature_article/reference_material.
+    const chain = new Set<string>([id]);
+    for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
+      if (link.rel === 'supersedes') chain.add(link.target_id);
+    }
     // P4 lifecycle-bind: reconciling an article/doc IS the fulfilling artifact for
     // any DRIFT-driven maintenance item about it. Re-baselining (above) already
     // self-clears the read-time drift flag; this drains the standing queue item in
@@ -1231,14 +1325,8 @@ export class SterlingTools {
     // separate, forgotten step (observed 2026-06-27: two already-reconciled
     // reconcile_needed items left in the queue). Scoped to the two drift reasons H7
     // and the read-time check raise (reconcile_needed + refresh_reference, both
-    // keyed by feature_link); NEVER promotion_review — promotion stays a human gate
-    // (P1). The item's feature_link points to whatever version was current when it
-    // was raised, which may now be an ancestor, so match the whole supersede chain.
+    // keyed by feature_link).
     if (next.type === 'feature_article' || next.type === 'reference_material') {
-      const chain = new Set<string>([id]);
-      for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
-        if (link.rel === 'supersedes') chain.add(link.target_id);
-      }
       for (const item of this.maintenanceQuery({ cap: 1000 })) {
         const it = item as { id: string; feature_link?: string; system_reason?: string };
         if (
@@ -1248,6 +1336,17 @@ export class SterlingTools {
         ) {
           this.store.remove(it.id, ts);
         }
+      }
+    }
+    // promotion_review stays a human gate (P1) — a supersession never DRAINS it,
+    // it is not the review being paid. But leaving its feature_link pointed at the
+    // now-superseded id STRANDS it silently (todo 6202a0f5): the review is still
+    // owed, same lineage, so RE-POINT rather than drop. In-place via updateTodo
+    // (no new version, no id churn) so every other reference to the item survives.
+    for (const item of this.maintenanceQuery({ cap: 1000 })) {
+      const it = item as DurableRecord & { feature_link?: string; system_reason?: string };
+      if (it.system_reason === 'promotion_review' && it.feature_link !== undefined && chain.has(it.feature_link) && it.feature_link !== updated.id) {
+        this.store.updateTodo(it.id, { ...it, feature_link: updated.id, updated_at: ts });
       }
     }
     return updated;
@@ -1287,8 +1386,10 @@ export class SterlingTools {
       scope: `domain:${domain}`,
       links: [{ rel: 'informed_by', target_id: id }],
     });
-    // tombstone the project original, pointing forward to the promoted copy
-    this.store.retireInFavorOf(id, promoted.id, ts);
+    // tombstone the project original, pointing forward to the promoted copy —
+    // 'promoted' (not the default 'retired') so the activity feed names this
+    // for what it is (board 39d6462d)
+    this.store.retireInFavorOf(id, promoted.id, ts, 'promoted');
     const review = this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 }).find(
       (t) => (t as { feature_link?: string }).feature_link === id
     );
@@ -1317,6 +1418,10 @@ export class SterlingTools {
     let filtered = filter.source ? todos.filter((t) => (t as { source: string }).source === filter.source) : todos;
     if (filter.system_reason) {
       filtered = filtered.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason);
+    }
+    if (filter.contains) {
+      const needle = filter.contains.toLowerCase();
+      filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
     }
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
@@ -1368,6 +1473,55 @@ export class SterlingTools {
       ...(notes.length ? { note: notes.join('; ') } : {}),
       records: projection === 'digest' ? records.map((r) => digestRecord(r as unknown as Record<string, unknown>)) : records,
     };
+  }
+
+  /**
+   * IN-PLACE edit of a board/queue item's text/priority/file_keys (work order
+   * 9a06b6aa) — the id stays stable and NO new version is minted, unlike every
+   * other durable record's change primitive (knowledge_update supersedes). That
+   * asymmetry is deliberate: a todo is not in the immutable set (only decision
+   * is), and rewriting one via remove+re-add was costing full retransmission on
+   * every edit ("every retransmission is a chance to corrupt an item that was
+   * previously correct") while stranding every reference keyed on the old id
+   * (feature_link, H7/H10 items) on every edit — the id-rot complaint this
+   * closes.
+   *
+   * UPDATING NEVER CLOSES AN ITEM: board_remove, bound to the fulfilling
+   * artifact-write, remains the only exit (P4) — this is not a soft-close and
+   * must not be used as one.
+   *
+   * Only text/priority/file_keys may change through this path: source and
+   * system_reason decide which surface (board vs. queue) an item lives on, and
+   * an edit must never move an item between them; status/id/created_at/type/
+   * superseded_by are server-owned everywhere else in this store, and this
+   * surface is no exception. Anything outside that set is REFUSED BY NAME,
+   * naming the valid set — the same refuse-don't-drop convention as
+   * refuseUnknownFields/refuseServerOwnedFields (decision b47889b7 class) —
+   * rather than silently ignored, which would report success on a write that
+   * changed nothing the caller asked for. An empty patch is refused for the
+   * same reason: nothing to update is not a no-op success.
+   */
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys'] as const;
+
+  boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
+    const old = this.store.get(id);
+    if (!old) throw new Error(`board_update: no record '${id}'`);
+    if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a todo — board_update only edits board/queue items`);
+    const updatable: readonly string[] = SterlingTools.BOARD_UPDATABLE_FIELDS;
+    const unknown = Object.keys(patch).filter((k) => !updatable.includes(k));
+    if (unknown.length) {
+      throw new Error(
+        `board_update: ${unknown.map((k) => `'${k}'`).join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not editable through board_update — ` +
+          `only ${updatable.join('/')} may change in place. source/system_reason decide which surface an item lives on and must never move by edit; ` +
+          `status/id/created_at/type/superseded_by are server-owned. Updating never closes an item — board_remove, bound to the fulfilling ` +
+          `artifact-write, remains the only exit. Valid fields: ${updatable.join(', ')}.`
+      );
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
+    }
+    const next = { ...old, ...patch, updated_at: this.now() };
+    return this.store.updateTodo(id, next);
   }
 
   /** P4: done = removed. The artifact-write binding (H9/H10) is not built yet — skipped loudly, never silently. */
@@ -1703,18 +1857,26 @@ export class SterlingTools {
     });
   }
 
-  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; cap?: number } = {}): DurableRecord[] {
+  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number } = {}): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
-    // so a reason-filtered query no longer misses matches past the cap.
-    return this.boardQuery({ source: 'system', system_reason: filter.system_reason, file_keys: filter.file_keys, cap: filter.cap });
+    // so a reason-filtered query no longer misses matches past the cap. contains
+    // (work order d9960c98) rides the same boardFiltered pass for the same reason.
+    return this.boardQuery({
+      source: 'system',
+      system_reason: filter.system_reason,
+      file_keys: filter.file_keys,
+      contains: filter.contains,
+      cap: filter.cap,
+    });
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
-  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; cap?: number; projection?: Projection } = {}): BoardQueryResult {
+  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number; projection?: Projection } = {}): BoardQueryResult {
     return this.boardQueryResult({
       source: 'system',
       system_reason: filter.system_reason,
       file_keys: filter.file_keys,
+      contains: filter.contains,
       cap: filter.cap,
       projection: filter.projection,
     });

@@ -18,8 +18,11 @@
 // refusal matrix and the step ordering are unit-testable without a network, an
 // npm install, or a 90-second test battery. scripts/update.mjs is the thin CLI.
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+// builtins-only module — safe at load time on an unbuilt clone (see the
+// bootstrap-independence note in scripts/update.mjs).
+import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -186,6 +189,40 @@ export function refusalFor(c) {
   return null;
 }
 
+/**
+ * Stamp machine_role:'consumer' into <cwd>/.sterling/config.json, but ONLY
+ * when the field is ABSENT (todo cabbc10f, decision a9b98b7d). Never
+ * overwrites a declared role — this is what makes "the authoring machine
+ * sometimes pulls" harmless: it declares 'authoring' once, by hand, and no
+ * update can flip it back. Read-modify-write so every other field survives
+ * byte-for-practical-purposes (parse, set one key, re-stringify) — no schema
+ * import here, deliberately: a consumer stamping its own config must not
+ * refuse on a field this build's schema does not yet know about.
+ *
+ * LOUD but NONFATAL (P5): the update itself already succeeded by the time
+ * this runs, so any failure here is a warning via `log`, never a thrown
+ * error that would make a successful update look failed.
+ */
+export function stampConsumerRoleIfAbsent(cwd, log) {
+  const configPath = join(cwd, '.sterling', 'config.json');
+  if (!existsSync(configPath)) {
+    log('\n▸ machine-role stamp — SKIPPED: no .sterling/config.json (run /sterling:init here first)');
+    return;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+    if (Object.prototype.hasOwnProperty.call(parsed, 'machine_role')) {
+      log(`\n▸ machine-role stamp — already '${parsed.machine_role}', not overwritten`);
+      return;
+    }
+    parsed.machine_role = 'consumer';
+    writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n');
+    log("\n▸ machine-role stamp — machine_role was absent, stamped 'consumer'");
+  } catch (err) {
+    log(`\n⚠ machine-role stamp FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
+  }
+}
+
 /** The one-line currency answer: what this machine is on, and how far behind. */
 export function currencyLine(c) {
   const id = c.describe && c.describe !== c.head_short ? `${c.describe} (${c.head_short})` : c.head_short;
@@ -320,6 +357,13 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     log('\n▸ re-bake machine artifacts — SKIPPED: no .sterling/config.json in the Sterling clone (run /sterling:init here to get launchers + MCP config on this machine)');
   }
 
+  // Stamp the consumer role now that the fast-forward + rebuild are complete
+  // (todo cabbc10f, decision a9b98b7d) — running /sterling:update is exactly
+  // what a consumer machine does, so a successful run here is the signal.
+  // Never fatal: a stamping failure must not make a successful update report
+  // as failed.
+  stampConsumerRoleIfAbsent(cwd, log);
+
   // Installed agents are what actually breaks on a pull: template content moves,
   // and the hook commands baked into each project's .claude/agents carry THIS
   // machine's node + hooks paths. A refusal (locally modified agent) is surfaced,
@@ -343,6 +387,17 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         report.exit = report.exit === 0 ? 1 : report.exit;
       } else {
         log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : 'up to date'}`);
+      }
+      // Deliver the double-click updater to every registered project — the
+      // update event is how a machine receives new artifacts, so a project
+      // init'd before this launcher existed gets one here rather than waiting
+      // on someone remembering a per-project re-init (P4). Ensure semantics:
+      // never overwrites what it cannot prove it generated; nonfatal always.
+      try {
+        const launcher = ensureUpdateLauncher(p.repo_path, cwd);
+        if (launcher.status !== 'matches') log(`      ${UPDATE_LAUNCHER_NAME}: ${launcher.status} — ${launcher.detail}`);
+      } catch (err) {
+        log(`      ⚠ ${UPDATE_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
       }
     }
   } else if (opts.projects === false) {

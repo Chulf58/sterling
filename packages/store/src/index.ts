@@ -96,6 +96,14 @@ CREATE TABLE IF NOT EXISTS queue_drain_log (
   text TEXT NOT NULL,
   file_keys TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS activity_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
 `;
 
 /** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
@@ -137,6 +145,19 @@ export function catalogStatus(
   const age = Math.floor((Date.parse(nowISO) - Date.parse(anchor)) / CATALOG_DAY_MS);
   const staleDate = new Date(Date.parse(anchor) + thresholdDays * CATALOG_DAY_MS).toISOString();
   return { present: true, stale: age > thresholdDays, staleDate };
+}
+
+/**
+ * Board 39d6462d activity feed: the "title-or-slug clipped" the record is
+ * shown under on the Queue tab's activity section. Most types carry `title`;
+ * feature_article also carries `slug` but title wins when both exist; todo/
+ * note carry neither and fall back to their first text line. Clipped to 80
+ * chars — the same clip the note-card title already uses (viewmodel.ts).
+ */
+function activityTitleOf(record: DurableRecord): string {
+  const r = record as unknown as { title?: string; slug?: string; text?: string; raw_text?: string; id: string };
+  const raw = r.title ?? r.slug ?? r.text?.split('\n')[0] ?? r.raw_text?.split('\n')[0] ?? r.id;
+  return raw.slice(0, 80);
 }
 
 function deepReplaceString(value: unknown, from: string, to: string): unknown {
@@ -209,6 +230,7 @@ export type ToolStore = Pick<
   // a ranking artefact.
   | 'articlesBySlug'
   | 'supersede'
+  | 'updateTodo'
   | 'retireInFavorOf'
   | 'remove'
   | 'addLink'
@@ -241,7 +263,10 @@ export class SterlingStore {
   /** The one validated write path. Unregistered type or malformed record throws; nothing is written. */
   create(input: unknown): DurableRecord {
     const record = validateRecord(input);
-    this.tx(() => this.insertRecord(record));
+    this.tx(() => {
+      this.insertRecord(record);
+      this.logActivity('created', record, record.created_at);
+    });
     return record;
   }
 
@@ -329,7 +354,71 @@ export class SterlingStore {
 
   get(id: string): DurableRecord | undefined {
     const row = this.db.prepare('SELECT body FROM records WHERE id = ?').get(id) as { body: string } | undefined;
-    return row ? (JSON.parse(row.body) as DurableRecord) : undefined;
+    if (!row) return undefined;
+    return this.withDerivedReliedBy(JSON.parse(row.body) as DurableRecord);
+  }
+
+  /**
+   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
+   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
+   * feature_article's relies_on naming this article's slug — not the stored
+   * field. relies_on stays author-written; relied_by cannot drift because it is
+   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
+   * domain-mounted articles are out of scope for this derivation (each mounted
+   * store derives its own; MountedStores does not cross-join relies_on across
+   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
+   * slug-collision check already make.
+   *
+   * Never a hidden lie (constraint 2 of the board item): when the stored
+   * relied_by differs from the derived set (as a sorted-deduped set — order and
+   * duplicates in the stored array don't count as drift), the returned record
+   * carries dependencies.relied_by_stored_stale: true alongside the derived
+   * value actually served. The stored field is left untouched in the DB — this
+   * derivation never writes.
+   */
+  private withDerivedReliedBy(record: DurableRecord, relations?: { slug: string; reliesOn: string[] }[]): DurableRecord {
+    if (record.type !== 'feature_article') return record;
+    const article = record as DurableRecord & {
+      slug: string;
+      dependencies: { relies_on: string[]; relied_by: string[] };
+    };
+    const derived = this.deriveReliedBy(article.slug, relations);
+    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
+    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
+    return {
+      ...record,
+      dependencies: {
+        relies_on: article.dependencies?.relies_on ?? [],
+        relied_by: derived,
+        ...(stale ? { relied_by_stored_stale: true } : {}),
+      },
+    } as DurableRecord;
+  }
+
+  /**
+   * Every active feature_article's slug + relies_on, in ONE scan — shared by
+   * withDerivedReliedBy across a whole query() result so a capped list of N
+   * articles costs one table scan, not N.
+   */
+  private activeArticleRelations(): { slug: string; reliesOn: string[] }[] {
+    const rows = this.db
+      .prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`)
+      .all() as { body: string }[];
+    return rows.map((r) => {
+      const rec = JSON.parse(r.body) as { slug?: string; dependencies?: { relies_on?: string[] } };
+      return { slug: rec.slug ?? '', reliesOn: rec.dependencies?.relies_on ?? [] };
+    });
+  }
+
+  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
+  private deriveReliedBy(slug: string, relations?: { slug: string; reliesOn: string[] }[]): string[] {
+    const rels = relations ?? this.activeArticleRelations();
+    const set = new Set<string>();
+    for (const r of rels) {
+      if (r.slug === slug) continue;
+      if (r.reliesOn.includes(slug)) set.add(r.slug);
+    }
+    return [...set].sort();
   }
 
   /**
@@ -377,7 +466,10 @@ export class SterlingStore {
           ORDER BY updated_at DESC`
       )
       .all(slug) as { body: string }[];
-    return rows.map((r) => JSON.parse(r.body) as DurableRecord);
+    const records = rows.map((r) => JSON.parse(r.body) as DurableRecord);
+    if (!records.length) return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
 
   /**
@@ -448,7 +540,7 @@ export class SterlingStore {
           WHERE ${where.join(' AND ')} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
         const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string }[];
-        return rows.map((x) => JSON.parse(x.body) as DurableRecord);
+        return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body) as DurableRecord));
       }
     }
     // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at desc.
@@ -464,7 +556,16 @@ export class SterlingStore {
     const sql = `SELECT r.body FROM records r WHERE ${where.join(' AND ')}
       ORDER BY ${orderBy.join(', ')} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string }[];
-    return rows.map((x) => JSON.parse(x.body) as DurableRecord);
+    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body) as DurableRecord));
+  }
+
+  /** query()'s two return paths share this: one relations scan for the whole
+   *  result set (not one per feature_article row) before applying the derived
+   *  relied_by to each. */
+  private withDerivedReliedByAll(records: DurableRecord[]): DurableRecord[] {
+    if (!records.some((r) => r.type === 'feature_article')) return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
 
   /**
@@ -509,8 +610,54 @@ export class SterlingStore {
       if (res.changes === 0) {
         throw new Error(`supersede: record '${oldId}' was concurrently superseded — retry against the current version`);
       }
+      this.logActivity('updated', newRecord, newRecord.updated_at);
     });
     return newRecord;
+  }
+
+  /**
+   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
+   * exception to "every change is a supersession". todo is deliberately NOT in
+   * the immutable set (only decision is), and every board item is a DURABLE
+   * record in the same store as knowledge, so the established change primitive
+   * (supersede: mint a new id, retain the old) would rot every reference keyed
+   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
+   * id, created_at, status and superseded_by stay exactly as they were; only the
+   * caller's patched fields and updated_at change — same row, same identity.
+   *
+   * `newInput` is the FULL merged candidate (old record + patch), mirroring
+   * supersede's own calling convention: this method validates and persists, the
+   * tool layer decides which fields may be patched and builds the merge. A
+   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
+   * and the UPDATE is guarded on that status inside the transaction to close the
+   * same concurrent-supersede race.
+   */
+  updateTodo(id: string, newInput: unknown): DurableRecord {
+    const old = this.get(id);
+    if (!old) throw new Error(`updateTodo: no record '${id}'`);
+    if (old.type !== 'todo') throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo — board_update only mutates todos`);
+    if (old.status === 'superseded') throw new Error(`updateTodo: record '${id}' is already superseded`);
+    const candidate = { ...(newInput as Record<string, unknown>) };
+    const updated = validateRecord(candidate) as DurableRecord;
+    if (updated.type !== 'todo') throw new Error(`updateTodo: type mismatch ('${updated.type}' is not 'todo')`);
+    const entry = RECORD_TYPES.todo;
+    this.tx(() => {
+      const res = this.db
+        .prepare("UPDATE records SET updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'")
+        .run(updated.updated_at, JSON.stringify(updated), id);
+      if (res.changes === 0) {
+        throw new Error(`updateTodo: record '${id}' was concurrently removed or superseded — retry against the current version`);
+      }
+      // file_keys may have changed — rebuild the join index rather than diffing it.
+      this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
+      for (const path of new Set(entry.fileKeys(updated as unknown as Record<string, unknown>))) {
+        this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(id, path);
+      }
+      // text may have changed — refresh the FTS row in place (this table is not
+      // an external-content fts5 table, so a plain UPDATE is well-formed).
+      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(updated as unknown as Record<string, unknown>), id);
+    });
+    return updated;
   }
 
   /**
@@ -521,7 +668,16 @@ export class SterlingStore {
    * the cross-store id with NO new row. Provenance and inbound links survive;
    * default queries already hide superseded records, so it never double-serves.
    */
-  retireInFavorOf(id: string, replacementId: string, at: string): DurableRecord {
+  /**
+   * `verb` names what this retirement IS for the activity feed (board
+   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
+   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
+   * two existing callers, distinguished so a promotion reads as "promoted",
+   * not as an unrelated-looking "retired". Defaults to 'retired' so the
+   * pre-promotion caller (and any future one) keeps that meaning without
+   * having to know the parameter exists.
+   */
+  retireInFavorOf(id: string, replacementId: string, at: string, verb: string = 'retired'): DurableRecord {
     const record = this.get(id);
     if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
     // Same relaxation + in-tx guard as supersede (audit findings 13/43 + 29/43):
@@ -536,6 +692,7 @@ export class SterlingStore {
       if (res.changes === 0) {
         throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded — retry`);
       }
+      this.logActivity(verb, retired as DurableRecord, at);
     });
     return retired;
   }
@@ -549,7 +706,8 @@ export class SterlingStore {
   remove(id: string, drainedAt?: string): void {
     this.tx(() => {
       const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[] }) | undefined;
-      if (record && record.type === 'todo' && record.source === 'system') {
+      const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
+      if (isSystemDrain && record) {
         this.db
           .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)')
           .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []));
@@ -557,6 +715,12 @@ export class SterlingStore {
         this.db
           .prepare('DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)')
           .run();
+      }
+      // A system-todo removal is already visible via queue_drain_log above — the
+      // activity log covers what THAT log does not (board 39d6462d), so it is
+      // deliberately skipped here to avoid double-logging the same removal.
+      if (record && !isSystemDrain) {
+        this.logActivity('removed', record, drainedAt ?? new Date().toISOString());
       }
       this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
       this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
@@ -576,6 +740,33 @@ export class SterlingStore {
       .prepare('SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?')
       .all(limit) as { drained_at: string; system_reason: string; text: string; file_keys: string }[];
     return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) as string[] }));
+  }
+
+  /**
+   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
+   * through, so the Queue tab's activity section shows "what has been done"
+   * without a second, separate write path (§3.1 invariant: one write path).
+   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
+   * verb that primitive actually performed; NOT called from insertRecord
+   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
+   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
+   * remove()'s system-todo branch, which already has a completed-section home
+   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
+   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
+   * items never build up here either.
+   */
+  private logActivity(verb: string, record: DurableRecord, at: string): void {
+    this.db
+      .prepare('INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)')
+      .run(at, verb, record.type, record.id, activityTitleOf(record));
+    this.db.prepare('DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)').run();
+  }
+
+  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
+  listActivityLog(limit = 15): { at: string; verb: string; type: string; id: string; title: string }[] {
+    return this.db
+      .prepare('SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?')
+      .all(limit) as { at: string; verb: string; type: string; id: string; title: string }[];
   }
 
   /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
@@ -872,12 +1063,15 @@ export class SterlingStore {
     if (!targetValidated && !this.get(targetId)) throw new Error(`addLink: no target record '${targetId}'`);
     const parsedRel = linkSchema.shape.rel.parse(rel);
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
-    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
+    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
     this.tx(() => {
       this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(updated), sourceId);
       this.db.prepare('INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)').run(sourceId, parsedRel, targetId);
+      // addLink does not bump updated_at (the edge is metadata, not content) —
+      // the activity row still needs a real timestamp, so it stamps "now".
+      this.logActivity('linked', updated, new Date().toISOString());
     });
-    return updated as DurableRecord;
+    return updated;
   }
 
   /**

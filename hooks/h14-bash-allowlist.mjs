@@ -4289,7 +4289,15 @@ var SYSTEM_REASONS = [
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
-  "state_review"
+  "state_review",
+  // A feature_article's serialized size (as knowledge_get would return it)
+  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
+  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // the only moment anyone is looking; deduped per article via file_keys (a
+  // feature_article's id changes on every version, so id-keyed dedup would not
+  // survive the next reconcile — the article's owned files do).
+  "article_oversize"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4463,7 +4471,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4647,6 +4655,16 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Board 8390f8fa: a registry-style feature_article can outgrow its own
+  // round-trip — knowledge_append responses on mcp-tool-surface (29 history
+  // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
+  // token cap. Measured: mcp-tool-surface serializes ~104KB. Set well below
+  // that observed failure and above every healthy article; a knowledge_update/
+  // append/edit that lands a feature_article over this many chars (as
+  // knowledge_get would return it) warns via the write's result envelope and
+  // enqueues one deduped article_oversize maintenance item. Tunable per
+  // machine, not architecture.
+  article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -4675,6 +4693,16 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
+  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
+  // a value to infer. 'authoring' is declared once, by hand, on the machine
+  // where Sterling work lands and merges; a successful /sterling:update stamps
+  // 'consumer' into a clone that has it absent, and never overwrites an
+  // existing value (so an authoring machine that occasionally pulls stays
+  // 'authoring'). H1 reads this — never store_authority, whose 'primary'
+  // default would mislabel every consumer that never opted in (the rejected
+  // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
+  machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
@@ -4797,14 +4825,18 @@ try {
   const helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
   const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
-  const allowed = runCommandPrefixes.some((p) => command === p || command.startsWith(p + " ")) || isFsHelper || isReadOnlySearch;
+  const strictQuote = command.match(/^(["'])([^\s"']*)\1(?=\s|$)/);
+  const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
+  const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + " "));
+  const allowed = matchesPrefix(command) || strictUnquoted !== null && matchesPrefix(strictUnquoted) || isFsHelper || isReadOnlySearch;
   if (!allowed) {
-    const unquoted = command.replace(/^(["'])([^"']+)\1/, "$2");
-    const matchedPrefix = runCommandPrefixes.find((p) => unquoted === p || unquoted.startsWith(p + " "));
-    const quotingIsTheCause = unquoted !== command && !!matchedPrefix;
+    const looseQuote = command.match(/^(["'])([^"']*)\1/);
+    const looseUnquoted = looseQuote ? looseQuote[2] + command.slice(looseQuote[0].length) : null;
+    const matchedPrefix = looseUnquoted !== null ? runCommandPrefixes.find((p) => looseUnquoted === p || looseUnquoted.startsWith(p + " ")) : void 0;
+    const quotingIsTheCause = !!matchedPrefix && /\s/.test(looseQuote[2]);
     const prefixHasSpace = quotingIsTheCause && matchedPrefix.includes(" ");
     deny(
-      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTES ARE THE CAUSE: the allowlist matches command prefixes LITERALLY, so a quoted executable path does not match. Re-run it unquoted: '${unquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
+      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTED FORM IS GENUINELY UNMATCHABLE: quoting the whole command as ONE token cannot match the allowlist (a single-word quoted first token \u2014 e.g. a quoted exe path \u2014 is already accepted; a multi-word quoted span is not, so it cannot smuggle a prefix past this gate). Re-run it unquoted: '${looseUnquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();

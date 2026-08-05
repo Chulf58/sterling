@@ -36,11 +36,16 @@ import { isGitRepo, discardRun } from './lib/branch-manager.mjs';
 const abort = process.argv.slice(2).includes('--abort');
 const target = arg('--target') ?? process.cwd();
 const { cwd, store, config } = openProject(target);
-const runId = arg('--run') ?? store.getRun()?.id;
+const requestedRun = arg('--run');
+const runId = requestedRun ?? store.getRun()?.id;
 const run = runId ? store.getRun(runId) : undefined;
 if (!run) {
   store.close();
-  fail('dispose-run REFUSED: no_active_run — there is no run to dispose');
+  fail(
+    requestedRun
+      ? `dispose-run REFUSED: no_active_run — no run '${requestedRun}' found — there is no run to dispose`
+      : 'dispose-run REFUSED: no_active_run — there is no run to dispose'
+  );
 }
 
 // ---- --abort: sanctioned pre-green teardown (no promotion, no snapshot) ----

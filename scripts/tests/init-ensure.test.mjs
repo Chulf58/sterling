@@ -34,7 +34,7 @@ const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', 
 // .mcp.json is NOT a per-project artifact: the plugin declares the sterling
 // server (bound per-project via ${CLAUDE_PROJECT_DIR}), so a consuming project
 // never gets one. Its absence is asserted directly below.
-const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', '.gitignore'];
+const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', 'sterling-update.bat', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
 test('init records a Windows-drive --backup-path in WSL /mnt form (r-dd88 backup_path bug)', () => {
@@ -163,7 +163,7 @@ test('ensure outcome 2 — skip matching: a flagless re-run reports matches and 
     const before = snapshot(dir);
     const rerun = init(dir); // NO flags: declarations read back from the recorded config
     assert.equal(rerun.code, 0, rerun.stderr);
-    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'sterling-windows\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', '\\.mcp\\.json', '\\.gitignore']) {
+    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'sterling-windows\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', 'sterling-update\\.bat', '\\.mcp\\.json', '\\.gitignore']) {
       assert.match(rerun.stdout, new RegExp(`^${item}\\s+matches\\b`, 'm'), `${item} reported as matching`);
     }
     assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+matches\b/m);

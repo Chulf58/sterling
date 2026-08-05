@@ -147,6 +147,16 @@ export const configSchema = z.object({
       deep_threshold: z.number().int().positive().default(15),
     })
     .default({}),
+  // Board 8390f8fa: a registry-style feature_article can outgrow its own
+  // round-trip — knowledge_append responses on mcp-tool-surface (29 history
+  // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
+  // token cap. Measured: mcp-tool-surface serializes ~104KB. Set well below
+  // that observed failure and above every healthy article; a knowledge_update/
+  // append/edit that lands a feature_article over this many chars (as
+  // knowledge_get would return it) warns via the write's result envelope and
+  // enqueues one deduped article_oversize maintenance item. Tunable per
+  // machine, not architecture.
+  article_oversize_chars: z.number().int().positive().default(60000),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -175,6 +185,16 @@ export const configSchema = z.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: z.enum(['primary', 'secondary']).default('primary'),
+  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
+  // a value to infer. 'authoring' is declared once, by hand, on the machine
+  // where Sterling work lands and merges; a successful /sterling:update stamps
+  // 'consumer' into a clone that has it absent, and never overwrites an
+  // existing value (so an authoring machine that occasionally pulls stays
+  // 'authoring'). H1 reads this — never store_authority, whose 'primary'
+  // default would mislabel every consumer that never opted in (the rejected
+  // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
+  machine_role: z.enum(['authoring', 'consumer']).optional(),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)

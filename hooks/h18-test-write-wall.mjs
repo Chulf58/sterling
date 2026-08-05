@@ -4328,7 +4328,15 @@ var SYSTEM_REASONS = [
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
-  "state_review"
+  "state_review",
+  // A feature_article's serialized size (as knowledge_get would return it)
+  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
+  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // the only moment anyone is looking; deduped per article via file_keys (a
+  // feature_article's id changes on every version, so id-keyed dedup would not
+  // survive the next reconcile — the article's owned files do).
+  "article_oversize"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4502,7 +4510,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4686,6 +4694,16 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Board 8390f8fa: a registry-style feature_article can outgrow its own
+  // round-trip — knowledge_append responses on mcp-tool-surface (29 history
+  // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
+  // token cap. Measured: mcp-tool-surface serializes ~104KB. Set well below
+  // that observed failure and above every healthy article; a knowledge_update/
+  // append/edit that lands a feature_article over this many chars (as
+  // knowledge_get would return it) warns via the write's result envelope and
+  // enqueues one deduped article_oversize maintenance item. Tunable per
+  // machine, not architecture.
+  article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -4714,6 +4732,16 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
+  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
+  // a value to infer. 'authoring' is declared once, by hand, on the machine
+  // where Sterling work lands and merges; a successful /sterling:update stamps
+  // 'consumer' into a clone that has it absent, and never overwrites an
+  // existing value (so an authoring machine that occasionally pulls stays
+  // 'authoring'). H1 reads this — never store_authority, whose 'primary'
+  // default would mislabel every consumer that never opted in (the rejected
+  // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
+  machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
@@ -4852,7 +4880,16 @@ try {
   }
   const rel = repoRel(toolPath, input.cwd);
   if (!rel) {
-    deny(`H18: '${toolPath}' is outside the repository \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)`);
+    let emptyNormalize = false;
+    try {
+      if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) toRepoRelative(fwd, input.cwd);
+      else normalizeRepoPath(fwd);
+    } catch (e) {
+      emptyNormalize = /empty path/.test(e && e.message || "");
+    }
+    deny(
+      emptyNormalize ? `H18: '${toolPath}' normalizes to an empty path (it resolves to the repo root itself, not a file inside it) \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)` : `H18: '${toolPath}' is outside the repository \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)`
+    );
   }
   if (isEnforcementSurface(rel)) {
     deny(`H18 [self-protection]: '${rel}' is enforcement surface (${[".claude/settings*.json", ".claude/agents/**", ".sterling/config.json"].join(", ")}) \u2014 never test-writer-writable, in any mode (\xA76)`);

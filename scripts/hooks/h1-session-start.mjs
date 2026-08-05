@@ -4,7 +4,8 @@
 // invisible; this is its visibility pressure. Banner art goes to stderr
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
@@ -77,14 +78,27 @@ function paint(rows) {
 }
 
 /** The plugin root — the dir holding .claude-plugin/plugin.json — by a bounded
- *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle). */
+ *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle).
+ *  STERLING_PLUGIN_ROOT overrides for tests (mirrors STERLING_SERVER_DIST
+ *  below): the real walk always resolves to the one clone the test process
+ *  runs from, so a test cannot otherwise put cwd AT the plugin root without
+ *  faking fixtures inside that live clone's own .sterling/. */
 function pluginRoot() {
+  if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
     if (existsSync(join(dir, '.claude-plugin', 'plugin.json'))) return dir;
     dir = dirname(dir);
   }
   return null;
+}
+
+/** POSIX-ish path equality for the self-hosted-clone check below: strips a
+ *  trailing slash and normalizes backslashes, but does NOT resolve symlinks —
+ *  both sides already come from path.resolve/dirname/join in this process. */
+function samePath(a, b) {
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '');
+  return norm(a) === norm(b);
 }
 
 /** Plugin version, fail-open (no version, no line). */
@@ -114,6 +128,106 @@ try {
   config = loadConfig(input.cwd);
 } catch {
   config = null;
+}
+
+// MACHINE ROLE (todo cabbc10f, decision a9b98b7d): stated ONLY when this
+// session's project IS a Sterling clone itself — comparing the normalized
+// input.cwd to pluginRoot(). Every OTHER Sterling project (a consumer of the
+// plugin, not a clone of it) never sees this line; it exists because the
+// committed CLAUDE.md's "this machine authors" prose travels with every
+// clone and misleads a session opened inside one. Guarded exactly like the
+// config read above — H1 is soft, so a malformed config costs this line, never
+// the conventions injection.
+let roleContext = '';
+try {
+  const root = pluginRoot();
+  if (root && samePath(input.cwd, root)) {
+    const role = config?.machine_role;
+    if (role === 'authoring') {
+      roleContext =
+        '\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) — Sterling work lands and merges here; CLAUDE.md\'s authoring contract applies.';
+    } else if (role === 'consumer') {
+      roleContext =
+        '\n\nMACHINE ROLE: CONSUMER — this clone consumes via /sterling:update. The committed CLAUDE.md\'s "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.';
+    } else {
+      roleContext =
+        '\n\nMACHINE ROLE: UNDECLARED — treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
+    }
+  }
+} catch {
+  // fail-open — a malformed config or unresolved plugin root costs only this line
+}
+
+// CLONE-CURRENCY SIGNAL (closes the gap decision be9168e8 surfaced and parked:
+// "a machine that never runs /sterling:update has no passive signal that it is
+// behind"). Probes the CLONE at pluginRoot() — not this project — so every
+// session on the machine states whether Sterling is current. Throttle: the one
+// networked step (git fetch) runs at most once per TTL (default 24h), stamped
+// in .git/sterling-update-check.json; the behind-count is computed LOCALLY
+// against the last-fetched ref on every session start, so an applied update
+// goes silent immediately without waiting out the TTL. checked_at is stamped
+// even when the fetch fails — an offline machine must not pay the timeout on
+// every session start. Skipped entirely on a declared-authoring clone (it
+// lives on branches and ahead-of-origin states, where "behind" is noise) and
+// off the default branch. Fail-open and silent on any error (P1); the
+// definitive probe stays /sterling:update --check.
+// STERLING_CURRENCY_DISABLE=1 skips the probe entirely (test hermeticity: the
+// hook test battery must never fetch — it RUNS during /sterling:update itself).
+let currencyWarning = '';
+let currencyContext = '';
+try {
+  const root = process.env.STERLING_CURRENCY_DISABLE === '1' ? null : pluginRoot();
+  const gitDir = root ? join(root, '.git') : null;
+  // .git as a FILE is a worktree — an authoring-machine shape; skip (fail-open).
+  if (gitDir && existsSync(gitDir) && statSync(gitDir).isDirectory()) {
+    let role = null;
+    try {
+      role = JSON.parse(readFileSync(join(root, '.sterling', 'config.json'), 'utf8')).machine_role;
+    } catch {
+      // no config or malformed — the safe posture is consumer (mirrors the role line above)
+    }
+    if (role !== 'authoring') {
+      const git = (args, timeout = 5_000) => {
+        const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', timeout });
+        return r.status === 0 ? (r.stdout ?? '').trim() : null;
+      };
+      const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+      const hasOrigin = (git(['remote']) ?? '').split('\n').includes('origin');
+      const defaultBranch = hasOrigin
+        ? (git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']) ?? '').replace(/^origin\//, '') || 'main'
+        : null;
+      if (hasOrigin && branch && branch === defaultBranch) {
+        const cachePath = join(gitDir, 'sterling-update-check.json');
+        const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1000);
+        let fresh = false;
+        try {
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync(cachePath, 'utf8')).checked_at) < ttl;
+        } catch {
+          // no cache yet — probe
+        }
+        if (!fresh) {
+          // GIT_TERMINAL_PROMPT=0: a fetch that would prompt for credentials
+          // must fail immediately, not hang SessionStart until the timeout.
+          spawnSync('git', ['fetch', 'origin', '--quiet'], { cwd: root, encoding: 'utf8', timeout: 10_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+          try {
+            writeFileSync(cachePath, JSON.stringify({ checked_at: new Date().toISOString() }) + '\n');
+          } catch {
+            // unwritable cache costs only the throttle, never the signal
+          }
+        }
+        const behind = Number.parseInt(git(['rev-list', '--count', `HEAD..origin/${defaultBranch}`]) ?? '', 10);
+        if (Number.isFinite(behind) && behind > 0) {
+          currencyWarning = `⚠ Sterling is ${behind} update(s) behind — double-click sterling-update.bat (or run /sterling:update), then restart the session. `;
+          currencyContext =
+            `\n\nSTERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. ` +
+            `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse, decision e6240afe), ` +
+            `and remind them a session RESTART follows a successful update.`;
+        }
+      }
+    }
+  }
+} catch {
+  // fail-open — the currency probe must never break or delay SessionStart beyond its timeouts
 }
 
 let counts = { todos: 0, maintenance: 0 };
@@ -283,8 +397,8 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${staleWarning}${machineWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + registryContext + machineContext + queueContext },
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

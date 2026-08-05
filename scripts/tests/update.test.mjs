@@ -8,10 +8,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate } from '../lib/update.mjs';
+import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent } from '../lib/update.mjs';
+import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
 
@@ -494,6 +495,129 @@ test('the init ensure pass runs only when the clone is itself initialized', asyn
   }
 });
 
+// ── 3. machine-role stamp (todo cabbc10f, decision a9b98b7d) ────────────────
+
+test('stampConsumerRoleIfAbsent: stamps consumer when machine_role is absent, preserving other fields', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ backup_path: '/tmp/backups', stack_tags: ['node'] }, null, 2));
+
+    const lines = [];
+    stampConsumerRoleIfAbsent(dir, (l) => lines.push(l));
+
+    const written = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.equal(written.machine_role, 'consumer');
+    assert.equal(written.backup_path, '/tmp/backups', 'other fields survive the read-modify-write');
+    assert.deepEqual(written.stack_tags, ['node']);
+    assert.ok(lines.some((l) => l.includes("stamped 'consumer'")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stampConsumerRoleIfAbsent: never overwrites a declared role, either value', () => {
+  for (const role of ['authoring', 'consumer']) {
+    const dir = scratchCwd();
+    try {
+      mkdirSync(join(dir, '.sterling'), { recursive: true });
+      const configPath = join(dir, '.sterling', 'config.json');
+      writeFileSync(configPath, JSON.stringify({ machine_role: role }));
+
+      const lines = [];
+      stampConsumerRoleIfAbsent(dir, (l) => lines.push(l));
+
+      const written = JSON.parse(readFileSync(configPath, 'utf8'));
+      assert.equal(written.machine_role, role, 'a declared role is never flipped, in either direction');
+      assert.ok(lines.some((l) => l.includes('not overwritten')));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('stampConsumerRoleIfAbsent: an unwritable config warns loudly but does not throw', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({}));
+    chmodSync(configPath, 0o444); // read-only — the write must fail, not the read
+    chmodSync(join(dir, '.sterling'), 0o555); // and block a same-name replace too
+
+    const lines = [];
+    assert.doesNotThrow(() => stampConsumerRoleIfAbsent(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => l.includes('FAILED') && l.includes('nonfatal')), 'the failure is loud');
+  } finally {
+    chmodSync(join(dir, '.sterling'), 0o755);
+    chmodSync(join(dir, '.sterling', 'config.json'), 0o644);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stampConsumerRoleIfAbsent: no .sterling/config.json prints a skip note, does not throw', () => {
+  const dir = scratchCwd();
+  try {
+    const lines = [];
+    assert.doesNotThrow(() => stampConsumerRoleIfAbsent(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => l.includes('SKIPPED')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runUpdate stamps the consumer role after a successful update, once build+check+test complete', async () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({}));
+
+    const { exec } = fakeExec({ behind: 1 });
+    const report = await runUpdate({ cwd: dir, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(report.exit, 0);
+    const written = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.equal(written.machine_role, 'consumer');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runUpdate never overwrites a declared machine_role, even after a real rebuild', async () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ machine_role: 'authoring' }));
+
+    const { exec } = fakeExec({ behind: 1 });
+    await runUpdate({ cwd: dir, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).machine_role, 'authoring');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runUpdate does not stamp when the update is a no-op (already current) — the stamp step never runs', async () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({}));
+
+    const { exec } = fakeExec({ behind: 0 });
+    const report = await runUpdate({ cwd: dir, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(report.exit, 0);
+    assert.ok(!Object.prototype.hasOwnProperty.call(JSON.parse(readFileSync(configPath, 'utf8')), 'machine_role'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /** A currency object clearing every EARLIER refusal, so a test isolates one branch
  *  of the matrix. Built literally rather than from a temp repo: the partitioning is
  *  pure string logic over porcelain lines, and driving it through real git would
@@ -552,4 +676,65 @@ test('the dirty refusal splits committed BUILD OUTPUTS from source and gives eac
     /SOURCE CHANGES/,
     'the authored hook SOURCE under scripts/ is source, not a build output'
   );
+});
+
+// --------------------------- sterling-update.bat delivery ---------------------------
+
+const BAT_TEMPLATE = '@echo off\r\nrem updater\r\n"wt.exe" wsl.exe --cd "{{WIN_PLUGIN_DIR}}" -- bash -lic "bash scripts/update-console.sh"\r\n';
+
+function cloneWithTemplate() {
+  const clone = mkdtempSync(join(tmpdir(), 'sterling-launcher-clone-'));
+  mkdirSync(join(clone, 'templates'));
+  writeFileSync(join(clone, 'templates', 'update-win.bat'), BAT_TEMPLATE);
+  return clone;
+}
+
+test('ensureUpdateLauncher: created / matches / differs / skipped — never overwrites, and the gitignore entry is ensured', () => {
+  const clone = cloneWithTemplate();
+  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
+  try {
+    const created = ensureUpdateLauncher(target, clone);
+    assert.equal(created.status, 'created');
+    const content = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
+    assert.doesNotMatch(content, /\{\{WIN_PLUGIN_DIR\}\}/, 'the plugin dir placeholder is substituted');
+    // this clone lives under /tmp (ext4, no /mnt/<d> form): the POSIX path must
+    // pass through unchanged — backslashifying it yields a path valid nowhere,
+    // and wsl.exe --cd accepts absolute Linux paths
+    assert.ok(content.includes(`--cd "${clone}"`), 'an ext4 clone bakes its POSIX path, never a backslashified non-path');
+    assert.match(readFileSync(join(target, '.gitignore'), 'utf8'), /^sterling-update\.bat$/m, 'a machine artifact never surfaces as untracked noise');
+
+    assert.equal(ensureUpdateLauncher(target, clone).status, 'matches', 'idempotent on a second run');
+    const ignoreEntries = readFileSync(join(target, '.gitignore'), 'utf8').split(/\r?\n/).filter((l) => l === UPDATE_LAUNCHER_NAME);
+    assert.equal(ignoreEntries.length, 1, 'the gitignore entry is not duplicated');
+
+    writeFileSync(join(target, UPDATE_LAUNCHER_NAME), 'hand edited');
+    assert.equal(ensureUpdateLauncher(target, clone).status, 'differs');
+    assert.equal(readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8'), 'hand edited', 'a differing launcher is left untouched');
+
+    assert.equal(ensureUpdateLauncher(join(target, 'does-not-exist'), clone).status, 'skipped', 'a missing target skips, never throws');
+    const bare = mkdtempSync(join(tmpdir(), 'sterling-launcher-bare-'));
+    try {
+      assert.equal(ensureUpdateLauncher(target, bare).status, 'skipped', 'a clone without the template skips, never throws');
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test('the fan-out delivers sterling-update.bat to each registered project (a project init\'d before the launcher existed still receives one)', async () => {
+  const cwd = cloneWithTemplate();
+  const proj = mkdtempSync(join(tmpdir(), 'sterling-launcher-proj-'));
+  try {
+    const { exec } = fakeExec({ behind: 1 });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: proj }], opts: {} });
+    assert.equal(report.exit, 0);
+    assert.ok(existsSync(join(proj, UPDATE_LAUNCHER_NAME)), 'the launcher landed in the consuming project');
+    assert.match(readFileSync(join(proj, '.gitignore'), 'utf8'), /^sterling-update\.bat$/m);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+  }
 });

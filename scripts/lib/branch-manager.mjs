@@ -8,7 +8,13 @@ import { spawnSync } from 'node:child_process';
 function git(cwd, args, { allowFail = false } = {}) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000 });
   if (r.status !== 0 && !allowFail) {
-    throw new Error(`git ${args.join(' ')} failed (${r.status}): ${(r.stderr || r.stdout || '').trim()}`);
+    // Evidence capture for the unreproduced 'fatal: stash failed' class (board
+    // aa01da07): a spawnSync that never ran or timed out has status null and an
+    // error/signal — name that state instead of printing 'failed (null)', so a
+    // recurrence is distinguishable from a real git nonzero exit at the message.
+    const spawnState =
+      r.error ? `spawn-error ${r.error.code ?? r.error.message}` : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
+    throw new Error(`git ${args.join(' ')} failed (${spawnState}): ${(r.stderr || r.stdout || '').trim()}`);
   }
   return (r.stdout ?? '').trim();
 }
@@ -119,7 +125,24 @@ export function defaultBranch(cwd) {
 export function mergeBranchInto({ cwd, branch, into, message }) {
   const status = git(cwd, ['status', '--porcelain']);
   if (status) {
-    throw new Error(`branch-manager: working tree is dirty — commit or discard before merging:\n${status}`);
+    // "commit or discard" is the wrong remedy for an UNTRACKED entry (?? in
+    // porcelain) — on a Sterling project these are exactly the init-generated
+    // machine-local launchers (sterling.bat, sterling-launch.sh,
+    // .claude-plugin/sterling-mcp*.json), and "commit" would land machine junk
+    // on the base branch. Give each kind its own remedy (direct-merge.mjs's
+    // pre-check does the same split; this is the library invariant it fronts).
+    const lines = status.split('\n').filter(Boolean);
+    const untracked = lines.filter((l) => l.startsWith('??'));
+    const tracked = lines.filter((l) => !l.startsWith('??'));
+    const parts = ['branch-manager: working tree is dirty — refusing to merge:'];
+    if (tracked.length > 0) parts.push(`${tracked.length} tracked change(s) — commit or discard before merging:`, ...tracked.map((l) => `  ${l}`));
+    if (untracked.length > 0) {
+      parts.push(
+        `${untracked.length} untracked path(s) — decide their disposition first (commit, .gitignore, move out of the repo, or remove); "commit" is not always correct:`,
+        ...untracked.map((l) => `  ${l}`)
+      );
+    }
+    throw new Error(parts.join('\n'));
   }
   git(cwd, ['checkout', into]);
   git(cwd, ['merge', '--no-ff', branch, '-m', message ?? `Merge ${branch} into ${into}`]);

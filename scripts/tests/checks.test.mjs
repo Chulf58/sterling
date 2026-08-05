@@ -15,6 +15,9 @@ import {
   lintRecordCitations,
   CITED_RECORD_WORDS,
   UNCITED_RECORD_WORDS,
+  isPointerSurface,
+  resolveSupersessionHead,
+  lintCitationCurrency,
 } from '../lib/checks.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -115,6 +118,56 @@ test('citation lint: fails on nothing, passes on a TOMBSTONE, flags an ambiguous
   assert.match(dangling[0].detail, /y\.mjs:1/);
 });
 
+// -- record-id citation CURRENCY (board 9d0fb893) ---------------------------
+
+test('isPointerSurface: scoped to CLAUDE.md, templates/target-claude-md.md, skills/**, commands/** only', () => {
+  assert.equal(isPointerSurface('CLAUDE.md'), true);
+  assert.equal(isPointerSurface('templates/target-claude-md.md'), true);
+  assert.equal(isPointerSurface('skills/drain/SKILL.md'), true);
+  assert.equal(isPointerSurface('commands/merge.md'), true);
+  // article history entries and code comments are deliberately untouched —
+  // pinning a superseded id there is often correct
+  assert.equal(isPointerSurface('scripts/check-record-citations.mjs'), false);
+  assert.equal(isPointerSurface('docs/historical/STERLING-SPEC.md'), false);
+  assert.equal(isPointerSurface('packages/store/src/index.ts'), false);
+});
+
+test('resolveSupersessionHead: walks a two-hop chain to its live head; stops at active; defensive on a missing link', () => {
+  const chain = new Map([
+    ['a', { status: 'superseded', superseded_by: 'b' }],
+    ['b', { status: 'superseded', superseded_by: 'c' }],
+    ['c', { status: 'active', superseded_by: null }],
+  ]);
+  const getById = (id) => chain.get(id);
+  assert.equal(resolveSupersessionHead('a', getById), 'c', 'two-hop supersession resolves to the final head');
+  assert.equal(resolveSupersessionHead('c', getById), 'c', 'an already-active id is its own head');
+  assert.equal(resolveSupersessionHead('missing', getById), 'missing', 'an unresolvable link stops the walk, never throws');
+});
+
+test('lintCitationCurrency: warns on a superseded citation on a POINTER surface, silent on the same citation elsewhere', () => {
+  const oldId = 'aaaaaaaa-0000-0000-0000-000000000000';
+  const headId = 'bbbbbbbb-0000-0000-0000-000000000000';
+  const chain = new Map([
+    [oldId, { id: oldId, status: 'superseded', superseded_by: headId }],
+    [headId, { id: headId, status: 'active', superseded_by: null }],
+  ]);
+  const resolve = (id) => chain.get(id);
+  const getById = (id) => chain.get(id);
+  const content = `decision ${oldId} is the register\n`; // not-a-citation: fixture ids
+
+  const pointer = lintCitationCurrency(content, 'CLAUDE.md', resolve, getById);
+  assert.deepEqual(pointer.map((w) => w.kind), ['citation_stale']);
+  assert.match(pointer[0].detail, new RegExp(headId));
+
+  // non-pointer surfaces (code, article history) are deliberately unchecked
+  assert.deepEqual(lintCitationCurrency(content, 'scripts/foo.mjs', resolve, getById), []);
+  assert.deepEqual(lintCitationCurrency(content, 'packages/store/src/index.ts', resolve, getById), []);
+
+  // an ACTIVE citation on a pointer surface warns about nothing
+  const activeContent = `decision ${headId} is current\n`; // not-a-citation: fixture id
+  assert.deepEqual(lintCitationCurrency(activeContent, 'CLAUDE.md', resolve, getById), []);
+});
+
 let SterlingStore;
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
@@ -190,6 +243,57 @@ test('check-record-citations resolves across MOUNTED stores and at ANY status; f
     write('// decision nothing-to-see\n');
     spawnSync('git', ['add', 'src.mjs'], { cwd: dir, encoding: 'utf8' });
     assert.equal(run().status, 0, 'an untracked file is not scanned');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('check-record-citations: a stale id on a POINTER SURFACE warns without failing; the same id off-surface is silent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-citations-currency-'));
+  try {
+    const NOW = '2026-06-10T12:00:00.000Z';
+    const decision = (id) => ({
+      id, type: 'decision', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
+      superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', file_keys: [],
+    });
+
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ stack_tags: [] }));
+
+    const oldId = randomUUID();
+    const project = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    project.create(decision(oldId));
+    // supersede oldId once — the CLAUDE.md citation below must warn naming
+    // this live head, by full id (never truncated in the warning detail)
+    const head = project.supersede(oldId, {
+      ...decision(randomUUID()),
+      created_at: NOW,
+      updated_at: '2026-06-10T13:00:00.000Z',
+    });
+    project.close();
+
+    // POINTER SURFACE: CLAUDE.md — a stale citation here must warn
+    writeFileSync(join(dir, 'CLAUDE.md'), `Verify-at-build register: decision ${oldId.slice(0, 8)}.\n`);
+    // NON-pointer surface: same superseded id cited in ordinary source — this
+    // is pinned history (deliberately correct) and must stay silent
+    writeFileSync(
+      join(dir, 'src.mjs'),
+      `// decision ${oldId.slice(0, 8)} originally justified this design\n`
+    );
+
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    assert.equal(spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' }).status, 0);
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'check-record-citations.mjs'), dir], {
+      encoding: 'utf8', cwd: dir, timeout: 120_000,
+    });
+    assert.equal(r.status, 0, `a currency warning must never fail the check: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /1 currency warning/, 'exactly one warning — the src.mjs citation is off pointer-surface');
+    assert.match(r.stdout, /citation_stale/);
+    assert.match(r.stdout, /CLAUDE\.md/);
+    assert.ok(r.stdout.includes(head.id), 'the warning names the live head by full id');
+    assert.ok(!/src\.mjs.*citation_stale/.test(r.stdout), 'the non-pointer citation of the same id is silent');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

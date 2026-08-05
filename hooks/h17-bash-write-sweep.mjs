@@ -4319,7 +4319,15 @@ var SYSTEM_REASONS = [
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
-  "state_review"
+  "state_review",
+  // A feature_article's serialized size (as knowledge_get would return it)
+  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
+  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // the only moment anyone is looking; deduped per article via file_keys (a
+  // feature_article's id changes on every version, so id-keyed dedup would not
+  // survive the next reconcile — the article's owned files do).
+  "article_oversize"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4602,7 +4610,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4786,6 +4794,16 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Board 8390f8fa: a registry-style feature_article can outgrow its own
+  // round-trip — knowledge_append responses on mcp-tool-surface (29 history
+  // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
+  // token cap. Measured: mcp-tool-surface serializes ~104KB. Set well below
+  // that observed failure and above every healthy article; a knowledge_update/
+  // append/edit that lands a feature_article over this many chars (as
+  // knowledge_get would return it) warns via the write's result envelope and
+  // enqueues one deduped article_oversize maintenance item. Tunable per
+  // machine, not architecture.
+  article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -4814,6 +4832,16 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
+  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
+  // a value to infer. 'authoring' is declared once, by hand, on the machine
+  // where Sterling work lands and merges; a successful /sterling:update stamps
+  // 'consumer' into a clone that has it absent, and never overwrites an
+  // existing value (so an authoring machine that occasionally pulls stays
+  // 'authoring'). H1 reads this — never store_authority, whose 'primary'
+  // default would mislabel every consumer that never opted in (the rejected
+  // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
+  machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
@@ -4963,8 +4991,21 @@ CREATE TABLE IF NOT EXISTS queue_drain_log (
   text TEXT NOT NULL,
   file_keys TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS activity_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
 `;
 var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
+function activityTitleOf(record) {
+  const r = record;
+  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.raw_text?.split("\n")[0] ?? r.id;
+  return raw.slice(0, 80);
+}
 function deepReplaceString(value, from, to) {
   if (typeof value === "string")
     return value === from ? to : value;
@@ -4993,7 +5034,10 @@ var SterlingStore = class {
   /** The one validated write path. Unregistered type or malformed record throws; nothing is written. */
   create(input2) {
     const record = validateRecord(input2);
-    this.tx(() => this.insertRecord(record));
+    this.tx(() => {
+      this.insertRecord(record);
+      this.logActivity("created", record, record.created_at);
+    });
     return record;
   }
   /**
@@ -5069,7 +5113,67 @@ var SterlingStore = class {
   }
   get(id) {
     const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
-    return row ? JSON.parse(row.body) : void 0;
+    if (!row)
+      return void 0;
+    return this.withDerivedReliedBy(JSON.parse(row.body));
+  }
+  /**
+   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
+   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
+   * feature_article's relies_on naming this article's slug — not the stored
+   * field. relies_on stays author-written; relied_by cannot drift because it is
+   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
+   * domain-mounted articles are out of scope for this derivation (each mounted
+   * store derives its own; MountedStores does not cross-join relies_on across
+   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
+   * slug-collision check already make.
+   *
+   * Never a hidden lie (constraint 2 of the board item): when the stored
+   * relied_by differs from the derived set (as a sorted-deduped set — order and
+   * duplicates in the stored array don't count as drift), the returned record
+   * carries dependencies.relied_by_stored_stale: true alongside the derived
+   * value actually served. The stored field is left untouched in the DB — this
+   * derivation never writes.
+   */
+  withDerivedReliedBy(record, relations) {
+    if (record.type !== "feature_article")
+      return record;
+    const article = record;
+    const derived = this.deriveReliedBy(article.slug, relations);
+    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
+    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
+    return {
+      ...record,
+      dependencies: {
+        relies_on: article.dependencies?.relies_on ?? [],
+        relied_by: derived,
+        ...stale ? { relied_by_stored_stale: true } : {}
+      }
+    };
+  }
+  /**
+   * Every active feature_article's slug + relies_on, in ONE scan — shared by
+   * withDerivedReliedBy across a whole query() result so a capped list of N
+   * articles costs one table scan, not N.
+   */
+  activeArticleRelations() {
+    const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
+    return rows.map((r) => {
+      const rec = JSON.parse(r.body);
+      return { slug: rec.slug ?? "", reliesOn: rec.dependencies?.relies_on ?? [] };
+    });
+  }
+  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
+  deriveReliedBy(slug, relations) {
+    const rels = relations ?? this.activeArticleRelations();
+    const set = /* @__PURE__ */ new Set();
+    for (const r of rels) {
+      if (r.slug === slug)
+        continue;
+      if (r.reliesOn.includes(slug))
+        set.add(r.slug);
+    }
+    return [...set].sort();
   }
   /**
    * Every record id in this store at ANY status, tombstones included, with its
@@ -5107,7 +5211,11 @@ var SterlingStore = class {
     const rows = this.db.prepare(`SELECT body FROM records
           WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    return rows.map((r) => JSON.parse(r.body));
+    const records = rows.map((r) => JSON.parse(r.body));
+    if (!records.length)
+      return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
   /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
@@ -5163,7 +5271,7 @@ var SterlingStore = class {
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
         const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return rows2.map((x) => JSON.parse(x.body));
+        return this.withDerivedReliedByAll(rows2.map((x) => JSON.parse(x.body)));
       }
     }
     const orderBy = [];
@@ -5176,7 +5284,16 @@ var SterlingStore = class {
     const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return rows.map((x) => JSON.parse(x.body));
+    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body)));
+  }
+  /** query()'s two return paths share this: one relations scan for the whole
+   *  result set (not one per feature_article row) before applying the derived
+   *  relied_by to each. */
+  withDerivedReliedByAll(records) {
+    if (!records.some((r) => r.type === "feature_article"))
+      return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
   }
   /**
    * Versioned change (§3.2.3, §3.1 criterion 3): the new record supersedes the
@@ -5209,8 +5326,52 @@ var SterlingStore = class {
       if (res.changes === 0) {
         throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
       }
+      this.logActivity("updated", newRecord, newRecord.updated_at);
     });
     return newRecord;
+  }
+  /**
+   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
+   * exception to "every change is a supersession". todo is deliberately NOT in
+   * the immutable set (only decision is), and every board item is a DURABLE
+   * record in the same store as knowledge, so the established change primitive
+   * (supersede: mint a new id, retain the old) would rot every reference keyed
+   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
+   * id, created_at, status and superseded_by stay exactly as they were; only the
+   * caller's patched fields and updated_at change — same row, same identity.
+   *
+   * `newInput` is the FULL merged candidate (old record + patch), mirroring
+   * supersede's own calling convention: this method validates and persists, the
+   * tool layer decides which fields may be patched and builds the merge. A
+   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
+   * and the UPDATE is guarded on that status inside the transaction to close the
+   * same concurrent-supersede race.
+   */
+  updateTodo(id, newInput) {
+    const old = this.get(id);
+    if (!old)
+      throw new Error(`updateTodo: no record '${id}'`);
+    if (old.type !== "todo")
+      throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo \u2014 board_update only mutates todos`);
+    if (old.status === "superseded")
+      throw new Error(`updateTodo: record '${id}' is already superseded`);
+    const candidate = { ...newInput };
+    const updated = validateRecord(candidate);
+    if (updated.type !== "todo")
+      throw new Error(`updateTodo: type mismatch ('${updated.type}' is not 'todo')`);
+    const entry = RECORD_TYPES.todo;
+    this.tx(() => {
+      const res = this.db.prepare("UPDATE records SET updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run(updated.updated_at, JSON.stringify(updated), id);
+      if (res.changes === 0) {
+        throw new Error(`updateTodo: record '${id}' was concurrently removed or superseded \u2014 retry against the current version`);
+      }
+      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+      for (const path of new Set(entry.fileKeys(updated))) {
+        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
+      }
+      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(updated), id);
+    });
+    return updated;
   }
   /**
    * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
@@ -5220,7 +5381,16 @@ var SterlingStore = class {
    * the cross-store id with NO new row. Provenance and inbound links survive;
    * default queries already hide superseded records, so it never double-serves.
    */
-  retireInFavorOf(id, replacementId, at) {
+  /**
+   * `verb` names what this retirement IS for the activity feed (board
+   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
+   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
+   * two existing callers, distinguished so a promotion reads as "promoted",
+   * not as an unrelated-looking "retired". Defaults to 'retired' so the
+   * pre-promotion caller (and any future one) keeps that meaning without
+   * having to know the parameter exists.
+   */
+  retireInFavorOf(id, replacementId, at, verb = "retired") {
     const record = this.get(id);
     if (!record)
       throw new Error(`retireInFavorOf: no record '${id}'`);
@@ -5232,6 +5402,7 @@ var SterlingStore = class {
       if (res.changes === 0) {
         throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded \u2014 retry`);
       }
+      this.logActivity(verb, retired, at);
     });
     return retired;
   }
@@ -5244,9 +5415,13 @@ var SterlingStore = class {
   remove(id, drainedAt) {
     this.tx(() => {
       const record = this.get(id);
-      if (record && record.type === "todo" && record.source === "system") {
+      const isSystemDrain = record && record.type === "todo" && record.source === "system";
+      if (isSystemDrain && record) {
         this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []));
         this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
+      }
+      if (record && !isSystemDrain) {
+        this.logActivity("removed", record, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
       }
       this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
       this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
@@ -5260,6 +5435,27 @@ var SterlingStore = class {
   listQueueDrain(limit = 15) {
     const rows = this.db.prepare("SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?").all(limit);
     return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) }));
+  }
+  /**
+   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
+   * through, so the Queue tab's activity section shows "what has been done"
+   * without a second, separate write path (§3.1 invariant: one write path).
+   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
+   * verb that primitive actually performed; NOT called from insertRecord
+   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
+   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
+   * remove()'s system-todo branch, which already has a completed-section home
+   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
+   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
+   * items never build up here either.
+   */
+  logActivity(verb, record, at) {
+    this.db.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)").run(at, verb, record.type, record.id, activityTitleOf(record));
+    this.db.prepare("DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)").run();
+  }
+  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
+  listActivityLog(limit = 15) {
+    return this.db.prepare("SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?").all(limit);
   }
   /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
   snapshot(targetPath) {
@@ -5500,6 +5696,7 @@ var SterlingStore = class {
     this.tx(() => {
       this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(updated), sourceId);
       this.db.prepare("INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)").run(sourceId, parsedRel, targetId);
+      this.logActivity("linked", updated, (/* @__PURE__ */ new Date()).toISOString());
     });
     return updated;
   }
@@ -5907,7 +6104,9 @@ try {
   }
   const bPath = baselineFile(cwd, runId);
   if (!existsSync3(bPath)) {
-    deny(`H17: baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5).`);
+    deny(
+      `H17: baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`
+    );
   }
   let baseline;
   try {

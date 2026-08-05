@@ -45,9 +45,12 @@ function envelope(type, at = NOW) {
   };
 }
 
-function articleFields(briefId, { traceAC = true, fulfills = [] } = {}) {
+// traceAC: true (a real trace) | false (no live_test_refs entry at all) |
+// 'empty' (an entry present, but with an EMPTY test_paths — the AC8 shape,
+// board 3800d559: a vacuous pass that looks deliberate).
+function articleFields(briefId, { traceAC = true, fulfills = [], slug = 'calc-add' } = {}) {
   return {
-    slug: 'calc-add',
+    slug,
     title: 'Calculator addition',
     what_it_does: 'Adds two numbers via the calc module.',
     intended_behavior: 'add(a, b) returns the arithmetic sum.',
@@ -57,9 +60,22 @@ function articleFields(briefId, { traceAC = true, fulfills = [] } = {}) {
     state: 'active',
     version: 1,
     history: [{ date: NOW, event: 'originating brief', target_id: briefId }],
-    live_test_refs: traceAC ? [{ ac_id: 'AC1', test_paths: ['tests/calc.test.mjs'] }] : [],
+    live_test_refs:
+      traceAC === 'empty' ? [{ ac_id: 'AC1', test_paths: [] }] : traceAC ? [{ ac_id: 'AC1', test_paths: ['tests/calc.test.mjs'] }] : [],
     links: fulfills.map((id) => ({ rel: 'fulfills', target_id: id })),
   };
+}
+
+// A second brief-linked feature_article, created directly via store.create (not
+// tools.knowledgeCreate) so its updated_at is a controlled fixed timestamp rather
+// than wall-clock "now" — lets tests pin which article query() (ORDER BY
+// updated_at DESC) returns as articles[0] vs. a later sibling.
+function makeSecondArticle(fix, { slug = 'calc-add-concept', traceAC = true, fulfills = [], updatedAt = NOW } = {}) {
+  return fix.store.create({
+    ...envelope('feature_article', updatedAt),
+    ...articleFields(fix.brief.id, { traceAC, fulfills, slug }),
+    title: 'Calculator addition (concept family)',
+  });
 }
 
 function makeLoopProject({ backupPath = true, reconcileGapArticle = false, mountDomain = false, decisionInDecisionsMade = false, phaseInterfaces = [], splitThreshold = null } = {}) {
@@ -217,7 +233,7 @@ function makeReadyToDispose(opts = {}) {
   if (opts.article !== false) {
     ({ record: article } = tools.knowledgeCreate(
       'feature_article',
-      articleFields(brief.id, { traceAC: opts.traceAC !== false, fulfills: [todo.id] })
+      articleFields(brief.id, { traceAC: opts.traceAC === undefined ? true : opts.traceAC, fulfills: [todo.id] })
     ));
     if (!opts.leaveTodo) tools.boardRemove(todo.id);
   }
@@ -334,6 +350,75 @@ test('dispose-run refuses: an AC has no traced test on the article', () => {
 test('dispose-run refuses: fulfilled todo still on the board', () => {
   const fix = makeReadyToDispose({ leaveTodo: true });
   try {
+    assertRefused(fix, /fulfilled_todo_still_on_board/);
+  } finally {
+    fix.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ac_untraced / fulfilled_todo_still_on_board UNION semantics (board a9b70305)
+// and the empty-test_paths hole (board 3800d559) — a run commonly histories
+// TWO brief-linked articles (an owning article + a concept-family one), so the
+// old articles[0]-only pick could refuse against a legitimately traced AC.
+// ---------------------------------------------------------------------------
+
+test('dispose-run: AC traced only on a non-first brief-linked article (union) — disposal succeeds', () => {
+  // primary (calc-add) is created LAST via tools.knowledgeCreate (wall-clock
+  // "now"), so it is articles[0] under ORDER BY updated_at DESC; it carries no
+  // trace. The trace sits on the older, second-historied sibling — the shape
+  // the old articles[0]-only check would have wrongly refused.
+  const fix = makeReadyToDispose({ traceAC: false });
+  try {
+    makeSecondArticle(fix, { traceAC: true, updatedAt: NOW });
+    const r = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('dispose-run refuses: AC traced on NEITHER of two brief-linked articles, and names both', () => {
+  const fix = makeReadyToDispose({ traceAC: false });
+  try {
+    makeSecondArticle(fix, { traceAC: false, updatedAt: NOW });
+    const r = assertRefused(fix, /ac_untraced.*AC1/);
+    assert.match(r.stderr, /calc-add\b/, 'names the primary article');
+    assert.match(r.stderr, /calc-add-concept/, 'names the second article — union checked both, not just articles[0]');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('dispose-run refuses: a live_test_refs entry with EMPTY test_paths counts as untraced (the AC8 shape, board 3800d559)', () => {
+  const fix = makeReadyToDispose({ traceAC: 'empty' });
+  try {
+    assertRefused(fix, /ac_untraced.*AC1/);
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('dispose-run: single-article store — union leaves the N=1 case unchanged', () => {
+  const fix = makeReadyToDispose();
+  try {
+    const r = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', fix.dir], fix.dir);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('dispose-run refuses: fulfilled todo carried by only ONE of two brief-linked articles (union consults both)', () => {
+  const fix = makeReadyToDispose({ article: false });
+  const { store, tools, brief, todo } = fix;
+  try {
+    // primary article carries NO fulfills link — the old articles[0]-only check
+    // would have missed the fulfilled todo entirely if this were articles[0].
+    tools.knowledgeCreate('feature_article', articleFields(brief.id, { traceAC: true, fulfills: [] }));
+    // the second, brief-linked article carries the fulfills link; todo stays on
+    // the board (never removed) so the condition should still trip.
+    makeSecondArticle(fix, { traceAC: true, fulfills: [todo.id], updatedAt: NOW });
     assertRefused(fix, /fulfilled_todo_still_on_board/);
   } finally {
     fix.cleanup();

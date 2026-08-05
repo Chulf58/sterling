@@ -127,6 +127,10 @@ function findPackageDir(cwd, file) {
  * static_wiring (§9.1, H12's static half): exports declared in the scope files
  * that are referenced ONLY by test files = built-but-not-wired. Mechanical:
  * declaration regexes + word-boundary reference search over project sources.
+ * A same-module reference (the export called elsewhere in its own file, outside
+ * its declaration) counts as wired too (board 5ef993c1 follow-up) — a helper
+ * exported solely so a frozen test oracle can exercise it directly, while every
+ * runtime call is same-file, is not built-but-not-wired.
  */
 export function staticWiring({ cwd, scope = [] }) {
   const scopeSet = new Set(scope.map((p) => p.replace(/\\/g, '/')));
@@ -145,14 +149,22 @@ export function staticWiring({ cwd, scope = [] }) {
         if (renamed) names.add(renamed[1]);
       }
     }
-    if (names.size) exportsByFile.push({ file, names: [...names] });
+    if (names.size) exportsByFile.push({ file, names: [...names], content });
   }
 
   const isTest = (file) => testPathGlobs.some((g) => matchesGlob(file, g));
   const test_only_exports = [];
-  for (const { file, names } of exportsByFile) {
+  for (const { file, names, content } of exportsByFile) {
+    // Same-module consumption wires an export just as an external caller would
+    // (board 5ef993c1 follow-up): strip the declaration syntax itself so an
+    // export's own declaration line never counts as a "use", then check
+    // whether the name still appears elsewhere in the same file.
+    const selfBody = content
+      .replace(/export\s+(?:async\s+)?(?:const|let|var|function|class)\s+[A-Za-z_$][\w$]*/g, '')
+      .replace(/export\s*\{[^}]+\}/g, '');
     for (const exportName of names) {
       const re = new RegExp(`\\b${exportName.replace(/[$]/g, '\\$&')}\\b`);
+      if (re.test(selfBody)) continue;
       let nonTestRef = false;
       let testRef = false;
       for (const other of allFiles) {

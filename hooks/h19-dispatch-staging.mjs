@@ -5,12 +5,12 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h19-clear-session.mjs
-import { rmSync, existsSync as existsSync2 } from "node:fs";
+// scripts/hooks/h19-dispatch-staging.mjs
+import { existsSync as existsSync5 } from "node:fs";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync, existsSync as existsSync2 } from "node:fs";
+import { dirname as dirname2, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -548,12 +548,12 @@ var ParseStatus = class _ParseStatus {
   }
   static mergeArray(status, results) {
     const arrayValue = [];
-    for (const s of results) {
-      if (s.status === "aborted")
+    for (const s2 of results) {
+      if (s2.status === "aborted")
         return INVALID;
-      if (s.status === "dirty")
+      if (s2.status === "dirty")
         status.dirty();
-      arrayValue.push(s.value);
+      arrayValue.push(s2.value);
     }
     return { status: status.value, value: arrayValue };
   }
@@ -4084,6 +4084,18 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
+function toRepoRelative(absolutePath, repoRoot) {
+  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const abs = norm(absolutePath);
+  const root = norm(repoRoot);
+  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
+  const a = drivePrefixed ? abs.toLowerCase() : abs;
+  const r = drivePrefixed ? root.toLowerCase() : root;
+  if (!(a === r || a.startsWith(r + "/"))) {
+    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
+  }
+  return normalizeRepoPath(abs.slice(root.length + 1));
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
@@ -4402,6 +4414,115 @@ var AGENT_CLASS = {
   debugger: "conductor_direct"
 };
 var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
+var s = (v) => typeof v === "string" ? v : "";
+var RECORD_TYPES = {
+  decision: {
+    schema: decisionSchema,
+    immutable: true,
+    fts: (r) => [s(r.title), s(r.statement), s(r.rationale)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // Title only, as asked: a decision's title is written to state the ruling.
+    digest: { title: "plain" }
+  },
+  anti_pattern: {
+    schema: antiPatternSchema,
+    immutable: false,
+    fts: (r) => [s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // trigger is the field that tells a reader whether the hazard applies to
+    // what they are about to do — the whole point of scanning hazards — and
+    // severity is the order H19 already renders them in.
+    digest: { title: "plain", trigger: "clip", severity: "plain" }
+  },
+  research_finding: {
+    schema: researchFindingSchema,
+    immutable: false,
+    fts: (r) => [s(r.question), s(r.answer)].join("\n"),
+    fileKeys: () => [],
+    // No title on this type — the question IS the identity. Both clocks ride
+    // along because a finding's currency decides whether it may be used at all.
+    digest: { question: "clip", source_date: "plain", capture_date: "plain" }
+  },
+  reference_material: {
+    schema: referenceMaterialSchema,
+    immutable: false,
+    fts: (r) => [s(r.title), s(r.summary)].join("\n"),
+    // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
+    // repo-relative location doubles as a file_key (H7 pressure applies);
+    // pdf/url locations are external and carry none.
+    fileKeys: (r) => {
+      if (r.kind !== "doc")
+        return [];
+      try {
+        return [normalizeRepoPath(r.location)];
+      } catch {
+        return [];
+      }
+    },
+    // location is this type's path-bearing field (§3.2.5), so it is what a
+    // reader needs to go open the thing.
+    digest: { title: "plain", kind: "plain", location: "plain" }
+  },
+  disconfirmed_hypothesis: {
+    schema: disconfirmedHypothesisSchema,
+    immutable: false,
+    fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The rejected answer is the reusable half — it stops the question being
+    // re-asked and re-answered the same wrong way.
+    digest: { question: "clip", rejected_answer: "clip" }
+  },
+  feature_article: {
+    schema: featureArticleSchema,
+    immutable: false,
+    // concept_family joins the FTS text so a family query ranks its concept
+    // article (class enumeration stays a consumer-side filter on the field).
+    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
+    fileKeys: (r) => (r.files ?? []).map((f) => f.path),
+    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
+    // and the id in the envelope beside it is not. version + state say whether
+    // this is a moving target and whether it is wired yet.
+    digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
+  },
+  note: {
+    schema: noteSchema,
+    immutable: false,
+    fts: (r) => s(r.raw_text),
+    fileKeys: () => [],
+    digest: { raw_text: "clip" }
+  },
+  todo: {
+    schema: todoSchema,
+    immutable: false,
+    fts: (r) => s(r.text),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The measured worst case for full bodies: board items run to ~8 KB each,
+    // so a whole-board read spilled 478 KB. system_reason is what sorts the
+    // maintenance queue into lanes; priority/source sort the board.
+    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain" }
+  },
+  brief: {
+    schema: briefSchema,
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.title), s(r.problem), s(r.feature)].join("\n"),
+    fileKeys: (r) => {
+      const br = r.blast_radius;
+      return (br?.files ?? []).map((f) => f.path);
+    },
+    digest: { slug: "plain", title: "plain", problem: "clip" }
+  }
+};
+function validateRecord(input2) {
+  if (typeof input2 !== "object" || input2 === null || typeof input2.type !== "string") {
+    throw new Error("validateRecord: input has no record type");
+  }
+  const type = input2.type;
+  const entry = RECORD_TYPES[type];
+  if (!entry) {
+    throw new Error(`validateRecord: unregistered record type '${type}' \u2014 register it in RECORD_TYPES (spec \xA715) before writing`);
+  }
+  return entry.schema.parse(input2);
+}
 
 // packages/schemas/dist/transient.js
 var SIGNALS = [
@@ -4775,23 +4896,959 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+import { mkdirSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
+var DDL = `
+CREATE TABLE IF NOT EXISTS records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(type, status);
+CREATE TABLE IF NOT EXISTS record_stack_tags (
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (record_id, tag)
+);
+CREATE TABLE IF NOT EXISTS record_file_keys (
+  record_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (record_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_keys_path ON record_file_keys(path);
+CREATE TABLE IF NOT EXISTS record_links (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_links_target ON record_links(target_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON handoffs(run_id, phase_id);
+CREATE TABLE IF NOT EXISTS check_skipped (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS queue_drain_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS activity_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
+`;
+var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
+function activityTitleOf(record) {
+  const r = record;
+  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.raw_text?.split("\n")[0] ?? r.id;
+  return raw.slice(0, 80);
+}
+function deepReplaceString(value, from, to) {
+  if (typeof value === "string")
+    return value === from ? to : value;
+  if (Array.isArray(value))
+    return value.map((v) => deepReplaceString(v, from, to));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
+  }
+  return value;
+}
 var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+var DEFAULT_QUERY_CAP = 20;
+var SterlingStore = class {
+  db;
+  constructor(path) {
+    this.db = new DatabaseSync2(path);
+    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec("PRAGMA busy_timeout=5000");
+    this.db.exec("PRAGMA foreign_keys=ON");
+    this.db.exec(DDL);
+  }
+  journalMode() {
+    return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+  }
+  /** The one validated write path. Unregistered type or malformed record throws; nothing is written. */
+  create(input2) {
+    const record = validateRecord(input2);
+    this.tx(() => {
+      this.insertRecord(record);
+      this.logActivity("created", record, record.created_at);
+    });
+    return record;
+  }
+  /**
+   * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
+   * definition, replacing four hand-rolled copies (board 2ded3b4b).
+   *
+   * THE BUG THIS CLOSES IS TWO BUGS. Four producers minted maintenance items
+   * (h7-file-touch, the read-time drift check in tools.ts, fs-remove, fs-move),
+   * each with its own copy-pasted "does an open item already exist?" query
+   * followed by a separate insert, and no uniqueness constraint anywhere:
+   *
+   *  (1) DUPLICATES. Two producers both read "no open item" before either insert
+   *      committed, and both inserted — classic TOCTOU. A consuming project
+   *      measured SEVEN byte-identical pairs created 2-3 MILLISECONDS apart, 52%
+   *      of a 27-item queue. The cost was judgement rather than writes: the
+   *      deep-queue threshold trips early, and anyone sizing a drain from the raw
+   *      count sees double the work that exists.
+   *  (2) SILENT LOSS — the worse half, and not in the report. All four checks
+   *      keyed on (feature_link, system_reason) and OMITTED the file, so a second
+   *      drifting file on the same article was suppressed. And because
+   *      knowledge_update re-baselines EVERY owned file, reconciling the first
+   *      file absorbed the second file's drift into a fresh baseline: the finding
+   *      neither queued nor survived.
+   *
+   * The key is therefore (system_reason, feature_link, file_keys SET), and the
+   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
+   * concurrent caller blocks on the write lock and then SEES the committed row
+   * instead of racing it.
+   *
+   * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
+   * severity — edited today, deleted tomorrow, both reconcile_needed, the first
+   * not yet drained — would otherwise be swallowed as a duplicate, losing the more
+   * urgent fact. Todos carry no version chain (P4: done = removed), so the text is
+   * replaced in place and updated_at moved; file_keys are identical by
+   * construction, so no index maintenance is needed.
+   */
+  enqueueSystemTodo(input2) {
+    const candidate = validateRecord(input2);
+    if (candidate.type !== "todo" || candidate.source !== "system") {
+      throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
+    }
+    const keyOf = (t) => {
+      const files = [...t.file_keys ?? []].sort();
+      const identified = !!t.feature_link || files.length > 0;
+      return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
+    };
+    const wantKey = keyOf(candidate);
+    let existing;
+    let textUpdated = false;
+    this.tx(() => {
+      const rows = this.db.prepare("SELECT body FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      for (const r of rows) {
+        const t = JSON.parse(r.body);
+        if (t.source !== "system")
+          continue;
+        if (keyOf(t) !== wantKey)
+          continue;
+        existing = t;
+        break;
+      }
+      if (!existing) {
+        this.insertRecord(candidate);
+        return;
+      }
+      if ((existing.text ?? "") !== (candidate.text ?? "")) {
+        const merged = { ...existing, text: candidate.text, updated_at: candidate.updated_at };
+        this.db.prepare("UPDATE records SET body = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(merged), candidate.updated_at, existing.id);
+        existing = merged;
+        textUpdated = true;
+      }
+    });
+    return existing ? { record: existing, deduped: true, text_updated: textUpdated } : { record: candidate, deduped: false, text_updated: false };
+  }
+  get(id) {
+    const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
+    if (!row)
+      return void 0;
+    return this.withDerivedReliedBy(JSON.parse(row.body));
+  }
+  /**
+   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
+   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
+   * feature_article's relies_on naming this article's slug — not the stored
+   * field. relies_on stays author-written; relied_by cannot drift because it is
+   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
+   * domain-mounted articles are out of scope for this derivation (each mounted
+   * store derives its own; MountedStores does not cross-join relies_on across
+   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
+   * slug-collision check already make.
+   *
+   * Never a hidden lie (constraint 2 of the board item): when the stored
+   * relied_by differs from the derived set (as a sorted-deduped set — order and
+   * duplicates in the stored array don't count as drift), the returned record
+   * carries dependencies.relied_by_stored_stale: true alongside the derived
+   * value actually served. The stored field is left untouched in the DB — this
+   * derivation never writes.
+   */
+  withDerivedReliedBy(record, relations) {
+    if (record.type !== "feature_article")
+      return record;
+    const article = record;
+    const derived = this.deriveReliedBy(article.slug, relations);
+    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
+    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
+    return {
+      ...record,
+      dependencies: {
+        relies_on: article.dependencies?.relies_on ?? [],
+        relied_by: derived,
+        ...stale ? { relied_by_stored_stale: true } : {}
+      }
+    };
+  }
+  /**
+   * Every active feature_article's slug + relies_on, in ONE scan — shared by
+   * withDerivedReliedBy across a whole query() result so a capped list of N
+   * articles costs one table scan, not N.
+   */
+  activeArticleRelations() {
+    const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
+    return rows.map((r) => {
+      const rec = JSON.parse(r.body);
+      return { slug: rec.slug ?? "", reliesOn: rec.dependencies?.relies_on ?? [] };
+    });
+  }
+  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
+  deriveReliedBy(slug, relations) {
+    const rels = relations ?? this.activeArticleRelations();
+    const set = /* @__PURE__ */ new Set();
+    for (const r of rels) {
+      if (r.slug === slug)
+        continue;
+      if (r.reliesOn.includes(slug))
+        set.add(r.slug);
+    }
+    return [...set].sort();
+  }
+  /**
+   * Every record id in this store at ANY status, tombstones included, with its
+   * type — the resolution surface for id CITATIONS in tracked source
+   * (check-record-citations). It exists because neither existing read serves
+   * that need: query() deliberately excludes superseded records (AC4), yet
+   * citing a superseded record is legitimate and common — a comment names the
+   * decision that ORIGINALLY justified a design, and history is exactly what it
+   * should cite — while get() resolves any status but only from a FULL id, and
+   * citations in prose are 8-char prefixes. No body fetch, no JSON.parse: ids
+   * and types only, so scanning the whole tree stays cheap.
+   */
+  recordIdIndex() {
+    return this.db.prepare("SELECT id, type, status FROM records").all();
+  }
+  /**
+   * Every non-superseded feature_article carrying this EXACT slug, newest first.
+   * A deterministic identity lookup, deliberately NOT a search (decision
+   * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
+   * query({rank_terms:[slug], cap:5}) and then look for an exact match among
+   * those five, which reported LIVE articles as '(not in store)': bm25 ranks by
+   * term frequency over the FTS blob, so a popular slug is cited more often in
+   * OTHER articles' prose than in the article that owns it, and the owner falls
+   * outside its own top-5 — measured against 'hooks-suite' at v46. Raising the
+   * cap was rejected because the cause is the RANKING, not the number 5, and the
+   * miss gets likelier as the store grows.
+   *
+   * Returns an ARRAY so the caller keeps applying its own working_tree exclusion.
+   * More than one active record per slug is a store-integrity fault rather than a
+   * normal state; it resolves newest-first here instead of arbitrarily, and is
+   * not raised on this path because delivery must never fail (AC7) — an opaque
+   * '(lookup failed)' would trade one false payload for another.
+   */
+  articlesBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`).all(slug);
+    const records = rows.map((r) => JSON.parse(r.body));
+    if (!records.length)
+      return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+  /**
+   * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
+   * file-key join) shared by query() and count() — everything EXCEPT the rank
+   * (FTS), ordering, and cap. One definition so count() can never drift from
+   * what query() would actually return.
+   */
+  baseFilter(opts) {
+    const params = [];
+    const where = ["r.status != 'superseded'"];
+    if (!opts.include_unconfirmed)
+      where.push("r.derived_unconfirmed = 0");
+    if (opts.types?.length) {
+      where.push(`r.type IN (${opts.types.map(() => "?").join(",")})`);
+      params.push(...opts.types);
+    }
+    if (opts.stack_tags?.length) {
+      where.push(`EXISTS (SELECT 1 FROM record_stack_tags t WHERE t.record_id = r.id AND t.tag IN (${opts.stack_tags.map(() => "?").join(",")}))`);
+      params.push(...opts.stack_tags);
+    }
+    const fileKeys = (opts.file_keys ?? []).map(normalizeRepoPath);
+    if (fileKeys.length) {
+      where.push(`EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => "?").join(",")}))`);
+      params.push(...fileKeys);
+    }
+    if (opts.source) {
+      where.push("json_extract(r.body, '$.source') = ?");
+      params.push(opts.source);
+    }
+    return { where, params, fileKeys };
+  }
+  /**
+   * COUNT(*) over the §3.4 base filter — the number of records query() WOULD
+   * return ignoring rank/cap (rank_terms is a no-op here). No body fetch, no
+   * JSON.parse: the TUI Knowledge tree's collapsed category/source badges call
+   * this every 1 Hz frame instead of fetching + parsing hundreds of bodies.
+   */
+  count(opts = {}) {
+    const { where, params } = this.baseFilter(opts);
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
+    return row.n;
+  }
+  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
+  query(opts = {}) {
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    const { where, params, fileKeys } = this.baseFilter(opts);
+    if (opts.rank_terms !== void 0) {
+      const terms = rankTerms.parse(opts.rank_terms);
+      if (terms.length) {
+        const joiner = opts.match_all ? " AND " : " OR ";
+        const match = terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+        const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
+          WHERE ${where.join(" AND ")} AND records_fts MATCH ?
+          ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
+        const rows2 = this.db.prepare(sql2).all(...params, match, cap);
+        return this.withDerivedReliedByAll(rows2.map((x) => JSON.parse(x.body)));
+      }
+    }
+    const orderBy = [];
+    const overlapParams = [];
+    if (fileKeys.length) {
+      orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
+      overlapParams.push(...fileKeys);
+    }
+    orderBy.push("r.updated_at DESC");
+    const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
+      ORDER BY ${orderBy.join(", ")} LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
+    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body)));
+  }
+  /** query()'s two return paths share this: one relations scan for the whole
+   *  result set (not one per feature_article row) before applying the derived
+   *  relied_by to each. */
+  withDerivedReliedByAll(records) {
+    if (!records.some((r) => r.type === "feature_article"))
+      return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+  /**
+   * Versioned change (§3.2.3, §3.1 criterion 3): the new record supersedes the
+   * old; the old is retained with status 'superseded' + superseded_by set.
+   * This is the ONLY change path for immutable types (decision, §3.2.1).
+   */
+  supersede(oldId, newInput) {
+    const oldRecord = this.get(oldId);
+    if (!oldRecord)
+      throw new Error(`supersede: no record '${oldId}'`);
+    if (oldRecord.status === "superseded")
+      throw new Error(`supersede: record '${oldId}' is already superseded`);
+    const candidate = { ...newInput };
+    const links = Array.isArray(candidate.links) ? [...candidate.links] : [];
+    if (!links.some((l) => l.rel === "supersedes" && l.target_id === oldId)) {
+      links.push({ rel: "supersedes", target_id: oldId });
+    }
+    candidate.links = links;
+    const newRecord = validateRecord(candidate);
+    if (newRecord.type !== oldRecord.type) {
+      throw new Error(`supersede: type mismatch ('${newRecord.type}' cannot supersede '${oldRecord.type}')`);
+    }
+    if (newRecord.type === "feature_article" && oldRecord.type === "feature_article" && newRecord.version <= oldRecord.version) {
+      throw new Error(`supersede: feature_article version must increase (old v${oldRecord.version}, new v${newRecord.version})`);
+    }
+    this.tx(() => {
+      this.insertRecord(newRecord);
+      const updatedOld = { ...oldRecord, status: "superseded", superseded_by: newRecord.id, updated_at: newRecord.updated_at };
+      const res = this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
+      if (res.changes === 0) {
+        throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
+      }
+      this.logActivity("updated", newRecord, newRecord.updated_at);
+    });
+    return newRecord;
+  }
+  /**
+   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
+   * exception to "every change is a supersession". todo is deliberately NOT in
+   * the immutable set (only decision is), and every board item is a DURABLE
+   * record in the same store as knowledge, so the established change primitive
+   * (supersede: mint a new id, retain the old) would rot every reference keyed
+   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
+   * id, created_at, status and superseded_by stay exactly as they were; only the
+   * caller's patched fields and updated_at change — same row, same identity.
+   *
+   * `newInput` is the FULL merged candidate (old record + patch), mirroring
+   * supersede's own calling convention: this method validates and persists, the
+   * tool layer decides which fields may be patched and builds the merge. A
+   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
+   * and the UPDATE is guarded on that status inside the transaction to close the
+   * same concurrent-supersede race.
+   */
+  updateTodo(id, newInput) {
+    const old = this.get(id);
+    if (!old)
+      throw new Error(`updateTodo: no record '${id}'`);
+    if (old.type !== "todo")
+      throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo \u2014 board_update only mutates todos`);
+    if (old.status === "superseded")
+      throw new Error(`updateTodo: record '${id}' is already superseded`);
+    const candidate = { ...newInput };
+    const updated = validateRecord(candidate);
+    if (updated.type !== "todo")
+      throw new Error(`updateTodo: type mismatch ('${updated.type}' is not 'todo')`);
+    const entry = RECORD_TYPES.todo;
+    this.tx(() => {
+      const res = this.db.prepare("UPDATE records SET updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run(updated.updated_at, JSON.stringify(updated), id);
+      if (res.changes === 0) {
+        throw new Error(`updateTodo: record '${id}' was concurrently removed or superseded \u2014 retry against the current version`);
+      }
+      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+      for (const path of new Set(entry.fileKeys(updated))) {
+        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
+      }
+      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(updated), id);
+    });
+    return updated;
+  }
+  /**
+   * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
+   * replacement that lives in ANOTHER store (the promoted copy in a domain
+   * store). supersede can't cross stores and always inserts a same-store
+   * replacement; this sets the existing record to superseded + superseded_by =
+   * the cross-store id with NO new row. Provenance and inbound links survive;
+   * default queries already hide superseded records, so it never double-serves.
+   */
+  /**
+   * `verb` names what this retirement IS for the activity feed (board
+   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
+   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
+   * two existing callers, distinguished so a promotion reads as "promoted",
+   * not as an unrelated-looking "retired". Defaults to 'retired' so the
+   * pre-promotion caller (and any future one) keeps that meaning without
+   * having to know the parameter exists.
+   */
+  retireInFavorOf(id, replacementId, at, verb = "retired") {
+    const record = this.get(id);
+    if (!record)
+      throw new Error(`retireInFavorOf: no record '${id}'`);
+    if (record.status === "superseded")
+      throw new Error(`retireInFavorOf: record '${id}' is already superseded`);
+    const retired = { ...record, status: "superseded", superseded_by: replacementId, updated_at: at };
+    this.tx(() => {
+      const res = this.db.prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'").run("superseded", replacementId, at, JSON.stringify(retired), id);
+      if (res.changes === 0) {
+        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded \u2014 retry`);
+      }
+      this.logActivity(verb, retired, at);
+    });
+    return retired;
+  }
+  /**
+   * Hard removal — the P4 path for todos (done = removed by the artifact-write
+   * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
+   * Removing a SYSTEM-source todo appends to the capped queue drain log
+   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
+   */
+  remove(id, drainedAt) {
+    this.tx(() => {
+      const record = this.get(id);
+      const isSystemDrain = record && record.type === "todo" && record.source === "system";
+      if (isSystemDrain && record) {
+        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []));
+        this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
+      }
+      if (record && !isSystemDrain) {
+        this.logActivity("removed", record, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
+      }
+      this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
+      this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_links WHERE source_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_links WHERE target_id = ?").run(id);
+      this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
+    });
+  }
+  /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
+  listQueueDrain(limit = 15) {
+    const rows = this.db.prepare("SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?").all(limit);
+    return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) }));
+  }
+  /**
+   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
+   * through, so the Queue tab's activity section shows "what has been done"
+   * without a second, separate write path (§3.1 invariant: one write path).
+   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
+   * verb that primitive actually performed; NOT called from insertRecord
+   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
+   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
+   * remove()'s system-todo branch, which already has a completed-section home
+   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
+   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
+   * items never build up here either.
+   */
+  logActivity(verb, record, at) {
+    this.db.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)").run(at, verb, record.type, record.id, activityTitleOf(record));
+    this.db.prepare("DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)").run();
+  }
+  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
+  listActivityLog(limit = 15) {
+    return this.db.prepare("SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?").all(limit);
+  }
+  /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
+  snapshot(targetPath) {
+    const target = targetPath.replace(/\\/g, "/");
+    if (existsSync(target)) {
+      throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+  }
+  close() {
+    this.db.close();
+  }
+  // -------------------------------------------------------------------------
+  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
+  // state, but they live in SQLite, not in a shared mutable file (P4), because
+  // brain transitions need atomic compare-and-swap and the TUI reads them live.
+  // They are NOT knowledge records: knowledge_query never sees them.
+  // -------------------------------------------------------------------------
+  /** Run begins at gate approval. One active run at a time (§7.5). */
+  createRun(input2) {
+    const run = runRecordSchema.parse(input2);
+    this.tx(() => {
+      const active = this.getRun();
+      if (active) {
+        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
+      }
+      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
+    });
+    return run;
+  }
+  /** By id, or the single active run when no id is given. */
+  getRun(id) {
+    const row = id ? this.db.prepare("SELECT body FROM runs WHERE id = ?").get(id) : this.db.prepare(`SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => "?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).get(...ACTIVE_STATES);
+    return row ? runRecordSchema.parse(JSON.parse(row.body)) : void 0;
+  }
+  /**
+   * §5.2 brain transition: atomic compare-and-swap on machine_state
+   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
+   * caller carried stale state — rejected loudly, never re-applied. Clears any
+   * pending exit (it is consumed by the transition).
+   */
+  casTransition(observed, next) {
+    const run = runRecordSchema.parse(next);
+    const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
+    if (res.changes === 0) {
+      throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
+    }
+    return run;
+  }
+  /**
+   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
+   * casTransition it CAS-guards machine_state, but instead of overwriting the
+   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
+   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
+   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
+   * updateRunOptimistic) landing between the caller's read and this transition is
+   * PRESERVED, not clobbered. The UPDATE guards on BOTH body and machine_state: a
+   * body change under us retries against the fresh body; a machine_state change is
+   * a stale caller and throws (casTransition's CAS-rejected semantics). Clears
+   * pending_exit — the transition consumes it. State moves through this path or
+   * casTransition, never updateRunOptimistic.
+   */
+  casTransitionMerge(observed, runId, mutate, attempts = 5) {
+    for (let i = 0; i < attempts; i++) {
+      const row = this.db.prepare("SELECT body, machine_state FROM runs WHERE id = ?").get(runId);
+      if (!row)
+        throw new Error(`casTransitionMerge: no run '${runId}'`);
+      if (row.machine_state !== observed) {
+        throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
+      }
+      const current = runRecordSchema.parse(JSON.parse(row.body));
+      const next = runRecordSchema.parse(mutate(current));
+      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed);
+      if (res.changes === 1)
+        return next;
+    }
+    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
+  }
+  /** agent_exit lands here; run_signal consumes it. An unconsumed exit is never silently overwritten (P5). */
+  recordPendingExit(runId, exit) {
+    const existing = this.getPendingExit(runId);
+    if (existing) {
+      throw new Error(`recordPendingExit: run '${runId}' already has an unconsumed exit ('${existing.signal}' from ${existing.agent_role ?? "unknown"}) \u2014 call run_signal first`);
+    }
+    const res = this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(JSON.stringify(exit), runId);
+    if (res.changes === 0)
+      throw new Error(`recordPendingExit: no run '${runId}'`);
+  }
+  getPendingExit(runId) {
+    const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
+    if (!row)
+      throw new Error(`getPendingExit: no run '${runId}'`);
+    return row.pending_exit ? JSON.parse(row.pending_exit) : void 0;
+  }
+  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
+  writeHandoff(runId, input2, at) {
+    const handoff = handoffSchema.parse(input2);
+    if (!this.db.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
+      throw new Error(`writeHandoff: no run '${runId}'`);
+    }
+    this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
+    return handoff;
+  }
+  readHandoffs(runId, filter = {}) {
+    const rows = filter.phase_id ? this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at").all(runId, filter.phase_id) : this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at").all(runId);
+    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
+    if (filter.files?.length) {
+      const wanted = new Set(filter.files.map(normalizeRepoPath));
+      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
+    }
+    return handoffs;
+  }
+  /**
+   * Optimistic non-state mutation of the run record (hooks write concurrently
+   * with the brain): retries on body change, fails loudly if it keeps losing
+   * the race — never a silent drop (P5). machine_state is CAS-only and must
+   * not change through this path.
+   */
+  updateRunOptimistic(runId, mutate, attempts = 5) {
+    for (let i = 0; i < attempts; i++) {
+      const row = this.db.prepare("SELECT body FROM runs WHERE id = ?").get(runId);
+      if (!row)
+        throw new Error(`updateRunOptimistic: no run '${runId}'`);
+      const current = JSON.parse(row.body);
+      const next = runRecordSchema.parse(mutate(current));
+      if (next.machine_state !== current.machine_state) {
+        throw new Error("updateRunOptimistic: machine_state changes go through casTransition only (\xA75.2)");
+      }
+      const res = this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body);
+      if (res.changes === 1)
+        return next;
+    }
+    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
+  }
+  /** H6 context warns + run_escalate land here (§6). */
+  appendRunEscalation(runId, entry) {
+    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
+  }
+  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
+  appendRunReconcileNeeded(runId, articleId) {
+    this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
+  }
+  /**
+   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
+   * the conductor's human-gated append of an exact repo-relative path to the run
+   * record. Idempotent-on-path — a duplicate path is skipped and the first
+   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
+   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
+   */
+  appendRunScopeAmendment(runId, amendment) {
+    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
+  }
+  /**
+   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
+   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
+   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
+   * phase, not global). An empty items list clears that phase only. Uses
+   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
+   * Pick — agent-invisible (decision 628c4b7f).
+   */
+  setRunReviewMandatory(runId, phaseId, items) {
+    this.updateRunOptimistic(runId, (run) => {
+      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
+      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
+      return { ...run, review_mandatory: [...kept, ...added] };
+    });
+  }
+  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
+  incrementDispatchCount(runId, agentType) {
+    const next = this.updateRunOptimistic(runId, (run) => ({
+      ...run,
+      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
+    }));
+    return next.dispatch_counts[agentType];
+  }
+  /** H11 (§3.2.6): append extraction ids to a note's derived[] — raw_text is never touched. */
+  appendNoteDerived(noteId, derivedIds) {
+    const note = this.get(noteId);
+    if (!note || note.type !== "note")
+      throw new Error(`appendNoteDerived: '${noteId}' is not a note`);
+    const updated = validateRecord({ ...note, derived: [.../* @__PURE__ */ new Set([...note.derived, ...derivedIds])] });
+    this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(updated), noteId);
+  }
+  /**
+   * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
+   * transactionally — read + delete in one transaction, never a signal file (P4).
+   */
+  writeSelection(type, recordId, at) {
+    this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
+  }
+  takeSelection() {
+    let row;
+    this.tx(() => {
+      row = this.db.prepare("SELECT type, record_id, at FROM selection WHERE slot = 1").get();
+      if (row)
+        this.db.prepare("DELETE FROM selection WHERE slot = 1").run();
+    });
+    return row;
+  }
+  /**
+   * fs-move support (§7.1): renames inside the machinery never orphan
+   * knowledge — every owning record's stored paths are rewritten as part of
+   * the move (exact normalized-path matches only), revalidated, and the
+   * file-key index updated, in one transaction.
+   */
+  renameFileKey(oldPath, newPath) {
+    const from = normalizeRepoPath(oldPath);
+    const to = normalizeRepoPath(newPath);
+    const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+    this.tx(() => {
+      for (const { record_id } of rows) {
+        const record = this.get(record_id);
+        if (!record)
+          continue;
+        const rewritten = validateRecord(deepReplaceString(record, from, to));
+        this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(rewritten), record_id);
+        this.db.prepare("UPDATE record_file_keys SET path = ? WHERE record_id = ? AND path = ?").run(to, record_id, from);
+      }
+    });
+    return rows.length;
+  }
+  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
+   *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
+   *  the target across every mounted store — cross-store edges are a legitimate shape
+   *  (promotion itself writes them: supersedes / informed_by across project↔domain)
+   *  that a store-local get cannot see. Standalone usage keeps the local check. */
+  addLink(sourceId, rel, targetId, targetValidated = false) {
+    const source = this.get(sourceId);
+    if (!source)
+      throw new Error(`addLink: no record '${sourceId}'`);
+    if (!targetValidated && !this.get(targetId))
+      throw new Error(`addLink: no target record '${targetId}'`);
+    const parsedRel = linkSchema.shape.rel.parse(rel);
+    if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
+      return source;
+    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
+    this.tx(() => {
+      this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(updated), sourceId);
+      this.db.prepare("INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)").run(sourceId, parsedRel, targetId);
+      this.logActivity("linked", updated, (/* @__PURE__ */ new Date()).toISOString());
+    });
+    return updated;
+  }
+  /**
+   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
+   * summaries onto the run record (the only facts that survive — §3.7),
+   * advances completing → awaiting_merge_gate via CAS, and deletes the
+   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
+   * binding follows the data (P4). The run record itself persists: the merge
+   * gate still needs it. Callers (dispose-run) verify promotion conditions
+   * and snapshot BEFORE calling this.
+   */
+  disposeRunRows(runId, summaries) {
+    const run = this.getRun(runId);
+    if (!run)
+      throw new Error(`disposeRunRows: no run '${runId}'`);
+    if (run.machine_state !== "completing") {
+      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
+    }
+    const next = runRecordSchema.parse({ ...run, machine_state: "awaiting_merge_gate", summaries });
+    this.tx(() => {
+      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, "completing");
+      if (res.changes === 0)
+        throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
+      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
+    });
+    return next;
+  }
+  /**
+   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
+   * rows of a run that has already reached a TERMINAL state ('rejected' via
+   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
+   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
+   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
+   * rows previously had no disposal event and accreted forever, and the merge
+   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
+   * Refuses on a non-terminal run — never a back door around disposal.
+   */
+  purgeRunRows(runId) {
+    const run = this.getRun(runId);
+    if (!run)
+      throw new Error(`purgeRunRows: no run '${runId}'`);
+    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
+      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
+    }
+    this.tx(() => {
+      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
+    });
+  }
+  /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
+  recordCheckSkipped(check, reason, runId, at) {
+    this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason, at);
+    if (!runId) {
+      this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
+    }
+  }
+  listCheckSkipped(runId) {
+    return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
+  }
+  // -------------------------------------------------------------------------
+  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
+  // -------------------------------------------------------------------------
+  /**
+   * Idempotent bootstrap: if no project-scoped reference_material carrying a
+   * `catalog` payload exists, create one seeded from config.models' DISTINCT
+   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
+   * already in use by the installed agents.
+   */
+  bootstrapCatalogIfAbsent(config, nowISO) {
+    const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
+    if (existing.length > 0)
+      return;
+    const cfg = config;
+    const models = cfg.models ?? {};
+    const ids = /* @__PURE__ */ new Set();
+    for (const v of Object.values(models)) {
+      if (v?.model)
+        ids.add(v.model);
+    }
+    const dateStr = nowISO.slice(0, 10);
+    this.create({
+      id: randomUUID(),
+      type: "reference_material",
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      title: "Models catalog",
+      kind: "doc",
+      location: ".sterling/models-catalog",
+      summary: "KB-maintained model catalog for the TUI System tab.",
+      source_date: dateStr,
+      capture_date: dateStr,
+      catalog: {
+        entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
+      }
+    });
+  }
+  /**
+   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
+   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
+   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
+   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   */
+  enqueueRefreshReferenceOnce(nowISO) {
+    const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
+    if (pending.length > 0)
+      return;
+    const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
+    const todo = {
+      id: randomUUID(),
+      type: "todo",
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      text: "Refresh the KB models catalog",
+      source: "system",
+      system_reason: "refresh_reference"
+    };
+    if (catalogs.length > 0) {
+      todo.feature_link = catalogs[0].id;
+    }
+    this.create(todo);
+  }
+  insertRecord(record) {
+    const entry = RECORD_TYPES[record.type];
+    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, scope, created_at, updated_at, author, derived_unconfirmed, body)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, record.status, record.superseded_by, record.scope, record.created_at, record.updated_at, record.author, record.derived_unconfirmed ? 1 : 0, JSON.stringify(record));
+    for (const tag of new Set(record.stack_tags)) {
+      this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
+    }
+    for (const path of new Set(entry.fileKeys(record))) {
+      this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(record.id, path);
+    }
+    for (const link of record.links) {
+      this.db.prepare("INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)").run(record.id, link.rel, link.target_id);
+    }
+    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(record));
+  }
+  tx(fn) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      fn();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+};
 
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
   if (!from) return null;
-  let dir2 = resolve(String(from));
+  let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync(join(dir2, ".sterling", "sterling.db"))) return dir2;
-    const parent = dirname(dir2);
-    if (parent === dir2) return null;
-    dir2 = parent;
+    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
 }
 function readStdin() {
@@ -4803,15 +5860,208 @@ function readStdin() {
 function allow() {
   process.exit(0);
 }
+function warnNonBlocking(message) {
+  process.stderr.write(message);
+  process.exit(1);
+}
+function loadConfig(cwd) {
+  const p = join(cwd, ".sterling", "config.json");
+  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
+function openStore(cwd) {
+  const p = join(cwd, ".sterling", "sterling.db");
+  return existsSync2(p) ? new SterlingStore(p) : null;
+}
+function repoRel(toolPath, cwd) {
+  if (!toolPath) return null;
+  const fwd = String(toolPath).replace(/\\/g, "/");
+  try {
+    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
+    return normalizeRepoPath(fwd);
+  } catch {
+    return null;
+  }
+}
+
+// scripts/hooks/lib/transcript.mjs
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
+function readTail(path, bytes = TAIL_BYTES) {
+  if (!existsSync3(path)) return null;
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, bytes);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
 
 // scripts/hooks/lib/delivery.mjs
-import { join as join2, dirname as dirname2 } from "node:path";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync4, rmSync } from "node:fs";
+import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
+function guardPath(cwd, agentId) {
+  return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+}
+function emptyGuard() {
+  return { records: [], frontier_files: [], pointer_files: [] };
+}
+function readGuard(path) {
+  try {
+    if (!existsSync4(path)) return emptyGuard();
+    return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
+  } catch {
+    process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
+`);
+    return emptyGuard();
+  }
+}
+function writeGuard(path, guard) {
+  mkdirSync2(dirname3(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(guard));
+}
+function clip(text, cap) {
+  const s2 = String(text ?? "");
+  return s2.length > cap ? `${s2.slice(0, cap)}\u2026` : s2;
+}
+function pointerLine(store, kind, slug) {
+  let head = "(not in store)";
+  try {
+    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
+    if (match) head = clip(match.what_it_does, 140);
+  } catch {
+    head = "(lookup failed)";
+  }
+  return `  \u2192 ${kind} [[${slug}]]: ${head}`;
+}
+function renderArticle(store, article, charCap) {
+  const lines = [
+    `\u25B8 article '${article.slug}' (${article.state}${article.concept_family ? `, concept family '${article.concept_family}'` : ""})`,
+    `WHAT IT DOES: ${clip(article.what_it_does, charCap)}`,
+    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
+  ];
+  if (article.current_ac?.length) {
+    lines.push(`ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => `${a.ac_id}: ${a.text}`).join(" | ")}`);
+  }
+  const relies = article.dependencies?.relies_on ?? [];
+  const relied = article.dependencies?.relied_by ?? [];
+  if (relies.length || relied.length) {
+    lines.push("ONE-HOP (follow with knowledge_get/knowledge_query when it matters):");
+    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug));
+    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug));
+  }
+  return lines.join("\n");
+}
+function renderReference(ref) {
+  return `\u25B8 reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? "", 200)} \u2014 refresh via knowledge_get ${ref.id}`;
+}
+var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
+function renderHazards(hazards, charCap) {
+  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).map(
+    (ap) => [
+      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `TRIGGER: ${clip(ap.trigger, charCap)}`,
+      `RIGHT WAY: ${clip(ap.right_way, charCap)}`
+    ].join("\n")
+  );
+}
+var DECISION_POINTER_CAP = 8;
+var DECISION_STATEMENT_CLIP = 120;
+var DECISION_REJECTED_CLIP = 140;
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
+  const shown = decisions.slice(0, cap);
+  const lines = [
+    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
+  ];
+  for (const d of shown) {
+    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+    if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+  }
+  if (decisions.length > shown.length) {
+    lines.push(
+      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
+    );
+  }
+  return lines.join("\n");
+}
+function renderPayload(rel, blocks, { unowned = false } = {}) {
+  return [
+    unowned ? renderFrontier(rel, { hasOtherKnowledge: blocks.length > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
+    ...blocks
+  ].join("\n\n");
+}
+function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
+  return `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
+}
 
-// scripts/hooks/h19-clear-session.mjs
+// scripts/hooks/h19-dispatch-staging.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+function lastDispatchPrompts(transcriptPath) {
+  if (!transcriptPath || !existsSync5(transcriptPath)) return [];
+  const tail = readTail(transcriptPath);
+  if (tail === null) return [];
+  const lines = tail.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type !== "assistant") continue;
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+    const blocks = content.filter((b) => b?.type === "tool_use" && (b.name === "Task" || b.name === "Agent"));
+    if (!blocks.length) continue;
+    return blocks.map((b) => b.input?.prompt).filter((p) => typeof p === "string");
+  }
+  return [];
+}
 var input = readStdin();
-var dir = deliveryDir(input.cwd);
-if (existsSync2(dir)) rmSync(dir, { recursive: true, force: true });
-allow();
+try {
+  const store = openStore(input.cwd);
+  if (!store) allow();
+  const prompts = lastDispatchPrompts(input.transcript_path);
+  const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+  const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
+    (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
+  );
+  if (!rels.length) allow();
+  const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree);
+  const hazards = store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 });
+  const decisions = store.query({ types: ["decision"], file_keys: rels, cap: 100 });
+  if (!owners.length && !hazards.length && !decisions.length) allow();
+  const gPath = guardPath(input.cwd, input.agent_id);
+  const guard = readGuard(gPath);
+  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
+  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
+  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length) allow();
+  const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+  const blocks = [
+    ...renderHazards(freshHazards, charCap),
+    ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
+    ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
+  ];
+  const payload = renderPayload(rels.join(", "), blocks, { unowned: false });
+  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: payload } }));
+  guard.records.push(...fresh.map((r) => r.id));
+  writeGuard(gPath, guard);
+  allow();
+} catch (e) {
+  warnNonBlocking(`H19: dispatch staging failed: ${e && e.message || e}`);
+}

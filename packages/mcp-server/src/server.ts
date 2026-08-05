@@ -165,10 +165,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description:
-        'List open board items. source=user is the board; source=system is the maintenance queue. Returns {matched_filter, returned, cap, capped, records}: capped=true means more items matched than are shown — raise cap before concluding the board or queue is shorter than it is. projection:"digest" returns one clipped line per item instead of its full text — board items run to several KB each, so prefer it for auditing or triaging the whole board and read the full text only for the items you act on.',
+        'List open board items. source=user is the board; source=system is the maintenance queue. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, records}: capped=true means more items matched than are shown — raise cap before concluding the board or queue is shorter than it is. projection:"digest" returns one clipped line per item instead of its full text — board items run to several KB each, so prefer it for auditing or triaging the whole board and read the full text only for the items you act on.',
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         file_keys: z.array(z.string()).optional(),
+        contains: z.string().optional(),
         cap: z.number().int().positive().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
@@ -193,6 +194,21 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.maintenanceRemove(id))
+  );
+
+  server.registerTool(
+    'board_update',
+    {
+      description:
+        'IN-PLACE edit of a board/queue item — text/priority/file_keys only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one of text/priority/file_keys is required.',
+      inputSchema: strict({
+        id: z.string(),
+        text: z.string().optional(),
+        priority: z.enum(['low', 'normal', 'high']).optional(),
+        file_keys: z.array(z.string()).optional(),
+      }),
+    },
+    ({ id, ...patch }) => json(tools.boardUpdate(id, patch))
   );
 
   server.registerTool(
@@ -279,10 +295,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_query',
     {
       description:
-        'List open maintenance-queue items (system todos), optionally by system_reason or file keys. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
+        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, or contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
+        contains: z.string().optional(),
         cap: z.number().int().positive().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),

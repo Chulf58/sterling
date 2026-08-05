@@ -255,6 +255,21 @@ test('one-hop pointers: relies_on sibling renders as slug + one-liner, never a f
   }
 });
 
+test('one-hop pointers: relied_by is DERIVED — a sibling naming this article in relies_on shows up even when the owning article\'s own STORED relied_by is empty (board 9641e01b, the exact drift case measured)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // alpha's stored relied_by is empty (the drift): nothing hand-maintained it
+    // after beta declared relies_on:['alpha']. The derived read must still show it.
+    store.create(article('alpha', ['src/a.mjs'])); // dependencies.relied_by: []
+    store.create(article('beta', ['src/b.mjs'], { dependencies: { relies_on: ['alpha'], relied_by: [] } }));
+    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    const payload = pendingOf(dir)[0].payload;
+    assert.match(payload, /relied_by \[\[beta\]\]: beta does the beta thing/, 'derived at read time, not the stale stored empty array');
+  } finally {
+    cleanup();
+  }
+});
+
 test('pipeline (AC6): active run silences agents (prep staged their pack) but not the conductor', () => {
   const { dir, store, cleanup } = makeProject({ withRun: true });
   try {

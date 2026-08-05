@@ -16,7 +16,7 @@ import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBr
 import { defaultExec } from './lib/update.mjs';
 
 const target = arg('--target') ?? process.cwd();
-if (!isGitRepo(target)) fail('direct-merge: not a git repository');
+if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
 // A run owns the working tree and merges through the §8.1 gate, which runs
 // disposal + promotion first — never route a run merge through here (P5).

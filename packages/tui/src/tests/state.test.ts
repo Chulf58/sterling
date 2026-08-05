@@ -187,6 +187,35 @@ test('queue tab (§3.2.7/§11): system items only, fixed half divider with trunc
   }
 });
 
+test('queue tab activity section (board 39d6462d): every knowledge write, drawn below completed, never clickable — the completed section is untouched', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const ui = st({ tab: QUEUE_TAB });
+    let s = buildDashboardState(store, ui);
+    // the fixture already created todos/notes/an article before this build, so
+    // the activity log is non-empty from the start — a fresh store's would say
+    // '(no activity yet)', mirroring queueCompleted's own empty-state message.
+    assert.ok(s.queueActivity, 'activity section always present on the queue tab');
+    assert.ok(s.queueActivity!.lines.length > 0);
+    assert.match(s.queueActivity!.lines[0], /^(\d{2}-\d{2} )?\d{2}:\d{2} \w+ · .+$/, 'left stamp + verb + title, same format as completed');
+
+    // a fresh write appears at the top, newest first
+    const d = store.create({ ...envelope('decision'), title: 'a fresh decision', statement: 'x', alternatives_rejected: [], rationale: 'y', file_keys: [] });
+    s = buildDashboardState(store, ui);
+    assert.match(s.queueActivity!.lines[0], /created · a fresh decision$/);
+    void d;
+
+    // the completed (drain log) section's own meaning and content are untouched
+    assert.deepEqual(s.queueCompleted!.lines, ['(nothing completed yet)']);
+
+    // activity lines are log lines, not records: never selectable, same as completed
+    const activityRow = screenLineToRow(s, 99, Infinity);
+    assert.equal(activityRow, -1, 'no body row claims the activity section screen lines');
+  } finally {
+    cleanup();
+  }
+});
+
 test('screenLineToRow: maps clicks through bodyTop and expanded heights', () => {
   const { store, t1, cleanup } = fixture();
   try {

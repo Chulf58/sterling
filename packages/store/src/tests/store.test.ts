@@ -394,6 +394,45 @@ test('remove deletes the record and all index rows (P4 todo path)', () => {
   }
 });
 
+test('updateTodo: IN-PLACE mutation — same id, same status, rebuilds file_keys + FTS indexes (§3.2.7 board_update)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const t = store.create({
+      ...envelope('todo'),
+      text: 'reconcile auth article',
+      source: 'user',
+      priority: 'low',
+      file_keys: ['src/auth.ts'],
+    });
+
+    const patched = store.updateTodo(t.id, { ...t, text: 'reconcile auth article thoroughly', priority: 'high', file_keys: ['src/auth2.ts'], updated_at: LATER });
+    assert.equal(patched.id, t.id, 'the id is stable — no new record is minted');
+    assert.equal(patched.status, 'active');
+    assert.equal(patched.created_at, t.created_at, 'created_at is untouched by an in-place edit');
+    assert.equal(patched.updated_at, LATER);
+    assert.equal(store.query({ types: ['todo'] }).length, 1, 'still exactly one record — updateTodo never supersedes');
+    assert.equal(store.get(t.id)!.id, t.id, 'the SAME row now carries the patched body');
+    assert.equal((store.get(t.id) as unknown as { text: string }).text, 'reconcile auth article thoroughly');
+
+    // the file_keys join index was rebuilt to the NEW value, not merely appended to
+    assert.equal(store.query({ file_keys: ['src/auth.ts'] }).length, 0, 'the old file_key no longer joins');
+    assert.equal(store.query({ file_keys: ['src/auth2.ts'] }).length, 1, 'the new file_key joins');
+
+    // the FTS row was refreshed too — old text no longer ranks, new text does
+    assert.equal(store.query({ rank_terms: ['thoroughly'] }).length, 1, 'FTS reflects the new text');
+
+    // refuses a non-todo id and an already-superseded id
+    const d = store.create(decision());
+    assert.throws(() => store.updateTodo(d.id, { ...d }), /not a todo/);
+    const gone = store.create({ ...envelope('todo'), text: 'x', source: 'user' });
+    store.remove(gone.id);
+    assert.throws(() => store.updateTodo(gone.id, { ...gone, text: 'y' }), /no record/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('queue drain log (§3.2.7): system removals logged + capped; user removals never logged', () => {
   const { dir, store } = tempStore();
   try {
@@ -431,6 +470,113 @@ test('queue drain log (§3.2.7): system removals logged + capped; user removals 
     assert.equal(all[0].text, 'item 59', 'newest first');
     assert.ok(!all.some((e) => e.text === 'reconcile article x'), 'oldest entries pruned');
     assert.equal(store.listQueueDrain(15).length, 15, 'reader limit');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity log (board 39d6462d): create/supersede/link/remove/retire/promote each log exactly one row', () => {
+  const { dir, store } = tempStore();
+  try {
+    // create → 'created', title-or-slug clipped (article carries both; title wins)
+    const d = store.create(decision({ title: 'Use SQLite' }));
+    let rows = store.listActivityLog(10);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(
+      { verb: rows[0].verb, type: rows[0].type, id: rows[0].id, title: rows[0].title },
+      { verb: 'created', type: 'decision', id: d.id, title: 'Use SQLite' }
+    );
+
+    // supersede → 'updated', logged against the NEW record's id
+    const d2 = store.supersede(d.id, decision({ title: 'Use SQLite v2', updated_at: LATER }));
+    rows = store.listActivityLog(10);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].verb, 'updated');
+    assert.equal(rows[0].id, d2.id);
+    assert.equal(rows[0].title, 'Use SQLite v2');
+
+    // addLink → 'linked'; an identical (deduped) edge does NOT log a second row
+    const target = store.create(decision({ title: 'target' }));
+    store.addLink(d2.id, 'cites', target.id);
+    rows = store.listActivityLog(10);
+    const afterFirstLink = rows.length;
+    assert.equal(rows[0].verb, 'linked');
+    assert.equal(rows[0].id, d2.id);
+    store.addLink(d2.id, 'cites', target.id); // identical edge — dedups, no new row
+    assert.equal(store.listActivityLog(10).length, afterFirstLink, 'a deduped identical edge logs no second row');
+
+    // remove on a NON-todo (note_remove's primitive) → 'removed'
+    const note = store.create({ ...envelope('note'), raw_text: 'a captured note', captured_at: NOW, capture_source: 'command', derived: [] });
+    store.remove(note.id);
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'removed');
+    assert.equal(rows[0].type, 'note');
+    assert.equal(rows[0].id, note.id);
+
+    // remove on a USER todo → 'removed' in the activity log (never in the drain log)
+    const userTodo = store.create({ ...envelope('todo'), text: 'a user todo', source: 'user' });
+    store.remove(userTodo.id, LATER);
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'removed');
+    assert.equal(rows[0].id, userTodo.id);
+
+    // remove on a SYSTEM todo → already covered by queue_drain_log; NOT double-logged here
+    const sysTodo = store.create({ ...envelope('todo'), text: 'reconcile x', source: 'system', system_reason: 'reconcile_needed' });
+    const afterCreate = store.listActivityLog(50).length; // the create() itself logs 'created'
+    store.remove(sysTodo.id, LATER);
+    assert.equal(store.listActivityLog(50).length, afterCreate, 'a system-todo removal is not double-logged (queue_drain_log already covers it)');
+    assert.equal(store.listQueueDrain(1)[0].text, 'reconcile x', 'the drain log still gets it');
+
+    // retireInFavorOf default verb → 'retired'
+    const dup = store.create(decision({ title: 'a duplicate decision' }));
+    const survivor = store.create(decision({ title: 'the survivor' }));
+    store.retireInFavorOf(dup.id, survivor.id, LATER);
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'retired');
+    assert.equal(rows[0].id, dup.id);
+    assert.equal(rows[0].title, 'a duplicate decision');
+
+    // retireInFavorOf with an explicit verb → 'promoted' (knowledgePromote's call shape)
+    const promotedOriginal = store.create(decision({ title: 'promotable finding' }));
+    const domainCopy = store.create({ ...decision({ title: 'promotable finding' }), scope: 'domain:node', id: randomUUID() });
+    store.retireInFavorOf(promotedOriginal.id, domainCopy.id, LATER, 'promoted');
+    rows = store.listActivityLog(10);
+    assert.equal(rows[0].verb, 'promoted');
+    assert.equal(rows[0].id, promotedOriginal.id);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity log title-or-slug: todo/note fall back to their first text line; feature_article uses title over slug', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'csv-export', title: 'CSV export' }));
+    assert.equal(store.listActivityLog(1)[0].title, 'CSV export', 'title wins over slug when both exist');
+
+    const t = store.create({ ...envelope('todo'), text: 'first line\nsecond line', source: 'user' });
+    assert.equal(store.listActivityLog(1)[0].title, 'first line', 'todo falls back to its first text line, clipped');
+
+    const n = store.create({ ...envelope('note'), raw_text: 'note first line\nrest', captured_at: NOW, capture_source: 'command', derived: [] });
+    assert.equal(store.listActivityLog(1)[0].title, 'note first line', 'note falls back to its first raw_text line');
+    void a; void t; void n;
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity log is capped at 50 rows, oldest pruned in the same transaction', () => {
+  const { dir, store } = tempStore();
+  try {
+    for (let i = 0; i < 60; i++) store.create(decision({ title: `decision ${i}` }));
+    const all = store.listActivityLog(100);
+    assert.equal(all.length, 50, 'capped at 50');
+    assert.equal(all[0].title, 'decision 59', 'newest first');
+    assert.ok(!all.some((e) => e.title === 'decision 0'), 'oldest entries pruned');
+    assert.equal(store.listActivityLog(15).length, 15, 'reader limit');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1094,5 +1240,108 @@ test('enqueueSystemTodo: file_keys ORDER does not create a false distinction', (
     assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 1);
   } finally {
     cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// relied_by DERIVED AT READ TIME (board 9641e01b, option (b)): relies_on stays
+// author-written; relied_by is computed from the union of every other active
+// feature_article's relies_on naming this article's slug — on get() AND
+// query() alike, so neither read surface can serve the stale stored field.
+// ---------------------------------------------------------------------------
+
+test('derived relied_by reflects a fresh relies_on immediately — no backfill of the depended-on article needed', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] } }));
+    // 'a' has never had its own relied_by touched — proving the union is
+    // computed from OTHER articles' relies_on, not from anything stored on 'a'.
+    assert.deepEqual((store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, []);
+
+    store.create(article({ slug: 'b', dependencies: { relies_on: ['a'], relied_by: [] } }));
+
+    const viaGet = store.get(a.id) as unknown as { dependencies: { relied_by: string[] } };
+    assert.deepEqual(viaGet.dependencies.relied_by, ['b'], 'get() serves the derived set the instant b declares it');
+
+    const viaQuery = store.query({ types: ['feature_article'], cap: 100 }).find((r) => (r as unknown as { slug: string }).slug === 'a') as unknown as {
+      dependencies: { relied_by: string[] };
+    };
+    assert.deepEqual(viaQuery.dependencies.relied_by, ['b'], 'query() agrees with get()');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relied_by_stored_stale discloses a stored value that no longer matches the derived set, and stays absent when it matches', () => {
+  const { dir, store } = tempStore();
+  try {
+    // 'a' stores a relied_by lie: a slug that names nothing real, and omits the
+    // sibling that actually relies on it.
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: ['ghost-slug'] } }));
+    store.create(article({ slug: 'b', dependencies: { relies_on: ['a'], relied_by: [] } }));
+
+    const stale = store.get(a.id) as unknown as { dependencies: { relied_by: string[]; relied_by_stored_stale?: boolean } };
+    assert.deepEqual(stale.dependencies.relied_by, ['b'], 'the SERVED value is always the derived one');
+    assert.equal(stale.dependencies.relied_by_stored_stale, true, 'never a hidden lie — the mismatch is disclosed');
+
+    // Now correct the stored field to genuinely match the derived set.
+    store.supersede(a.id, article({ slug: 'a', dependencies: { relies_on: [], relied_by: ['b'] }, version: 2 }));
+    const fresh = store
+      .query({ types: ['feature_article'], cap: 100 })
+      .find((r) => (r as unknown as { slug: string }).slug === 'a') as unknown as {
+      dependencies: { relied_by: string[]; relied_by_stored_stale?: boolean };
+    };
+    assert.deepEqual(fresh.dependencies.relied_by, ['b']);
+    assert.equal(fresh.dependencies.relied_by_stored_stale, undefined, 'a matching stored value discloses nothing');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('derived relied_by is deduped and sorted regardless of authoring order or duplicate declarations', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] } }));
+    // 'c' names 'a' twice (author error) and 'z' names 'a' once — inserted in an
+    // order that would NOT already be sorted if left alone.
+    store.create(article({ slug: 'z', dependencies: { relies_on: ['a'], relied_by: [] } }));
+    store.create(article({ slug: 'c', dependencies: { relies_on: ['a', 'a'], relied_by: [] } }));
+
+    const got = store.get(a.id) as unknown as { dependencies: { relied_by: string[] } };
+    assert.deepEqual(got.dependencies.relied_by, ['c', 'z'], 'deduped (c counted once) and sorted, not insertion order');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a superseded article is excluded from derivation on BOTH sides: its relies_on no longer contributes, and it no longer receives derived edges', () => {
+  const { dir, store } = tempStore();
+  try {
+    const a = store.create(article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] } }));
+    const b = store.create(article({ slug: 'b', dependencies: { relies_on: ['a'], relied_by: [] } }));
+    assert.deepEqual((store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, ['b']);
+
+    // Supersede b with a new version that no longer relies on 'a'.
+    store.supersede(b.id, article({ slug: 'b', dependencies: { relies_on: [], relied_by: [] }, version: 2 }));
+    assert.deepEqual(
+      (store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by,
+      [],
+      "b's superseded (old) relies_on no longer counts toward a's derived relied_by"
+    );
+
+    // Now supersede 'a' itself out of existence (a's own record becomes a tombstone).
+    store.create(article({ slug: 'c', dependencies: { relies_on: ['a'], relied_by: [] } }));
+    assert.deepEqual((store.get(a.id) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, ['c']);
+    store.supersede(a.id, article({ slug: 'a', dependencies: { relies_on: [], relied_by: [] }, version: 2 }));
+    // The new head of 'a' is a DIFFERENT id but the same slug — derivation is
+    // slug-keyed, so 'c' still resolves to the live head of 'a'.
+    const newHeadId = store.articlesBySlug('a')[0].id;
+    assert.deepEqual((store.get(newHeadId) as unknown as { dependencies: { relied_by: string[] } }).dependencies.relied_by, ['c']);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

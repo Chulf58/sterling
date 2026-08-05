@@ -368,6 +368,29 @@ test('node adapter static_wiring: test-only exports flagged; wired and renamed e
   }
 });
 
+test('node adapter static_wiring: a same-module caller wires an export even when only a test imports it directly (board 5ef993c1)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-wiring-samefile-'));
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    // helper is exported only so the frozen test oracle can exercise it
+    // directly, but every runtime call is same-module (publicApi calls it
+    // internally) — that must not read as built-but-not-wired.
+    writeFileSync(
+      join(dir, 'src', 'internal.mjs'),
+      "export function helper() { return 1; }\nexport function publicApi() { return helper() + 1; }\n"
+    );
+    writeFileSync(
+      join(dir, 'tests', 'internal.test.mjs'),
+      "import { helper } from '../src/internal.mjs';\nhelper();\n"
+    );
+    const result = staticWiring({ cwd: dir, scope: ['src/internal.mjs'] });
+    assert.deepEqual(result.test_only_exports, [], 'helper is wired via same-module use by publicApi, not just the test import');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // H13 reads ledger + clear
 // ---------------------------------------------------------------------------
@@ -639,26 +662,48 @@ test('H14: standalone read-only grep/ls are allowed; chaining, redirection, find
   }
 });
 
-test('H14: a quoted run-command prefix is still denied, but the denial names QUOTING as the cause (decision 398adceb)', () => {
+test('H14: a MULTI-WORD quoted run-command prefix is still denied — genuinely unmatchable as one quoted token (decision 398adceb, board f49466f5)', () => {
   const { dir, cleanup } = makeProject();
   try {
     const bash = (command) => runHook('h14-bash-allowlist.mjs', hookInput(dir, { tool_name: 'Bash', tool_input: { command } }), dir);
     const r = bash('"node --test" src/x.test.mjs');
-    assert.equal(r.code, 2, 'the allow surface is unchanged — quoting is diagnosed, not normalized');
-    assert.match(r.stderr, /THE QUOTES ARE THE CAUSE/, 'the discriminator is named, not just the allowlist');
+    assert.equal(r.code, 2, 'a multi-word quoted span cannot smuggle a prefix past the allowlist — the allow surface is unchanged');
+    assert.match(r.stderr, /THE QUOTED FORM IS GENUINELY UNMATCHABLE/, 'the discriminator is named, not just the allowlist');
     assert.match(r.stderr, /Re-run it unquoted: 'node --test src\/x\.test\.mjs'/, 'and the working form is spelled out');
     // Both quoting instincts, not only double quotes.
     const single = bash("'node --test' src/x.test.mjs");
     assert.equal(single.code, 2);
-    assert.match(single.stderr, /THE QUOTES ARE THE CAUSE/, 'a single-quoted exe path hits the same trap and gets the same diagnosis');
+    assert.match(single.stderr, /THE QUOTED FORM IS GENUINELY UNMATCHABLE/, 'a single-quoted multi-word span hits the same trap and gets the same diagnosis');
     // The hint fires ONLY when quoting is the actual discriminator — an unrelated
     // denial must not acquire a misleading quoting explanation.
     const unrelated = bash('git push --force');
     assert.equal(unrelated.code, 2);
-    assert.doesNotMatch(unrelated.stderr, /THE QUOTES ARE THE CAUSE/, 'no quoting hint where dropping quotes would not have helped');
+    assert.doesNotMatch(unrelated.stderr, /THE QUOTED FORM IS GENUINELY UNMATCHABLE/, 'no quoting hint where dropping quotes would not have helped');
     const quotedButStillWrong = bash('"git" push');
     assert.equal(quotedButStillWrong.code, 2);
-    assert.doesNotMatch(quotedButStillWrong.stderr, /THE QUOTES ARE THE CAUSE/, 'quoted but not otherwise allowlisted gets no hint either');
+    assert.doesNotMatch(quotedButStillWrong.stderr, /THE QUOTED FORM IS GENUINELY UNMATCHABLE/, 'quoted but not otherwise allowlisted gets no hint either');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H14: a quoted SINGLE-WORD first token now MATCHES for match purposes only — the executed command and every other branch are untouched (board f49466f5)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const bash = (command) => runHook('h14-bash-allowlist.mjs', hookInput(dir, { tool_name: 'Bash', tool_input: { command } }), dir);
+    // '"node" --test …' where 'node --test …' is allowed: the quoted content is a
+    // single word, so it strips for matching and passes.
+    assert.equal(bash('"node" --test src/x.test.mjs').code, 0, 'a double-quoted single-word first token is allowed where the unquoted form is');
+    assert.equal(bash("'node' --test src/x.test.mjs").code, 0, 'a single-quoted single-word first token is allowed too');
+    // Smuggling shape: a quoted MULTI-WORD first token must NOT match — quoting
+    // cannot compress an entire prefix (or more) into one opaque token.
+    assert.equal(bash('"node --test" x').code, 2, 'a multi-word quoted first token is denied even though the unquoted equivalent would be allowed');
+    // Smuggling shape: mismatched quotes are not stripped at all.
+    const mismatched = bash('"node\' --test src/x.test.mjs');
+    assert.equal(mismatched.code, 2, 'mismatched quotes are not stripped for matching');
+    assert.doesNotMatch(mismatched.stderr, /THE QUOTED FORM IS GENUINELY UNMATCHABLE/, 'mismatched quotes get no quoting diagnosis either — there is no clean unquoted form to offer');
+    // Smuggling shape: quotes mid-token are untouched (the token does not START with a quote).
+    assert.equal(bash('node"--test" src/x.test.mjs').code, 2, 'quotes appearing mid-token are not stripped');
   } finally {
     cleanup();
   }
@@ -682,7 +727,7 @@ test('H14: a space-bearing declared prefix carries the word-splitting caveat, so
       dir
     );
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /THE QUOTES ARE THE CAUSE/);
+    assert.match(r.stderr, /THE QUOTED FORM IS GENUINELY UNMATCHABLE/);
     assert.match(r.stderr, /CAVEAT before you retry/, 'the dead end is disclosed rather than papered over');
     assert.match(r.stderr, /word-split by the shell/, 'and the reason is named');
     assert.match(r.stderr, /NO working spelling here/, 'including that the command may be unrunnable outright');
@@ -885,6 +930,12 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
         encoding: 'utf8',
         cwd: dir,
         timeout: 30_000,
+        // H1's clone-currency probe would otherwise run against the LIVE clone
+        // (no STERLING_PLUGIN_ROOT here, so pluginRoot() walks up to it) and
+        // fetch from the real origin inside the test battery — which runs
+        // during /sterling:update itself. Hermeticity by construction, not by
+        // this machine's declared role.
+        env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
       });
       assert.equal(res.status, 0, `${file} on benign ${event}: exit ${res.status} — ${res.stderr}`);
     }

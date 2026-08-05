@@ -28,7 +28,10 @@ function runHook(script, input, cwd, env = {}) {
     encoding: 'utf8',
     cwd,
     timeout: 60_000,
-    env: { ...process.env, ...env },
+    // H1's clone-currency probe is disabled by default: this battery runs
+    // DURING /sterling:update, so a hook test must never fetch. The currency
+    // test re-enables it against a local file remote.
+    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', ...env },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -189,6 +192,115 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     assert.match(JSON.parse(broken.stdout).hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions survive a corrupt config');
   } finally {
     cleanup();
+  }
+});
+
+test('H1 machine role (todo cabbc10f, decision a9b98b7d): stated only on a Sterling clone itself, one line per declared state', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // STERLING_PLUGIN_ROOT makes this tmp project LOOK like the plugin's own
+    // clone to pluginRoot() — the real walk-up always resolves to the actual
+    // repo the test process runs from, which this tmp dir is not.
+    const selfHosted = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: dir };
+
+    // absent → UNDECLARED, the safe posture
+    const undeclared = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    assert.match(undeclared.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED — treat as CONSUMER/);
+
+    // declared 'authoring'
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
+    const authoring = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    assert.match(authoring.hookSpecificOutput.additionalContext, /MACHINE ROLE: AUTHORING \(declared in \.sterling\/config\.json machine_role\)/);
+
+    // declared 'consumer'
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'consumer' }));
+    const consumer = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    assert.match(consumer.hookSpecificOutput.additionalContext, /MACHINE ROLE: CONSUMER — this clone consumes via \/sterling:update/);
+    assert.match(consumer.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions still present alongside the role line');
+
+    // NOT a clone (no STERLING_PLUGIN_ROOT override — this tmp dir is not the
+    // real plugin root the unmocked walk-up would find): no role line at all,
+    // even with machine_role declared.
+    const notAClone = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
+    assert.ok(!/MACHINE ROLE/.test(notAClone.hookSpecificOutput.additionalContext), 'no role line off the plugin\'s own clone');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 machine role: a malformed config on the plugin\'s own clone costs only the role line\'s specificity, never a crash', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
+    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, {
+      NO_COLOR: '1',
+      STERLING_PLUGIN_ROOT: dir,
+    });
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.match(out.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions survive a corrupt config even on the self-hosted clone');
+    assert.match(out.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED/, 'a malformed config reads as absent, the safe default — never a crash');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer clone behind origin warns BOTH surfaces; current or declared-authoring stays silent', () => {
+  const { dir, cleanup } = makeProject();
+  const base = mkdtempSync(join(tmpdir(), 'sterling-currency-'));
+  // real git against a LOCAL file remote — the probe's fetch works offline
+  const sh = (cwd, args) => {
+    const r = spawnSync('git', ['-c', 'user.email=t@sterling.test', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  try {
+    const origin = join(base, 'origin.git');
+    const author = join(base, 'author');
+    const clone = join(base, 'clone');
+    mkdirSync(author);
+    sh(base, ['init', '--bare', '--initial-branch=main', origin]);
+    sh(base, ['init', '--initial-branch=main', author]);
+    writeFileSync(join(author, 'f.txt'), 'v1\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'one']);
+    sh(author, ['remote', 'add', 'origin', origin]);
+    sh(author, ['push', '-u', 'origin', 'main']);
+    sh(base, ['clone', origin, clone]);
+    // origin moves ahead of the clone
+    writeFileSync(join(author, 'f.txt'), 'v2\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'two']);
+    sh(author, ['push']);
+
+    // TTL 0 → the fetch throttle never reads as fresh, so each run probes
+    const env = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: clone, STERLING_CURRENCY_DISABLE: '0', STERLING_CURRENCY_TTL_MS: '0' };
+    const behind = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    assert.match(behind.systemMessage, /Sterling is 1 update\(s\) behind/, 'the human is told, with the double-click remedy');
+    assert.match(behind.systemMessage, /sterling-update\.bat/);
+    assert.match(behind.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND \(H1\)/, 'the conductor is told');
+    assert.match(behind.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions intact alongside the signal');
+    assert.ok(existsSync(join(clone, '.git', 'sterling-update-check.json')), 'the fetch throttle is stamped');
+
+    // fast-forward the clone → silent IMMEDIATELY: behind is computed locally
+    // per session, never served from the cache
+    sh(clone, ['merge', '--ff-only', 'origin/main']);
+    const current = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    assert.doesNotMatch(current.systemMessage, /behind/, 'silent once current (P1)');
+    assert.doesNotMatch(current.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND/);
+
+    // a declared-authoring clone is never probed, even when genuinely behind
+    // (it lives on branches and ahead-of-origin states, where "behind" is noise)
+    writeFileSync(join(author, 'f.txt'), 'v3\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'three']);
+    sh(author, ['push']);
+    mkdirSync(join(clone, '.sterling'), { recursive: true });
+    writeFileSync(join(clone, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
+    const authoring = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    assert.doesNotMatch(authoring.systemMessage, /behind/, 'authoring machines opt out via their declared role');
+  } finally {
+    cleanup();
+    rmSync(base, { recursive: true, force: true });
   }
 });
 
@@ -651,7 +763,7 @@ test('H9: Stop blocked only while completing, naming outstanding promotion condi
 
 // --------------------------- H10 ---------------------------
 
-test('H10: capture nag once with reviewer selection, then capture_owed and release; capture clears it', () => {
+test('H10: capture nag once (no reviewer-selection block — board cac61a95, that is H2s job), then capture_owed and release; capture clears it', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src', 'auth'), { recursive: true });
@@ -663,8 +775,8 @@ test('H10: capture nag once with reviewer selection, then capture_owed and relea
     const nag = stop();
     assert.equal(nag.code, 2);
     assert.match(nag.stderr, /nothing was captured/);
-    assert.match(nag.stderr, /"reviewer":"correctness"/, 'deterministic reviewer selection is included');
-    assert.match(nag.stderr, /"reviewer":"security"/, 'auth/ path signal dispatches security');
+    assert.doesNotMatch(nag.stderr, /Reviewer selection for this diff/, 'the reviewer-selection block is demoted out of the H10 nag (board cac61a95)');
+    assert.doesNotMatch(nag.stderr, /"reviewer":/, 'no reviewer-selection JSON leaks into the capture nag');
 
     const second = stop();
     assert.equal(second.code, 0, 'second stop releases the session');
@@ -1648,6 +1760,98 @@ test('H10 AC5: a debug_scope event with zero touches and no capture triggers the
     assert.equal(second.code, 0, 'second Stop releases');
     assert.equal(owed(store, 'capture_owed').length, 1, 'the unmet debug capture duty enqueues capture_owed');
     assert.equal(existsSync(eventsPath(dir)), false, 'register cleared');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---- no-capture declaration (board 7bbec3bd: H10 fires on file count, not substance) ----
+// scripts/no-capture.mjs writes a no_capture session event; H10's capture duty treats
+// it as satisfying every touch/debug_scope event EARLIER than the declaration, while
+// work arriving AFTER it re-arms the duty.
+function writeTouchesAt(dir, entries) {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  for (const { path } of entries) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), '// touched\n');
+  }
+  writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify(entries));
+}
+const ncEvent = (reason, at = R_EVENT_AT) => ({ kind: 'no_capture', detail: reason, at });
+
+test('no-capture.mjs: --reason is required and refused when blank; a valid declaration appends a no_capture event', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const run = (args) => spawnSync(process.execPath, [join(root, 'scripts', 'no-capture.mjs'), ...args], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+
+    assert.notEqual(run([]).status, 0, 'no --reason at all is refused');
+    assert.notEqual(run(['--reason', '   ']).status, 0, 'a blank/whitespace-only reason is refused');
+    assert.equal(readSessionEvents(dir).length, 0, 'a refused declaration writes nothing');
+
+    const ok = run(['--reason', 'read-only investigation, nothing durable']);
+    assert.equal(ok.status, 0, ok.stderr);
+    const ev = readSessionEvents(dir).filter((e) => e.kind === 'no_capture');
+    assert.equal(ev.length, 1);
+    assert.equal(ev[0].detail, 'read-only investigation, nothing durable');
+    assert.ok(typeof ev[0].at === 'string' && ev[0].at.length > 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 no-capture duty: a declaration BEFORE the Stop covers earlier touches/debug events — no nag, registers clear', () => {
+  const touches = makeProject();
+  try {
+    writeTouchesAt(touches.dir, [{ path: 'src/a.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(touches.dir, [ncEvent('nothing durable', LATE_EVENT_AT)]); // declared AFTER the touch
+    const r = runHook('h10-direct-capture.mjs', hookInput(touches.dir, { hook_event_name: 'Stop' }), touches.dir);
+    assert.equal(r.code, 0, 'a no_capture declaration later than the touch satisfies the capture duty');
+    assert.equal(existsSync(join(touches.dir, '.sterling', 'transient', 'touches.json')), false, 'touches.json cleared');
+    assert.equal(existsSync(eventsPath(touches.dir)), false, 'session-events.json cleared');
+    assert.equal(owed(touches.store, 'capture_owed').length, 0, 'nothing owed — the duty was satisfied, not deferred');
+  } finally {
+    touches.cleanup();
+  }
+  const debug = makeProject();
+  try {
+    writeSessionEvents(debug.dir, [dEvent('src/probe.mjs', R_EVENT_AT), ncEvent('dead end, nothing to capture', LATE_EVENT_AT)]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(debug.dir, { hook_event_name: 'Stop' }), debug.dir);
+    assert.equal(r.code, 0, 'a no_capture declaration later than the debug_scope event also satisfies the duty');
+    assert.equal(existsSync(eventsPath(debug.dir)), false, 'session-events.json cleared');
+  } finally {
+    debug.cleanup();
+  }
+});
+
+test('H10 no-capture duty: work arriving AFTER the declaration re-arms it — nag fires for the new touch only', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/old.mjs', at: R_EVENT_AT }, { path: 'src/new.mjs', at: LATE_EVENT_AT }]);
+    writeSessionEvents(dir, [ncEvent('old work already declared', CAPTURE_AT)]); // between old and new
+    const stop = (over = {}) => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', ...over }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'the touch AFTER the declaration re-arms the capture duty');
+    assert.match(nag.stderr, /touched 1 file/, 'only the post-declaration touch counts — the declared one does not');
+    assert.match(nag.stderr, /no-capture\.mjs/, 'the nag names the no-capture escape hatch');
+    assert.match(nag.stderr, /false declaration is drift/, 'and warns that a false declaration is drift');
+
+    const release = stop();
+    assert.equal(release.code, 0, 'second Stop releases');
+    const items = owed(store, 'capture_owed');
+    assert.equal(items.length, 1);
+    assert.deepEqual([...items[0].file_keys], ['src/new.mjs'], 'the owed item carries only the re-armed touch');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 no-capture duty: an old declaration does not retroactively cover a LATER unrelated debug_scope event', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [ncEvent('first thing, nothing durable', R_EVENT_AT), dEvent('src/second.mjs', LATE_EVENT_AT)]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2, 'the debug_scope event postdates the declaration, so the duty is armed again');
   } finally {
     cleanup();
   }
