@@ -440,6 +440,98 @@ test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed f
   }
 });
 
+test('direct-merge.mjs: pushes the base to origin after the merge (--no-push opts out); a worktree-pinned merged branch is skipped, never a sweep failure', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  const outside = mkdtempSync(join(tmpdir(), 'sterling-dm-push-'));
+  try {
+    // a local bare origin the push can land on — no network, no credentials
+    const originDir = join(outside, 'origin.git');
+    git(outside, ['init', '--bare', '-b', 'main', originDir]);
+    git(dir, ['remote', 'add', 'origin', originDir]);
+    git(dir, ['push', '-u', 'origin', 'main']);
+
+    // a merged branch PINNED by a worktree (outside the repo — an inside path
+    // would trip the dirty-tree refusal): git refuses to delete it, and the old
+    // sweep failed the whole gate over that housekeeping
+    git(dir, ['branch', 'pinned/merged']);
+    git(dir, ['worktree', 'add', join(outside, 'wt'), 'pinned/merged']);
+
+    git(dir, ['checkout', '-b', 'feat/push']);
+    writeFileSync(join(dir, 'src', 'p.mjs'), 'export const p = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'p']);
+
+    const r = runDirectMerge(dir);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.pushed, true, 'the merge is pushed to origin');
+    assert.ok(!out.branches_swept.includes('pinned/merged'), 'worktree-pinned branch is not in the swept list');
+    assert.ok(git(dir, ['branch', '--list', 'pinned/merged']).includes('pinned/merged'), 'pinned branch survives the sweep');
+    assert.equal(git(originDir, ['rev-parse', 'main']), git(dir, ['rev-parse', 'main']), 'origin main equals local main');
+
+    // --no-push: the merge lands locally, the push is skipped LOUD
+    git(dir, ['checkout', '-b', 'feat/local']);
+    writeFileSync(join(dir, 'src', 'l.mjs'), 'export const l = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'l']);
+    const noPush = runDirectMerge(dir, ['--no-push']);
+    assert.equal(noPush.status, 0, noPush.stderr);
+    assert.equal(JSON.parse(noPush.stdout).pushed, false);
+    assert.match(noPush.stderr, /push to origin SKIPPED/);
+    assert.notEqual(git(originDir, ['rev-parse', 'main']), git(dir, ['rev-parse', 'main']), 'origin must NOT have the --no-push merge');
+  } finally {
+    cleanup();
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('direct-merge.mjs: an unbumped version refuses when the diff goes beyond generated projections; diverged fields refuse; a bump (or --allow-same-version) merges (decision be9168e8)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    // a plugin-shaped repo: manifest + package.json at 0.1.0 on the base
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'fixture', version: '0.1.0' }));
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', version: '0.1.0' }));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'versioned base']);
+
+    git(dir, ['checkout', '-b', 'feat/unbumped']);
+    writeFileSync(join(dir, 'src', 'v.mjs'), 'export const v = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'substantive change, no bump']);
+
+    const refused = runDirectMerge(dir);
+    assert.notEqual(refused.status, 0, 'a substantive diff with an unmoved version must refuse');
+    assert.match(refused.stderr, /version .* did not move|did not move/);
+
+    // diverged fields refuse even after a bump attempt
+    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'fixture', version: '0.1.1' }));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'bump plugin only']);
+    const diverged = runDirectMerge(dir);
+    assert.notEqual(diverged.status, 0);
+    assert.match(diverged.stderr, /DIVERGED/);
+
+    // both fields moved together → merges
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', version: '0.1.1' }));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'bump package.json too']);
+    const ok = runDirectMerge(dir);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(JSON.parse(ok.stdout).branch_merged, 'feat/unbumped');
+
+    // --allow-same-version: the deliberate escape for a no-bump merge
+    git(dir, ['checkout', '-b', 'feat/nobump']);
+    writeFileSync(join(dir, 'src', 'w.mjs'), 'export const w = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'no bump, waived']);
+    const waived = runDirectMerge(dir, ['--allow-same-version']);
+    assert.equal(waived.status, 0, waived.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
 test('test-integrity: frozen baseline detects modification and deletion; clean baseline passes (§9.2)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ti-'));
   try {
