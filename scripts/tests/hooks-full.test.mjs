@@ -2875,3 +2875,129 @@ test('H10 slice boundary: no git degrades LOUD and open — soft + non-repo neve
     cleanup();
   }
 });
+
+// --------------------------- Rotation note + H1 restore (context-rotation slice 3) ---------------------------
+// scripts/rotation-note.mjs writes the single-slot transient note; H1 injects and
+// CONSUMES it on SessionStart source=clear only. Fail-open everywhere (H1 is soft).
+
+const ROTATION_SCRIPT = join(root, 'scripts', 'rotation-note.mjs');
+
+function runRotationNote(dir, args) {
+  return spawnSync(process.execPath, [ROTATION_SCRIPT, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+}
+
+function readRotationNote(dir) {
+  const p = join(dir, '.sterling', 'transient', 'rotation-note.json');
+  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+}
+
+function h1(dir, over = {}) {
+  const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart', ...over }), dir, {
+    STERLING_NO_BANNER: '1',
+    STERLING_PLUGIN_ROOT: root,
+  });
+  let out = null;
+  try {
+    out = JSON.parse(r.stdout);
+  } catch {
+    // caller asserts
+  }
+  return { ...r, out };
+}
+
+test('rotation-note.mjs: refuses a missing/empty --next-slice; refuses outside a Sterling project', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const bare = runRotationNote(dir, []);
+    assert.notEqual(bare.status, 0, 'missing --next-slice refused');
+    assert.match(bare.stderr + bare.stdout, /next-slice/);
+    const empty = runRotationNote(dir, ['--next-slice', '   ']);
+    assert.notEqual(empty.status, 0, 'blank --next-slice refused');
+    const outside = spawnSync(process.execPath, [ROTATION_SCRIPT, '--next-slice', 'x'], { cwd: tmpdir(), encoding: 'utf8' });
+    assert.notEqual(outside.status, 0, 'non-Sterling cwd refused');
+  } finally {
+    cleanup();
+  }
+});
+
+test('rotation-note.mjs: writes the single-slot note with git anchors; a rewrite supersedes (latest wins)', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const r = runRotationNote(dir, ['--next-slice', 'Finish Goblin animations', '--objective', 'Animation pass', '--risks', 'shader cache flaky']);
+    assert.equal(r.status, 0, r.stderr);
+    const note = readRotationNote(dir);
+    assert.equal(note.next_slice, 'Finish Goblin animations');
+    assert.equal(note.objective, 'Animation pass');
+    assert.equal(note.risks, 'shader cache flaky');
+    assert.match(note.head_sha, /^[0-9a-f]{40}$/, 'git HEAD anchored');
+    assert.ok(note.branch, 'branch anchored');
+    assert.ok(note.at, 'timestamped');
+    assert.equal(runRotationNote(dir, ['--next-slice', 'Skeleton instead']).status, 0);
+    assert.equal(readRotationNote(dir).next_slice, 'Skeleton instead', 'single slot — latest wins');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore: source=clear injects the note into additionalContext and CONSUMES it (single shot)', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'Finish Goblin animations', '--risks', 'shader cache flaky']).status, 0);
+    const r = h1(dir, { source: 'clear' });
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    assert.match(ctx, /Finish Goblin animations/);
+    assert.match(ctx, /shader cache flaky/);
+    assert.equal(readRotationNote(dir), null, 'note consumed by the injection');
+    const again = h1(dir, { source: 'clear' });
+    assert.doesNotMatch(again.out.hookSpecificOutput.additionalContext, /ROTATION RESTORE/, 'no re-injection');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore: source=startup/resume neither injects nor consumes; conventions intact throughout', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'Finish Goblin animations']).status, 0);
+    for (const source of ['startup', 'resume']) {
+      const r = h1(dir, { source });
+      assert.doesNotMatch(r.out.hookSpecificOutput.additionalContext, /ROTATION RESTORE/, `${source} does not inject`);
+      assert.match(r.out.hookSpecificOutput.additionalContext, /Sterling conventions/, 'conventions intact');
+      assert.ok(readRotationNote(dir), `${source} does not consume`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore: a HEAD moved since the note is disclosed as a CAUTION, injection still lands', () => {
+  const { dir, dirty, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'Finish Goblin animations']).status, 0);
+    dirty();
+    const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    g(['add', '-A']);
+    g(['commit', '-qm', 'moved']);
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    assert.match(ctx, /HEAD has MOVED/i, 'delta disclosed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 hard pressure names the rotation protocol: rotation note + READY TO CLEAR', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 170_000); // 85% — hard
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /rotation-note\.mjs/, 'names the writer');
+    assert.match(r.stderr, /READY TO CLEAR/, 'names the protocol');
+  } finally {
+    cleanup();
+  }
+});

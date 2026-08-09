@@ -4,7 +4,7 @@
 // invisible; this is its visibility pressure. Banner art goes to stderr
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
-import { readFileSync, existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -230,6 +230,52 @@ try {
   // fail-open — the currency probe must never break or delay SessionStart beyond its timeouts
 }
 
+// ROTATION RESTORE (context-rotation slice 3): a rotation note written by
+// scripts/rotation-note.mjs before a /clear is injected into the FRESH session
+// and CONSUMED by that injection — source=clear ONLY (startup/resume have their
+// own truths and must not eat a note prepared for a rotation that hasn't
+// happened). Single-shot by deletion-before-build (P4): even a later failure in
+// this block cannot leave a note that re-injects forever. Disclosures over
+// refusals: a moved HEAD or an old note still injects, loudly qualified — the
+// store/board stay the authorities; the note is only the non-reconstructable
+// residue. Fail-open like every H1 read.
+let rotationContext = '';
+try {
+  if (input.source === 'clear') {
+    const notePath = join(input.cwd, '.sterling', 'transient', 'rotation-note.json');
+    if (existsSync(notePath)) {
+      const note = JSON.parse(readFileSync(notePath, 'utf8'));
+      rmSync(notePath, { force: true }); // consume FIRST — a note serves exactly one restore
+      const head = (() => {
+        try {
+          const r = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: input.cwd, encoding: 'utf8', timeout: 5_000 });
+          return r.status === 0 ? (r.stdout ?? '').trim() : null;
+        } catch {
+          return null;
+        }
+      })();
+      const cautions = [];
+      if (note.head_sha && head && head !== note.head_sha) {
+        cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} → ${head.slice(0, 8)}) — re-verify repository state before acting on it`);
+      }
+      const ageMs = Date.now() - Date.parse(note.at ?? '');
+      if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1000) {
+        cautions.push(`the note is ~${Math.round(ageMs / 3_600_000)}h old`);
+      }
+      const fields = ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'at']
+        .filter((k) => note[k])
+        .map((k) => `- ${k}: ${note[k]}`)
+        .join('\n');
+      rotationContext =
+        `\n\nROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` +
+        (cautions.length ? ` CAUTION: ${cautions.join('; ')}.` : '') +
+        `\n${fields}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold.`;
+    }
+  }
+} catch {
+  // fail-open — a malformed note costs the restore, never the conventions injection
+}
+
 let counts = { todos: 0, maintenance: 0 };
 let queueReasons = [];
 let drainable = 0;
@@ -412,7 +458,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + rotationContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

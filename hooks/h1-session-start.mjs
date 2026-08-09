@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname as dirname5, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6125,6 +6125,39 @@ STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit
   }
 } catch {
 }
+var rotationContext = "";
+try {
+  if (input.source === "clear") {
+    const notePath = join4(input.cwd, ".sterling", "transient", "rotation-note.json");
+    if (existsSync3(notePath)) {
+      const note = JSON.parse(readFileSync2(notePath, "utf8"));
+      rmSync(notePath, { force: true });
+      const head = (() => {
+        try {
+          const r = spawnSync("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+          return r.status === 0 ? (r.stdout ?? "").trim() : null;
+        } catch {
+          return null;
+        }
+      })();
+      const cautions = [];
+      if (note.head_sha && head && head !== note.head_sha) {
+        cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
+      }
+      const ageMs = Date.now() - Date.parse(note.at ?? "");
+      if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
+        cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
+      }
+      const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).join("\n");
+      rotationContext = `
+
+ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
+${fields}
+Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold.`;
+    }
+  }
+} catch {
+}
 var counts = { todos: 0, maintenance: 0 };
 var queueReasons = [];
 var drainable = 0;
@@ -6228,7 +6261,7 @@ ${versionLine}`);
 }
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + rotationContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

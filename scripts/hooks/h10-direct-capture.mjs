@@ -118,9 +118,15 @@ try {
     dirtyPaths > 0
       ? ` Working tree: ${dirtyPaths} uncommitted path(s) — finish the open slice to a COMMIT BOUNDARY (branch-local commit) before opening new work.`
       : '';
+  // The rotation writer lives in the plugin clone, not the target project (same
+  // resolution as the no-capture remedy below): print the absolute path when the
+  // platform provides it, so the command works from any project's shell cwd.
+  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT
+    ? `node "${join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts', 'rotation-note.mjs')}"`
+    : 'node scripts/rotation-note.mjs';
   const pressurePart = () =>
     pressure.level === 'hard'
-      ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents — the conductor's context is the scarce resource (P1).${boundaryLine()} This notice fires once per session.`
+      ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents — the conductor's context is the scarce resource (P1).${boundaryLine()} Once the open slice is committed and captures are settled, prepare ROTATION: ${rotationCmd} --next-slice "<the exact next slice>" (--objective/--risks/--pointers optional), then tell the user READY TO CLEAR — H1 restores and consumes the note automatically in the fresh session. This notice fires once per session.`
       : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ soft threshold ${config.context_watch.conductor.soft_pct}% — prefer finishing open work over opening large new areas; delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
