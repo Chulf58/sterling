@@ -2763,3 +2763,22 @@ test('H10 conductor pressure: stop_hook_active suppresses the standalone hard de
     cleanup();
   }
 });
+
+test('H10 conductor pressure: fill > 100% is window MISCONFIGURATION, not pressure — unknown + check_skipped, no false hard block (live 2026-08-09)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 260_000); // 130% of the 200k default — impossible with a correct denominator
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'misconfigured window never blocks');
+    const sample = readPressureFile(dir);
+    assert.equal(sample.level, 'unknown');
+    assert.equal(sample.reason, 'window_mismatch');
+    assert.ok(sample.fill_pct > 100, 'raw fill preserved as evidence');
+    assert.ok(
+      store.listCheckSkipped().some((c) => c.check_name === 'conductor-pressure' && /window_mismatch/.test(c.reason)),
+      'misconfiguration recorded loud'
+    );
+  } finally {
+    cleanup();
+  }
+});

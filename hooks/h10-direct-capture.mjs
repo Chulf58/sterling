@@ -6001,8 +6001,13 @@ try {
       } else {
         const windowSize = model && cw.windows[model] || cw.windows.default;
         const fill = fillPct(usage, windowSize);
-        const level = fill >= cw.conductor.hard_pct ? "hard" : fill >= cw.conductor.soft_pct ? "soft" : "below_soft";
-        sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+        if (fill > 100) {
+          store.recordCheckSkipped("conductor-pressure", `window_mismatch:${model ?? "unknown-model"}:${fill.toFixed(1)}pct`, void 0, now);
+          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", at: now };
+        } else {
+          const level = fill >= cw.conductor.hard_pct ? "hard" : fill >= cw.conductor.soft_pct ? "soft" : "below_soft";
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+        }
       }
       mkdirSync2(join2(input.cwd, ".sterling", "transient"), { recursive: true });
       writeFileSync(join2(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));

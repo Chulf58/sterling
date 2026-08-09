@@ -67,8 +67,17 @@ try {
       } else {
         const windowSize = (model && cw.windows[model]) || cw.windows.default;
         const fill = fillPct(usage, windowSize);
-        const level = fill >= cw.conductor.hard_pct ? 'hard' : fill >= cw.conductor.soft_pct ? 'soft' : 'below_soft';
-        sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+        if (fill > 100) {
+          // Impossible with a correct denominator — the windows map lacks this model's true
+          // window (observed live 2026-08-09: 129.3% on a fable session vs the 200k default).
+          // Evidence of MISCONFIGURATION, not pressure: classify unknown + check_skipped
+          // (loud, fail-open) instead of false-hard-blocking every session on this machine.
+          store.recordCheckSkipped('conductor-pressure', `window_mismatch:${model ?? 'unknown-model'}:${fill.toFixed(1)}pct`, undefined, now);
+          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', at: now };
+        } else {
+          const level = fill >= cw.conductor.hard_pct ? 'hard' : fill >= cw.conductor.soft_pct ? 'soft' : 'below_soft';
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+        }
       }
       mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
       writeFileSync(join(input.cwd, '.sterling', 'transient', 'conductor-pressure.json'), JSON.stringify(sample));
