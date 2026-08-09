@@ -31,6 +31,7 @@ import {
   renderArticle,
   renderReference,
   renderHazards,
+  cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
   renderPayload,
@@ -123,12 +124,14 @@ try {
 
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
   const blocks = [
-    ...renderHazards(freshHazards, charCap),
+    ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
     ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
     ...(freshDecisions.length ? [renderDecisionPointers(rels.join(', '), freshDecisions)] : []),
   ];
   const payload = renderPayload(rels.join(', '), blocks, { unowned: false });
-  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  // Hazards guard the severity-sorted RENDERED slice only (board a470046d
+  // slice 1) — same AC8 rule as the decision slice beside it.
+  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
 
   // Side effect first, guard second (council wf_db9a59aa-0af precedent,
   // mirrored from h19-knowledge-delivery.mjs): a throw before this line leaves

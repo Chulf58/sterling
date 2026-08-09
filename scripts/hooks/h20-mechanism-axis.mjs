@@ -51,6 +51,7 @@ import {
   renderDecisionPointers,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
+  HAZARD_CAP,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -58,7 +59,9 @@ import {
 // join, so it earns less of the reader's attention. Also note the separate
 // finding that config.delivery.payload_char_cap is applied per FIELD and does
 // not bound a payload at all — so these counts are the real bound here.
-const MAX_HAZARDS = 3;
+// The hazard ceiling is the ONE shared definition (HAZARD_CAP, invariant 1):
+// since board a470046d slice 1, H19's path-scoped hazard block caps at the
+// same count, so the two channels share the bound.
 const MAX_DECISIONS = 5;
 const NARROW_CLIP = 700;
 
@@ -116,7 +119,7 @@ try {
   const fresh = scored.filter((x) => !guard.records.includes(x.record.id));
   if (!fresh.length) allow();
 
-  const hazards = fresh.filter((x) => x.record.type === 'anti_pattern').slice(0, MAX_HAZARDS);
+  const hazards = fresh.filter((x) => x.record.type === 'anti_pattern').slice(0, HAZARD_CAP);
   const decisions = fresh.filter((x) => x.record.type === 'decision').slice(0, MAX_DECISIONS);
   if (!hazards.length && !decisions.length) allow();
 

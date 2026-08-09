@@ -293,9 +293,29 @@ export function renderReference(ref) {
 // (the schema leaves it optional, and most records omit it).
 const HAZARD_RANK = { block: 0, warn: 1, info: 2 };
 
+/** How many hazard blocks render before the rest are disclosed as dropped.
+ *  ONE definition (invariant 1) — H20's dispatch ceiling reuses it. Added
+ *  2026-08-09 (board a470046d slice 1): ca23c811's no-cap clause was premised on
+ *  measured volume ('0-1 per file'); a hub file then delivered ~25 records for a
+ *  one-block edit, falsifying the premise — capping now HONORS the ruling's own
+ *  anti-flood reasoning (P1/P6). Distinct from payload_char_cap, which clips per
+ *  FIELD and bounds no payload. */
+export const HAZARD_CAP = 3;
+
+/** The severity-sorted survivors the cap keeps — exported so callers guard
+ *  exactly what RENDERED (AC8): a hazard capped out of a payload is never marked
+ *  delivered, so it surfaces on a later touch instead of being lost silently. */
+export function cappedHazards(hazards, cap = HAZARD_CAP) {
+  return [...hazards]
+    .sort((a, b) => (HAZARD_RANK[a.severity ?? 'warn'] ?? 1) - (HAZARD_RANK[b.severity ?? 'warn'] ?? 1))
+    .slice(0, cap);
+}
+
 /** Hazard blocks for the anti_patterns whose file_keys name this path, most
- *  severe first. ALL matches render — measured before choosing the shape
- *  (2026-07-30): anti-patterns are low-volume per file, unlike decisions.
+ *  severe first, capped at HAZARD_CAP with the overflow STATED (never silent —
+ *  a silent cap reads as 'that is all there is', the same failure the decision
+ *  pointer cap discloses against). The cap applies AFTER the severity sort, so
+ *  the dropped hazards are always the least severe.
  *
  *  WHY THIS EXISTS (defect reported from a consuming project 2026-07-30,
  *  decision ca23c811): delivery's owner query was articles-only, so an
@@ -306,16 +326,22 @@ const HAZARD_RANK = { block: 0, warn: 1, info: 2 };
  *  one-way-latch bug in territory that had a stored one-way-latch anti_pattern.
  *  Substance (trigger + right_way), not a pointer: a pointer to a hazard the
  *  reader must choose to follow reproduces the skippable step delivery deletes. */
-export function renderHazards(hazards, charCap) {
-  return [...hazards]
-    .sort((a, b) => (HAZARD_RANK[a.severity ?? 'warn'] ?? 1) - (HAZARD_RANK[b.severity ?? 'warn'] ?? 1))
-    .map((ap) =>
-      [
-        `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}' (full record: knowledge_get ${ap.id})`,
-        `TRIGGER: ${clip(ap.trigger, charCap)}`,
-        `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
-      ].join('\n')
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = shown.map((ap) =>
+    [
+      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `TRIGGER: ${clip(ap.trigger, charCap)}`,
+      `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
+    ].join('\n')
+  );
+  if (hazards.length > shown.length) {
+    const keys = fileKeys.map((k) => `"${k}"`).join(',');
+    blocks.push(
+      `… ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) — knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length} for the full set`
     );
+  }
+  return blocks;
 }
 
 /** How many decision pointers render before the rest are disclosed as dropped. */

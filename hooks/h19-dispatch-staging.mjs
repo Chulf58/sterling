@@ -5970,14 +5970,26 @@ function renderReference(ref) {
   return `\u25B8 reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? "", 200)} \u2014 refresh via knowledge_get ${ref.id}`;
 }
 var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
-function renderHazards(hazards, charCap) {
-  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).map(
+var HAZARD_CAP = 3;
+function cappedHazards(hazards, cap = HAZARD_CAP) {
+  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
+}
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = shown.map(
     (ap) => [
       `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
   );
+  if (hazards.length > shown.length) {
+    const keys = fileKeys.map((k) => `"${k}"`).join(",");
+    blocks.push(
+      `\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length} for the full set`
+    );
+  }
+  return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
@@ -6060,12 +6072,12 @@ try {
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
   const blocks = [
-    ...renderHazards(freshHazards, charCap),
+    ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
     ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
     ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
   ];
   const payload = renderPayload(rels.join(", "), blocks, { unowned: false });
-  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: payload } }));
   guard.records.push(...fresh.map((r) => r.id));
   writeGuard(gPath, guard);
