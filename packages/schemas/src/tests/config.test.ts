@@ -177,3 +177,12 @@ test('conductor pressure thresholds (context-rotation slice 1): defaults 65/80, 
   assert.equal(shipped.context_watch.conductor.soft_pct, 65, 'shipped default carries the conductor block');
   assert.equal(shipped.context_watch.conductor.hard_pct, 80);
 });
+
+test('conductor pressure: shipped windows map carries verified per-model context windows (live probe 2026-08-09 — 200k default misclassified a 1M-window session)', () => {
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
+  assert.equal(shipped.context_watch.windows['claude-fable-5'], 1_000_000);
+  assert.equal(shipped.context_watch.windows['claude-opus-5'], 1_000_000);
+  assert.equal(shipped.context_watch.windows['claude-sonnet-5'], 1_000_000);
+  assert.equal(shipped.context_watch.windows['claude-haiku-4-5'], 200_000);
+  assert.equal(shipped.context_watch.windows.default, 200_000, 'unknown models stay conservative — mismatch degrades loud, never false-blocks');
+});
