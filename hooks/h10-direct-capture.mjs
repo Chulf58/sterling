@@ -4613,7 +4613,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture", "capture_pending"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -5971,6 +5971,8 @@ try {
   }
   const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
   const latestNoCapture = noCaptureEvents.length ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1) : null;
+  const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
+  const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
   const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync3(join2(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
@@ -6022,6 +6024,33 @@ try {
     clearRegisters();
     allow();
   }
+  if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    if (!existsSync3(nagMarker)) {
+      writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+      allow();
+    }
+    const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
+    if (!openPending) {
+      store.create({
+        id: randomUUID2(),
+        type: "todo",
+        created_at: now,
+        updated_at: now,
+        author: "system",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close`,
+        source: "system",
+        system_reason: "capture_owed",
+        file_keys: activePaths.slice(0, 20)
+      });
+    }
+    clearRegisters();
+    allow();
+  }
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = "";
   if (hasCaptureDuty && !captured && activePaths.some((p) => testGlobs.some((g) => matchesGlob(p, g)))) {
@@ -6036,18 +6065,19 @@ Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${J
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [];
     const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
-    if (hasCaptureDuty && !captured) {
+    if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;
+      const declareLine = `Or declare: nothing durable \u2192 the no_capture MCP tool (or ${noCaptureCmd} --reason "<why>"); capture drafted and riding an in-flight commit/agent \u2192 the capture_pending MCP tool. A false declaration is drift.`;
       if (hasDebug) {
         let capturePart = `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).
 Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).
-Or, if there is genuinely nothing durable, declare it: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).`;
+` + declareLine;
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
         parts.push(
           `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).
-Capture what was learned inline (knowledge_create), or declare there is nothing durable: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).` + integrityNote
+Capture what was learned inline (knowledge_create). ${declareLine}` + integrityNote
         );
       }
     }
@@ -6087,7 +6117,7 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
+        text: pendingDetail ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close` : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
         source: "system",
         system_reason: "capture_owed",
         file_keys: activePaths.slice(0, 20)

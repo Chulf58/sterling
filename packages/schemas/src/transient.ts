@@ -113,9 +113,17 @@ export type MachineState = z.infer<typeof machineState>;
 // an explicit declaration that a Stop produced nothing durable, satisfying
 // H10's capture duty for every touch/debug_scope event EARLIER than it; work
 // arriving after the declaration re-arms the duty. A false declaration is
-// drift, not a bypass). Never a durable store record.
+// drift, not a bypass). Since 2026-08-09 (board 1af5d630/75b1a05f) no_capture,
+// concept_designed and the SIXTH kind capture_pending are also writable via
+// the MCP tool surface — the scripts stay as the no-server fallback.
+// capture_pending: detail carries "<target> — <reason>", declaring the capture
+// EXISTS and its write is in flight on a named commit/agent/lane; H10 defers
+// the capture duty one Stop (registers preserved, so a landed write settles
+// cleanly) and converts a still-pending duty to ONE deduped capture_owed item
+// on the next — pending work defers or lands on the queue, never evaporates.
+// Never a durable store record.
 export const sessionEventSchema = z.object({
-  kind: z.enum(['research_tool', 'agent_dispatch', 'debug_scope', 'concept_designed', 'no_capture']),
+  kind: z.enum(['research_tool', 'agent_dispatch', 'debug_scope', 'concept_designed', 'no_capture', 'capture_pending']),
   detail: z.string().min(1),
   at: z.string().min(1),
 });

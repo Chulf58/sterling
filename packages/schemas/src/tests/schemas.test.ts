@@ -418,7 +418,7 @@ test('§11 drain verbs: every maintenance lane has its completed-section verb (t
 
 // ------------------- session-event register (run r-0501: session-event-register) -------------------
 
-test('sessionEventSchema: the five register kinds parse; unknown kind + missing fields rejected (interface slice 1; no_capture added board 7bbec3bd)', async () => {
+test('sessionEventSchema: the six register kinds parse; unknown kind + missing fields rejected (interface slice 1; no_capture board 7bbec3bd; capture_pending board 1af5d630)', async () => {
   // dynamic import + cast: sessionEventSchema does not exist until this phase ships, so a
   // missing export must fail an ASSERTION below — never a compile-time reference to a
   // not-yet-declared symbol (that would break the package build; a crash-red proves nothing).
@@ -437,9 +437,12 @@ test('sessionEventSchema: the five register kinds parse; unknown kind + missing 
   assert.equal(s.parse({ kind: 'concept_designed', detail: 'weapons', at: NOW }).kind, 'concept_designed');
   // no_capture (board 7bbec3bd): detail carries the REASON for the declaration
   assert.equal(s.parse({ kind: 'no_capture', detail: 'read-only investigation, nothing durable', at: NOW }).kind, 'no_capture');
+  // capture_pending (board 1af5d630): detail carries "<target> — <reason>" — the
+  // truthful middle state between captured and nothing-durable
+  assert.equal(s.parse({ kind: 'capture_pending', detail: 'commit wave-3 — decisions drafted, riding the gated commit', at: NOW }).kind, 'capture_pending');
 
-  // kind is a closed enum of exactly the five register writers
-  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the five writers is rejected');
+  // kind is a closed enum of exactly the six register writers
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the six writers is rejected');
   // detail is a required string; at is required
   assert.throws(() => s.parse({ kind: 'research_tool', at: NOW }), 'detail is required');
   assert.throws(() => s.parse({ kind: 'research_tool', detail: 42, at: NOW }), 'detail must be a string');

@@ -110,6 +110,17 @@ try {
   const latestNoCapture = noCaptureEvents.length
     ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1)
     : null;
+
+  // Capture-pending declaration (board 1af5d630, decision follows e23f38f8):
+  // the capture EXISTS and its write is in flight on a named target (detail =
+  // "<target> — <reason>"). Unlike no_capture it covers LATER work too — the
+  // whole point is that wave work keeps arriving while the capture rides a
+  // pending commit, and per-batch re-declaration is the boilerplate loop that
+  // trains false declarations (six in ~90 minutes, measured 2026-08-09).
+  // Safe because the debt cannot evaporate: the deferral below either settles
+  // on a landed write or converts to a deduped capture_owed item.
+  const capturePendingEvents = sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail);
+  const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
   const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
@@ -199,6 +210,52 @@ try {
     allow();
   }
 
+  // CAPTURE-PENDING DEFERRAL (board 1af5d630). Only the CAPTURE duty is
+  // deferrable, and only when every other duty is satisfied — a pending
+  // declaration must never mute a research/concept/article demand it says
+  // nothing about. First pending Stop: allow WITHOUT clearing the registers —
+  // a deliberate, narrow exception to the clear-on-terminal rule, because this
+  // release is NOT terminal: the duty stays armed so a write that lands before
+  // the next Stop settles it cleanly with zero queue noise. Second pending
+  // Stop: the write still has not landed — convert the debt to ONE deduped
+  // capture_owed item citing the target, then clear (P5: pending work defers
+  // or lands on the queue, never evaporates). The shared nag marker doubles as
+  // the once-only counter, exactly as it does for the soft-block.
+  if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    // The marker ALONE is the once-only counter here — deliberately no
+    // stop_hook_active clause (review finding 1, 2026-08-09): that clause
+    // guards against re-BLOCKING in a deny loop, and this branch ALLOWS. With
+    // it, a pending declaration whose first Stop happened to follow some other
+    // hook's deny would lose its whole grace period and mint a false debt.
+    if (!existsSync(nagMarker)) {
+      writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+      allow(); // registers deliberately NOT cleared — see above
+    }
+    const openPending = store
+      .query({ types: ['todo'], cap: 1000 })
+      .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
+    if (!openPending) {
+      store.create({
+        id: randomUUID(),
+        type: 'todo',
+        created_at: now,
+        updated_at: now,
+        author: 'system',
+        status: 'active',
+        superseded_by: null,
+        links: [],
+        scope: 'project',
+        stack_tags: [],
+        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close`,
+        source: 'system',
+        system_reason: 'capture_owed',
+        file_keys: activePaths.slice(0, 20),
+      });
+    }
+    clearRegisters();
+    allow();
+  }
+
   // test-touching → test-integrity vs git HEAD (§8.2); non-git degrades loud.
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = '';
@@ -228,19 +285,24 @@ try {
     // Reviewer advice is NOT this hook's business (board cac61a95): it repeated
     // identically on every firing and had gone unread; H2's selection-inject
     // surface is the place for that, not a capture-demand message.
-    if (hasCaptureDuty && !captured) {
+    // A capture_pending declaration suppresses the capture nag — the deferral
+    // block above owns that lane end-to-end (other unmet duties still nag).
+    if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;
+      const declareLine =
+        `Or declare: nothing durable → the no_capture MCP tool (or ${noCaptureCmd} --reason "<why>"); ` +
+        `capture drafted and riding an in-flight commit/agent → the capture_pending MCP tool. A false declaration is drift.`;
       if (hasDebug) {
         let capturePart =
           `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).\n` +
           `Capture what was learned inline — expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).\n` +
-          `Or, if there is genuinely nothing durable, declare it: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).`;
+          declareLine;
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
         parts.push(
           `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
-            `Capture what was learned inline (knowledge_create), or declare there is nothing durable: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).` +
+            `Capture what was learned inline (knowledge_create). ${declareLine}` +
             integrityNote
         );
       }
@@ -293,7 +355,9 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
+        text: pendingDetail
+          ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close`
+          : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
         source: 'system',
         system_reason: 'capture_owed',
         file_keys: activePaths.slice(0, 20),

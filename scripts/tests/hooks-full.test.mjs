@@ -1889,6 +1889,87 @@ test('H10 no-capture duty: an old declaration does not retroactively cover a LAT
   }
 });
 
+// ---- capture-pending deferral (board 1af5d630: the truthful middle state) ----
+// capture_pending declares the capture EXISTS and its write is in flight on a
+// named target. Unlike no_capture it covers LATER work too — wave work keeps
+// arriving while the capture rides a pending commit, and per-batch
+// re-declaration is the boilerplate loop that trains false declarations.
+const cpEvent = (detail, at = CAPTURE_AT) => ({ kind: 'capture_pending', detail, at });
+
+test('H10 capture-pending: covers later work, defers one Stop with registers PRESERVED, then converts to ONE capture_owed citing the target', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/old.mjs', at: R_EVENT_AT }, { path: 'src/new.mjs', at: LATE_EVENT_AT }]);
+    writeSessionEvents(dir, [cpEvent('commit wave-3 — decisions drafted, riding the gated commit')]); // touches exist BOTH before and after it
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const first = stop();
+    assert.equal(first.code, 0, 'pending covers touches before AND after the declaration — no nag, no re-declaration loop');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), true, 'registers survive the deferral — this release is deliberately NOT terminal, so a landed write can settle the duty cleanly');
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no debt minted on the first deferral');
+
+    const second = stop();
+    assert.equal(second.code, 0, 'still pending on the next Stop — released, not trapped (P1)');
+    const items = owed(store, 'capture_owed');
+    assert.equal(items.length, 1, 'the debt lands on the queue exactly once');
+    assert.match(items[0].text, /declared pending \(commit wave-3 — decisions drafted, riding the gated commit\)/, 'the owed item cites the pending target, so the drain can verify it landed');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), false, 'conversion IS terminal — registers clear together (P4)');
+    assert.equal(existsSync(eventsPath(dir)), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: a write landing between Stops settles the duty cleanly — zero queue noise', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/a.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(dir, [cpEvent('librarian lane — article append in flight')]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(stop().code, 0, 'deferred');
+    decisionAfter(store); // the in-flight write lands
+    assert.equal(stop().code, 0);
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no debt — the landed write paid the duty, which is why the registers had to survive the deferral');
+    assert.equal(existsSync(eventsPath(dir)), false, 'the satisfied path clears the registers as ever');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: the deferral survives stop_hook_active — a prior hook block never costs the grace period (review finding 1)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/a.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(dir, [cpEvent('commit y — capture riding')]);
+    // stop_hook_active guards against re-BLOCKING in a deny loop; the deferral
+    // ALLOWS, so it must not collapse the grace into an immediate capture_owed.
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: true }), dir);
+    assert.equal(r.code, 0);
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), true, 'still the non-terminal deferral, not a straight-to-queue conversion');
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no false debt minted on the first pending Stop');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: a pending declaration never mutes the article demand — it speaks only for the capture duty', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [
+      { path: 'src/u1.mjs', at: R_EVENT_AT },
+      { path: 'src/u2.mjs', at: R_EVENT_AT },
+      { path: 'src/u3.mjs', at: R_EVENT_AT },
+    ]); // three unowned touches — at the article-demand threshold
+    writeSessionEvents(dir, [cpEvent('commit x — capture riding')]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2, 'the article demand still soft-blocks');
+    assert.match(r.stderr, /article demand/);
+    assert.ok(!/H10: direct-mode work touched/.test(r.stderr), 'while the capture nag itself stays suppressed by the pending declaration');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H10 AC6: every terminal path clears touches.json + session-events.json + the nag marker together; allow-only while a run is active', () => {
   // (a) satisfied path clears both registers AND the nag marker (proven by a fresh nag afterward)
   const sat = makeProject();

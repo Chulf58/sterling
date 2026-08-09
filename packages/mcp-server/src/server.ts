@@ -129,7 +129,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_edit',
     {
       description:
-        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). Use it to correct a stale sentence or a count in a registry-style article that has outgrown a full round-trip. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical.",
+        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical.",
       inputSchema: strict({ id: z.string(), field: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, field, find, replace, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace), projection))
@@ -183,7 +183,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'board_remove',
     {
-      description: 'Remove a todo — the only way items leave the board (done = removed, bound to the artifact-write).',
+      description:
+        "Remove a todo — the only way items leave the board (done = removed, bound to the artifact-write). The result discloses artifact_evidence: durable records touching the item's file_keys written since the item was created. An empty list means the close rides YOUR word — legitimate for genuine abandonment, drift if work fulfilled the item and its capture is missing.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardRemove(id))
@@ -193,7 +194,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_remove',
     {
       description:
-        "Remove a MAINTENANCE-QUEUE item (source:'system') once its fulfilling artifact exists — board_remove narrowed to the queue, so an agent that drains the queue can close what it drains. Refuses user-source board items: that board is the human's own surface and is not an agent's to clear. Removals are logged to the §3.2.7 drain-log audit trail exactly as board_remove's are.",
+        "Remove a MAINTENANCE-QUEUE item (source:'system') once its fulfilling artifact exists — board_remove narrowed to the queue, so an agent that drains the queue can close what it drains. Refuses user-source board items: that board is the human's own surface and is not an agent's to clear. Removals are logged to the §3.2.7 drain-log audit trail exactly as board_remove's are, and the result discloses the same artifact_evidence (durable records touching the item's file_keys since its creation) — an empty list on a drain means verify against HEAD before closing.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.maintenanceRemove(id))
@@ -223,6 +224,36 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.noteRemove(id))
+  );
+
+  server.registerTool(
+    'no_capture',
+    {
+      description:
+        "Declare that this session's direct-mode work produced NOTHING durable — satisfies H10's capture duty for every touch/debug event EARLIER than the declaration (later work re-arms it). A false declaration is drift, not a bypass: the reason is register-recorded. If a capture EXISTS and is merely landing later, use capture_pending instead. Replaces hunting for scripts/no-capture.mjs in the plugin clone; the script remains the no-server fallback.",
+      inputSchema: strict({ reason: z.string() }),
+    },
+    ({ reason }) => json(tools.noCapture(reason))
+  );
+
+  server.registerTool(
+    'concept_designed',
+    {
+      description:
+        "Register that a domain concept FAMILY's design SETTLED this session (decision 7208729b) — H10 then demands the family's concept article (feature_article with concept_family) before the session ends, deferring to a concept_article_missing queue item if unmet. Pass the family slug(s). Replaces node scripts/concept-designed.mjs; the script remains the no-server fallback.",
+      inputSchema: strict({ families: z.array(z.string()).min(1) }),
+    },
+    ({ families }) => json(tools.conceptDesigned(families))
+  );
+
+  server.registerTool(
+    'capture_pending',
+    {
+      description:
+        "Declare that a capture EXISTS and its write is IN FLIGHT on a named target — a pending gated commit, a dispatched agent, a lane. H10 then defers the capture duty instead of nagging: the registers survive one Stop so the landed write settles the duty cleanly, and a still-pending duty on the next Stop becomes ONE deduped capture_owed item citing the target. Use this instead of a boilerplate no_capture when the truth is 'captured, landing later' — pending work defers or lands on the queue, it never evaporates.",
+      inputSchema: strict({ target: z.string(), reason: z.string() }),
+    },
+    ({ target, reason }) => json(tools.capturePending(target, reason))
   );
 
   server.registerTool(
