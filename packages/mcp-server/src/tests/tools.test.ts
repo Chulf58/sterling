@@ -839,6 +839,58 @@ test("board_query / maintenance_query take projection:'digest' — the 478 KB bo
   }
 });
 
+test("write tools take projection:'digest' — the envelope survives, only the echo collapses (the 49.8KB append)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    // The measured complaint (2026-08-09 consuming-project retrospective): every
+    // write echoes the record the caller JUST authored — one history append
+    // echoed 49.8KB, 100KB+ of pure echo per session across ~10 writes.
+    const body = 'w'.repeat(3000);
+    const article = mkArticle(tools, 'echoey', 'src/echoey.ts');
+
+    // DEFAULT UNCHANGED — a write result never changes shape under an existing
+    // caller (same posture as the read-side digest: opt-in, not a migration).
+    const full = tools.writeProjected(tools.knowledgeUpdateResult(article.id, { what_it_does: body }));
+    const fullRecord = (full as { record: Record<string, unknown> }).record;
+    assert.equal(fullRecord.what_it_does, body, "'full' stays the default and still echoes the body");
+
+    // digest: the envelope is what a caller ACTS on (warnings, check_skipped,
+    // replaced) — it survives; only the echoed record collapses to its digest.
+    const digested = tools.writeProjected(
+      tools.knowledgeUpdateResult(fullRecord.id as string, { what_it_does: `${body} v2` }),
+      'digest'
+    ) as Record<string, unknown>;
+    assert.ok(Array.isArray(digested.warnings), 'the warnings channel survives the projection');
+    const receipt = digested.record as Record<string, unknown>;
+    assert.equal(receipt.slug, 'echoey', 'the receipt carries the stable handle');
+    assert.equal(receipt.type, 'feature_article');
+    assert.ok(typeof receipt.version === 'number', 'and the version the write minted');
+    assert.ok(!('what_it_does' in receipt), 'without re-sending the body the caller just wrote');
+    assert.ok(
+      JSON.stringify(digested).length * 5 < JSON.stringify(full).length,
+      'a digested write response is dramatically cheaper to receive'
+    );
+
+    // knowledge_create keeps its declared envelope fields the same way.
+    const created = tools.writeProjected(
+      tools.knowledgeCreate('decision', { title: 'Echo decision', statement: body, alternatives_rejected: [], rationale: body }),
+      'digest'
+    ) as Record<string, unknown>;
+    assert.ok(Array.isArray(created.check_skipped), 'check_skipped is declared, not dropped, in the digest shape');
+    const createdReceipt = created.record as Record<string, unknown>;
+    assert.equal(createdReceipt.title, 'Echo decision');
+    assert.ok(!('statement' in createdReceipt));
+
+    // board_update returns a BARE record — the projection handles that shape too.
+    const todo = (tools.boardAdd({ text: `long item ${'y'.repeat(2000)}`, source: 'user' }) as { record: { id: string } }).record;
+    const updated = tools.writeProjected(tools.boardUpdate(todo.id, { priority: 'high' }), 'digest') as Record<string, unknown>;
+    assert.equal(updated.priority, 'high', 'the fields you triage by survive');
+    assert.match(updated.text as string, /…$/, 'the text is clipped, not echoed whole');
+  } finally {
+    cleanup();
+  }
+});
+
 test('dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED naming the match — the author merges via knowledge_update or stores with dedup_override', () => {
   const { tools, cleanup } = harness();
   try {

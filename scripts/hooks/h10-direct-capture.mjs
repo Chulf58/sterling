@@ -214,6 +214,16 @@ try {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [];
 
+    // The conductor's shell cwd is the TARGET project, where scripts/no-capture.mjs
+    // does not exist — it lives in the plugin clone. The platform sets
+    // CLAUDE_PLUGIN_ROOT for hook processes, so resolve the ABSOLUTE path here
+    // and print THAT; a relative fallback only when the env var is absent
+    // (2026-08-09 consuming project: the relative path cost two failed node
+    // invocations and a Glob hunt for the real location).
+    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT
+      ? `node "${join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts', 'no-capture.mjs')}"`
+      : 'node scripts/no-capture.mjs';
+
     // Capture duty nag (touches or debug events present, nothing captured).
     // Reviewer advice is NOT this hook's business (board cac61a95): it repeated
     // identically on every firing and had gone unread; H2's selection-inject
@@ -224,13 +234,13 @@ try {
         let capturePart =
           `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).\n` +
           `Capture what was learned inline — expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).\n` +
-          `Or, if there is genuinely nothing durable, declare it: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).`;
+          `Or, if there is genuinely nothing durable, declare it: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).`;
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
         parts.push(
           `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
-            `Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).` +
+            `Capture what was learned inline (knowledge_create), or declare there is nothing durable: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).` +
             integrityNote
         );
       }

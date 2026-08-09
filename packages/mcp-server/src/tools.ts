@@ -1157,6 +1157,29 @@ export class SterlingTools {
     return { record, warnings };
   }
 
+  /**
+   * Digest projection for WRITE responses (2026-08-09 consuming-project
+   * retrospective). Every write tool echoes the record it just wrote, and on a
+   * grown article that echo is the single biggest context cost the conductor
+   * pays: one history append measured 49.8KB, and two sessions independently
+   * put full-record write echoes at 100KB+ of pure waste each — content the
+   * caller had JUST authored and gains nothing from re-reading. With
+   * projection:"digest" the result envelope survives intact (warnings,
+   * check_skipped, replaced, deduped — everything a caller acts on) and only
+   * the echoed record collapses to its digestRecord headline, the same
+   * projection vocabulary the read side already has (decision 87a12a1e): one
+   * projection concept, not two. The default stays 'full' deliberately —
+   * internal callers and existing consumers read fields off the echoed record,
+   * and a write result must never change shape under them silently.
+   */
+  writeProjected<T>(result: T, projection?: 'full' | 'digest'): T | Record<string, unknown> {
+    if (projection !== 'digest') return result;
+    if (result && typeof result === 'object' && 'record' in result) {
+      return { ...(result as Record<string, unknown>), record: digestRecord((result as { record: unknown }).record as Record<string, unknown>) };
+    }
+    return digestRecord(result as unknown as Record<string, unknown>);
+  }
+
   knowledgeQueryResult(opts: QueryOptions & { projection?: Projection }): KnowledgeQueryResult {
     const { projection = 'full', ...filter } = opts;
     const records = this.knowledgeQuery(filter);

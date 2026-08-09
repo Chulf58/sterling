@@ -6035,18 +6035,19 @@ Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${J
   if (!input.stop_hook_active && !existsSync3(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [];
+    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
     if (hasCaptureDuty && !captured) {
       const hasDebug = activeDebugEvents.length > 0;
       if (hasDebug) {
         let capturePart = `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).
 Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).
-Or, if there is genuinely nothing durable, declare it: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).`;
+Or, if there is genuinely nothing durable, declare it: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).`;
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
         parts.push(
           `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).
-Capture what was learned inline (knowledge_create), or declare there is nothing durable: node scripts/no-capture.mjs --reason "<why>" (a false declaration is drift).` + integrityNote
+Capture what was learned inline (knowledge_create), or declare there is nothing durable: ${noCaptureCmd} --reason "<why>" (a false declaration is drift).` + integrityNote
         );
       }
     }

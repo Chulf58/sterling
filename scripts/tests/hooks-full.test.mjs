@@ -177,12 +177,44 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     }
     const deep = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
     const ctx = deep.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 open items/);
+    assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 drainable items/);
     assert.match(ctx, /reconcile_needed ×3/, 'the lane split says WHAT is owed, not just how much');
     assert.match(ctx, /article_missing ×2/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
     assert.match(ctx, /Anti-speculation/, 'the conventions injection is unaffected');
+
+    // file_parked closes at branch merge, never by drain — it must not trip the
+    // drain signal (2026-08-09 consuming project: 15 by-design-open file_parked
+    // items tripped this warning every session start; a standing warning about
+    // undrainable items trains the operator to ignore the warning). Park enough
+    // items to cross the threshold on their own: still silent.
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 5 } }));
+    const { dir: parkedDir, store: parkedStore, cleanup: cleanupParked } = makeProject();
+    try {
+      writeFileSync(join(parkedDir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 5 } }));
+      for (let i = 0; i < 6; i++) {
+        parkedStore.create({ ...envelope('todo'), text: `p${i}`, source: 'system', system_reason: 'file_parked' });
+      }
+      const parkedOnly = JSON.parse(runHook('h1-session-start.mjs', hookInput(parkedDir, { hook_event_name: 'SessionStart' }), parkedDir, { NO_COLOR: '1' }).stdout);
+      assert.ok(
+        !/MAINTENANCE QUEUE IS DEEP/.test(parkedOnly.hookSpecificOutput.additionalContext),
+        'a queue of only file_parked items never cries wolf'
+      );
+      // With drainable items past the threshold, parked items are disclosed but
+      // not counted, and never appear as a drainable lane.
+      for (let i = 0; i < 5; i++) {
+        parkedStore.create({ ...envelope('todo'), text: `r${i}`, source: 'system', system_reason: 'reconcile_needed' });
+      }
+      const mixed = JSON.parse(runHook('h1-session-start.mjs', hookInput(parkedDir, { hook_event_name: 'SessionStart' }), parkedDir, { NO_COLOR: '1' }).stdout);
+      const mixedCtx = mixed.hookSpecificOutput.additionalContext;
+      assert.match(mixedCtx, /MAINTENANCE QUEUE IS DEEP — 5 drainable items/);
+      assert.match(mixedCtx, /plus 6 file_parked \(close at branch merge, not by drain — excluded from this count\)/);
+      assert.ok(!/file_parked ×/.test(mixedCtx), 'file_parked never appears as a drainable lane');
+      assert.match(mixed.systemMessage, /11 maintenance items pending/, 'the HUMAN banner still reports the true total, parked included');
+    } finally {
+      cleanupParked();
+    }
 
     // A malformed config costs the THRESHOLD, never the conventions: H1 is soft,
     // unlike the gates that fail closed on this same input (anti_pattern e13f0fb5).

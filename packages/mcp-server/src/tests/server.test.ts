@@ -134,6 +134,29 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     assert.equal(bogusBoard.isError, true, 'strictness is a property of the whole tool surface');
     assert.match((bogusBoard.content as { text: string }[])[0].text, /limit/);
 
+    // WRITE-SIDE projection:"digest" over the wire (decision e23f38f8). This
+    // pins the server closures' {projection, ...rest} destructuring — the unit
+    // tests exercise writeProjected directly, so only a wire call can prove
+    // projection never leaks into field validation (board_add would refuse an
+    // unknown 'projection' field on the todo) and that the digest lands.
+    const added = payload(
+      await client.callTool({
+        name: 'board_add',
+        arguments: { text: `wire ${'z'.repeat(2000)}`, source: 'user', projection: 'digest' },
+      })
+    ) as { record: { id: string; text: string }; check_skipped: unknown[] };
+    assert.ok(added.record.id, 'the write landed and the receipt carries the id');
+    assert.ok(Array.isArray(added.check_skipped), 'the envelope survives the digest');
+    assert.match(added.record.text, /…$/, 'the echoed text is clipped, not returned whole');
+    const bumped = payload(
+      await client.callTool({
+        name: 'board_update',
+        arguments: { id: added.record.id, priority: 'high', projection: 'digest' },
+      })
+    ) as { priority: string; text: string };
+    assert.equal(bumped.priority, 'high', 'projection is split from the patch — a leak would be refused BY NAME');
+    assert.match(bumped.text, /…$/);
+
     // protocol loop over the wire
     store.createRun({
       id: 'r-0001',

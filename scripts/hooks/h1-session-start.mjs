@@ -232,15 +232,27 @@ try {
 
 let counts = { todos: 0, maintenance: 0 };
 let queueReasons = [];
+let drainable = 0;
+let parked = 0;
 try {
   const todos = store.query({ types: ['todo'], cap: 1000 });
   counts.todos = todos.filter((t) => t.source === 'user').length;
   const system = todos.filter((t) => t.source === 'system');
   counts.maintenance = system.length;
+  // file_parked closes at branch merge (direct-merge sweeps it), never by
+  // draining — counting it toward the deep-queue threshold makes H1 cry wolf
+  // about items no drain can touch, and a standing warning about undrainable
+  // items trains the operator to ignore the warning (2026-08-09 consuming
+  // project: 15 by-design-open file_parked items tripped this every session
+  // start). It stays in counts.maintenance (the human's banner shows the true
+  // total); only the DRAIN signal excludes it.
+  const drainableItems = system.filter((t) => t.system_reason !== 'file_parked');
+  drainable = drainableItems.length;
+  parked = system.length - drainable;
   // Lane breakdown for the deep-queue signal below: a bare total says "drain",
   // a per-lane split says WHAT is owed, which is what decides how to drain it.
   const byReason = new Map();
-  for (const t of system) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
+  for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
   queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ×${n}`);
 } finally {
   store.close();
@@ -254,9 +266,11 @@ try {
 // with nothing anywhere prompting a drain (reported 2026-07-29). Silent below the
 // threshold (P1); above it, states the depth, the lanes, and the remedy.
 let queueContext = '';
-if (counts.maintenance >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
+if (drainable >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
   queueContext =
-    `\n\nMAINTENANCE QUEUE IS DEEP — ${counts.maintenance} open items (${queueReasons.join(', ')}).\n` +
+    `\n\nMAINTENANCE QUEUE IS DEEP — ${drainable} drainable items (${queueReasons.join(', ')})` +
+    (parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain — excluded from this count)` : '') +
+    `.\n` +
     `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
     `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
     `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +

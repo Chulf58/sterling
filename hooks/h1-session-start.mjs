@@ -6119,22 +6119,27 @@ STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit
 }
 var counts = { todos: 0, maintenance: 0 };
 var queueReasons = [];
+var drainable = 0;
+var parked = 0;
 try {
   const todos = store.query({ types: ["todo"], cap: 1e3 });
   counts.todos = todos.filter((t) => t.source === "user").length;
   const system = todos.filter((t) => t.source === "system");
   counts.maintenance = system.length;
+  const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
+  drainable = drainableItems.length;
+  parked = system.length - drainable;
   const byReason = /* @__PURE__ */ new Map();
-  for (const t of system) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
+  for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
   queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} \xD7${n}`);
 } finally {
   store.close();
 }
 var queueContext = "";
-if (counts.maintenance >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
+if (drainable >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
   queueContext = `
 
-MAINTENANCE QUEUE IS DEEP \u2014 ${counts.maintenance} open items (${queueReasons.join(", ")}).
+MAINTENANCE QUEUE IS DEEP \u2014 ${drainable} drainable items (${queueReasons.join(", ")})` + (parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "") + `.
 Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
 }
 var registryContext = "";
