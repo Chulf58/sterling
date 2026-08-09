@@ -2782,3 +2782,96 @@ test('H10 conductor pressure: fill > 100% is window MISCONFIGURATION, not pressu
     cleanup();
   }
 });
+
+// --------------------------- H10 slice-boundary advisory (context-rotation slice 2) ---------------------------
+// At elevated pressure a DIRTY working tree means the open slice has not reached its
+// commit boundary. Advisory via the same once-per-session marker; fail-open on no-git.
+
+function gitProject() {
+  const { dir, store, cleanup } = makeProject();
+  const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  g(['init', '-q']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  // Mirror a real init'd project: .sterling/ is gitignored (init ensures the entry), and
+  // t/ holds the fixture's conductor transcript, which lives outside the repo in reality —
+  // so the hook's own pressure-sample write never counts as slice dirt.
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\nt/\n');
+  writeFileSync(join(dir, 'base.mjs'), '// base\n');
+  g(['add', '-A']);
+  g(['commit', '-qm', 'init']);
+  return { dir, store, cleanup, dirty: () => writeFileSync(join(dir, 'wip.mjs'), '// uncommitted\n') };
+}
+
+test('H10 slice boundary: soft pressure + dirty tree soft-blocks ONCE naming the commit boundary; clean release after', () => {
+  const { dir, dirty, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 140_000); // 70% of the 200k default — soft
+    dirty();
+    const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(first.code, 2, 'soft + dirty tree blocks once');
+    assert.match(first.stderr, /commit boundary/i);
+    assert.match(first.stderr, /uncommitted/i, 'names the dirty state');
+    assert.match(first.stderr, /once per session/i);
+    const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(second.code, 0, 'marker spent — no repeat');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: soft pressure + CLEAN tree stays advisory-silent (commit-ready needs no nudge)', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 140_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'clean tree at soft never blocks');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: hard pressure + dirty tree carries the boundary addendum in the hard block', () => {
+  const { dir, dirty, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 170_000); // 85% — hard
+    dirty();
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /conductor context pressure/i);
+    assert.match(r.stderr, /commit boundary/i, 'hard message names the boundary when dirty');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: soft-boundary block does not suppress a later hard escalation; hard marker ends it', () => {
+  const { dir, dirty, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 140_000);
+    dirty();
+    assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 2, 'soft boundary block');
+    writeConductorTranscript(dir, 170_000); // escalate to hard
+    const hard = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(hard.code, 2, 'escalation still notifies');
+    assert.match(hard.stderr, /hard threshold/);
+    assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 0, 'hard marker spent — done for the session');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: no git degrades LOUD and open — soft + non-repo never blocks, check_skipped recorded', () => {
+  const { dir, store, cleanup } = makeProject(); // no git init
+  try {
+    writeConductorTranscript(dir, 140_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'advisory fails open');
+    assert.ok(
+      store.listCheckSkipped().some((c) => c.check_name === 'conductor-pressure' && /boundary_no_git/.test(c.reason)),
+      'degradation recorded'
+    );
+  } finally {
+    cleanup();
+  }
+});

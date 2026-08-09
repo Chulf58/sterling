@@ -91,23 +91,63 @@ try {
       return { session_id: input.session_id, level: 'unknown', fill_pct: null, reason: 'pressure_failed', at: now };
     }
   })();
+  // SLICE-BOUNDARY ADVISORY (context-rotation slice 2): at elevated pressure a DIRTY
+  // working tree means the open slice has not reached its commit boundary — the safe
+  // state every direct-mode slice ends in (branch-local commit; the merge gates stay
+  // human). Checked only at soft/hard so a quiet session never pays the git spawn;
+  // fail-open with check_skipped on no-git or a failed probe (advisory, never a gate).
+  const dirtyPaths = (() => {
+    if (pressure.level !== 'soft' && pressure.level !== 'hard') return 0;
+    try {
+      const st = spawnSync('git', ['status', '--porcelain'], { cwd: input.cwd, encoding: 'utf8', timeout: 15_000 });
+      if (st.status !== 0) {
+        store.recordCheckSkipped('conductor-pressure', 'boundary_no_git', undefined, now);
+        return 0;
+      }
+      return st.stdout.split('\n').filter(Boolean).length;
+    } catch (e) {
+      try {
+        store.recordCheckSkipped('conductor-pressure', `boundary_check_failed:${String((e && e.message) || e)}`, undefined, now);
+      } catch {
+        // store is the casualty — stay advisory
+      }
+      return 0;
+    }
+  })();
+  const boundaryLine = () =>
+    dirtyPaths > 0
+      ? ` Working tree: ${dirtyPaths} uncommitted path(s) — finish the open slice to a COMMIT BOUNDARY (branch-local commit) before opening new work.`
+      : '';
   const pressurePart = () =>
     pressure.level === 'hard'
-      ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents — the conductor's context is the scarce resource (P1). This notice fires once per session.`
-      : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ soft threshold ${config.context_watch.conductor.soft_pct}% — prefer finishing open work over opening large new areas; delegate reads to subagents.`;
-  const spendPressureMarker = () => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const pressureMarkerSpent = () => {
+      ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents — the conductor's context is the scarce resource (P1).${boundaryLine()} This notice fires once per session.`
+      : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ soft threshold ${config.context_watch.conductor.soft_pct}% — prefer finishing open work over opening large new areas; delegate reads to subagents.${boundaryLine()}`;
+  const pressureMarkerState = () => {
     try {
-      return JSON.parse(readFileSync(pressureMarker, 'utf8')).session_id === input.session_id;
+      const m = JSON.parse(readFileSync(pressureMarker, 'utf8'));
+      return m.session_id === input.session_id ? m : null;
     } catch {
-      return false;
+      return null;
     }
   };
-  /** Every direct-mode release path exits through here: hard pressure soft-blocks ONCE per session. */
+  const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  /**
+   * Every direct-mode release path exits through here. At most TWO pressure blocks per
+   * session, strictly escalating: soft+dirty fires the slice-boundary nudge once; hard
+   * fires once more (even after a soft block — escalation is new information). A spent
+   * hard marker ends all pressure blocking for the session.
+   */
   const releaseWithPressure = () => {
-    if (pressure.level === 'hard' && !input.stop_hook_active && !pressureMarkerSpent()) {
-      spendPressureMarker();
-      deny(pressurePart());
+    if (!input.stop_hook_active) {
+      const spent = pressureMarkerState();
+      if (pressure.level === 'hard' && (!spent || spent.level !== 'hard')) {
+        spendPressureMarker('hard');
+        deny(pressurePart());
+      }
+      if (pressure.level === 'soft' && dirtyPaths > 0 && !spent) {
+        spendPressureMarker('soft');
+        deny(`H10 slice boundary: ${pressurePart()} This notice fires once per session.`);
+      }
     }
     allow();
   };
@@ -400,11 +440,11 @@ try {
       );
     }
 
-    // Conductor pressure rides the same deny (one block per Stop, P1): soft advises,
-    // hard advises AND spends the once-per-session marker so no second block follows.
+    // Conductor pressure rides the same deny (one block per Stop, P1) and spends the
+    // once-per-session marker at its level so no separate pressure block follows.
     if (pressure.level === 'soft' || pressure.level === 'hard') {
       parts.push(pressurePart());
-      if (pressure.level === 'hard') spendPressureMarker();
+      spendPressureMarker(pressure.level);
     }
 
     deny(parts.join('\n\n'));

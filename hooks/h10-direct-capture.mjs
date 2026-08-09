@@ -6020,19 +6020,45 @@ try {
       return { session_id: input.session_id, level: "unknown", fill_pct: null, reason: "pressure_failed", at: now };
     }
   })();
-  const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents \u2014 the conductor's context is the scarce resource (P1). This notice fires once per session.` : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2014 prefer finishing open work over opening large new areas; delegate reads to subagents.`;
-  const spendPressureMarker = () => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const pressureMarkerSpent = () => {
+  const dirtyPaths = (() => {
+    if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      return JSON.parse(readFileSync2(pressureMarker, "utf8")).session_id === input.session_id;
+      const st = spawnSync2("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      if (st.status !== 0) {
+        store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
+        return 0;
+      }
+      return st.stdout.split("\n").filter(Boolean).length;
+    } catch (e) {
+      try {
+        store.recordCheckSkipped("conductor-pressure", `boundary_check_failed:${String(e && e.message || e)}`, void 0, now);
+      } catch {
+      }
+      return 0;
+    }
+  })();
+  const boundaryLine = () => dirtyPaths > 0 ? ` Working tree: ${dirtyPaths} uncommitted path(s) \u2014 finish the open slice to a COMMIT BOUNDARY (branch-local commit) before opening new work.` : "";
+  const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents \u2014 the conductor's context is the scarce resource (P1).${boundaryLine()} This notice fires once per session.` : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2014 prefer finishing open work over opening large new areas; delegate reads to subagents.${boundaryLine()}`;
+  const pressureMarkerState = () => {
+    try {
+      const m = JSON.parse(readFileSync2(pressureMarker, "utf8"));
+      return m.session_id === input.session_id ? m : null;
     } catch {
-      return false;
+      return null;
     }
   };
+  const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
   const releaseWithPressure = () => {
-    if (pressure.level === "hard" && !input.stop_hook_active && !pressureMarkerSpent()) {
-      spendPressureMarker();
-      deny(pressurePart());
+    if (!input.stop_hook_active) {
+      const spent = pressureMarkerState();
+      if (pressure.level === "hard" && (!spent || spent.level !== "hard")) {
+        spendPressureMarker("hard");
+        deny(pressurePart());
+      }
+      if (pressure.level === "soft" && dirtyPaths > 0 && !spent) {
+        spendPressureMarker("soft");
+        deny(`H10 slice boundary: ${pressurePart()} This notice fires once per session.`);
+      }
     }
     allow();
   };
@@ -6204,7 +6230,7 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     }
     if (pressure.level === "soft" || pressure.level === "hard") {
       parts.push(pressurePart());
-      if (pressure.level === "hard") spendPressureMarker();
+      spendPressureMarker(pressure.level);
     }
     deny(parts.join("\n\n"));
   }
