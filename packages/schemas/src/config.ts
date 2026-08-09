@@ -80,6 +80,16 @@ export const configSchema = z.object({
       block_pct: z.number().positive().default(95),
       mode: z.enum(['observe', 'enforce']).default('observe'),
       windows: z.record(z.string(), z.number().int().positive()).default({ default: 200_000 }),
+      // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
+      // "finish before opening new areas"; hard = once-per-session soft-block naming the
+      // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
+      // different consequences (run escalation / dispatch deny in enforce mode).
+      conductor: z
+        .object({
+          soft_pct: z.number().positive().default(65),
+          hard_pct: z.number().positive().default(80),
+        })
+        .default({}),
     })
     .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).

@@ -4475,7 +4475,7 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture"]),
+  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture", "capture_pending"]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4604,7 +4604,15 @@ var configSchema = external_exports.object({
     warn_pct: external_exports.number().positive().default(60),
     block_pct: external_exports.number().positive().default(95),
     mode: external_exports.enum(["observe", "enforce"]).default("observe"),
-    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 })
+    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
+    // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
+    // "finish before opening new areas"; hard = once-per-session soft-block naming the
+    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
+    // different consequences (run escalation / dispatch deny in enforce mode).
+    conductor: external_exports.object({
+      soft_pct: external_exports.number().positive().default(65),
+      hard_pct: external_exports.number().positive().default(80)
+    }).default({})
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except

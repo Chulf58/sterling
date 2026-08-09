@@ -165,3 +165,24 @@ test('templates/default-config.json ships difficulty.split_interface_threshold (
   assert.ok(shipped.difficulty, 'the shipped default-config carries a difficulty block');
   assert.equal(shipped.difficulty?.split_interface_threshold, 3, 'the shipped split_interface_threshold is 3');
 });
+
+test('conductor pressure thresholds (context-rotation slice 1): defaults 65/80, tunable, shipped in the default config', () => {
+  const empty = parseConfig({});
+  assert.equal(empty.context_watch.conductor.soft_pct, 65, 'soft default 65');
+  assert.equal(empty.context_watch.conductor.hard_pct, 80, 'hard default 80');
+  const custom = parseConfig({ context_watch: { conductor: { soft_pct: 50, hard_pct: 70 } } });
+  assert.equal(custom.context_watch.conductor.soft_pct, 50);
+  assert.equal(custom.context_watch.conductor.hard_pct, 70);
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
+  assert.equal(shipped.context_watch.conductor.soft_pct, 65, 'shipped default carries the conductor block');
+  assert.equal(shipped.context_watch.conductor.hard_pct, 80);
+});
+
+test('conductor pressure: shipped windows map carries verified per-model context windows (live probe 2026-08-09 — 200k default misclassified a 1M-window session)', () => {
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
+  assert.equal(shipped.context_watch.windows['claude-fable-5'], 1_000_000);
+  assert.equal(shipped.context_watch.windows['claude-opus-5'], 1_000_000);
+  assert.equal(shipped.context_watch.windows['claude-sonnet-5'], 1_000_000);
+  assert.equal(shipped.context_watch.windows['claude-haiku-4-5'], 200_000);
+  assert.equal(shipped.context_watch.windows.default, 200_000, 'unknown models stay conservative — mismatch degrades loud, never false-blocks');
+});

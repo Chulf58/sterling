@@ -54,10 +54,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'knowledge_create',
     {
-      description: 'Create a knowledge record. Schema-validated against the registered record types; unregistered types are rejected.',
-      inputSchema: strict({ type: z.string(), fields: passthrough }),
+      description:
+        'Create a knowledge record. Schema-validated against the registered record types; unregistered types are rejected. projection:"digest" returns the result with the echoed record reduced to its one-line digest (id + headline) — the write landed either way; prefer it unless you need the stored record back.',
+      inputSchema: strict({ type: z.string(), fields: passthrough, projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ type, fields }) => json(tools.knowledgeCreate(type, fields))
+    ({ type, fields, projection }) => json(tools.writeProjected(tools.knowledgeCreate(type, fields), projection))
   );
 
   server.registerTool(
@@ -108,30 +109,30 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description:
-        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append.',
-      inputSchema: strict({ id: z.string(), body: passthrough }),
+        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. projection:"digest" keeps the warnings but reduces the echoed record to its one-line digest — prefer it: you just authored the content the full echo would re-send.',
+      inputSchema: strict({ id: z.string(), body: passthrough, projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, body }) => json(tools.knowledgeUpdateResult(id, body))
+    ({ id, body, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body), projection))
   );
 
   server.registerTool(
     'knowledge_append',
     {
       description:
-        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, the file_baselines re-baseline and the drift-item drain are identical. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link).',
-      inputSchema: strict({ id: z.string(), field: z.string(), entries: z.array(z.unknown()) }),
+        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, the file_baselines re-baseline and the drift-item drain are identical. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). projection:"digest" keeps the warnings but reduces the echoed record to its one-line digest — prefer it on grown articles: a single full-record append echo measured 49.8KB of content the caller had just written.',
+      inputSchema: strict({ id: z.string(), field: z.string(), entries: z.array(z.unknown()), projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, field, entries }) => json(tools.knowledgeAppend(id, field, entries))
+    ({ id, field, entries, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries), projection))
   );
 
   server.registerTool(
     'knowledge_edit',
     {
       description:
-        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). Use it to correct a stale sentence or a count in a registry-style article that has outgrown a full round-trip. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical.",
-      inputSchema: strict({ id: z.string(), field: z.string(), find: z.string(), replace: z.string() }),
+        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical.",
+      inputSchema: strict({ id: z.string(), field: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, field, find, replace }) => json(tools.knowledgeEdit(id, field, find, replace))
+    ({ id, field, find, replace, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace), projection))
   );
 
   server.registerTool(
@@ -147,7 +148,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'board_add',
     {
-      description: 'Add a todo to the board (source: user) or the maintenance queue (source: system, requires system_reason).',
+      description:
+        'Add a todo to the board (source: user) or the maintenance queue (source: system, requires system_reason). projection:"digest" returns the result with the echoed item reduced to its one-line digest.',
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
@@ -156,9 +158,10 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         feature_link: z.string().optional(),
         system_reason: z.string().optional(),
         stack_tags: z.array(z.string()).optional(),
+        projection: z.enum(['full', 'digest']).optional(),
       }),
     },
-    (args) => json(tools.boardAdd(args))
+    ({ projection, ...args }) => json(tools.writeProjected(tools.boardAdd(args), projection))
   );
 
   server.registerTool(
@@ -180,7 +183,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'board_remove',
     {
-      description: 'Remove a todo — the only way items leave the board (done = removed, bound to the artifact-write).',
+      description:
+        "Remove a todo — the only way items leave the board (done = removed, bound to the artifact-write). The result discloses artifact_evidence: durable records touching the item's file_keys written since the item was created. An empty list means the close rides YOUR word — legitimate for genuine abandonment, drift if work fulfilled the item and its capture is missing.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardRemove(id))
@@ -190,7 +194,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_remove',
     {
       description:
-        "Remove a MAINTENANCE-QUEUE item (source:'system') once its fulfilling artifact exists — board_remove narrowed to the queue, so an agent that drains the queue can close what it drains. Refuses user-source board items: that board is the human's own surface and is not an agent's to clear. Removals are logged to the §3.2.7 drain-log audit trail exactly as board_remove's are.",
+        "Remove a MAINTENANCE-QUEUE item (source:'system') once its fulfilling artifact exists — board_remove narrowed to the queue, so an agent that drains the queue can close what it drains. Refuses user-source board items: that board is the human's own surface and is not an agent's to clear. Removals are logged to the §3.2.7 drain-log audit trail exactly as board_remove's are, and the result discloses the same artifact_evidence (durable records touching the item's file_keys since its creation) — an empty list on a drain means verify against HEAD before closing.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.maintenanceRemove(id))
@@ -200,15 +204,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_update',
     {
       description:
-        'IN-PLACE edit of a board/queue item — text/priority/file_keys only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one of text/priority/file_keys is required.',
+        'IN-PLACE edit of a board/queue item — text/priority/file_keys only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one of text/priority/file_keys is required. projection:"digest" reduces the echoed item to its one-line digest — board items run to several KB and you just wrote the change.',
       inputSchema: strict({
         id: z.string(),
         text: z.string().optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         file_keys: z.array(z.string()).optional(),
+        projection: z.enum(['full', 'digest']).optional(),
       }),
     },
-    ({ id, ...patch }) => json(tools.boardUpdate(id, patch))
+    ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection))
   );
 
   server.registerTool(
@@ -219,6 +224,36 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.noteRemove(id))
+  );
+
+  server.registerTool(
+    'no_capture',
+    {
+      description:
+        "Declare that this session's direct-mode work produced NOTHING durable — satisfies H10's capture duty for every touch/debug event EARLIER than the declaration (later work re-arms it). A false declaration is drift, not a bypass: the reason is register-recorded. If a capture EXISTS and is merely landing later, use capture_pending instead. Replaces hunting for scripts/no-capture.mjs in the plugin clone; the script remains the no-server fallback.",
+      inputSchema: strict({ reason: z.string() }),
+    },
+    ({ reason }) => json(tools.noCapture(reason))
+  );
+
+  server.registerTool(
+    'concept_designed',
+    {
+      description:
+        "Register that a domain concept FAMILY's design SETTLED this session (decision 7208729b) — H10 then demands the family's concept article (feature_article with concept_family) before the session ends, deferring to a concept_article_missing queue item if unmet. Pass the family slug(s). Replaces node scripts/concept-designed.mjs; the script remains the no-server fallback.",
+      inputSchema: strict({ families: z.array(z.string()).min(1) }),
+    },
+    ({ families }) => json(tools.conceptDesigned(families))
+  );
+
+  server.registerTool(
+    'capture_pending',
+    {
+      description:
+        "Declare that a capture EXISTS and its write is IN FLIGHT on a named target — a pending gated commit, a dispatched agent, a lane. H10 then defers the capture duty instead of nagging: the registers survive one Stop so the landed write settles the duty cleanly, and a still-pending duty on the next Stop becomes ONE deduped capture_owed item citing the target. Use this instead of a boilerplate no_capture when the truth is 'captured, landing later' — pending work defers or lands on the queue, it never evaporates.",
+      inputSchema: strict({ target: z.string(), reason: z.string() }),
+    },
+    ({ target, reason }) => json(tools.capturePending(target, reason))
   );
 
   server.registerTool(

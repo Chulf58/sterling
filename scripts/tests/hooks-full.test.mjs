@@ -177,12 +177,44 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     }
     const deep = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
     const ctx = deep.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 open items/);
+    assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 drainable items/);
     assert.match(ctx, /reconcile_needed ×3/, 'the lane split says WHAT is owed, not just how much');
     assert.match(ctx, /article_missing ×2/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
     assert.match(ctx, /Anti-speculation/, 'the conventions injection is unaffected');
+
+    // file_parked closes at branch merge, never by drain — it must not trip the
+    // drain signal (2026-08-09 consuming project: 15 by-design-open file_parked
+    // items tripped this warning every session start; a standing warning about
+    // undrainable items trains the operator to ignore the warning). Park enough
+    // items to cross the threshold on their own: still silent.
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 5 } }));
+    const { dir: parkedDir, store: parkedStore, cleanup: cleanupParked } = makeProject();
+    try {
+      writeFileSync(join(parkedDir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 5 } }));
+      for (let i = 0; i < 6; i++) {
+        parkedStore.create({ ...envelope('todo'), text: `p${i}`, source: 'system', system_reason: 'file_parked' });
+      }
+      const parkedOnly = JSON.parse(runHook('h1-session-start.mjs', hookInput(parkedDir, { hook_event_name: 'SessionStart' }), parkedDir, { NO_COLOR: '1' }).stdout);
+      assert.ok(
+        !/MAINTENANCE QUEUE IS DEEP/.test(parkedOnly.hookSpecificOutput.additionalContext),
+        'a queue of only file_parked items never cries wolf'
+      );
+      // With drainable items past the threshold, parked items are disclosed but
+      // not counted, and never appear as a drainable lane.
+      for (let i = 0; i < 5; i++) {
+        parkedStore.create({ ...envelope('todo'), text: `r${i}`, source: 'system', system_reason: 'reconcile_needed' });
+      }
+      const mixed = JSON.parse(runHook('h1-session-start.mjs', hookInput(parkedDir, { hook_event_name: 'SessionStart' }), parkedDir, { NO_COLOR: '1' }).stdout);
+      const mixedCtx = mixed.hookSpecificOutput.additionalContext;
+      assert.match(mixedCtx, /MAINTENANCE QUEUE IS DEEP — 5 drainable items/);
+      assert.match(mixedCtx, /plus 6 file_parked \(close at branch merge, not by drain — excluded from this count\)/);
+      assert.ok(!/file_parked ×/.test(mixedCtx), 'file_parked never appears as a drainable lane');
+      assert.match(mixed.systemMessage, /11 maintenance items pending/, 'the HUMAN banner still reports the true total, parked included');
+    } finally {
+      cleanupParked();
+    }
 
     // A malformed config costs the THRESHOLD, never the conventions: H1 is soft,
     // unlike the gates that fail closed on this same input (anti_pattern e13f0fb5).
@@ -1857,6 +1889,87 @@ test('H10 no-capture duty: an old declaration does not retroactively cover a LAT
   }
 });
 
+// ---- capture-pending deferral (board 1af5d630: the truthful middle state) ----
+// capture_pending declares the capture EXISTS and its write is in flight on a
+// named target. Unlike no_capture it covers LATER work too — wave work keeps
+// arriving while the capture rides a pending commit, and per-batch
+// re-declaration is the boilerplate loop that trains false declarations.
+const cpEvent = (detail, at = CAPTURE_AT) => ({ kind: 'capture_pending', detail, at });
+
+test('H10 capture-pending: covers later work, defers one Stop with registers PRESERVED, then converts to ONE capture_owed citing the target', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/old.mjs', at: R_EVENT_AT }, { path: 'src/new.mjs', at: LATE_EVENT_AT }]);
+    writeSessionEvents(dir, [cpEvent('commit wave-3 — decisions drafted, riding the gated commit')]); // touches exist BOTH before and after it
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const first = stop();
+    assert.equal(first.code, 0, 'pending covers touches before AND after the declaration — no nag, no re-declaration loop');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), true, 'registers survive the deferral — this release is deliberately NOT terminal, so a landed write can settle the duty cleanly');
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no debt minted on the first deferral');
+
+    const second = stop();
+    assert.equal(second.code, 0, 'still pending on the next Stop — released, not trapped (P1)');
+    const items = owed(store, 'capture_owed');
+    assert.equal(items.length, 1, 'the debt lands on the queue exactly once');
+    assert.match(items[0].text, /declared pending \(commit wave-3 — decisions drafted, riding the gated commit\)/, 'the owed item cites the pending target, so the drain can verify it landed');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), false, 'conversion IS terminal — registers clear together (P4)');
+    assert.equal(existsSync(eventsPath(dir)), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: a write landing between Stops settles the duty cleanly — zero queue noise', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/a.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(dir, [cpEvent('librarian lane — article append in flight')]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(stop().code, 0, 'deferred');
+    decisionAfter(store); // the in-flight write lands
+    assert.equal(stop().code, 0);
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no debt — the landed write paid the duty, which is why the registers had to survive the deferral');
+    assert.equal(existsSync(eventsPath(dir)), false, 'the satisfied path clears the registers as ever');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: the deferral survives stop_hook_active — a prior hook block never costs the grace period (review finding 1)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [{ path: 'src/a.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(dir, [cpEvent('commit y — capture riding')]);
+    // stop_hook_active guards against re-BLOCKING in a deny loop; the deferral
+    // ALLOWS, so it must not collapse the grace into an immediate capture_owed.
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: true }), dir);
+    assert.equal(r.code, 0);
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), true, 'still the non-terminal deferral, not a straight-to-queue conversion');
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no false debt minted on the first pending Stop');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: a pending declaration never mutes the article demand — it speaks only for the capture duty', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeTouchesAt(dir, [
+      { path: 'src/u1.mjs', at: R_EVENT_AT },
+      { path: 'src/u2.mjs', at: R_EVENT_AT },
+      { path: 'src/u3.mjs', at: R_EVENT_AT },
+    ]); // three unowned touches — at the article-demand threshold
+    writeSessionEvents(dir, [cpEvent('commit x — capture riding')]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2, 'the article demand still soft-blocks');
+    assert.match(r.stderr, /article demand/);
+    assert.ok(!/H10: direct-mode work touched/.test(r.stderr), 'while the capture nag itself stays suppressed by the pending declaration');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H10 AC6: every terminal path clears touches.json + session-events.json + the nag marker together; allow-only while a run is active', () => {
   // (a) satisfied path clears both registers AND the nag marker (proven by a fresh nag afterward)
   const sat = makeProject();
@@ -2506,6 +2619,258 @@ test('H7 omits the hint rather than inventing one when the tool gives it nothing
     assert.equal(r.code, 0);
     const [item] = store.query({ types: ['todo'], cap: 10 });
     assert.match(item.text, /owned file src\/w\.mjs was touched in direct mode$/, 'no trailing "near lines" clause');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- H10 conductor context pressure (slice 1) ---------------------------
+// Direct-conductor pressure at the Stop seam: H6's transcript machinery pointed at the
+// conductor's OWN transcript. Advisory + fail-open: a pressure failure never costs a duty.
+
+function writeConductorTranscript(dir, inputTokens, { cacheRead = 0, model = 'claude-fable-5' } = {}) {
+  const p = join(dir, 't', 's1.jsonl');
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(
+    p,
+    JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: inputTokens, cache_read_input_tokens: cacheRead }, model } }) + '\n'
+  );
+}
+
+function readPressureFile(dir) {
+  const p = join(dir, '.sterling', 'transient', 'conductor-pressure.json');
+  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+}
+
+test('H10 conductor pressure: below-soft classifies below_soft, no deny, sample persisted at the Stop seam', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 50_000); // 25% of the 200k default window
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, `clean session releases: ${r.stderr}`);
+    const sample = readPressureFile(dir);
+    assert.ok(sample, 'pressure sample persisted');
+    assert.equal(sample.level, 'below_soft');
+    assert.equal(sample.session_id, 's1');
+    assert.ok(Math.abs(sample.fill_pct - 25) < 0.01, `fill_pct ~25, got ${sample.fill_pct}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: soft classifies soft — advisory only, never a standalone deny', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 140_000); // 70% — between soft 65 and hard 80 defaults
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'soft pressure never blocks on its own (P1)');
+    assert.equal(readPressureFile(dir).level, 'soft');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: hard denies ONCE per session naming fill, threshold and the delegation remedy; spent marker releases the next Stop', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 170_000); // 85% — past hard 80 default
+    const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(first.code, 2, 'hard pressure soft-blocks once');
+    assert.match(first.stderr, /conductor context pressure/i);
+    assert.match(first.stderr, /85\.0%/, 'names the fill');
+    assert.match(first.stderr, /80%/, 'names the threshold');
+    assert.match(first.stderr, /delegat/i, 'names the delegation remedy');
+    assert.doesNotMatch(first.stderr, /\/clear/, 'slice 1 never instructs /clear');
+    assert.equal(readPressureFile(dir).level, 'hard');
+    const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(second.code, 0, 'once per session — marker spent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: hard + open capture duty ride ONE deny (pressure appended to the duty nag, no second block after)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 170_000);
+    writeFileSync(join(dir, 'src.mjs'), '// touched\n');
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'src.mjs', at: NOW }]));
+    const nag = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(nag.code, 2);
+    assert.match(nag.stderr, /nothing was captured/, 'duty nag present');
+    assert.match(nag.stderr, /conductor context pressure/i, 'pressure part rides the same deny');
+    const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(second.code, 0, 'second Stop releases (queue path) with no separate pressure deny');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: pipeline runs are untouched — no pressure file, no deny (H9 territory)', () => {
+  const { dir, cleanup } = makeProject({ withRun: true });
+  try {
+    writeConductorTranscript(dir, 170_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'active run releases to H9');
+    assert.equal(readPressureFile(dir), null, 'no conductor pressure accounting during a run');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: missing transcript degrades LOUD to unknown — check_skipped recorded, duties unaffected', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'unknown pressure never blocks');
+    const sample = readPressureFile(dir);
+    assert.equal(sample.level, 'unknown');
+    assert.equal(sample.reason, 'transcript_missing');
+    assert.ok(
+      store.listCheckSkipped().some((c) => c.check_name === 'conductor-pressure' && c.reason === 'transcript_missing'),
+      'degradation recorded via check_skipped'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: config thresholds govern (custom soft/hard flip a below-soft fill to hard)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeFileSync(
+      join(dir, '.sterling', 'config.json'),
+      JSON.stringify({ ...CONFIG, context_watch: { conductor: { soft_pct: 10, hard_pct: 20 } } })
+    );
+    writeConductorTranscript(dir, 50_000); // 25% — hard under the custom 20 threshold
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2, 'custom hard threshold fires');
+    assert.match(r.stderr, /20%/, 'names the configured threshold');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: stop_hook_active suppresses the standalone hard deny (no deny loops) but the sample still lands', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 170_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: true }), dir);
+    assert.equal(r.code, 0);
+    assert.equal(readPressureFile(dir).level, 'hard');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: fill > 100% is window MISCONFIGURATION, not pressure — unknown + check_skipped, no false hard block (live 2026-08-09)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 260_000); // 130% of the 200k default — impossible with a correct denominator
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'misconfigured window never blocks');
+    const sample = readPressureFile(dir);
+    assert.equal(sample.level, 'unknown');
+    assert.equal(sample.reason, 'window_mismatch');
+    assert.ok(sample.fill_pct > 100, 'raw fill preserved as evidence');
+    assert.ok(
+      store.listCheckSkipped().some((c) => c.check_name === 'conductor-pressure' && /window_mismatch/.test(c.reason)),
+      'misconfiguration recorded loud'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- H10 slice-boundary advisory (context-rotation slice 2) ---------------------------
+// At elevated pressure a DIRTY working tree means the open slice has not reached its
+// commit boundary. Advisory via the same once-per-session marker; fail-open on no-git.
+
+function gitProject() {
+  const { dir, store, cleanup } = makeProject();
+  const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  g(['init', '-q']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  // Mirror a real init'd project: .sterling/ is gitignored (init ensures the entry), and
+  // t/ holds the fixture's conductor transcript, which lives outside the repo in reality —
+  // so the hook's own pressure-sample write never counts as slice dirt.
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\nt/\n');
+  writeFileSync(join(dir, 'base.mjs'), '// base\n');
+  g(['add', '-A']);
+  g(['commit', '-qm', 'init']);
+  return { dir, store, cleanup, dirty: () => writeFileSync(join(dir, 'wip.mjs'), '// uncommitted\n') };
+}
+
+test('H10 slice boundary: soft pressure + dirty tree soft-blocks ONCE naming the commit boundary; clean release after', () => {
+  const { dir, dirty, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 140_000); // 70% of the 200k default — soft
+    dirty();
+    const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(first.code, 2, 'soft + dirty tree blocks once');
+    assert.match(first.stderr, /commit boundary/i);
+    assert.match(first.stderr, /uncommitted/i, 'names the dirty state');
+    assert.match(first.stderr, /once per session/i);
+    const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(second.code, 0, 'marker spent — no repeat');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: soft pressure + CLEAN tree stays advisory-silent (commit-ready needs no nudge)', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 140_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'clean tree at soft never blocks');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: hard pressure + dirty tree carries the boundary addendum in the hard block', () => {
+  const { dir, dirty, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 170_000); // 85% — hard
+    dirty();
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /conductor context pressure/i);
+    assert.match(r.stderr, /commit boundary/i, 'hard message names the boundary when dirty');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: soft-boundary block does not suppress a later hard escalation; hard marker ends it', () => {
+  const { dir, dirty, cleanup } = gitProject();
+  try {
+    writeConductorTranscript(dir, 140_000);
+    dirty();
+    assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 2, 'soft boundary block');
+    writeConductorTranscript(dir, 170_000); // escalate to hard
+    const hard = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(hard.code, 2, 'escalation still notifies');
+    assert.match(hard.stderr, /hard threshold/);
+    assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 0, 'hard marker spent — done for the session');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 slice boundary: no git degrades LOUD and open — soft + non-repo never blocks, check_skipped recorded', () => {
+  const { dir, store, cleanup } = makeProject(); // no git init
+  try {
+    writeConductorTranscript(dir, 140_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'advisory fails open');
+    assert.ok(
+      store.listCheckSkipped().some((c) => c.check_name === 'conductor-pressure' && /boundary_no_git/.test(c.reason)),
+      'degradation recorded'
+    );
   } finally {
     cleanup();
   }

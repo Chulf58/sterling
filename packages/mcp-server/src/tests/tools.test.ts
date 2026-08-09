@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
@@ -397,7 +397,10 @@ test('board tools: add/query separates board from maintenance queue; remove is t
     });
     assert.throws(() => tools.boardRemove(d.id), /not a todo/);
     const res = tools.boardRemove(userTodo.id);
-    assert.deepEqual(res.check_skipped, [{ check: 'board-remove-artifact-binding', reason: 'not_built' }]);
+    // the artifact binding is BUILT now (board b8ff0b68): a keyless item still
+    // reports the check as skipped, but for the real reason — no file identity
+    // to join on — not as not_built
+    assert.deepEqual(res.check_skipped, [{ check: 'board-remove-artifact-binding', reason: 'no_file_keys' }]);
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0);
   } finally {
     cleanup();
@@ -836,6 +839,219 @@ test("board_query / maintenance_query take projection:'digest' — the 478 KB bo
     assert.equal(queued.source, 'system');
   } finally {
     cleanup();
+  }
+});
+
+test("write tools take projection:'digest' — the envelope survives, only the echo collapses (the 49.8KB append)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    // The measured complaint (2026-08-09 consuming-project retrospective): every
+    // write echoes the record the caller JUST authored — one history append
+    // echoed 49.8KB, 100KB+ of pure echo per session across ~10 writes.
+    const body = 'w'.repeat(3000);
+    const article = mkArticle(tools, 'echoey', 'src/echoey.ts');
+
+    // DEFAULT UNCHANGED — a write result never changes shape under an existing
+    // caller (same posture as the read-side digest: opt-in, not a migration).
+    const full = tools.writeProjected(tools.knowledgeUpdateResult(article.id, { what_it_does: body }));
+    const fullRecord = (full as { record: Record<string, unknown> }).record;
+    assert.equal(fullRecord.what_it_does, body, "'full' stays the default and still echoes the body");
+
+    // digest: the envelope is what a caller ACTS on (warnings, check_skipped,
+    // replaced) — it survives; only the echoed record collapses to its digest.
+    const digested = tools.writeProjected(
+      tools.knowledgeUpdateResult(fullRecord.id as string, { what_it_does: `${body} v2` }),
+      'digest'
+    ) as Record<string, unknown>;
+    assert.ok(Array.isArray(digested.warnings), 'the warnings channel survives the projection');
+    const receipt = digested.record as Record<string, unknown>;
+    assert.equal(receipt.slug, 'echoey', 'the receipt carries the stable handle');
+    assert.equal(receipt.type, 'feature_article');
+    assert.ok(typeof receipt.version === 'number', 'and the version the write minted');
+    assert.ok(!('what_it_does' in receipt), 'without re-sending the body the caller just wrote');
+    assert.ok(
+      JSON.stringify(digested).length * 5 < JSON.stringify(full).length,
+      'a digested write response is dramatically cheaper to receive'
+    );
+
+    // knowledge_create keeps its declared envelope fields the same way.
+    const created = tools.writeProjected(
+      tools.knowledgeCreate('decision', { title: 'Echo decision', statement: body, alternatives_rejected: [], rationale: body }),
+      'digest'
+    ) as Record<string, unknown>;
+    assert.ok(Array.isArray(created.check_skipped), 'check_skipped is declared, not dropped, in the digest shape');
+    const createdReceipt = created.record as Record<string, unknown>;
+    assert.equal(createdReceipt.title, 'Echo decision');
+    assert.ok(!('statement' in createdReceipt));
+
+    // board_update returns a BARE record — the projection handles that shape too.
+    const todo = (tools.boardAdd({ text: `long item ${'y'.repeat(2000)}`, source: 'user' }) as { record: { id: string } }).record;
+    const updated = tools.writeProjected(tools.boardUpdate(todo.id, { priority: 'high' }), 'digest') as Record<string, unknown>;
+    assert.equal(updated.priority, 'high', 'the fields you triage by survive');
+    assert.match(updated.text as string, /…$/, 'the text is clipped, not echoed whole');
+  } finally {
+    cleanup();
+  }
+});
+
+test("knowledge_edit array-element addressing: files[path=x].role edits ONE string in ONE element — exactly-once at both levels (board b078167a)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = tools.knowledgeCreate('feature_article', {
+      slug: 'multi',
+      title: 'multi',
+      what_it_does: 'does',
+      intended_behavior: 'b',
+      files: [
+        { path: 'src/a.ts', role: 'the seam (uncommitted at writing)' },
+        { path: 'src/b.ts', role: 'the sibling seam (uncommitted at writing)' },
+      ],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    }).record;
+
+    // The motivating case: fix ONE stale clause inside ONE role without
+    // retransmitting the sibling elements.
+    const edited = tools.knowledgeEdit(article.id, 'files[path=src/a.ts].role', ' (uncommitted at writing)', '');
+    const files = (edited.record as unknown as { files: { path: string; role: string }[] }).files;
+    assert.equal(files.find((f) => f.path === 'src/a.ts')?.role, 'the seam', 'the selected element is corrected');
+    assert.equal(files.find((f) => f.path === 'src/b.ts')?.role, 'the sibling seam (uncommitted at writing)', 'the sibling is byte-untouched');
+    assert.equal(edited.replaced.field, 'files[path=src/a.ts].role');
+
+    const current = edited.record.id;
+    // selector matching ZERO elements refuses with the count
+    assert.throws(
+      () => tools.knowledgeEdit(current, 'files[path=src/zzz.ts].role', 'x', 'y'),
+      /matches 0 element/,
+      'an unmatched selector is refused, nothing written'
+    );
+    // non-array base field refuses the selector shape
+    assert.throws(
+      () => tools.knowledgeEdit(current, 'what_it_does[path=x].role', 'x', 'y'),
+      /not an array/,
+      'the selector only addresses array fields'
+    );
+    // find must still match exactly once INSIDE the selected element
+    assert.throws(
+      () => tools.knowledgeEdit(current, 'files[path=src/b.ts].role', 'e', 'E'),
+      /appears \d+ times/,
+      'ambiguity inside the element is refused exactly like the plain path'
+    );
+    // unknown base field is refused naming the valid set (same guard as everywhere)
+    assert.throws(() => tools.knowledgeEdit(current, 'nonsense[path=x].role', 'x', 'y'), /nonsense/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('session-event writers (no_capture / concept_designed / capture_pending) append schema-valid events to the transient register (boards 75b1a05f + 1af5d630)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-events-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  const eventsPath = join(dir, '.sterling', 'transient', 'session-events.json');
+  try {
+    // blank inputs are refused BEFORE anything is written — a false or empty
+    // declaration is drift, and these are honesty surfaces, not silencers
+    assert.throws(() => tools.noCapture('   '), /reason/);
+    assert.throws(() => tools.capturePending('', 'capture riding commit'), /target/);
+    assert.throws(() => tools.capturePending('commit abc', '  '), /reason/);
+    assert.throws(() => tools.conceptDesigned([]), /non-empty/);
+    assert.throws(() => tools.conceptDesigned(['ok', ' ']), /blank/);
+    assert.equal(existsSync(eventsPath), false, 'refused declarations write nothing');
+
+    tools.noCapture('read-only investigation');
+    tools.conceptDesigned(['weapons', 'armor']);
+    const pending = tools.capturePending('commit sterling/wave-3', 'three decisions drafted, riding the gated commit');
+    assert.match(pending.pending, /^commit sterling\/wave-3 — /, 'the pending detail leads with the target so the debt stays traceable');
+
+    const events = JSON.parse(readFileSync(eventsPath, 'utf8')) as { kind: string; detail: string; at: string }[];
+    assert.deepEqual(
+      events.map((e) => e.kind),
+      ['no_capture', 'concept_designed', 'concept_designed', 'capture_pending'],
+      'one event per declaration, in order, in the ONE register H10 reads'
+    );
+    assert.ok(events.every((e) => e.detail && e.at === NOW), 'every event carries detail + timestamp (sessionEventSchema shape)');
+
+    // a server with no resolvable project root refuses loudly instead of
+    // writing the register somewhere no hook will ever read it (P5)
+    const rootless = new SterlingTools({ store, now: () => NOW });
+    assert.throws(() => rootless.noCapture('x'), /no project root/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board_remove / maintenance_remove disclose artifact_evidence — the binding is visibility, not a gate (board b8ff0b68)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // fulfilled item: a durable record touching its file_keys landed after it
+    const fulfilled = (tools.boardAdd({ text: 'fix the widget', source: 'user', file_keys: ['src/widget.ts'] }) as { record: { id: string } }).record;
+    tools.knowledgeCreate('decision', { title: 'widget fixed thus', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src/widget.ts'] });
+    const closed = tools.boardRemove(fulfilled.id);
+    assert.equal(closed.artifact_evidence?.length, 1, 'the fulfilling write is visible in the receipt');
+    assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
+    assert.equal(closed.note, undefined, 'no operator-word warning when evidence exists');
+
+    // unfulfilled item: nothing touched its file_keys — removed, but the
+    // receipt says out loud that the close rides the operator's word
+    const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
+    const abandoned = tools.boardRemove(bare.id);
+    assert.deepEqual(abandoned.artifact_evidence, [], 'empty evidence is reported, never fabricated');
+    assert.match(abandoned.note ?? '', /operator's word/, 'and the receipt names what that means');
+
+    // no file identity → the check cannot run and says so (P5)
+    const keyless = (tools.boardAdd({ text: 'free-floating idea', source: 'user' }) as { record: { id: string } }).record;
+    const skipped = tools.boardRemove(keyless.id);
+    assert.equal(skipped.check_skipped?.[0]?.check, 'board-remove-artifact-binding');
+    assert.equal(skipped.check_skipped?.[0]?.reason, 'no_file_keys');
+
+    // maintenance_remove discloses the same evidence on queue items
+    const qi = tools.maintenanceEnqueue({ reason: 'capture_owed', text: 'capture owed on the widget work', file_keys: ['src/widget.ts'] });
+    const drained = tools.maintenanceRemove(qi.record.id);
+    assert.ok((drained.artifact_evidence?.length ?? 0) >= 1, 'the drain receipt shows the fulfilling write too');
+  } finally {
+    cleanup();
+  }
+});
+
+test('removal evidence survives the store cap: old high-overlap records cannot push the one fulfilling write out (review finding 12)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-evidence-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  let t = '2026-06-10T12:00:00.000Z';
+  const tools = new SterlingTools({ store, now: () => t });
+  try {
+    // A well-documented area: 30 OLD records overlapping BOTH of the item's
+    // file_keys (overlap 2 → sorted first by the store), predating the item.
+    for (let i = 0; i < 30; i++) {
+      tools.knowledgeCreate('decision', {
+        title: `old lore ${i}`,
+        statement: 'S',
+        alternatives_rejected: [],
+        rationale: 'R',
+        file_keys: ['src/hot.ts', 'src/hot2.ts'],
+      });
+    }
+    t = '2026-06-11T12:00:00.000Z';
+    const item = (tools.boardAdd({ text: 'work the hot area', source: 'user', file_keys: ['src/hot.ts', 'src/hot2.ts'] }) as { record: { id: string } }).record;
+    t = '2026-06-12T12:00:00.000Z';
+    // The one FULFILLING write overlaps only one key (overlap 1 → sorted last),
+    // so a small pre-filter cap would drop exactly the record that matters and
+    // the receipt would falsely accuse drift.
+    tools.knowledgeCreate('decision', { title: 'the fulfilling ruling', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src/hot.ts'] });
+    const closed = tools.boardRemove(item.id);
+    assert.ok(
+      (closed.artifact_evidence ?? []).some((e) => (e as { title?: string }).title === 'the fulfilling ruling'),
+      'the since-filter runs over a wide scan, not a pre-filtered window'
+    );
+    assert.equal(closed.note, undefined, "and no operator's-word accusation fires when evidence exists");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

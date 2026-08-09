@@ -4,10 +4,10 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, type DurableRecord, type FieldShape, type RunRecord, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import { DEFAULT_QUERY_CAP, type QueryOptions, type RecordedExit, type ToolStore } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
@@ -1040,6 +1040,61 @@ export class SterlingTools {
     if (typeof find !== 'string' || find.length === 0) {
       throw new Error(`knowledge_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
     }
+    // ARRAY-ELEMENT ADDRESSING (board b078167a, 2026-08-09): field may be a
+    // selector `arr[key=value].sub` — the one shape neither append (add-only)
+    // nor plain edit (string fields only) could reach. Correcting ONE string
+    // inside ONE element of a long array (canonically a stale files[].role)
+    // previously required a full knowledge_update retransmitting every sibling
+    // element under the documented truncation hazard; a consuming project left
+    // the drift in place as the lesser evil — a bad outcome delivered by a
+    // good rule. Same exactly-once contract at BOTH levels: the selector must
+    // match exactly one element, and find must match exactly once inside that
+    // element's field — zero and multiple are refused with the count.
+    const selector = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]\.([A-Za-z_]\w*)$/.exec(field);
+    if (selector) {
+      const [, base, key, value, sub] = selector;
+      this.refuseServerOwnedFields({ [base]: replace }, 'knowledge_update');
+      this.refuseUnknownFields(old.type, { [base]: replace });
+      const arr = (old as unknown as Record<string, unknown>)[base];
+      if (!Array.isArray(arr)) {
+        throw new Error(
+          `knowledge_edit: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector addresses array elements; a plain field name edits a string field`
+        );
+      }
+      const hits = arr.filter((el) => el && typeof el === 'object' && String((el as Record<string, unknown>)[key]) === value);
+      if (hits.length !== 1) {
+        throw new Error(
+          `knowledge_edit: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, nothing was written. ` +
+            (hits.length === 0 ? `Confirm the ${key} value against the live array.` : `Select on a key whose value is unique in the array.`)
+        );
+      }
+      const el = hits[0] as Record<string, unknown>;
+      const cur = el[sub];
+      if (typeof cur !== 'string') {
+        throw new Error(
+          `knowledge_edit: '${sub}' on the selected ${base} element is ${cur === undefined ? 'absent' : typeof cur}, not a string — edit replaces text inside a string`
+        );
+      }
+      const occ = cur.split(find).length - 1;
+      if (occ === 0) {
+        throw new Error(
+          `knowledge_edit: 'find' does not appear in the selected element's '${sub}' (${cur.length} chars) — nothing was written. Confirm the exact text (including whitespace and punctuation) before retrying.`
+        );
+      }
+      if (occ > 1) {
+        throw new Error(
+          `knowledge_edit: 'find' appears ${occ} times in the selected element's '${sub}' — refused as ambiguous, nothing was written. Extend 'find' with surrounding text until it identifies exactly one site.`
+        );
+      }
+      const nextEl = { ...el, [sub]: cur.replace(find, replace) };
+      const nextArr = arr.map((e) => (e === el ? nextEl : e));
+      const record = this.knowledgeUpdate(id, { [base]: nextArr });
+      return {
+        record,
+        replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
+        warnings: this.articleOversizeWarnings(record),
+      };
+    }
     this.refuseServerOwnedFields({ [field]: replace }, 'knowledge_update');
     this.refuseUnknownFields(old.type, { [field]: replace });
     const current = (old as unknown as Record<string, unknown>)[field];
@@ -1155,6 +1210,29 @@ export class SterlingTools {
     }
     warnings.push(...this.articleOversizeWarnings(record));
     return { record, warnings };
+  }
+
+  /**
+   * Digest projection for WRITE responses (2026-08-09 consuming-project
+   * retrospective). Every write tool echoes the record it just wrote, and on a
+   * grown article that echo is the single biggest context cost the conductor
+   * pays: one history append measured 49.8KB, and two sessions independently
+   * put full-record write echoes at 100KB+ of pure waste each — content the
+   * caller had JUST authored and gains nothing from re-reading. With
+   * projection:"digest" the result envelope survives intact (warnings,
+   * check_skipped, replaced, deduped — everything a caller acts on) and only
+   * the echoed record collapses to its digestRecord headline, the same
+   * projection vocabulary the read side already has (decision 87a12a1e): one
+   * projection concept, not two. The default stays 'full' deliberately —
+   * internal callers and existing consumers read fields off the echoed record,
+   * and a write result must never change shape under them silently.
+   */
+  writeProjected<T>(result: T, projection?: 'full' | 'digest'): T | Record<string, unknown> {
+    if (projection !== 'digest') return result;
+    if (result && typeof result === 'object' && 'record' in result) {
+      return { ...(result as Record<string, unknown>), record: digestRecord((result as { record: unknown }).record as Record<string, unknown>) };
+    }
+    return digestRecord(result as unknown as Record<string, unknown>);
   }
 
   knowledgeQueryResult(opts: QueryOptions & { projection?: Projection }): KnowledgeQueryResult {
@@ -1397,6 +1475,86 @@ export class SterlingTools {
     return { promoted, retired: id, drained_review: review?.id ?? null };
   }
 
+  // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------
+
+  /**
+   * The conductor declarations that previously lived ONLY in standalone
+   * scripts (scripts/no-capture.mjs, scripts/concept-designed.mjs) join the
+   * §10 surface: the scripts' relative paths are unreachable from a consuming
+   * project's shell — they live in the plugin clone, not the project cwd, and
+   * the 2026-08-09 retrospective burned two failed node invocations plus a
+   * Glob hunt on exactly that — while the MCP surface is mounted wherever the
+   * store is. The scripts survive as the no-server fallback; both writers
+   * append the SAME sessionEventSchema shape to the same register, so H10
+   * cannot tell them apart — one shape, one consumer (invariant 1).
+   */
+  private appendSessionEvents(entries: { kind: SessionEvent['kind']; detail: string }[]): { at: string } {
+    if (!this.repoRoot) {
+      throw new Error(
+        'session-event write: no project root is known to this server, so the transient register location cannot be resolved — use the script fallback (scripts/no-capture.mjs / scripts/concept-designed.mjs in the plugin clone)'
+      );
+    }
+    const eventsPath = join(this.repoRoot, '.sterling', 'transient', 'session-events.json');
+    mkdirSync(dirname(eventsPath), { recursive: true });
+    let events: unknown[] = [];
+    if (existsSync(eventsPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(eventsPath, 'utf8'));
+        if (Array.isArray(parsed)) events = parsed;
+      } catch {
+        // tolerate a malformed register exactly as H10 does — degrade to empty
+        // rather than refusing the write (the register is transient state)
+      }
+    }
+    const at = this.now();
+    for (const e of entries) events.push({ ...e, at });
+    writeFileSync(eventsPath, JSON.stringify(events));
+    return { at };
+  }
+
+  /** no_capture (§10): the explicit nothing-durable-was-learned declaration (board 7bbec3bd shape, MCP-served since board 75b1a05f). */
+  noCapture(reason: string): { declared: string; at: string } {
+    if (!reason || !reason.trim()) {
+      throw new Error(`no_capture: 'reason' is required — a false declaration is drift, so say why there is nothing durable`);
+    }
+    const { at } = this.appendSessionEvents([{ kind: 'no_capture', detail: reason }]);
+    return { declared: reason, at };
+  }
+
+  /** concept_designed (§10): a domain concept family's design settled — H10 will demand the family's concept article (decision 7208729b). */
+  conceptDesigned(families: string[]): { registered: string[]; at: string } {
+    if (!Array.isArray(families) || families.length === 0 || families.some((f) => typeof f !== 'string' || !f.trim())) {
+      throw new Error(`concept_designed: 'families' must be a non-empty array of concept family slugs — blank entries are refused`);
+    }
+    const { at } = this.appendSessionEvents(families.map((f) => ({ kind: 'concept_designed', detail: f })));
+    return { registered: families, at };
+  }
+
+  /**
+   * capture_pending (§10, board 1af5d630): the capture EXISTS and its write is
+   * in flight on a named target (a pending gated commit, a dispatched agent, a
+   * lane). Unlike no_capture this is not a claim that nothing durable was
+   * learned — it is the truthful middle state the register previously could
+   * not express, which trained operators to write boilerplate no_capture
+   * declarations (six in ~90 minutes, measured 2026-08-09), and boilerplate is
+   * exactly how a FALSE declaration eventually slips through. H10's contract
+   * for this kind: defer one Stop with registers preserved (a landed write
+   * settles the duty cleanly), then convert a still-pending duty to ONE
+   * deduped capture_owed item citing the target — pending work defers or lands
+   * on the queue, never evaporates.
+   */
+  capturePending(target: string, reason: string): { pending: string; at: string } {
+    if (!target || !target.trim()) {
+      throw new Error(`capture_pending: 'target' is required — name the commit/agent/lane the capture rides, so the deferred debt stays traceable`);
+    }
+    if (!reason || !reason.trim()) {
+      throw new Error(`capture_pending: 'reason' is required — say what capture is in flight`);
+    }
+    const detail = `${target.trim()} — ${reason.trim()}`;
+    const { at } = this.appendSessionEvents([{ kind: 'capture_pending', detail }]);
+    return { pending: detail, at };
+  }
+
   // -- board (§3.2.7) ----------------------------------------------------------
 
   boardAdd(args: Record<string, unknown>): CreateResult {
@@ -1524,14 +1682,65 @@ export class SterlingTools {
     return this.store.updateTodo(id, next);
   }
 
-  /** P4: done = removed. The artifact-write binding (H9/H10) is not built yet — skipped loudly, never silently. */
-  boardRemove(id: string): { removed: string; check_skipped: SkippedCheck[] } {
+  /**
+   * P4: done = removed. The artifact-write binding is now BUILT as EVIDENCE
+   * DISCLOSURE, deliberately not a refusal (board b8ff0b68 — 'the plugin's own
+   * receipt admits its close-with-artifact rule is unenforced'). Two reasons a
+   * hard gate is the wrong shape here: the user board is the human's own
+   * surface and legitimate abandonment exists ('no longer wanted' has no
+   * artifact and needs none — a refusal would trap exactly the closes only the
+   * human may judge); and the failure mode P4 guards against — calling work
+   * done in conversation with no artifact — is a VISIBILITY problem, so the
+   * receipt now shows what the store can see: durable records touching the
+   * item's file_keys written since the item was born. An empty list means the
+   * close rides the operator's word, and the receipt says so out loud.
+   */
+  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string } | { check_skipped: SkippedCheck[] } {
+    const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
+    if (fileKeys.length === 0) {
+      // No file identity to join on — the check cannot run, and says so
+      // (P5: a skipped check is loud, never a silent no-op).
+      const skipped = { check: 'board-remove-artifact-binding', reason: 'no_file_keys' };
+      this.store.recordCheckSkipped(skipped.check, skipped.reason, this.activeRunId(), this.now());
+      return { check_skipped: [skipped] };
+    }
+    const since = item.created_at;
+    // Scan WIDE, filter by since, THEN trim the receipt (review finding 12,
+    // 2026-08-09 — the same pre-cap/post-cap ordering hazard as audit finding
+    // 33/43): the store orders by file-key-overlap count first and updated_at
+    // only as a tiebreak, so a small cap on a well-documented area fills with
+    // old high-overlap records and pushes the one NEW artifact out — and this
+    // receipt would then accuse the operator of drift that never happened.
+    // 200 is a bounded scan, not a guarantee; past it the disclosure errs
+    // toward the scanned window and never blocks either way.
+    const evidence = this.store
+      .query({
+        types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'reference_material'],
+        file_keys: fileKeys,
+        cap: 200,
+      })
+      .filter((r) => r.created_at >= since || r.updated_at >= since)
+      .slice(0, 25)
+      .map((r) => digestRecord(r as unknown as Record<string, unknown>));
+    return {
+      artifact_evidence: evidence,
+      ...(evidence.length === 0
+        ? {
+            note:
+              `no fulfilling artifact-write found touching this item's file_keys since it was created — removed on the operator's word. ` +
+              `If work fulfilled this item, its capture is missing (that is drift, not a formality).`,
+          }
+        : {}),
+    };
+  }
+
+  boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
     if (!record) throw new Error(`board_remove: no record '${id}'`);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a todo`);
-    const skipped = [this.skip('board-remove-artifact-binding', this.activeRunId())];
+    const evidence = this.removalArtifactEvidence(record);
     this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
-    return { removed: id, check_skipped: skipped };
+    return { removed: id, ...evidence };
   }
 
   /**
@@ -1554,7 +1763,7 @@ export class SterlingTools {
    * a user item by design, naming board_remove as the conductor's path so the
    * refusal teaches rather than merely blocks.
    */
-  maintenanceRemove(id: string): { removed: string; check_skipped: SkippedCheck[] } {
+  maintenanceRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
     if (!record) throw new Error(`maintenance_remove: no record '${id}'`);
     if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
@@ -1566,9 +1775,9 @@ export class SterlingTools {
           `If you are the conductor and this item is genuinely fulfilled, use board_remove.`
       );
     }
-    const skipped = [this.skip('board-remove-artifact-binding', this.activeRunId())];
+    const evidence = this.removalArtifactEvidence(record);
     this.store.remove(id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
-    return { removed: id, check_skipped: skipped };
+    return { removed: id, ...evidence };
   }
 
   /**
