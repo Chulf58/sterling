@@ -2623,3 +2623,143 @@ test('H7 omits the hint rather than inventing one when the tool gives it nothing
     cleanup();
   }
 });
+
+// --------------------------- H10 conductor context pressure (slice 1) ---------------------------
+// Direct-conductor pressure at the Stop seam: H6's transcript machinery pointed at the
+// conductor's OWN transcript. Advisory + fail-open: a pressure failure never costs a duty.
+
+function writeConductorTranscript(dir, inputTokens, { cacheRead = 0, model = 'claude-fable-5' } = {}) {
+  const p = join(dir, 't', 's1.jsonl');
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(
+    p,
+    JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: inputTokens, cache_read_input_tokens: cacheRead }, model } }) + '\n'
+  );
+}
+
+function readPressureFile(dir) {
+  const p = join(dir, '.sterling', 'transient', 'conductor-pressure.json');
+  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+}
+
+test('H10 conductor pressure: below-soft classifies below_soft, no deny, sample persisted at the Stop seam', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 50_000); // 25% of the 200k default window
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, `clean session releases: ${r.stderr}`);
+    const sample = readPressureFile(dir);
+    assert.ok(sample, 'pressure sample persisted');
+    assert.equal(sample.level, 'below_soft');
+    assert.equal(sample.session_id, 's1');
+    assert.ok(Math.abs(sample.fill_pct - 25) < 0.01, `fill_pct ~25, got ${sample.fill_pct}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: soft classifies soft — advisory only, never a standalone deny', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 140_000); // 70% — between soft 65 and hard 80 defaults
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'soft pressure never blocks on its own (P1)');
+    assert.equal(readPressureFile(dir).level, 'soft');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: hard denies ONCE per session naming fill, threshold and the delegation remedy; spent marker releases the next Stop', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 170_000); // 85% — past hard 80 default
+    const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(first.code, 2, 'hard pressure soft-blocks once');
+    assert.match(first.stderr, /conductor context pressure/i);
+    assert.match(first.stderr, /85\.0%/, 'names the fill');
+    assert.match(first.stderr, /80%/, 'names the threshold');
+    assert.match(first.stderr, /delegat/i, 'names the delegation remedy');
+    assert.doesNotMatch(first.stderr, /\/clear/, 'slice 1 never instructs /clear');
+    assert.equal(readPressureFile(dir).level, 'hard');
+    const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(second.code, 0, 'once per session — marker spent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: hard + open capture duty ride ONE deny (pressure appended to the duty nag, no second block after)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 170_000);
+    writeFileSync(join(dir, 'src.mjs'), '// touched\n');
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'src.mjs', at: NOW }]));
+    const nag = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(nag.code, 2);
+    assert.match(nag.stderr, /nothing was captured/, 'duty nag present');
+    assert.match(nag.stderr, /conductor context pressure/i, 'pressure part rides the same deny');
+    const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(second.code, 0, 'second Stop releases (queue path) with no separate pressure deny');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: pipeline runs are untouched — no pressure file, no deny (H9 territory)', () => {
+  const { dir, cleanup } = makeProject({ withRun: true });
+  try {
+    writeConductorTranscript(dir, 170_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'active run releases to H9');
+    assert.equal(readPressureFile(dir), null, 'no conductor pressure accounting during a run');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: missing transcript degrades LOUD to unknown — check_skipped recorded, duties unaffected', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'unknown pressure never blocks');
+    const sample = readPressureFile(dir);
+    assert.equal(sample.level, 'unknown');
+    assert.equal(sample.reason, 'transcript_missing');
+    assert.ok(
+      store.listCheckSkipped().some((c) => c.check_name === 'conductor-pressure' && c.reason === 'transcript_missing'),
+      'degradation recorded via check_skipped'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: config thresholds govern (custom soft/hard flip a below-soft fill to hard)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeFileSync(
+      join(dir, '.sterling', 'config.json'),
+      JSON.stringify({ ...CONFIG, context_watch: { conductor: { soft_pct: 10, hard_pct: 20 } } })
+    );
+    writeConductorTranscript(dir, 50_000); // 25% — hard under the custom 20 threshold
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 2, 'custom hard threshold fires');
+    assert.match(r.stderr, /20%/, 'names the configured threshold');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: stop_hook_active suppresses the standalone hard deny (no deny loops) but the sample still lands', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 170_000);
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: true }), dir);
+    assert.equal(r.code, 0);
+    assert.equal(readPressureFile(dir).level, 'hard');
+  } finally {
+    cleanup();
+  }
+});

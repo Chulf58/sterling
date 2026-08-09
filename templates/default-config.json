@@ -12,7 +12,8 @@
     "warn_pct": 60,
     "block_pct": 95,
     "mode": "observe",
-    "windows": { "default": 200000 }
+    "windows": { "default": 200000 },
+    "conductor": { "soft_pct": 65, "hard_pct": 80 }
   },
   "models": {
     "test_writer": { "model": "claude-opus-5", "effort": "high" },

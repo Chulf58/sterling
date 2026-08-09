@@ -8,7 +8,7 @@ var __export = (target, all) => {
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { readFileSync as readFileSync2, writeFileSync, rmSync, existsSync as existsSync3 } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, rmSync, existsSync as existsSync4, mkdirSync as mkdirSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -4742,7 +4742,15 @@ var configSchema = external_exports.object({
     warn_pct: external_exports.number().positive().default(60),
     block_pct: external_exports.number().positive().default(95),
     mode: external_exports.enum(["observe", "enforce"]).default("observe"),
-    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 })
+    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
+    // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
+    // "finish before opening new areas"; hard = once-per-session soft-block naming the
+    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
+    // different consequences (run escalation / dispatch deny in enforce mode).
+    conductor: external_exports.object({
+      soft_pct: external_exports.number().positive().default(65),
+      hard_pct: external_exports.number().positive().default(80)
+    }).default({})
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
@@ -5898,6 +5906,52 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/hooks/lib/transcript.mjs
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
+function readTail(path, bytes = TAIL_BYTES) {
+  if (!existsSync3(path)) return null;
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, bytes);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+function latestUsage(path) {
+  const tail = readTail(path);
+  if (tail === null) return { usage: null, reason: "transcript_missing" };
+  const lines = tail.split("\n");
+  let sawAssistant = false;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type !== "assistant") continue;
+    sawAssistant = true;
+    const usage = entry.message?.usage;
+    if (usage && typeof usage.input_tokens === "number") {
+      return { usage, model: entry.message?.model, reason: null };
+    }
+  }
+  if (sawAssistant) return { usage: null, reason: "format_unparseable" };
+  const exhausted = statSync(path).size > TAIL_BYTES;
+  return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
+}
+function fillPct(usage, windowSize) {
+  const used = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+  return 100 * used / windowSize;
+}
+
 // scripts/lib/test-integrity.mjs
 import { spawnSync } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
@@ -5933,13 +5987,57 @@ var eventsPath = join2(input.cwd, ".sterling", "transient", "session-events.json
 var nagMarker = join2(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   if (store.getRun()) allow();
+  const config = parseConfig(loadConfig(input.cwd) ?? {});
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const pressureMarker = join2(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressure = (() => {
+    try {
+      const cw = config.context_watch;
+      const { usage, model, reason } = latestUsage(input.transcript_path ?? "");
+      let sample;
+      if (!usage) {
+        store.recordCheckSkipped("conductor-pressure", reason ?? "format_unparseable", void 0, now);
+        sample = { session_id: input.session_id, level: "unknown", fill_pct: null, reason, at: now };
+      } else {
+        const windowSize = model && cw.windows[model] || cw.windows.default;
+        const fill = fillPct(usage, windowSize);
+        const level = fill >= cw.conductor.hard_pct ? "hard" : fill >= cw.conductor.soft_pct ? "soft" : "below_soft";
+        sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+      }
+      mkdirSync2(join2(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync(join2(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      return sample;
+    } catch (e) {
+      try {
+        store.recordCheckSkipped("conductor-pressure", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
+      } catch {
+      }
+      return { session_id: input.session_id, level: "unknown", fill_pct: null, reason: "pressure_failed", at: now };
+    }
+  })();
+  const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents \u2014 the conductor's context is the scarce resource (P1). This notice fires once per session.` : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2014 prefer finishing open work over opening large new areas; delegate reads to subagents.`;
+  const spendPressureMarker = () => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const pressureMarkerSpent = () => {
+    try {
+      return JSON.parse(readFileSync2(pressureMarker, "utf8")).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  const releaseWithPressure = () => {
+    if (pressure.level === "hard" && !input.stop_hook_active && !pressureMarkerSpent()) {
+      spendPressureMarker();
+      deny(pressurePart());
+    }
+    allow();
+  };
   let touches = [];
-  if (existsSync3(touchesPath)) {
+  if (existsSync4(touchesPath)) {
     touches = JSON.parse(readFileSync2(touchesPath, "utf8"));
   }
   let sessionEvents = [];
   try {
-    if (existsSync3(eventsPath)) {
+    if (existsSync4(eventsPath)) {
       const raw = JSON.parse(readFileSync2(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
@@ -5953,11 +6051,9 @@ try {
   };
   if (!touches.length && !sessionEvents.length) {
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
-  const config = parseConfig(loadConfig(input.cwd) ?? {});
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync3(join2(input.cwd, p)));
+  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
   const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
   const researchEvents = sessionEvents.filter(
@@ -5974,14 +6070,14 @@ try {
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
   const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync3(join2(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const hasResearchDuty = researchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
@@ -6022,12 +6118,12 @@ try {
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
-    if (!existsSync3(nagMarker)) {
+    if (!existsSync4(nagMarker)) {
       writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
-      allow();
+      releaseWithPressure();
     }
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
@@ -6049,7 +6145,7 @@ try {
       });
     }
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   let integrityNote = "";
@@ -6061,7 +6157,7 @@ try {
 Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${JSON.stringify(ti.deleted)} \u2014 review these before capture.`;
     }
   }
-  if (!input.stop_hook_active && !existsSync3(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync4(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [];
     const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
@@ -6100,6 +6196,10 @@ Create/update the family article(s) NOW (knowledge_create/knowledge_update type 
         `H10 article demand (\xA76): ${unowned.length} touched file(s) have no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""}: ${JSON.stringify(unowned.slice(0, 20))}.
 Create or extend the owning article(s) NOW (knowledge_create type feature_article; for a governing document, reference_material kind doc) \u2014 the knowledge is freshest before this session ends; general capture does not satisfy this.`
       );
+    }
+    if (pressure.level === "soft" || pressure.level === "hard") {
+      parts.push(pressurePart());
+      if (pressure.level === "hard") spendPressureMarker();
     }
     deny(parts.join("\n\n"));
   }
@@ -6188,7 +6288,7 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     }
   }
   clearRegisters();
-  allow();
+  releaseWithPressure();
 } catch (e) {
   try {
     store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());

@@ -27,9 +27,10 @@
 // All terminal paths clear both registers + the nag marker together (P4).
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking } from './lib/common.mjs';
+import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 
@@ -43,6 +44,64 @@ const nagMarker = join(input.cwd, '.sterling', 'transient', 'capture-nagged.json
 
 try {
   if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers
+
+  const config = parseConfig(loadConfig(input.cwd) ?? {});
+  const now = new Date().toISOString();
+
+  // CONDUCTOR CONTEXT PRESSURE (context-rotation slice 1): H6's transcript machinery
+  // (latestUsage/fillPct) pointed at the conductor's OWN transcript — Stop payloads carry
+  // transcript_path natively, no deriveAgentTranscript. Advisory and FAIL-OPEN in its own
+  // try: a pressure failure records check_skipped {conductor-pressure} and must never cost
+  // a session-end duty. The persisted sample is a latest-value cell keyed by session_id;
+  // the once-per-session hard nag marker is spent-by-session_id, so a stale marker from a
+  // prior session never suppresses and needs no clearing event (P4 by supersession).
+  const pressureMarker = join(input.cwd, '.sterling', 'transient', 'pressure-nagged.json');
+  const pressure = (() => {
+    try {
+      const cw = config.context_watch;
+      const { usage, model, reason } = latestUsage(input.transcript_path ?? '');
+      let sample;
+      if (!usage) {
+        store.recordCheckSkipped('conductor-pressure', reason ?? 'format_unparseable', undefined, now);
+        sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, reason, at: now };
+      } else {
+        const windowSize = (model && cw.windows[model]) || cw.windows.default;
+        const fill = fillPct(usage, windowSize);
+        const level = fill >= cw.conductor.hard_pct ? 'hard' : fill >= cw.conductor.soft_pct ? 'soft' : 'below_soft';
+        sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+      }
+      mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
+      writeFileSync(join(input.cwd, '.sterling', 'transient', 'conductor-pressure.json'), JSON.stringify(sample));
+      return sample;
+    } catch (e) {
+      try {
+        store.recordCheckSkipped('conductor-pressure', String((e && e.message) || e), undefined, new Date().toISOString());
+      } catch {
+        // store is the casualty — pressure stays advisory, the duty gate below still runs
+      }
+      return { session_id: input.session_id, level: 'unknown', fill_pct: null, reason: 'pressure_failed', at: now };
+    }
+  })();
+  const pressurePart = () =>
+    pressure.level === 'hard'
+      ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents — the conductor's context is the scarce resource (P1). This notice fires once per session.`
+      : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ soft threshold ${config.context_watch.conductor.soft_pct}% — prefer finishing open work over opening large new areas; delegate reads to subagents.`;
+  const spendPressureMarker = () => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const pressureMarkerSpent = () => {
+    try {
+      return JSON.parse(readFileSync(pressureMarker, 'utf8')).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  /** Every direct-mode release path exits through here: hard pressure soft-blocks ONCE per session. */
+  const releaseWithPressure = () => {
+    if (pressure.level === 'hard' && !input.stop_hook_active && !pressureMarkerSpent()) {
+      spendPressureMarker();
+      deny(pressurePart());
+    }
+    allow();
+  };
 
   // Read touches
   let touches = [];
@@ -72,11 +131,8 @@ try {
   // Dual-register entry: proceed only if either register has content.
   if (!touches.length && !sessionEvents.length) {
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
-
-  const config = parseConfig(loadConfig(input.cwd) ?? {});
-  const now = new Date().toISOString();
 
   // §6 H10: only files that STILL EXIST drive a demand — a file created and then
   // deleted within the session (e.g. a throwaway) leaves a stale H7 touch entry
@@ -137,7 +193,7 @@ try {
     // No duties to enforce (e.g. only non-research dispatches recorded, or a
     // no-capture declaration covered every touch/debug event) — clear and release.
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
 
   // Earliest timestamp across the ACTIVE touches ∪ debug events (the
@@ -207,7 +263,7 @@ try {
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
 
   // CAPTURE-PENDING DEFERRAL (board 1af5d630). Only the CAPTURE duty is
@@ -229,7 +285,7 @@ try {
     // hook's deny would lose its whole grace period and mint a false debt.
     if (!existsSync(nagMarker)) {
       writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
-      allow(); // registers deliberately NOT cleared — see above
+      releaseWithPressure(); // registers deliberately NOT cleared — see above
     }
     const openPending = store
       .query({ types: ['todo'], cap: 1000 })
@@ -253,7 +309,7 @@ try {
       });
     }
     clearRegisters();
-    allow();
+    releaseWithPressure();
   }
 
   // test-touching → test-integrity vs git HEAD (§8.2); non-git degrades loud.
@@ -333,6 +389,13 @@ try {
           `${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''}: ${JSON.stringify(unowned.slice(0, 20))}.\n` +
           `Create or extend the owning article(s) NOW (knowledge_create type feature_article; for a governing document, reference_material kind doc) — the knowledge is freshest before this session ends; general capture does not satisfy this.`
       );
+    }
+
+    // Conductor pressure rides the same deny (one block per Stop, P1): soft advises,
+    // hard advises AND spends the once-per-session marker so no second block follows.
+    if (pressure.level === 'soft' || pressure.level === 'hard') {
+      parts.push(pressurePart());
+      if (pressure.level === 'hard') spendPressureMarker();
     }
 
     deny(parts.join('\n\n'));
@@ -436,7 +499,7 @@ try {
     }
   }
   clearRegisters();
-  allow();
+  releaseWithPressure();
 } catch (e) {
   // A throw here (config parse, store read) would otherwise skip every session-end
   // duty silently on a non-blocking exit-1. Degrade LOUD instead (AC4): record a
