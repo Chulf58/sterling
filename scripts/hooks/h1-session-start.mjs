@@ -4,6 +4,7 @@
 // invisible; this is its visibility pressure. Banner art goes to stderr
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
+import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, readdirSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -276,6 +277,115 @@ try {
   // fail-open — a malformed note costs the restore, never the conventions injection
 }
 
+// SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
+// (touches / session-events / capture-nagged) are cleared by H10's terminal Stop
+// paths — but a session that dies without one (kill, deny-then-close, or the
+// capture-pending deferral's deliberate allow-without-clear, decision bd594c03)
+// leaks them into the NEXT session: a stale nag marker silently downgrades every
+// duty's soft-block to queue items, a stale capture_pending suppresses the capture
+// nag for unrelated new work, and stale touches backdate `earliest` and pollute
+// item file_keys and the unowned set. At a NEW session (source startup|clear ONLY —
+// resume/compact continue the same logical session and keep their registers) the
+// residue belongs to a DEAD session: verify its debt against the store (the same
+// captured-set query H10 runs) and either clear silently (paid) or convert to ONE
+// deduped capture_owed item, then clear (P5: dead-session debt lands on the queue
+// or is verified paid — it never evaporates and never pollutes the new session's
+// duty cycle). A malformed register is UNVERIFIABLE debt and converts regardless —
+// conservative and loud, never silently trusted. Fail-open like every H1 read.
+let residueContext = '';
+try {
+  if (input.source === 'startup' || input.source === 'clear') {
+    const transient = join(input.cwd, '.sterling', 'transient');
+    const regPaths = [join(transient, 'touches.json'), join(transient, 'session-events.json'), join(transient, 'capture-nagged.json')];
+    const [touchesPath, eventsPath] = regPaths;
+    if (regPaths.some((p) => existsSync(p))) {
+      let touches = [];
+      let events = [];
+      let malformed = false;
+      try {
+        if (existsSync(touchesPath)) {
+          const raw = JSON.parse(readFileSync(touchesPath, 'utf8'));
+          if (Array.isArray(raw)) touches = raw;
+          else malformed = true;
+        }
+      } catch {
+        malformed = true;
+      }
+      try {
+        if (existsSync(eventsPath)) {
+          const raw = JSON.parse(readFileSync(eventsPath, 'utf8'));
+          if (Array.isArray(raw)) events = raw;
+          else malformed = true;
+        }
+      } catch {
+        malformed = true;
+      }
+      // A lone nag marker with no work evidence is not debt — deleted silently below.
+      if (touches.length || events.length || malformed) {
+        const stamps = [...touches.map((t) => t?.at), ...events.map((e) => e?.at)].filter(Boolean).sort();
+        const earliest = stamps.length ? stamps[0] : null;
+        // Same captured-set semantics as H10's duty check: any durable record at or
+        // after the residue's earliest timestamp means the dead session paid its debt.
+        const paid =
+          !malformed &&
+          earliest !== null &&
+          store
+            .query({
+              types: ['decision', 'anti_pattern', 'note', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'],
+              cap: 1000,
+              include_unconfirmed: true,
+            })
+            .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+        if (!paid) {
+          const paths = [...new Set(touches.map((t) => t?.path).filter(Boolean))];
+          const pending = events
+            .filter((e) => e?.kind === 'capture_pending' && e?.detail)
+            .map((e) => e.detail)
+            .at(-1);
+          const open = store
+            .query({ types: ['todo'], cap: 1000 })
+            .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
+          if (!open) {
+            const now = new Date().toISOString();
+            store.create({
+              id: randomUUID(),
+              type: 'todo',
+              created_at: now,
+              updated_at: now,
+              author: 'system',
+              status: 'active',
+              superseded_by: null,
+              links: [],
+              scope: 'project',
+              stack_tags: [],
+              text:
+                `capture owed (session-boundary residue): a previous session ended without settling its transient registers — ` +
+                (malformed
+                  ? `register content was malformed, so the debt is unverifiable and stays loud` +
+                    (paths.length ? `; ${paths.length} touched file(s) were recoverable` : '') +
+                    ` — `
+                  : `${paths.length} touched file(s), ${events.length} session event(s)` +
+                    (pending ? `, declared pending (${pending})` : '') +
+                    ` and no durable record since ${earliest} — `) +
+                `verify the work landed its capture against HEAD, then close`,
+              source: 'system',
+              system_reason: 'capture_owed',
+              file_keys: paths.slice(0, 20),
+            });
+            residueContext =
+              `\n\nSESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient registers` +
+              (pending ? ` (including a capture_pending declaration: ${pending})` : '') +
+              `; no durable capture covers this session-boundary residue, so ONE capture_owed item now carries the debt — verify it against HEAD when draining. The registers were cleared so they cannot pollute this session's duty cycle.`;
+          }
+        }
+      }
+      for (const p of regPaths) rmSync(p, { force: true });
+    }
+  }
+} catch {
+  // fail-open — residue conversion must never break SessionStart
+}
+
 let counts = { todos: 0, maintenance: 0 };
 let queueReasons = [];
 let drainable = 0;
@@ -458,7 +568,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + rotationContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

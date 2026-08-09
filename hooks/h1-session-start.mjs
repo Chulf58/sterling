@@ -6,6 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname as dirname5, join as join4 } from "node:path";
@@ -6158,6 +6159,75 @@ Resume from next_slice. The board and knowledge store remain the authorities for
   }
 } catch {
 }
+var residueContext = "";
+try {
+  if (input.source === "startup" || input.source === "clear") {
+    const transient = join4(input.cwd, ".sterling", "transient");
+    const regPaths = [join4(transient, "touches.json"), join4(transient, "session-events.json"), join4(transient, "capture-nagged.json")];
+    const [touchesPath, eventsPath] = regPaths;
+    if (regPaths.some((p) => existsSync3(p))) {
+      let touches = [];
+      let events = [];
+      let malformed = false;
+      try {
+        if (existsSync3(touchesPath)) {
+          const raw = JSON.parse(readFileSync2(touchesPath, "utf8"));
+          if (Array.isArray(raw)) touches = raw;
+          else malformed = true;
+        }
+      } catch {
+        malformed = true;
+      }
+      try {
+        if (existsSync3(eventsPath)) {
+          const raw = JSON.parse(readFileSync2(eventsPath, "utf8"));
+          if (Array.isArray(raw)) events = raw;
+          else malformed = true;
+        }
+      } catch {
+        malformed = true;
+      }
+      if (touches.length || events.length || malformed) {
+        const stamps = [...touches.map((t) => t?.at), ...events.map((e) => e?.at)].filter(Boolean).sort();
+        const earliest = stamps.length ? stamps[0] : null;
+        const paid = !malformed && earliest !== null && store.query({
+          types: ["decision", "anti_pattern", "note", "feature_article", "research_finding", "disconfirmed_hypothesis"],
+          cap: 1e3,
+          include_unconfirmed: true
+        }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+        if (!paid) {
+          const paths = [...new Set(touches.map((t) => t?.path).filter(Boolean))];
+          const pending = events.filter((e) => e?.kind === "capture_pending" && e?.detail).map((e) => e.detail).at(-1);
+          const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
+          if (!open) {
+            const now = (/* @__PURE__ */ new Date()).toISOString();
+            store.create({
+              id: randomUUID2(),
+              type: "todo",
+              created_at: now,
+              updated_at: now,
+              author: "system",
+              status: "active",
+              superseded_by: null,
+              links: [],
+              scope: "project",
+              stack_tags: [],
+              text: `capture owed (session-boundary residue): a previous session ended without settling its transient registers \u2014 ` + (malformed ? `register content was malformed, so the debt is unverifiable and stays loud` + (paths.length ? `; ${paths.length} touched file(s) were recoverable` : "") + ` \u2014 ` : `${paths.length} touched file(s), ${events.length} session event(s)` + (pending ? `, declared pending (${pending})` : "") + ` and no durable record since ${earliest} \u2014 `) + `verify the work landed its capture against HEAD, then close`,
+              source: "system",
+              system_reason: "capture_owed",
+              file_keys: paths.slice(0, 20)
+            });
+            residueContext = `
+
+SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient registers` + (pending ? ` (including a capture_pending declaration: ${pending})` : "") + `; no durable capture covers this session-boundary residue, so ONE capture_owed item now carries the debt \u2014 verify it against HEAD when draining. The registers were cleared so they cannot pollute this session's duty cycle.`;
+          }
+        }
+      }
+      for (const p of regPaths) rmSync(p, { force: true });
+    }
+  }
+} catch {
+}
 var counts = { todos: 0, maintenance: 0 };
 var queueReasons = [];
 var drainable = 0;
@@ -6261,7 +6331,7 @@ ${versionLine}`);
 }
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + rotationContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();
