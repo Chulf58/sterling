@@ -75,6 +75,8 @@ Worked handoff — copy this shape (it kills the recurring first-write schema fa
 
 # Exit signals it may emit
 
+If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` REFUSE with `no active run` — skip them and make your FINAL TEXT the complete deliverable, with the signal named on its first line. Inside a run this section binds unchanged: `agent_exit` is mandatory there (H9/consume-exit depend on it).
+
 - `complete` `{handoff_ref}` — verdict recorded (clean or with objections).
 - `review-unresolved` `{objections, reviewer_agreement}` — only when re-review after fixes still finds the same defect (post-cap).
 - `blocked` `{reason}` — a required input is missing.

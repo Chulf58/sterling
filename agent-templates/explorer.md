@@ -62,6 +62,8 @@ Before reporting that anything is missing, absent, unused, unwired, untested, or
 
 # Exit signals it may emit
 
+If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` REFUSE with `no active run` — skip them and make your FINAL TEXT the complete deliverable, with the signal named on its first line. Inside a run this section binds unchanged: `agent_exit` is mandatory there (H9/consume-exit depend on it).
+
 - `complete` `{handoff_ref}` — map recorded.
 - `blocked` `{reason}` — the target is not findable with the given inputs.
 

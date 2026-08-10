@@ -54,6 +54,8 @@ PRE-RUN DISPATCH — the normal case: you are dispatched at planning or intake, 
 
 # Exit signals it may emit
 
+If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` REFUSE with `no active run` — skip them and make your FINAL TEXT the complete deliverable, with the signal named on its first line. Inside a run this section binds unchanged: `agent_exit` is mandatory there (H9/consume-exit depend on it).
+
 - `complete` `{handoff_ref}` — design recorded.
 - `research-needed` `{question, context, blocking}` — a load-bearing external unknown.
 - `blocked` `{reason}` — the brief draft is too unresolved to design against.
