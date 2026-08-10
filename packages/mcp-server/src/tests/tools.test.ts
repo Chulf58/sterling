@@ -851,11 +851,18 @@ test("write tools take projection:'digest' — the envelope survives, only the e
     const body = 'w'.repeat(3000);
     const article = mkArticle(tools, 'echoey', 'src/echoey.ts');
 
-    // DEFAULT UNCHANGED — a write result never changes shape under an existing
-    // caller (same posture as the read-side digest: opt-in, not a migration).
-    const full = tools.writeProjected(tools.knowledgeUpdateResult(article.id, { what_it_does: body }));
+    // DEFAULT IS THE RECEIPT (board 7ddf13a7, flipping e23f38f8's default-full):
+    // the echo was the single biggest measured context leak, and every consumer
+    // of the full body was swept before the flip — 'full' is the opt-in now.
+    const defaulted = tools.writeProjected(tools.knowledgeUpdateResult(article.id, { what_it_does: body })) as Record<string, unknown>;
+    const defaultReceipt = defaulted.record as Record<string, unknown>;
+    assert.ok(!('what_it_does' in defaultReceipt), 'the default echo no longer re-sends the body the caller just wrote');
+    assert.equal(defaultReceipt.slug, 'echoey', 'the default receipt still carries the stable handle');
+    assert.ok(Array.isArray(defaulted.warnings), 'the warnings channel survives the default projection');
+
+    const full = tools.writeProjected(tools.knowledgeUpdateResult(defaultReceipt.id as string, { what_it_does: body }), 'full');
     const fullRecord = (full as { record: Record<string, unknown> }).record;
-    assert.equal(fullRecord.what_it_does, body, "'full' stays the default and still echoes the body");
+    assert.equal(fullRecord.what_it_does, body, "projection:'full' opts back into the whole echoed record");
 
     // digest: the envelope is what a caller ACTS on (warnings, check_skipped,
     // replaced) — it survives; only the echoed record collapses to its digest.

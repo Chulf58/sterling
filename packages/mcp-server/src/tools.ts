@@ -1290,12 +1290,17 @@ export class SterlingTools {
    * check_skipped, replaced, deduped — everything a caller acts on) and only
    * the echoed record collapses to its digestRecord headline, the same
    * projection vocabulary the read side already has (decision 87a12a1e): one
-   * projection concept, not two. The default stays 'full' deliberately —
-   * internal callers and existing consumers read fields off the echoed record,
-   * and a write result must never change shape under them silently.
+   * projection concept, not two. The default is the DIGEST receipt (board
+   * 7ddf13a7, flipping e23f38f8's default-full after the 2026-08-10
+   * retrospective measured the echo as the biggest single context leak): the
+   * envelope a caller acts on (warnings, check_skipped, replaced, deduped)
+   * survives, the body the caller just authored does not come back, and
+   * projection:'full' opts back in. Every boundary consumer of the full echo
+   * was swept before the flip — internal callers use the tools.* methods
+   * directly and still receive full records.
    */
   writeProjected<T>(result: T, projection?: 'full' | 'digest'): T | Record<string, unknown> {
-    if (projection !== 'digest') return result;
+    if (projection === 'full') return result;
     if (result && typeof result === 'object' && 'record' in result) {
       return { ...(result as Record<string, unknown>), record: digestRecord((result as { record: unknown }).record as Record<string, unknown>) };
     }
