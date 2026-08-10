@@ -4904,7 +4904,7 @@ try {
     const count = prior && prior.session_id === input.session_id && Number.isFinite(prior.count) ? prior.count + 1 : 1;
     writeJson(articleWritesPath, { session_id: input.session_id, count });
     emit(
-      `H21 article-write watch: this is hand-run article write #${count} this session (decision dac3d2c6 \u2014 article application is librarian-shaped). Hand-run writes are for the three named exceptions only: (1) a small authored create, (2) a write needing live adjudication, (3) a single small-record touch. Bulkier article reconciles should batch through the librarian dispatch instead.`
+      `H21 article-write watch: this is hand-run article write #${count} this session (decision dac3d2c6 \u2014 article application is librarian-shaped). Hand-run writes are for the three named exceptions only: (1) a small authored create, (2) a write needing live adjudication, (3) a single small-record touch. Bulkier article reconciles should batch through the librarian dispatch instead \u2014 it runs on a cheaper model in parallel, and the conductor's context window is the session's scarcest and most expensive resource.`
     );
     process.exit(0);
   }
@@ -4928,7 +4928,7 @@ try {
     let ctx = null;
     if (!streak.nagged && streakCount >= threshold) {
       streak.nagged = true;
-      ctx = `H21 hand-work streak: ${streakCount} distinct hand-work action(s) (reads + searches) since the last dispatch \u2014 moment 3 of decision 677f1639: hand-work that needed only its CONCLUSION was a dispatch. Delegate the remaining reads/searches to a subagent.`;
+      ctx = `H21 hand-work streak: ${streakCount} distinct hand-work action(s) (reads + searches) since the last dispatch \u2014 moment 3 of decision 677f1639: hand-work that needed only its CONCLUSION was a dispatch. Every hand-read lands file contents in the conductor's own context window \u2014 the session's scarcest and most expensive resource; a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion. Delegate the remaining reads/searches.`;
     }
     writeJson(streakPath, streak);
     if (ctx) emit(ctx);
