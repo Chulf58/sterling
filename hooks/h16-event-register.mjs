@@ -4656,6 +4656,21 @@ var runRecordSchema = external_exports.object({
     // the shared mandatory tuple (invariant 1). Optional so legacy summaries
     // round-trip unchanged.
     undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
+    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
+    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
+    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
+    // telemetry a run produces was previously deleted unread at the exact
+    // moment this summary was assembled (a standing P4 violation). The values
+    // are fractions of the model WINDOW, deliberately not tokens or dollars
+    // (true token totals need subagent-transcript usage reads — a separate,
+    // probe-first slice; the transcript path has moved once already).
+    // Optional so legacy summaries round-trip unchanged.
+    agent_fill: external_exports.array(external_exports.object({
+      agent_type: external_exports.string(),
+      samples: external_exports.number().int().positive(),
+      peak_fill_pct: external_exports.number(),
+      median_fill_pct: external_exports.number()
+    })).optional(),
     snapshot_path: external_exports.string()
   }).optional()
 });
