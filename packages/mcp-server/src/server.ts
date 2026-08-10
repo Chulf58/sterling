@@ -304,6 +304,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_preflight',
+    {
+      description:
+        'Ask "does the store govern this subject?" BEFORE dispatching — verify a brief against store targets instead of discovering a governing anti_pattern/decision only after a subagent has already gone wrong. Reuses the H20 delivery floors (axis-term extraction + record centrality) over anti_pattern + decision records. Returns {terms, matches:[{id,type,title,matched_on,central}], answerability}: "insufficient" means too little extractable vocabulary to judge at all (reason:"too_little_vocabulary"); "verify_targets" means the store governs this subject — verify the brief against the named matches; "ready" means nothing in the store governs it.',
+      inputSchema: strict({ text: z.string() }),
+    },
+    ({ text }) => json(tools.knowledgePreflight(text))
+  );
+
+  server.registerTool(
     'run_escalate',
     {
       description: 'Surface a judgment branch / typed escalation onto the active run record.',

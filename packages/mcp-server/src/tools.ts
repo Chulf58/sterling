@@ -8,7 +8,19 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
-import { DEFAULT_QUERY_CAP, type QueryOptions, type RecordedExit, type ToolStore } from '@sterling/store';
+import {
+  DEFAULT_QUERY_CAP,
+  MAX_RANK_TERMS,
+  extractAxisTerms,
+  axisHits,
+  AXIS_MIN_HITS,
+  hasDiscriminatingHit,
+  hasRecordCentralityHit,
+  recordCentralityHits,
+  type QueryOptions,
+  type RecordedExit,
+  type ToolStore,
+} from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
 
 export interface SkippedCheck {
@@ -98,7 +110,29 @@ export interface KnowledgeQueryResult {
   capped: boolean;
   /** present only when the window is partial — states how to widen it */
   note?: string;
+  /**
+   * H19/H20 relevance slice 4b: the window's own basis to answer from —
+   * 'verify_targets' when capped (more matched than was returned: a window,
+   * never an inventory), 'insufficient' when nothing came back at all, else
+   * 'ready' (a complete, non-empty window).
+   */
+  answerability: 'ready' | 'verify_targets' | 'insufficient';
   records: Record<string, unknown>[];
+}
+
+/** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b): "does
+ *  the store govern this subject?", asked BEFORE dispatching. Reuses the same
+ *  axis-extraction + stage-2 centrality floors H20 applies at delivery time,
+ *  surfaced as a directly callable tool over anti_pattern + decision records. */
+export interface KnowledgePreflightResult {
+  /** 'insufficient' — too little extractable vocabulary to judge at all;
+   *  'verify_targets' — the store governs this subject, verify the brief
+   *  against the named matches before dispatching; 'ready' — nothing in the
+   *  store governs this subject. */
+  answerability: 'ready' | 'verify_targets' | 'insufficient';
+  reason?: 'too_little_vocabulary';
+  terms: string[];
+  matches: { id: string; type: string; title: string; matched_on: string[]; central: string[] }[];
 }
 
 export interface ToolDeps {
@@ -1251,6 +1285,10 @@ export class SterlingTools {
     const capped = records.length === cap;
     const ranked = (filter.rank_terms?.length ?? 0) > 0;
     const rankRestricted = ranked && !capped && matchedFilter > records.length;
+    // H19/H20 relevance slice 4b: a capped window can never establish absence
+    // (verify_targets), a zero-return window carries no basis to answer from
+    // (insufficient), otherwise the window is complete and non-empty (ready).
+    const answerability: KnowledgeQueryResult['answerability'] = capped ? 'verify_targets' : records.length === 0 ? 'insufficient' : 'ready';
     return {
       matched_filter: matchedFilter,
       returned: records.length,
@@ -1263,8 +1301,43 @@ export class SterlingTools {
               note: `rank_terms restricted this to ${records.length} FTS match(es); ${matchedFilter} records match the filter alone — drop or widen rank_terms to see them`,
             }
           : {}),
+      answerability,
       records: records.map((r) => (projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r))),
     };
+  }
+
+  /**
+   * "Does the store govern this subject?" — asked BEFORE dispatching, rather
+   * than discovering a governing anti_pattern/decision only after a subagent
+   * has already gone wrong (H20/H19 relevance slice 4b). Reuses the SAME axis
+   * extraction + stage-2 centrality floors H20 already applies at delivery
+   * time, over anti_pattern + decision records only (the narrow-field surface
+   * axisNarrowText defines), surfaced as a directly callable tool.
+   */
+  knowledgePreflight(text: string): KnowledgePreflightResult {
+    const terms = extractAxisTerms(text, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) {
+      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matches: [] };
+    }
+    const candidates = [
+      ...this.store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
+      ...this.store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
+    ];
+    const matches = candidates
+      .map((record) => ({ record, hits: axisHits(record, terms) }))
+      .filter(
+        ({ record, hits }) =>
+          hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(record, text)
+      )
+      .sort((a, b) => b.hits.length - a.hits.length)
+      .map(({ record, hits }) => ({
+        id: record.id,
+        type: record.type,
+        title: (record as unknown as { title: string }).title,
+        matched_on: hits,
+        central: recordCentralityHits(record, text),
+      }));
+    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ready' };
   }
 
   /**
