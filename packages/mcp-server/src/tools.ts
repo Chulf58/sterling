@@ -120,16 +120,21 @@ export interface KnowledgeQueryResult {
   records: Record<string, unknown>[];
 }
 
-/** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b): "does
- *  the store govern this subject?", asked BEFORE dispatching. Reuses the same
- *  axis-extraction + stage-2 centrality floors H20 applies at delivery time,
- *  surfaced as a directly callable tool over anti_pattern + decision records. */
+/** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
+ *  widened + verdict renamed by board 39c3d762): "does the store govern this
+ *  subject?", asked BEFORE dispatching. Reuses the same axis-extraction +
+ *  stage-2 centrality floors H20 applies at delivery time, over anti_pattern +
+ *  decision + feature_article + research_finding records. */
 export interface KnowledgePreflightResult {
   /** 'insufficient' — too little extractable vocabulary to judge at all;
    *  'verify_targets' — the store governs this subject, verify the brief
-   *  against the named matches before dispatching; 'ready' — nothing in the
-   *  store governs this subject. */
-  answerability: 'ready' | 'verify_targets' | 'insufficient';
+   *  against the named matches before dispatching; 'ungoverned' — nothing in
+   *  the store governs this subject. Renamed from 'ready' (board 39c3d762):
+   *  the query envelope's 'ready' means a COMPLETE NON-EMPTY window — the same
+   *  word carried the OPPOSITE reading here, and a false 'nothing governs'
+   *  dressed as 'ready' is exactly the settled-question-presented-as-open
+   *  failure the conduct rules name. */
+  answerability: 'ungoverned' | 'verify_targets' | 'insufficient';
   reason?: 'too_little_vocabulary';
   terms: string[];
   matches: { id: string; type: string; title: string; matched_on: string[]; central: string[] }[];
@@ -1376,11 +1381,15 @@ export class SterlingTools {
 
   /**
    * "Does the store govern this subject?" — asked BEFORE dispatching, rather
-   * than discovering a governing anti_pattern/decision only after a subagent
-   * has already gone wrong (H20/H19 relevance slice 4b). Reuses the SAME axis
-   * extraction + stage-2 centrality floors H20 already applies at delivery
-   * time, over anti_pattern + decision records only (the narrow-field surface
-   * axisNarrowText defines), surfaced as a directly callable tool.
+   * than discovering a governing record only after a subagent has already gone
+   * wrong (H20/H19 relevance slice 4b). Reuses the SAME axis extraction +
+   * stage-2 centrality floors H20 already applies at delivery time. Since
+   * board 39c3d762 the candidate surface spans all four governing types —
+   * anti_pattern, decision, feature_article (territory = slug/family/title),
+   * research_finding (subject = question) — because the two missing types made
+   * an article-governed question answer 'nothing governs this', a false
+   * negative dressed as a verdict; and the no-match verdict is 'ungoverned'
+   * (renamed from 'ready', whose query-envelope reading is the opposite).
    */
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
@@ -1390,6 +1399,8 @@ export class SterlingTools {
     const candidates = [
       ...this.store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
       ...this.store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
+      ...this.store.query({ types: ['feature_article'], rank_terms: terms, cap: 40 }),
+      ...this.store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
     ];
     const matches = candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))
@@ -1401,11 +1412,30 @@ export class SterlingTools {
       .map(({ record, hits }) => ({
         id: record.id,
         type: record.type,
-        title: (record as unknown as { title: string }).title,
+        // research_finding carries no title — its question IS the identity;
+        // an article's slug beats its long title as the handle.
+        title:
+          (record as unknown as { title?: string }).title ??
+          (record as unknown as { question?: string }).question ??
+          (record as unknown as { slug?: string }).slug ??
+          '',
         matched_on: hits,
         central: recordCentralityHits(record, text),
       }));
-    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ready' };
+    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
+  }
+
+  /**
+   * Batch preflight (board 39c3d762 slice 2 — the design_pass core): an agenda
+   * of question texts in, one verdict row per question out, in input order.
+   * A pure loop over knowledgePreflight — the judgment (drafting decisions for
+   * the open questions) deliberately stays with the conductor (P3).
+   */
+  knowledgePreflightBatch(texts: string[]): { verdicts: (KnowledgePreflightResult & { text: string })[] } {
+    if (!Array.isArray(texts) || texts.length === 0) {
+      throw new Error(`knowledge_preflight: 'texts' must be a non-empty array of question texts`);
+    }
+    return { verdicts: texts.map((text) => ({ text, ...this.knowledgePreflight(text) })) };
   }
 
   /**

@@ -5111,6 +5111,11 @@ ${record.trigger ?? ""}`;
   if (record.type === "decision")
     return `${record.title ?? ""}
 ${record.statement ?? ""}`;
+  if (record.type === "feature_article")
+    return `${record.slug ?? ""} ${record.concept_family ?? ""}
+${record.title ?? ""}`;
+  if (record.type === "research_finding")
+    return `${record.question ?? ""}`;
   return "";
 }
 function axisHits(record, terms) {

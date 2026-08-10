@@ -307,10 +307,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_preflight',
     {
       description:
-        'Ask "does the store govern this subject?" BEFORE dispatching — verify a brief against store targets instead of discovering a governing anti_pattern/decision only after a subagent has already gone wrong. Reuses the H20 delivery floors (axis-term extraction + record centrality) over anti_pattern + decision records. Returns {terms, matches:[{id,type,title,matched_on,central}], answerability}: "insufficient" means too little extractable vocabulary to judge at all (reason:"too_little_vocabulary"); "verify_targets" means the store governs this subject — verify the brief against the named matches; "ready" means nothing in the store governs it.',
-      inputSchema: strict({ text: z.string() }),
+        'Ask "does the store govern this subject?" BEFORE dispatching or designing — verify a brief or design agenda against store targets instead of discovering a governing record only after the work has gone wrong. Reuses the H20 delivery floors (axis-term extraction + record centrality) over anti_pattern + decision + feature_article + research_finding records. Pass ONE of: text (a single subject) or texts (an agenda — one verdict row per question, in order). Verdicts: "insufficient" means too little extractable vocabulary to judge at all (reason:"too_little_vocabulary"); "verify_targets" means the store governs this subject — verify against the named matches (open the records; a match row is a lookup, never the source); "ungoverned" means nothing in the store governs it (a genuinely open question). Single-text returns {terms, matches:[{id,type,title,matched_on,central}], answerability}; texts returns {verdicts:[{text, ...same}]}.',
+      inputSchema: strict({ text: z.string().optional(), texts: z.array(z.string()).optional() }),
     },
-    ({ text }) => json(tools.knowledgePreflight(text))
+    ({ text, texts }) => {
+      if ((text === undefined) === (texts === undefined)) {
+        throw new Error(`knowledge_preflight: pass exactly ONE of 'text' (single subject) or 'texts' (agenda)`);
+      }
+      return json(texts !== undefined ? tools.knowledgePreflightBatch(texts) : tools.knowledgePreflight(text as string));
+    }
   );
 
   server.registerTool(
