@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore } from '../index.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -143,17 +144,73 @@ test('casTransitionMerge: RETRIES on a body change under it and still commits, m
   }
 });
 
-test('pending exit: recorded once, never silently overwritten, consumed by transition (§5.2)', () => {
+test('pending exits QUEUE (FIFO, board 81bc3409): parallel exits append, head served, transition pops the head only', () => {
   const { dir, store } = tempStore();
   try {
     const run = store.createRun(runRecord());
-    const exit = { signal: 'complete', phase_id: 'p1', agent_role: 'coder', at: NOW };
-    store.recordPendingExit(run.id, exit);
-    assert.equal(store.getPendingExit(run.id)!.signal, 'complete');
-    assert.throws(() => store.recordPendingExit(run.id, { ...exit, signal: 'blocked' }), /unconsumed exit/);
-    store.casTransition('running', { ...run, machine_state: 'completing' });
-    assert.equal(store.getPendingExit(run.id), undefined, 'transition consumes the pending exit');
-    assert.throws(() => store.recordPendingExit('r-none', exit), /no run/);
+    const coderExit = { signal: 'complete', phase_id: 'p1', agent_role: 'coder', at: NOW };
+    const skepticExit = { signal: 'complete', phase_id: 'p1', agent_role: 'reviewer-skeptic', at: NOW };
+    store.recordPendingExit(run.id, coderExit);
+    // THE POINT (2026-07-03 incident): a sibling's exit no longer refuses on an
+    // unconsumed slot — it queues behind it.
+    store.recordPendingExit(run.id, skepticExit);
+    assert.equal(store.getPendingExit(run.id)!.agent_role, 'coder', 'the HEAD is served, FIFO');
+
+    // one exit per dispatched agent still holds: same (phase, role) re-exit is a
+    // protocol violation regardless of signal — refused loudly, nothing recorded.
+    assert.throws(() => store.recordPendingExit(run.id, { ...coderExit, signal: 'blocked' }), /unconsumed exit/);
+
+    // a transition consumes exactly the HEAD; the queued sibling survives.
+    store.casTransition('running', { ...run, machine_state: 'halted' });
+    assert.equal(store.getPendingExit(run.id)!.agent_role, 'reviewer-skeptic', 'tail preserved — the sibling exit was not lost');
+
+    // the next transition consumes the sibling; the queue is then empty.
+    store.casTransition('halted', { ...run, machine_state: 'completing' });
+    assert.equal(store.getPendingExit(run.id), undefined, 'queue drained');
+
+    assert.throws(() => store.recordPendingExit('r-none', coderExit), /no run/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pending exits: a LEGACY single-object pending_exit value reads as a one-element queue and pops clean', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    // plant the pre-queue storage format directly: a bare JSON object, exactly
+    // what a store written before board 81bc3409 carries.
+    const raw = new DatabaseSync(join(dir, 'sterling.db'));
+    try {
+      raw
+        .prepare('UPDATE runs SET pending_exit = ? WHERE id = ?')
+        .run(JSON.stringify({ signal: 'complete', phase_id: 'p1', agent_role: 'coder', at: NOW }), run.id);
+    } finally {
+      raw.close();
+    }
+    assert.equal(store.getPendingExit(run.id)!.agent_role, 'coder', 'legacy object served as the head');
+    // and a parallel exit may queue behind it — the legacy value upgrades in place
+    store.recordPendingExit(run.id, { signal: 'complete', phase_id: 'p1', agent_role: 'reviewer-correctness', at: NOW });
+    store.casTransition('running', { ...run, machine_state: 'halted' });
+    assert.equal(store.getPendingExit(run.id)!.agent_role, 'reviewer-correctness', 'legacy head popped, queued sibling preserved');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('casTransitionMerge pops only the HEAD pending exit — the same-state consume-exit shape preserves queued siblings', () => {
+  const { dir, store } = tempStore();
+  try {
+    const run = store.createRun(runRecord());
+    store.recordPendingExit(run.id, { signal: 'complete', phase_id: 'p1', agent_role: 'test-writer', at: NOW });
+    store.recordPendingExit(run.id, { signal: 'complete', phase_id: 'p1', agent_role: 'coder', at: NOW });
+    // consume-exit's same-state identity transition: pops the test-writer's exit
+    store.casTransitionMerge('running', run.id, (fresh) => fresh);
+    assert.equal(store.getPendingExit(run.id)!.agent_role, 'coder', 'merge transition popped the head only');
+    store.casTransitionMerge('running', run.id, (fresh) => fresh);
+    assert.equal(store.getPendingExit(run.id), undefined);
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
