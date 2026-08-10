@@ -164,6 +164,43 @@ export function hasDiscriminatingHit(hits) {
   return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
 }
 
+/** RECORD CENTRALITY — the third stage-2 floor (board b655cb6f, reconstructing
+ *  the measured 2026-08-09 Blender false positive). The first two floors ask
+ *  whether the OUTGOING prompt is specific enough; neither asks whether the
+ *  matched terms are central to the RECORD — a modeling-topology anti_pattern
+ *  still fired on a game/field/cell dispatch because those words appeared once
+ *  each in its trigger, in passing. Centrality ranks the record's OWN narrow
+ *  text by the same extractor (frequency-first — a record repeats what it is
+ *  ABOUT, exactly like a prompt does) and requires the outgoing text to cover
+ *  at least AXIS_MIN_RECORD_TERMS of the top AXIS_RECORD_TOP_K, scaling down
+ *  for terse records with fewer extractable own terms. Composes AFTER the
+ *  existing floors, never replacing them. */
+export const AXIS_RECORD_TOP_K = 6;
+export const AXIS_MIN_RECORD_TERMS = 2;
+
+/** The record's central terms that actually appear in the outgoing text —
+ *  same left-boundary matching as axisHits, direction reversed. Exported so
+ *  H20's header can NAME the covered central terms. */
+export function recordCentralityHits(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const hay = String(outgoingText ?? '').toLowerCase();
+  if (!hay) return [];
+  return central.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(hay));
+}
+
+export function hasRecordCentralityHit(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const covered = recordCentralityHits(record, outgoingText, { topK });
+  // A terse record scales the requirement down to what it can offer (a record
+  // with one extractable own term needs only that one present); zero
+  // extractable terms is unreachable behind the earlier floors and passes
+  // vacuously rather than silencing on a technicality.
+  return covered.length >= Math.min(minTerms, central.length);
+}
+
 /** Per-agent guard: which record ids / frontier files were already delivered
  *  this session. The conductor (no agent_id) and every subagent get their own
  *  file — delivery is per-context, mirroring H13's per-agent read ledgers. */

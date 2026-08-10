@@ -51,6 +51,8 @@ import {
   renderDecisionPointers,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
+  hasRecordCentralityHit,
+  recordCentralityHits,
   HAZARD_CAP,
 } from './lib/delivery.mjs';
 
@@ -104,9 +106,13 @@ try {
   // universal dev vocabulary in a store whose own subject IS this repo's
   // machinery, so a payload matched PURELY on generic terms goes silent here
   // — at least one matched term must actually discriminate.
+  // RECORD-CENTRALITY FLOOR (board b655cb6f, third floor): the two floors above
+  // ask whether the PROMPT is specific; this one asks whether the matched terms
+  // are central to the RECORD — a record may not fire on words that appear only
+  // in passing in its own trigger (the measured 2026-08-09 Blender case).
   const scored = candidates
     .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits))
+    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing))
     .sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
 
@@ -124,6 +130,10 @@ try {
   if (!hazards.length && !decisions.length) allow();
 
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(', ');
+  // Name the covered CENTRAL terms too, so the reader can see at a glance that
+  // the match is about the record's subject, not a passing mention.
+  const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(', ');
+  const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
   // The header names the SURFACE, because the stakes differ and the reader should
   // feel which one they are on. A bad dispatch wastes agent work; a bad choice put
   // to the USER manufactures an authorised ruling that contradicts a real one, and
@@ -131,11 +141,11 @@ try {
   // deliberately the stronger of the two.
   const header = isQuestion
     ? `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to put a CHOICE TO THE USER. ` +
-      `The store already governs this subject (matched on: ${matched}) and no file you touched would have surfaced it. ` +
+      `The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. ` +
       `READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made — ` +
       `and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.`
     : `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to dispatch '${input.tool_input?.subagent_type ?? 'an agent'}'. ` +
-      `The store holds records matching this prompt's SUBJECT (matched on: ${matched}) rather than any file you touched. ` +
+      `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
       `Path-scoped delivery cannot find these. Check them BEFORE the brief goes out — a fan-out multiplies a bad premise by N.`;
   const blocks = [
     header,

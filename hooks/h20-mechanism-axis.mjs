@@ -6098,6 +6098,22 @@ var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
 function hasDiscriminatingHit(hits) {
   return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
 }
+var AXIS_RECORD_TOP_K = 6;
+var AXIS_MIN_RECORD_TERMS = 2;
+function recordCentralityHits(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const hay = String(outgoingText ?? "").toLowerCase();
+  if (!hay) return [];
+  return central.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+}
+function hasRecordCentralityHit(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const covered = recordCentralityHits(record, outgoingText, { topK });
+  return covered.length >= Math.min(minTerms, central.length);
+}
 function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
@@ -6182,7 +6198,7 @@ try {
     ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
   ];
   if (!candidates.length) allow();
-  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits)).sort((a, b) => b.hits.length - a.hits.length);
+  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
@@ -6192,7 +6208,9 @@ try {
   const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
   if (!hazards.length && !decisions.length) allow();
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
-  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to put a CHOICE TO THE USER. The store already governs this subject (matched on: ${matched}) and no file you touched would have surfaced it. READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made \u2014 and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (matched on: ${matched}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
+  const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
+  const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
+  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made \u2014 and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
   const blocks = [
     header,
     ...renderHazards(
