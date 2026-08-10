@@ -152,6 +152,29 @@ try {
       return false;
     }
   };
+  // H21 companion (decision 9042abeb): the mid-session watch's whole-session
+  // article-write tally lives in its own transient file — read-only here, 0
+  // when absent or when it belongs to a different session (a leftover from a
+  // prior session must never be folded into this one's count).
+  const articleWritesPath = join(input.cwd, '.sterling', 'transient', 'article-writes.json');
+  const readArticleWrites = () => {
+    try {
+      const raw = JSON.parse(readFileSync(articleWritesPath, 'utf8'));
+      return raw.session_id === input.session_id && Number.isFinite(raw.count) ? raw.count : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const statsPath = join(input.cwd, '.sterling', 'transient', 'delegation-stats.json');
+  const writeDelegationStats = (stats) => {
+    try {
+      mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
+      writeFileSync(statsPath, JSON.stringify(stats));
+    } catch {
+      // the observation cell is best-effort — a write failure here must not
+      // cost the advisory itself, which already computed its own text
+    }
+  };
   const delegation = (() => {
     try {
       // A spent marker means the advisory can never fire again this session — skip the
@@ -167,6 +190,8 @@ try {
       const readFiles = new Set();
       let searches = 0;
       let dispatches = 0;
+      let maxBatch = 0;
+      let soloDispatches = 0;
       let assistantEntries = 0;
       let contentArrays = 0;
       for (const line of readFileSync(tPath, 'utf8').split('\n')) {
@@ -186,6 +211,11 @@ try {
         const content = entry.message?.content;
         if (!Array.isArray(content)) continue;
         contentArrays++;
+        // H21 companion (decision 9042abeb): max_batch is the largest number of
+        // Task/Agent blocks inside ONE assistant message; solo_dispatches counts
+        // messages carrying exactly one such block — both computed per-message,
+        // not from the running dispatch total.
+        let batchCount = 0;
         for (const b of content) {
           if (!b || b.type !== 'tool_use') continue;
           if (b.name === 'Read') {
@@ -194,8 +224,11 @@ try {
             searches++;
           } else if (b.name === 'Task' || b.name === 'Agent') {
             dispatches++;
+            batchCount++;
           }
         }
+        if (batchCount > maxBatch) maxBatch = batchCount;
+        if (batchCount === 1) soloDispatches++;
       }
       if (assistantEntries > 0 && contentArrays === 0) {
         // Assistant entries exist but none carried a content array — the transcript
@@ -204,8 +237,22 @@ try {
         store.recordCheckSkipped('delegation-watch', 'format_unparseable', undefined, now);
         return null;
       }
+      // Report-only observation cell (decision 9042abeb, C): a latest-value
+      // snapshot written on EVERY successful scan, fired or not — the next
+      // user report is a number, not an impression.
+      const articleWrites = readArticleWrites();
+      writeDelegationStats({
+        session_id: input.session_id,
+        hand_reads: readFiles.size,
+        searches,
+        dispatches,
+        max_batch: maxBatch,
+        solo_dispatches: soloDispatches,
+        article_writes: articleWrites,
+        at: now,
+      });
       if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
-        return { hand_reads: readFiles.size, searches, dispatches };
+        return { hand_reads: readFiles.size, searches, dispatches, max_batch: maxBatch, solo_dispatches: soloDispatches, article_writes: articleWrites };
       }
       return null;
     } catch (e) {
@@ -219,7 +266,7 @@ try {
   })();
   const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const delegationPart = () =>
-    `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es). Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) — delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
+    `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es) (largest single-message batch: ${delegation.max_batch}, solo dispatches: ${delegation.solo_dispatches}) and ${delegation.article_writes} hand-run article write(s) this session. Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) — delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
   /**
    * Every direct-mode release path exits through here. At most TWO pressure blocks per
    * session, strictly escalating: soft+dirty fires the slice-boundary nudge once; hard

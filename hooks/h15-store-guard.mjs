@@ -4647,7 +4647,11 @@ var configSchema = external_exports.object({
   // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
   delegation_watch: external_exports.object({
     min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
+    max_dispatches: external_exports.number().int().nonnegative().default(0),
+    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
+    // paths + searches since the last Task/Agent dispatch crossing this
+    // threshold injects ONE moment-3 advisory per streak episode.
+    streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except

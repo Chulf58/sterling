@@ -100,6 +100,10 @@ export const configSchema = z.object({
     .object({
       min_hand_work: z.number().int().positive().default(15),
       max_dispatches: z.number().int().nonnegative().default(0),
+      // H21 hand-work-streak advisory (decision 9042abeb): distinct read
+      // paths + searches since the last Task/Agent dispatch crossing this
+      // threshold injects ONE moment-3 advisory per streak episode.
+      streak_threshold: z.number().int().positive().default(10),
     })
     .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).

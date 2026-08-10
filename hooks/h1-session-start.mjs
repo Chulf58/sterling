@@ -4760,7 +4760,11 @@ var configSchema = external_exports.object({
   // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
   delegation_watch: external_exports.object({
     min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
+    max_dispatches: external_exports.number().int().nonnegative().default(0),
+    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
+    // paths + searches since the last Task/Agent dispatch crossing this
+    // threshold injects ONE moment-3 advisory per streak episode.
+    streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
@@ -6115,7 +6119,7 @@ var CONVENTIONS = [
   // reads as a target; leading with the ceiling reads as a limit. Both halves of the
   // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
   // because a rule that only pushes one way is the rule that produced the fear.
-  "- Delegation: FIVE concurrent subagents is a CEILING, not a target \u2014 there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real \u2014 speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.",
+  "- Delegation: FIVE concurrent subagents is a CEILING, not a target \u2014 there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real \u2014 speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. THE CONTEXT WINDOW IS THE PRIMARY VALUE (user-stated 2026-08-10, decision 9042abeb): the conductor typically runs on a premium model, so hand-work costs twice \u2014 it fills the session's scarcest context AND spends the most expensive tokens, while a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion at a fraction of the price. Weigh dispatch-vs-hand-work in conductor tokens spent on intermediate reading, not just wall-clock. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.",
   '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind \u2014 being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" \u2014 it is the conductor reading files by hand that an agent should have read for it.',
   // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
   // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
