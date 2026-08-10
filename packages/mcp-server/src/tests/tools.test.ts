@@ -2496,3 +2496,116 @@ test("state_review does NOT double-report a deletion the drift arm already named
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Article history rotation (board 0697c6bd): history is bounded at the write
+// boundary — the newest article_history_max_entries survive; older entries are
+// NOT lost, they remain readable in the retained superseded versions. The
+// oversize detector measures the NON-history body, since a split (its remedy)
+// only ever fixes prose.
+// ---------------------------------------------------------------------------
+
+test('history rotation: knowledge_append past the cap keeps the newest N, warns, and dropped entries survive in the prior version', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 3 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts'); // history: ['seed']
+    const appended = tools.knowledgeAppend(v1.id, 'history', [
+      { date: NOW, event: 'e2' },
+      { date: NOW, event: 'e3' },
+      { date: NOW, event: 'e4' },
+    ]);
+    const served = appended.record as unknown as { history: { event: string }[] };
+    assert.deepEqual(
+      served.history.map((h) => h.event),
+      ['e2', 'e3', 'e4'],
+      'newest 3 kept, oldest rotated out'
+    );
+    assert.equal(appended.warnings.length, 1, 'rotation is disclosed, never silent');
+    assert.match(appended.warnings[0], /history rotated/, 'names the rotation');
+    assert.match(appended.warnings[0], /3 of 4/, 'names kept-of-attempted counts');
+    assert.match(appended.warnings[0], /superseded/, 'points the reader at the retained prior versions');
+    const prior = tools.knowledgeGet(v1.id) as unknown as { history: { event: string }[] };
+    assert.deepEqual(
+      prior.history.map((h) => h.event),
+      ['seed'],
+      'the rotated-away entry is still readable in the retained prior version'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('history rotation: at or under the cap nothing rotates and nothing warns', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 3 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts'); // 1 entry
+    const appended = tools.knowledgeAppend(v1.id, 'history', [
+      { date: NOW, event: 'e2' },
+      { date: NOW, event: 'e3' },
+    ]);
+    const served = appended.record as unknown as { history: { event: string }[] };
+    assert.equal(served.history.length, 3, 'exactly at the cap — untouched');
+    assert.deepEqual(appended.warnings, [], 'no rotation, no warning');
+  } finally {
+    cleanup();
+  }
+});
+
+test('history rotation: knowledge_update rotates an over-cap history even when the write never touches it', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 2 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
+    // grow to 3 entries under a cap of 2 by appending — the append itself rotates,
+    // so instead build the over-cap state via an explicit history replacement…
+    const grown = tools.knowledgeUpdateResult(v1.id, {
+      history: [
+        { date: NOW, event: 'a' },
+        { date: NOW, event: 'b' },
+        { date: NOW, event: 'c' },
+      ],
+    });
+    const served = grown.record as unknown as { history: { event: string }[] };
+    assert.deepEqual(
+      served.history.map((h) => h.event),
+      ['b', 'c'],
+      'a caller-passed over-cap history is rotated too'
+    );
+    assert.ok(grown.warnings.some((w) => /history rotated/.test(w) && /2 of 3/.test(w)), 'update path discloses on the same channel');
+
+    // an update that never passes history still serves a bounded record
+    const head = served as unknown as { id: string };
+    const next = tools.knowledgeUpdateResult((grown.record as { id: string }).id, { state: 'active' });
+    const nextServed = next.record as unknown as { history: { event: string }[] };
+    assert.equal(nextServed.history.length, 2, 'stays bounded on untouched-history writes');
+    assert.deepEqual(next.warnings, [], 'nothing rotated (already at cap) — nothing to disclose');
+    void head;
+  } finally {
+    cleanup();
+  }
+});
+
+test('article_oversize measures the NON-history body: fat history alone never flags; fat prose still does (board 0697c6bd)', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 2000, article_history_max_entries: 100 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
+    // ~10 x 200-char entries: total record far over 2000, body-minus-history well under.
+    const fat = 'x'.repeat(180);
+    const appended = tools.knowledgeAppend(
+      v1.id,
+      'history',
+      Array.from({ length: 10 }, (_, i) => ({ date: NOW, event: `${i}-${fat}` }))
+    );
+    assert.deepEqual(appended.warnings, [], 'history weight alone does not flag the article');
+    assert.equal(tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }).length, 0, 'nothing queued');
+
+    // fat PROSE crosses the same threshold — that is what a split can actually fix.
+    const head = (appended.record as { id: string }).id;
+    const result = tools.knowledgeUpdateResult(head, { what_it_does: 'y'.repeat(2100), intended_behavior: 'z', current_ac: [] });
+    assert.equal(result.warnings.length, 1, 'prose over threshold warns');
+    assert.match(result.warnings[0], /article_oversize_chars threshold/);
+    assert.match(result.warnings[0], /non-history/, 'the warning names the body-only measure');
+    assert.equal(tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }).length, 1, 'one deduped item queued');
+  } finally {
+    cleanup();
+  }
+});

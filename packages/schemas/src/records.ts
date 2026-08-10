@@ -226,10 +226,13 @@ export const SYSTEM_REASONS = [
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
   'state_review',
-  // A feature_article's serialized size (as knowledge_get would return it)
-  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
-  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
-  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // A feature_article's NON-HISTORY serialized size crossed
+  // config.article_oversize_chars on a knowledge_update/append/edit — the
+  // registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. History is excluded from the
+  // measure (board 0697c6bd): the lane's remedy is a split, a split only
+  // redistributes prose, and history weight is bounded separately by write-time
+  // rotation (article_history_max_entries). Minted at the WRITE, since that is
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).

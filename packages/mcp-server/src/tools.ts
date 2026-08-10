@@ -1033,7 +1033,7 @@ export class SterlingTools {
     // including the oversize check (board 8390f8fa): the write's result carries
     // a warning on the SAME channel knowledge_update uses.
     const record = this.knowledgeUpdate(id, { [field]: next });
-    return { record, warnings: this.articleOversizeWarnings(record) };
+    return { record, warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)] };
   }
 
   /**
@@ -1126,7 +1126,7 @@ export class SterlingTools {
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
-        warnings: this.articleOversizeWarnings(record),
+        warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record), ...this.articleOversizeWarnings(record)],
       };
     }
     this.refuseServerOwnedFields({ [field]: replace }, 'knowledge_update');
@@ -1158,7 +1158,7 @@ export class SterlingTools {
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
-      warnings: this.articleOversizeWarnings(record),
+      warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)],
     };
   }
 
@@ -1193,7 +1193,13 @@ export class SterlingTools {
    */
   private articleOversizeWarnings(record: DurableRecord): string[] {
     if (record.type !== 'feature_article') return [];
-    const size = JSON.stringify(record).length;
+    // NON-history body only (board 0697c6bd): the remedy this lane names is a
+    // SPLIT, and a split only ever redistributes prose — history weight is
+    // bounded separately by rotation (article_history_max_entries), so counting
+    // it here flagged articles a split could not fix and minted duplicate items
+    // from writes the reconcile contract itself demanded.
+    const { history: _h, ...body } = record as unknown as Record<string, unknown>;
+    const size = JSON.stringify(body).length;
     const threshold = this.config.article_oversize_chars;
     if (size <= threshold) return [];
     const a = record as unknown as { slug: string; files?: { path: string }[] };
@@ -1202,13 +1208,40 @@ export class SterlingTools {
       'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
     this.maintenanceEnqueue({
       reason: 'article_oversize',
-      text: `article '${a.slug}' is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
+      text: `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
       file_keys: (a.files ?? []).map((f) => f.path),
     });
     return [
-      `feature_article '${a.slug}' is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
+      `feature_article '${a.slug}' non-history body is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
         `A deduped article_oversize maintenance item has been queued.`,
     ];
+  }
+
+  /**
+   * History rotation disclosure (board 0697c6bd). knowledgeUpdate bounds a
+   * feature_article's history to the newest article_history_max_entries at the
+   * write; this reports it on the same warnings channel the coherence and
+   * oversize checks use. `attempted` is what the merged write WOULD have stored
+   * unbounded (computed by attemptedHistoryLen from the caller's body and the
+   * prior record). Nothing is lost by rotation — the store retains every
+   * superseded version, so the chain is the archive — but a silent drop would
+   * still be a lie about what the write stored (P5), hence the disclosure.
+   */
+  private historyRotationWarnings(attempted: number, record: DurableRecord): string[] {
+    if (record.type !== 'feature_article') return [];
+    const kept = ((record as unknown as { history?: unknown[] }).history ?? []).length;
+    if (kept >= attempted) return [];
+    return [
+      `history rotated: kept the newest ${kept} of ${attempted} entries (article_history_max_entries=${this.config.article_history_max_entries}). ` +
+        `Older entries are not lost — they remain readable in the retained superseded versions (knowledge_get a prior version's id).`,
+    ];
+  }
+
+  /** The history length the caller's write would store unbounded: the passed array if the write touches history, else the prior record's. */
+  private attemptedHistoryLen(old: DurableRecord, body: Record<string, unknown>): number {
+    if (Array.isArray(body.history)) return body.history.length;
+    const h = (old as unknown as { history?: unknown[] }).history;
+    return Array.isArray(h) ? h.length : 0;
   }
 
   /**
@@ -1231,7 +1264,7 @@ export class SterlingTools {
   knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[] } {
     const before = this.store.get(id);
     const record = this.knowledgeUpdate(id, body);
-    const warnings: string[] = [];
+    const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
     if (before?.type === 'feature_article' && 'what_it_does' in body) {
       const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
       if (untouched.length > 0) {
@@ -1451,6 +1484,18 @@ export class SterlingTools {
     };
     if (old.type === 'feature_article' && body.version === undefined) {
       next.version = (old as { version: number }).version + 1;
+    }
+    // History rotation (board 0697c6bd): bound the stored history to the newest
+    // N entries. The oldest are dropped from THIS version only — the version
+    // being superseded right here retains them forever, so the supersede chain
+    // is the archive and no entry ever becomes unreadable. Callers see the
+    // rotation via historyRotationWarnings on the write's result envelope.
+    if (old.type === 'feature_article') {
+      const hist = next.history as unknown[] | undefined;
+      const max = this.config.article_history_max_entries;
+      if (Array.isArray(hist) && hist.length > max) {
+        next.history = hist.slice(-max);
+      }
     }
     // re-baseline on every reconcile: the new version's owned-file hashes become
     // the truth the next read-time drift check compares against, so reconciling
