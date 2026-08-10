@@ -6038,6 +6038,7 @@ function repoRel(toolPath2, cwd2) {
 
 // scripts/hooks/lib/ledger.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join as join2, dirname as dirname3 } from "node:path";
 function ledgerPath(cwd2, runId, agentId) {
   if (runId && agentId) return join2(cwd2, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
@@ -6047,8 +6048,19 @@ function ledgerPath(cwd2, runId, agentId) {
 function readLedger(path) {
   return existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
 }
-function hasRead(path, repoRelPath) {
-  return readLedger(path).some((e) => e.path === repoRelPath);
+function fileHash(absPath) {
+  try {
+    return createHash("sha256").update(readFileSync2(absPath)).digest("hex");
+  } catch {
+    return void 0;
+  }
+}
+function hasFreshRead(path, repoRelPath, absPath) {
+  return readLedger(path).some((e) => {
+    if (e.path !== repoRelPath) return false;
+    if (!e.sha256) return true;
+    return e.sha256 === fileHash(absPath);
+  });
 }
 
 // scripts/hooks/lib/contract.mjs
@@ -6091,8 +6103,8 @@ var toolPath = input.tool_input?.file_path;
 var rel = repoRel(toolPath, cwd);
 function evidenceDenial(mode, lp, path) {
   const count = readLedger(lp).length;
-  const window = input.agent_id ? "this AGENT's own ledger \u2014 reads by the conductor or by another agent are never yours" : "the CONDUCTOR ledger, which h13-clear-conductor CLEARS ON EVERY USER PROMPT \u2014 so anything you read before your last prompt no longer counts as evidence";
-  return `H3 [${mode}]: no read-evidence for '${path}' \u2014 Read the exact file before editing. Checked ${lp} (${count} entr${count === 1 ? "y" : "ies"}), which is ${window}. Grep/Glob hits are not read-evidence.`;
+  const window = input.agent_id ? "this AGENT's own ledger \u2014 reads by the conductor or by another agent are never yours" : "the CONDUCTOR ledger. Evidence EXPIRES WHEN THE FILE CHANGES (read-time content hash vs current bytes) and on context compaction \u2014 so either you never Read this exact file, or it has been modified since your last Read";
+  return `H3 [${mode}]: no fresh read-evidence for '${path}' \u2014 Read the exact file before editing. Checked ${lp} (${count} entr${count === 1 ? "y" : "ies"}), which is ${window}. Grep/Glob hits are not read-evidence.`;
 }
 if (input.agent_id && toolPath) {
   const fwd = String(toolPath).replace(/\\/g, "/");
@@ -6118,7 +6130,7 @@ try {
     if (!brief || brief.type !== "brief") deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
     const scope2 = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope2.deny) deny(`H3 [run mode]: ${scope2.deny}`);
-    if (!isCreation && !hasRead(ledgerPath(cwd, run.id, input.agent_id), rel)) {
+    if (!isCreation && !hasFreshRead(ledgerPath(cwd, run.id, input.agent_id), rel, absPath)) {
       deny(evidenceDenial("run mode", ledgerPath(cwd, run.id, input.agent_id), rel));
     }
     allow();
@@ -6126,7 +6138,7 @@ try {
   if (!rel) allow();
   const scope = scopeCheck({ debugScope: readDebugScope(cwd), rel });
   if (scope.deny) deny(`H3 [debug-scope mode]: ${scope.deny}`);
-  if (!isCreation && !hasRead(ledgerPath(cwd, void 0, input.agent_id), rel)) {
+  if (!isCreation && !hasFreshRead(ledgerPath(cwd, void 0, input.agent_id), rel, absPath)) {
     deny(evidenceDenial("direct mode", ledgerPath(cwd, void 0, input.agent_id), rel));
   }
   allow();

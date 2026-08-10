@@ -4849,11 +4849,17 @@ function ledgerPath(cwd, runId, agentId) {
   if (agentId) return join2(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
   return join2(cwd, ".sterling", "transient", "conductor-reads.json");
 }
-function clearLedger(path) {
-  if (existsSync2(path)) rmSync(path);
+function readLedger(path) {
+  return existsSync2(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
+}
+function pruneUnhashed(path) {
+  if (!existsSync2(path)) return;
+  const kept = readLedger(path).filter((e) => e.sha256);
+  if (kept.length) writeFileSync(path, JSON.stringify(kept));
+  else rmSync(path);
 }
 
 // scripts/hooks/h13-clear-conductor.mjs
 var input = readStdin();
-clearLedger(ledgerPath(input.cwd, void 0, void 0));
+pruneUnhashed(ledgerPath(input.cwd, void 0, void 0));
 allow();

@@ -293,6 +293,25 @@ try {
   // fail-open — a malformed note costs the restore, never the conventions injection
 }
 
+// READ-EVIDENCE DOES NOT SURVIVE A SESSION BOUNDARY OR COMPACTION (board
+// 776d2b65): the conductor ledger's entries now expire by FILE CONTENT HASH
+// rather than per prompt, so the two cases a hash cannot vouch for get an
+// explicit clear here. (1) source=compact — compaction can drop a read from
+// the model's window while the file's bytes are unchanged; the old per-prompt
+// clear never covered this either, since compaction does not fire
+// UserPromptSubmit. (2) source=startup|clear — a genuinely NEW session has
+// read nothing, and a dead session's hashed entries would otherwise vouch for
+// unchanged files this model never saw. resume continues the same logical
+// session and keeps its ledger. Fail-open like every H1 read.
+try {
+  if (input.source === 'compact' || input.source === 'startup' || input.source === 'clear') {
+    const conductorLedger = join(input.cwd, '.sterling', 'transient', 'conductor-reads.json');
+    rmSync(conductorLedger, { force: true });
+  }
+} catch {
+  // fail-open — a failed clear costs freshness, never the conventions injection
+}
+
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
 // (touches / session-events / capture-nagged) are cleared by H10's terminal Stop
 // paths — but a session that dies without one (kill, deny-then-close, or the

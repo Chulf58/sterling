@@ -414,10 +414,43 @@ test('H13: appends normalized read-evidence to the correct ledger (run vs conduc
     r = runHook('h13-reads-ledger.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: 'C:/elsewhere/x.ts' } }), dir);
     assert.equal(r.code, 0);
 
-    // UserPromptSubmit clears the conductor ledger (window = since last user prompt)
+    // UserPromptSubmit prunes HASHLESS legacy entries only (board 776d2b65) —
+    // the hashed entry the h13-reads-ledger hook just wrote SURVIVES the prompt
+    // boundary; evidence now expires with the file, not the prompt.
+    const before = JSON.parse(readFileSync(conductorLedger, 'utf8'));
+    assert.ok(before.every((e) => e.sha256), 'h13-reads-ledger stamps a content hash on every entry');
     r = runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     assert.equal(r.code, 0);
-    assert.equal(existsSync(conductorLedger), false);
+    assert.equal(existsSync(conductorLedger), true, 'hashed entries survive the prompt clear');
+    // seed a hashless legacy entry beside it — the prompt clear prunes exactly that one
+    const mixed = [...JSON.parse(readFileSync(conductorLedger, 'utf8')), { agent_id: 'conductor', path: 'src/legacy-read.ts', at: NOW }];
+    writeFileSync(conductorLedger, JSON.stringify(mixed));
+    r = runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    assert.equal(r.code, 0);
+    const after = JSON.parse(readFileSync(conductorLedger, 'utf8'));
+    assert.ok(after.every((e) => e.sha256), 'hashless legacy entries are pruned at the prompt boundary');
+    assert.ok(!after.some((e) => e.path === 'src/legacy-read.ts'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('H3 [direct mode]: evidence expires with the FILE — a hashed read survives prompts and dies on content change (board 776d2b65)', () => {
+  const { dir, cleanup } = makeProject({ withRun: false });
+  try {
+    const target = join(dir, 'src', 'feature.ts');
+    // real read through the hook so the entry carries the live content hash
+    let r = runHook('h13-reads-ledger.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: target } }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    // prompt boundary: hashed evidence survives …
+    runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: target } }), dir);
+    assert.equal(r.code, 0, `byte-current file read before an earlier prompt must stay editable: ${r.stderr}`);
+    // … until the FILE changes, which is the actual staleness
+    writeFileSync(target, 'export const changed = true;\n');
+    r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: target } }), dir);
+    assert.equal(r.code, 2, 'a changed file expires the evidence');
+    assert.match(r.stderr, /no fresh read-evidence/);
   } finally {
     cleanup();
   }
@@ -447,8 +480,9 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
     assert.match(r.stderr, /this AGENT's own ledger/);
     assert.doesNotMatch(r.stderr, /CLEARS ON EVERY USER PROMPT/, 'the conductor window must not be claimed for an agent');
 
-    // The CONDUCTOR's denial names the per-prompt window instead — the fact that
-    // makes "I did read it" a reasonable objection rather than a mistake.
+    // The CONDUCTOR's denial names its hash-expiry window (board 776d2b65) —
+    // the fact that makes "I did read it" answerable: either never read, or
+    // the file changed since.
     const conductorEdit = runHook(
       'h3-contract-gate.mjs',
       hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'feature.ts') } }),
@@ -456,8 +490,8 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
     );
     assert.equal(conductorEdit.code, 2);
     assert.match(conductorEdit.stderr, /conductor-reads\.json/, 'the conductor ledger is named by path');
-    assert.match(conductorEdit.stderr, /CLEARS ON EVERY USER PROMPT/);
-    assert.match(conductorEdit.stderr, /before your last prompt no longer counts/);
+    assert.match(conductorEdit.stderr, /EXPIRES WHEN THE FILE CHANGES/);
+    assert.match(conductorEdit.stderr, /modified since your last Read/);
 
     // with evidence -> allowed (absolute Windows path normalized)
     seedLedger(dir, 'r-1', 'a1', ['src/feature.ts']);

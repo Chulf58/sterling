@@ -5,6 +5,9 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h13-reads-ledger.mjs
+import { join as join3 } from "node:path";
+
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
@@ -5989,6 +5992,7 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/ledger.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join as join2, dirname as dirname3 } from "node:path";
 function ledgerPath(cwd, runId2, agentId) {
   if (runId2 && agentId) return join2(cwd, ".sterling", "runs", runId2, "reads", `agent-${agentId}.json`);
@@ -6003,6 +6007,13 @@ function appendRead(path, entry) {
   entries.push(entry);
   mkdirSync2(dirname3(path), { recursive: true });
   writeFileSync(path, JSON.stringify(entries));
+}
+function fileHash(absPath) {
+  try {
+    return createHash("sha256").update(readFileSync2(absPath)).digest("hex");
+  } catch {
+    return void 0;
+  }
 }
 
 // scripts/hooks/h13-reads-ledger.mjs
@@ -6022,7 +6033,12 @@ try {
   appendRead(ledgerPath(input.cwd, runId, input.agent_id), {
     agent_id: input.agent_id ?? "conductor",
     path: rel,
-    at: (/* @__PURE__ */ new Date()).toISOString()
+    at: (/* @__PURE__ */ new Date()).toISOString(),
+    // content hash at read time (board 776d2b65): H3 accepts this entry only
+    // while the file's bytes still match — evidence expires with the FILE.
+    // An unreadable file yields no hash; the entry then lives in the legacy
+    // per-prompt window instead of the hash window.
+    sha256: fileHash(join3(input.cwd, rel))
   });
 } catch (e) {
   warnNonBlocking(`H13: failed to append read-evidence for '${rel}': ${e.message}`);

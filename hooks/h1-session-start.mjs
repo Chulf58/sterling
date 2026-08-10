@@ -6278,6 +6278,13 @@ Resume from next_slice. The board and knowledge store remain the authorities for
   }
 } catch {
 }
+try {
+  if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
+    const conductorLedger = join4(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    rmSync(conductorLedger, { force: true });
+  }
+} catch {
+}
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
