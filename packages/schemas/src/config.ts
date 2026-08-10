@@ -92,6 +92,16 @@ export const configSchema = z.object({
         .default({}),
     })
     .default({}),
+  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
+  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
+  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
+  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
+  delegation_watch: z
+    .object({
+      min_hand_work: z.number().positive().default(15),
+      max_dispatches: z.number().nonnegative().default(0),
+    })
+    .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.

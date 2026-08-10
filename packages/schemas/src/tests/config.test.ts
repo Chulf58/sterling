@@ -186,3 +186,45 @@ test('conductor pressure: shipped windows map carries verified per-model context
   assert.equal(shipped.context_watch.windows['claude-haiku-4-5'], 200_000);
   assert.equal(shipped.context_watch.windows.default, 200_000, 'unknown models stay conservative — mismatch degrades loud, never false-blocks');
 });
+
+// ------------------- delegation_watch config (H10 delegation-watch advisory, decision 677f1639) -------------------
+
+// delegation_watch is a NEW top-level config block (a sibling of context_watch,
+// not nested under it — mirrors the context_watch.conductor precedent in shape
+// only). Accessed through a cast so referencing it here does not require the
+// field to exist at compile time — the assertions below fail cleanly (not the
+// package build) until parseConfig grows the block.
+type CfgWithDelegationWatch = {
+  delegation_watch?: { min_hand_work?: number; max_dispatches?: number };
+};
+
+test('delegation_watch: defaults {min_hand_work:15, max_dispatches:0} from an empty config', () => {
+  const empty = parseConfig({}) as unknown as CfgWithDelegationWatch;
+  assert.ok(empty.delegation_watch, 'parseConfig defaults must add a delegation_watch block');
+  assert.equal(empty.delegation_watch?.min_hand_work, 15, 'min_hand_work defaults to 15');
+  assert.equal(empty.delegation_watch?.max_dispatches, 0, 'max_dispatches defaults to 0');
+});
+
+test('delegation_watch: explicit values are honored; a non-number fails loud', () => {
+  const tuned = parseConfig({ delegation_watch: { min_hand_work: 20, max_dispatches: 2 } }) as unknown as CfgWithDelegationWatch;
+  assert.equal(tuned.delegation_watch?.min_hand_work, 20, 'an explicit min_hand_work overrides the default 15');
+  assert.equal(tuned.delegation_watch?.max_dispatches, 2, 'an explicit max_dispatches overrides the default 0');
+  assert.throws(
+    () => parseConfig({ delegation_watch: { min_hand_work: 'many' } }),
+    /invalid/i,
+    'min_hand_work must be a number — a non-number fails loud'
+  );
+  assert.throws(
+    () => parseConfig({ delegation_watch: { max_dispatches: 'none' } }),
+    /invalid/i,
+    'max_dispatches must be a number — a non-number fails loud'
+  );
+});
+
+test('delegation_watch: min_hand_work is zod-positive (0 and negative rejected); max_dispatches is nonnegative (negative rejected, 0 allowed)', () => {
+  assert.throws(() => parseConfig({ delegation_watch: { min_hand_work: 0 } }), 'min_hand_work must be positive — 0 is rejected');
+  assert.throws(() => parseConfig({ delegation_watch: { min_hand_work: -5 } }), 'min_hand_work must be positive — a negative is rejected');
+  assert.throws(() => parseConfig({ delegation_watch: { max_dispatches: -1 } }), 'max_dispatches must be nonnegative — a negative is rejected');
+  const zeroOk = parseConfig({ delegation_watch: { max_dispatches: 0 } }) as unknown as CfgWithDelegationWatch;
+  assert.equal(zeroOk.delegation_watch?.max_dispatches, 0, 'max_dispatches: 0 is a valid, explicit, nonnegative value');
+});

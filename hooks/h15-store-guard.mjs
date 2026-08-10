@@ -4614,6 +4614,14 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(80)
     }).default({})
   }).default({}),
+  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
+  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
+  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
+  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
+  delegation_watch: external_exports.object({
+    min_hand_work: external_exports.number().positive().default(15),
+    max_dispatches: external_exports.number().nonnegative().default(0)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.

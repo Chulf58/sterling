@@ -4752,6 +4752,14 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(80)
     }).default({})
   }).default({}),
+  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
+  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
+  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
+  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
+  delegation_watch: external_exports.object({
+    min_hand_work: external_exports.number().positive().default(15),
+    max_dispatches: external_exports.number().nonnegative().default(0)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -6049,17 +6057,77 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  const delegationMarker = join2(input.cwd, ".sterling", "transient", "delegation-nagged.json");
+  const delegation = (() => {
+    try {
+      const dw = config.delegation_watch;
+      const tPath = input.transcript_path ?? "";
+      if (!tPath || !existsSync4(tPath)) {
+        store.recordCheckSkipped("delegation-watch", "transcript_missing", void 0, now);
+        return null;
+      }
+      const readFiles = /* @__PURE__ */ new Set();
+      let searches = 0;
+      let dispatches = 0;
+      for (const line of readFileSync2(tPath, "utf8").split("\n")) {
+        if (!line.trim()) continue;
+        let entry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (entry.type !== "assistant") continue;
+        const content = entry.message?.content;
+        if (!Array.isArray(content)) continue;
+        for (const b of content) {
+          if (!b || b.type !== "tool_use") continue;
+          if (b.name === "Read") {
+            if (b.input?.file_path) readFiles.add(b.input.file_path);
+          } else if (b.name === "Grep" || b.name === "Glob") {
+            searches++;
+          } else if (b.name === "Task" || b.name === "Agent") {
+            dispatches++;
+          }
+        }
+      }
+      if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
+        return { hand_reads: readFiles.size, searches, dispatches };
+      }
+      return null;
+    } catch (e) {
+      try {
+        store.recordCheckSkipped("delegation-watch", String(e && e.message || e), void 0, now);
+      } catch {
+      }
+      return null;
+    }
+  })();
+  const delegationSpent = () => {
+    try {
+      return JSON.parse(readFileSync2(delegationMarker, "utf8")).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const delegationPart = () => `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es). Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) \u2014 delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
+      const parts = [];
       const spent = pressureMarkerState();
       if (pressure.level === "hard" && (!spent || spent.level !== "hard")) {
         spendPressureMarker("hard");
-        deny(pressurePart());
-      }
-      if (pressure.level === "soft" && dirtyPaths > 0 && !spent) {
+        parts.push(pressurePart());
+      } else if (pressure.level === "soft" && dirtyPaths > 0 && !spent) {
         spendPressureMarker("soft");
-        deny(`H10 slice boundary: ${pressurePart()} This notice fires once per session.`);
+        parts.push(`H10 slice boundary: ${pressurePart()} This notice fires once per session.`);
       }
+      if (delegation && !delegationSpent()) {
+        spendDelegationMarker();
+        parts.push(delegationPart());
+      }
+      if (parts.length) deny(parts.join("\n\n"));
     }
     allow();
   };
@@ -6232,6 +6300,10 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     if (pressure.level === "soft" || pressure.level === "hard") {
       parts.push(pressurePart());
       spendPressureMarker(pressure.level);
+    }
+    if (delegation && !delegationSpent()) {
+      spendDelegationMarker();
+      parts.push(delegationPart());
     }
     deny(parts.join("\n\n"));
   }
