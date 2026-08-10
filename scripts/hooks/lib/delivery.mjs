@@ -12,42 +12,27 @@ export function deliveryDir(cwd) {
 }
 
 // ---------------------------------------------------------------------------
-// MECHANISM-AXIS MATCHING (H20, board 62806222). Path-scoped delivery is
-// STRUCTURALLY blind to recurrence: an anti_pattern is filed against the file
-// where the incident HAPPENED, not against every file where the mistake can
-// recur, so no file-key join can ever surface it. The only thing that finds
-// these is a query on the MECHANISM — and the prose rule to run one was missed
-// twice in one session by the person who wrote it. This matches the outgoing
-// dispatch prompt's own vocabulary against stored triggers and titles instead.
-//
-// TWO STAGES, because one is not enough. Stage 1 is the store's FTS: rank_terms
-// genuinely NARROW (index.ts builds `... AND records_fts MATCH ?`), so zero
-// hits is a real zero and the hook can stay silent. But that index spans
-// rationale/right_way/guidance too (records.ts:394,400) — far too much surface
-// to inject from. Stage 2 (axisHits) re-checks against the NARROW fields only,
-// which is what the board item actually asked for: triggers and titles.
+// MECHANISM-AXIS MATCHING (H20, board 62806222; relevance slices 2-4). The
+// matcher/extractor CORE moved to @sterling/store (packages/store/src/axis.ts)
+// so the MCP server's knowledge_preflight and the hooks import ONE definition
+// (the f5638a84 one-mechanism constraint). Re-exported here so every hook
+// consumer keeps its import path; esbuild resolves the workspace import at
+// bundle time exactly as h20's MAX_RANK_TERMS import always has — the old
+// "stays free of workspace imports" note predates that proof.
 // ---------------------------------------------------------------------------
-
-/** Ordinary function words PLUS the boilerplate that appears in essentially
- *  every Sterling dispatch prompt. The second group is the load-bearing half: a
- *  term present in EVERY prompt cannot discriminate BETWEEN prompts, so keeping
- *  it guarantees false positives (every anti_pattern mentions 'record'). */
-const AXIS_STOPWORDS = new Set([
-  // function words
-  'this', 'that', 'these', 'those', 'with', 'from', 'have', 'has', 'had', 'will', 'would', 'could',
-  'should', 'must', 'your', 'you', 'into', 'then', 'than', 'when', 'what', 'which', 'there', 'their',
-  'them', 'they', 'been', 'being', 'does', 'make', 'made', 'used', 'using', 'also', 'only', 'each',
-  'more', 'most', 'some', 'such', 'very', 'just', 'like', 'over', 'after', 'before', 'because',
-  'about', 'under', 'above', 'below', 'where', 'while', 'since', 'until', 'unless', 'either',
-  'neither', 'both', 'every', 'not', 'but', 'and', 'the', 'for', 'are', 'was', 'were', 'its',
-  'here', 'how', 'why', 'who', 'whom', 'whose', 'any', 'all', 'can', 'may', 'might', 'shall',
-  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
-  'sterling', 'conductor', 'agent', 'agents', 'subagent', 'dispatch', 'report', 'return',
-  'verify', 'verified', 'evidence', 'record', 'records', 'store', 'knowledge', 'query',
-  'knowledge_get', 'knowledge_query', 'read', 'reads', 'grep', 'file', 'files', 'code',
-  'first', 'second', 'third', 'task', 'work', 'please', 'note', 'notes', 'deliverable',
-  'claim', 'claims', 'absence', 'cite', 'cites', 'citing', 'exactly', 'nothing', 'else',
-]);
+export {
+  AXIS_MIN_TERM_LEN,
+  AXIS_MIN_HITS,
+  extractAxisTerms,
+  axisNarrowText,
+  axisHits,
+  GENERIC_DEV_TERMS,
+  hasDiscriminatingHit,
+  AXIS_RECORD_TOP_K,
+  AXIS_MIN_RECORD_TERMS,
+  recordCentralityHits,
+  hasRecordCentralityHit,
+} from '@sterling/store';
 
 /** The OUTGOING text H20 scans, PER SURFACE — the two do not share an input
  *  shape, and assuming they do yields a hook that silently never fires.
@@ -75,148 +60,7 @@ export function outgoingProposalText(toolInput) {
   return '';
 }
 
-/** A term shorter than this is too generic to carry a mechanism. */
-export const AXIS_MIN_TERM_LEN = 4;
 
-/** How many DISTINCT extracted terms must land in a record's narrow fields
- *  before it is worth injecting. One shared word is coincidence; two is signal.
- *  HONEST NOTE: 2 is a starting threshold chosen on the two motivating cases
- *  (see the hook header), NOT on measured data — tune it on hit rates, the way
- *  board 8390f8fa says size thresholds should be set. */
-export const AXIS_MIN_HITS = 2;
-
-/** Extract candidate mechanism terms from outgoing prompt text, most
- *  discriminating first. Ranked by TERM FREQUENCY: a dispatch prompt repeats
- *  what it is ABOUT, so a term used three times beats a one-off mention. Ties
- *  break by length (longer is more specific) then lexicographically, so the
- *  result is fully deterministic for a given prompt — the same prompt must
- *  always produce the same query.
- *
- *  `maxTerms` is supplied by the CALLER rather than hardcoded here: the real
- *  ceiling is the store's MAX_RANK_TERMS, and writing 16 in a second place is
- *  the exact drift decision b47889b7 removed. This module also stays free of
- *  workspace imports on purpose (it is bundled into several hooks). */
-export function extractAxisTerms(text, maxTerms) {
-  const counts = new Map();
-  for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (raw.length < AXIS_MIN_TERM_LEN) continue;
-    if (AXIS_STOPWORDS.has(raw)) continue;
-    if (/^\d+$/.test(raw)) continue; // bare numbers carry no mechanism
-    counts.set(raw, (counts.get(raw) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1))
-    .slice(0, Math.max(0, maxTerms))
-    .map(([term]) => term);
-}
-
-/** The NARROW fields a mechanism match is allowed to consider — deliberately
- *  not the whole FTS surface. An anti_pattern's trigger is its statement of WHEN
- *  it recurs, which is precisely the axis; a decision's title and statement are
- *  its ruling. rationale/right_way/guidance are excluded: they are long, they
- *  discuss context rather than assert the rule, and matching them is what would
- *  turn this into noise. */
-export function axisNarrowText(record) {
-  if (!record || typeof record !== 'object') return '';
-  if (record.type === 'anti_pattern') return `${record.title ?? ''}\n${record.trigger ?? ''}`;
-  if (record.type === 'decision') return `${record.title ?? ''}\n${record.statement ?? ''}`;
-  return '';
-}
-
-/** How many DISTINCT terms appear in the record's narrow fields. Substring
- *  match on a word-ish boundary so 'latch' hits 'latches' and 'one-way-latch'
- *  but not an unrelated token that merely contains the letters. */
-export function axisHits(record, terms) {
-  const hay = axisNarrowText(record).toLowerCase();
-  if (!hay) return [];
-  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(hay));
-}
-
-/** UNIVERSAL coding vocabulary — words that show up in essentially every
- *  dispatch prompt regardless of SUBJECT, so a match confined to this set
- *  cannot discriminate between one dispatch and the next. Tuned on the
- *  measured 15/15 fire rate (board 648bb497, research_finding bf74c65f,
- *  2026-08-04): AXIS_MIN_HITS=2 was trivially satisfied by generic vocabulary
- *  alone in a store whose own records are about this repo's machinery.
- *
- *  DELIBERATELY EXCLUDES Sterling domain words ('board', 'decision',
- *  'article', 'triage', 'user', ...) even though several read as ordinary
- *  English — in THIS store they discriminate, because the store's subject
- *  IS Sterling's own mechanism. Widening this set to catch those too would
- *  silence exactly the matches H20 exists to deliver. This is the honest
- *  boundary chosen 2026-08-04: narrow and universal-only, not "words that
- *  merely look generic." */
-export const GENERIC_DEV_TERMS = new Set([
-  'test', 'tests', 'testing', 'script', 'scripts', 'commit', 'commits', 'branch', 'merge',
-  'build', 'builds', 'check', 'checks', 'node', 'file', 'files', 'path', 'paths', 'run', 'runs',
-  'running', 'item', 'items', 'text', 'change', 'changed', 'changes', 'code', 'repo', 'line',
-  'lines', 'error', 'errors', 'string', 'value', 'values', 'field', 'fields', 'message',
-  'messages', 'output', 'input', 'name', 'names', 'list', 'exact', 'existing', 'touched',
-  'untouched', 'through', 'actually', 'behavior', 'still',
-]);
-
-/** True once at least one matched term escapes GENERIC_DEV_TERMS. This is the
- *  floor H20 applies ON TOP OF AXIS_MIN_HITS: two hits of pure universal
- *  vocabulary ("test", "check") describe every dispatch ever written, so they
- *  can never be the reason to interrupt one — a real match needs at least one
- *  term that actually says something about THIS prompt's subject. */
-export function hasDiscriminatingHit(hits) {
-  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
-}
-
-/** RECORD CENTRALITY — the third stage-2 floor (board b655cb6f, reconstructing
- *  the measured 2026-08-09 Blender false positive). The first two floors ask
- *  whether the OUTGOING prompt is specific enough; neither asks whether the
- *  matched terms are central to the RECORD — a modeling-topology anti_pattern
- *  still fired on a game/field/cell dispatch because those words appeared once
- *  each in its trigger, in passing. Centrality ranks the record's OWN narrow
- *  text by the same extractor (frequency-first — a record repeats what it is
- *  ABOUT, exactly like a prompt does) and requires the outgoing text to cover
- *  at least AXIS_MIN_RECORD_TERMS of the top AXIS_RECORD_TOP_K, scaling down
- *  for terse records with fewer extractable own terms. Composes AFTER the
- *  existing floors, never replacing them. */
-export const AXIS_RECORD_TOP_K = 6;
-export const AXIS_MIN_RECORD_TERMS = 2;
-
-/** The record's central terms that the outgoing text actually covers.
- *  SYMMETRIC prefix matching (review finding 2, 2026-08-10): axisHits tests the
- *  prompt's term as a prefix inside the record ('latch' hits 'latches'), but the
- *  record's own extracted term is the full inflected word — one-directional
- *  matching here would let the earlier floor COUNT an inflected pair and this
- *  floor SILENCE it, failing closed on a technicality. So a central term is
- *  covered when it and a prompt word prefix each other, either direction.
- *  Exported so headers can NAME the covered central terms. */
-export function recordCentralityHits(record, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
-  const words = [
-    ...new Set(
-      String(outgoingText ?? '')
-        .toLowerCase()
-        .split(/[^a-z0-9_]+/)
-        .filter((w) => w.length >= AXIS_MIN_TERM_LEN)
-    ),
-  ];
-  if (!words.length) return [];
-  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
-}
-
-export function hasRecordCentralityHit(record, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
-  const covered = recordCentralityHits(record, outgoingText, { topK });
-  // A terse record scales the requirement down to what it can offer (one
-  // extractable own term needs only that one present). Zero extractable terms
-  // passes vacuously — NOT provably unreachable (a narrow text of pure
-  // stopwords can in principle clear the earlier floors via prefix matches
-  // into its raw tokens; review finding 3), but the deliberate direction here
-  // is fail-open: this floor removes noise, it never manufactures silence.
-  // Known limit (review finding 1, accepted): a record with <= topK extractable
-  // own terms makes EVERY term central, so the floor only bites on verbose
-  // records — frequency cannot discriminate where there is no repetition.
-  return covered.length >= Math.min(minTerms, central.length);
-}
 
 /** Per-agent guard: which record ids / frontier files were already delivered
  *  this session. The conductor (no agent_id) and every subagent get their own

@@ -27,6 +27,7 @@ import {
 
 export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
+export * from './axis.js';
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS records (

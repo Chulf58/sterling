@@ -4919,6 +4919,244 @@ import { randomUUID } from "node:crypto";
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
+// packages/store/dist/axis.js
+var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
+  // function words
+  "this",
+  "that",
+  "these",
+  "those",
+  "with",
+  "from",
+  "have",
+  "has",
+  "had",
+  "will",
+  "would",
+  "could",
+  "should",
+  "must",
+  "your",
+  "you",
+  "into",
+  "then",
+  "than",
+  "when",
+  "what",
+  "which",
+  "there",
+  "their",
+  "them",
+  "they",
+  "been",
+  "being",
+  "does",
+  "make",
+  "made",
+  "used",
+  "using",
+  "also",
+  "only",
+  "each",
+  "more",
+  "most",
+  "some",
+  "such",
+  "very",
+  "just",
+  "like",
+  "over",
+  "after",
+  "before",
+  "because",
+  "about",
+  "under",
+  "above",
+  "below",
+  "where",
+  "while",
+  "since",
+  "until",
+  "unless",
+  "either",
+  "neither",
+  "both",
+  "every",
+  "not",
+  "but",
+  "and",
+  "the",
+  "for",
+  "are",
+  "was",
+  "were",
+  "its",
+  "here",
+  "how",
+  "why",
+  "who",
+  "whom",
+  "whose",
+  "any",
+  "all",
+  "can",
+  "may",
+  "might",
+  "shall",
+  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
+  "sterling",
+  "conductor",
+  "agent",
+  "agents",
+  "subagent",
+  "dispatch",
+  "report",
+  "return",
+  "verify",
+  "verified",
+  "evidence",
+  "record",
+  "records",
+  "store",
+  "knowledge",
+  "query",
+  "knowledge_get",
+  "knowledge_query",
+  "read",
+  "reads",
+  "grep",
+  "file",
+  "files",
+  "code",
+  "first",
+  "second",
+  "third",
+  "task",
+  "work",
+  "please",
+  "note",
+  "notes",
+  "deliverable",
+  "claim",
+  "claims",
+  "absence",
+  "cite",
+  "cites",
+  "citing",
+  "exactly",
+  "nothing",
+  "else"
+]);
+var AXIS_MIN_TERM_LEN = 4;
+var AXIS_MIN_HITS = 2;
+function extractAxisTerms(text, maxTerms) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < AXIS_MIN_TERM_LEN)
+      continue;
+    if (AXIS_STOPWORDS.has(raw))
+      continue;
+    if (/^\d+$/.test(raw))
+      continue;
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
+}
+function axisNarrowText(record) {
+  if (!record || typeof record !== "object")
+    return "";
+  if (record.type === "anti_pattern")
+    return `${record.title ?? ""}
+${record.trigger ?? ""}`;
+  if (record.type === "decision")
+    return `${record.title ?? ""}
+${record.statement ?? ""}`;
+  return "";
+}
+function axisHits(record, terms) {
+  const hay = axisNarrowText(record).toLowerCase();
+  if (!hay)
+    return [];
+  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+}
+var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
+  "test",
+  "tests",
+  "testing",
+  "script",
+  "scripts",
+  "commit",
+  "commits",
+  "branch",
+  "merge",
+  "build",
+  "builds",
+  "check",
+  "checks",
+  "node",
+  "file",
+  "files",
+  "path",
+  "paths",
+  "run",
+  "runs",
+  "running",
+  "item",
+  "items",
+  "text",
+  "change",
+  "changed",
+  "changes",
+  "code",
+  "repo",
+  "line",
+  "lines",
+  "error",
+  "errors",
+  "string",
+  "value",
+  "values",
+  "field",
+  "fields",
+  "message",
+  "messages",
+  "output",
+  "input",
+  "name",
+  "names",
+  "list",
+  "exact",
+  "existing",
+  "touched",
+  "untouched",
+  "through",
+  "actually",
+  "behavior",
+  "still"
+]);
+function hasDiscriminatingHit(hits) {
+  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+}
+var AXIS_RECORD_TOP_K = 6;
+var AXIS_MIN_RECORD_TERMS = 2;
+function recordCentralityHits(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const words = [
+    ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
+  ];
+  if (!words.length)
+    return [];
+  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
+}
+function hasRecordCentralityHit(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const covered = recordCentralityHits(record, outgoingText, { topK });
+  return covered.length >= Math.min(minTerms, central.length);
+}
+
 // packages/store/dist/index.js
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
@@ -5921,236 +6159,6 @@ import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, 
 import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
-}
-var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
-  // function words
-  "this",
-  "that",
-  "these",
-  "those",
-  "with",
-  "from",
-  "have",
-  "has",
-  "had",
-  "will",
-  "would",
-  "could",
-  "should",
-  "must",
-  "your",
-  "you",
-  "into",
-  "then",
-  "than",
-  "when",
-  "what",
-  "which",
-  "there",
-  "their",
-  "them",
-  "they",
-  "been",
-  "being",
-  "does",
-  "make",
-  "made",
-  "used",
-  "using",
-  "also",
-  "only",
-  "each",
-  "more",
-  "most",
-  "some",
-  "such",
-  "very",
-  "just",
-  "like",
-  "over",
-  "after",
-  "before",
-  "because",
-  "about",
-  "under",
-  "above",
-  "below",
-  "where",
-  "while",
-  "since",
-  "until",
-  "unless",
-  "either",
-  "neither",
-  "both",
-  "every",
-  "not",
-  "but",
-  "and",
-  "the",
-  "for",
-  "are",
-  "was",
-  "were",
-  "its",
-  "here",
-  "how",
-  "why",
-  "who",
-  "whom",
-  "whose",
-  "any",
-  "all",
-  "can",
-  "may",
-  "might",
-  "shall",
-  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
-  "sterling",
-  "conductor",
-  "agent",
-  "agents",
-  "subagent",
-  "dispatch",
-  "report",
-  "return",
-  "verify",
-  "verified",
-  "evidence",
-  "record",
-  "records",
-  "store",
-  "knowledge",
-  "query",
-  "knowledge_get",
-  "knowledge_query",
-  "read",
-  "reads",
-  "grep",
-  "file",
-  "files",
-  "code",
-  "first",
-  "second",
-  "third",
-  "task",
-  "work",
-  "please",
-  "note",
-  "notes",
-  "deliverable",
-  "claim",
-  "claims",
-  "absence",
-  "cite",
-  "cites",
-  "citing",
-  "exactly",
-  "nothing",
-  "else"
-]);
-var AXIS_MIN_TERM_LEN = 4;
-var AXIS_MIN_HITS = 2;
-function extractAxisTerms(text, maxTerms) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (raw.length < AXIS_MIN_TERM_LEN) continue;
-    if (AXIS_STOPWORDS.has(raw)) continue;
-    if (/^\d+$/.test(raw)) continue;
-    counts.set(raw, (counts.get(raw) ?? 0) + 1);
-  }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
-}
-function axisNarrowText(record) {
-  if (!record || typeof record !== "object") return "";
-  if (record.type === "anti_pattern") return `${record.title ?? ""}
-${record.trigger ?? ""}`;
-  if (record.type === "decision") return `${record.title ?? ""}
-${record.statement ?? ""}`;
-  return "";
-}
-function axisHits(record, terms) {
-  const hay = axisNarrowText(record).toLowerCase();
-  if (!hay) return [];
-  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
-}
-var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
-  "test",
-  "tests",
-  "testing",
-  "script",
-  "scripts",
-  "commit",
-  "commits",
-  "branch",
-  "merge",
-  "build",
-  "builds",
-  "check",
-  "checks",
-  "node",
-  "file",
-  "files",
-  "path",
-  "paths",
-  "run",
-  "runs",
-  "running",
-  "item",
-  "items",
-  "text",
-  "change",
-  "changed",
-  "changes",
-  "code",
-  "repo",
-  "line",
-  "lines",
-  "error",
-  "errors",
-  "string",
-  "value",
-  "values",
-  "field",
-  "fields",
-  "message",
-  "messages",
-  "output",
-  "input",
-  "name",
-  "names",
-  "list",
-  "exact",
-  "existing",
-  "touched",
-  "untouched",
-  "through",
-  "actually",
-  "behavior",
-  "still"
-]);
-function hasDiscriminatingHit(hits) {
-  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
-}
-var AXIS_RECORD_TOP_K = 6;
-var AXIS_MIN_RECORD_TERMS = 2;
-function recordCentralityHits(record, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
-  const words = [
-    ...new Set(
-      String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN)
-    )
-  ];
-  if (!words.length) return [];
-  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
-}
-function hasRecordCentralityHit(record, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
-  const covered = recordCentralityHits(record, outgoingText, { topK });
-  return covered.length >= Math.min(minTerms, central.length);
 }
 function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
