@@ -29,6 +29,11 @@ const SERVED_TOOLS = [
   'knowledge_retire',
   'knowledge_promote',
   'knowledge_link',
+  // H20/H19 relevance slice 4 (board 5fac3459): the conductor-callable analog
+  // of the H20 delivery floors — verify the brief against store targets BEFORE
+  // dispatching, rather than discovering governing anti_patterns/decisions
+  // only after a subagent has already gone wrong.
+  'knowledge_preflight',
   'board_add',
   'board_query',
   'board_remove',
@@ -134,6 +139,26 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     assert.match(bogusText, /unrecognized_keys/, 'the refusal is a validation error, not a tool-logic error');
     assert.match(bogusText, /query/, 'the refusal NAMES the offending parameters so the caller can self-correct');
     assert.match(bogusText, /limit/);
+
+    // knowledge_preflight (H20/H19 relevance slice 4, board 5fac3459): served
+    // alongside the rest of the surface and callable end-to-end over the wire.
+    // The tool's OWN answerability logic (centrality floors, matches) is
+    // unit-tested against SterlingTools directly in knowledge-preflight.test.ts;
+    // this pin only proves the MCP registration + strict schema, which only a
+    // wire call can discriminate (see the knowledge_query bogus-param comment
+    // above for why).
+    const preflight = payload(
+      await client.callTool({ name: 'knowledge_preflight', arguments: { text: 'the a of' } })
+    ) as { answerability: string; reason?: string; terms: string[]; matches: unknown[] };
+    assert.equal(preflight.answerability, 'insufficient', 'too little extractable vocabulary to judge answerability');
+    assert.equal(preflight.reason, 'too_little_vocabulary');
+    assert.deepEqual(preflight.matches, [], 'insufficient vocabulary never carries matches');
+
+    const bogusPreflight = await client.callTool({ name: 'knowledge_preflight', arguments: { text: 'x', cap: 5 } });
+    assert.equal(bogusPreflight.isError, true, 'an unknown key (cap) is rejected in-band, never silently stripped');
+    const bogusPreflightText = (bogusPreflight.content as { text: string }[])[0].text;
+    assert.match(bogusPreflightText, /unrecognized_keys/, 'the refusal is a validation error, not a tool-logic error');
+    assert.match(bogusPreflightText, /cap/, 'the refusal NAMES the offending parameter');
 
     // the same closed-set rule holds across the surface, not just on retrieval
     const bogusBoard = await client.callTool({ name: 'board_query', arguments: { source: 'user', limit: 5 } });

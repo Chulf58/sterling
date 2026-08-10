@@ -6,6 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname as dirname5, join as join4 } from "node:path";
@@ -4725,6 +4726,14 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(80)
     }).default({})
   }).default({}),
+  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
+  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
+  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
+  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
+  delegation_watch: external_exports.object({
+    min_hand_work: external_exports.number().int().positive().default(15),
+    max_dispatches: external_exports.number().int().nonnegative().default(0)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -5998,7 +6007,21 @@ var CONVENTIONS = [
   // because a rule that only pushes one way is the rule that produced the fear.
   "- Delegation: FIVE concurrent subagents is a CEILING, not a target \u2014 there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real \u2014 speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.",
   '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind \u2014 being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" \u2014 it is the conductor reading files by hand that an agent should have read for it.',
+  // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
+  // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
+  // Diagnosis: the rule bound to no event (an always-rule fires never) and the wording's
+  // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
+  `- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS \u2014 an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise \u2014 adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch \u2014 hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent's claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor's attention spent where it should not be (decision 677f1639).`,
+  // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
+  // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
+  // echo each store write returns. Application is moment (3) in recurring form: only the
+  // new id + version is needed, so it is a dispatch. Drafting stays with the conductor.
+  "- ARTICLE APPLICATION IS DISPATCH-SHAPED: every knowledge_update/edit/append echoes the FULL updated record into the caller's context (~50KB on large articles). The conductor DRAFTS all reconcile text \u2014 the librarian never authors knowledge \u2014 then BATCHES the slice's drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor's next work \u2014 never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates (the echo IS the draft), a write needing live adjudication, or a single small-record touch (decision dac3d2c6).",
   `- The Workflow tool stays OPT-IN and needs the user's explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting \u2014 its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.`,
+  // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
+  // stops were rejected verbatim ("demands attention all the time"); the three subagent
+  // purposes are the user's own words. Ships here so every project gets it next session.
+  `- CONDUCTOR MODE FLOWS THROUGH SLICE BOUNDARIES: commit each slice at its boundary, reconcile, and CONTINUE to the next unattended \u2014 never end the turn to ask "shall I continue?". The user is engaged at exactly two points: the merge-to-main gate, and a genuine blocker (an adjudication only they can make, an ambiguity the store cannot resolve, hard context pressure \u2192 rotation). Subagents are intrinsic to the mode, for three things: PARALLEL speed on independent work; subagents DO the work while the conductor REVIEWS; and protecting the conductor's context window (decision aac19532).`,
   // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
   // the rationale lives in the store (decision + the paired-exploration research_finding), and
   // conventions injected on every session stay short to stay read.
@@ -6158,6 +6181,75 @@ Resume from next_slice. The board and knowledge store remain the authorities for
   }
 } catch {
 }
+var residueContext = "";
+try {
+  if (input.source === "startup" || input.source === "clear") {
+    const transient = join4(input.cwd, ".sterling", "transient");
+    const regPaths = [join4(transient, "touches.json"), join4(transient, "session-events.json"), join4(transient, "capture-nagged.json")];
+    const [touchesPath, eventsPath] = regPaths;
+    if (regPaths.some((p) => existsSync3(p))) {
+      let touches = [];
+      let events = [];
+      let malformed = false;
+      try {
+        if (existsSync3(touchesPath)) {
+          const raw = JSON.parse(readFileSync2(touchesPath, "utf8"));
+          if (Array.isArray(raw)) touches = raw;
+          else malformed = true;
+        }
+      } catch {
+        malformed = true;
+      }
+      try {
+        if (existsSync3(eventsPath)) {
+          const raw = JSON.parse(readFileSync2(eventsPath, "utf8"));
+          if (Array.isArray(raw)) events = raw;
+          else malformed = true;
+        }
+      } catch {
+        malformed = true;
+      }
+      if (touches.length || events.length || malformed) {
+        const stamps = [...touches.map((t) => t?.at), ...events.map((e) => e?.at)].filter(Boolean).sort();
+        const earliest = stamps.length ? stamps[0] : null;
+        const paid = !malformed && earliest !== null && store.query({
+          types: ["decision", "anti_pattern", "note", "feature_article", "research_finding", "disconfirmed_hypothesis"],
+          cap: 1e3,
+          include_unconfirmed: true
+        }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+        if (!paid) {
+          const paths = [...new Set(touches.map((t) => t?.path).filter(Boolean))];
+          const pending = events.filter((e) => e?.kind === "capture_pending" && e?.detail).map((e) => e.detail).at(-1);
+          const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
+          if (!open) {
+            const now = (/* @__PURE__ */ new Date()).toISOString();
+            store.create({
+              id: randomUUID2(),
+              type: "todo",
+              created_at: now,
+              updated_at: now,
+              author: "system",
+              status: "active",
+              superseded_by: null,
+              links: [],
+              scope: "project",
+              stack_tags: [],
+              text: `capture owed (session-boundary residue): a previous session ended without settling its transient registers \u2014 ` + (malformed ? `register content was malformed, so the debt is unverifiable and stays loud` + (paths.length ? `; ${paths.length} touched file(s) were recoverable` : "") + ` \u2014 ` : `${paths.length} touched file(s), ${events.length} session event(s)` + (pending ? `, declared pending (${pending})` : "") + ` and no durable record since ${earliest} \u2014 `) + `verify the work landed its capture against HEAD, then close`,
+              source: "system",
+              system_reason: "capture_owed",
+              file_keys: paths.slice(0, 20)
+            });
+            residueContext = `
+
+SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient registers` + (pending ? ` (including a capture_pending declaration: ${pending})` : "") + `; no durable capture covers this session-boundary residue, so ONE capture_owed item now carries the debt \u2014 verify it against HEAD when draining. The registers were cleared so they cannot pollute this session's duty cycle.`;
+          }
+        }
+      }
+      for (const p of regPaths) rmSync(p, { force: true });
+    }
+  }
+} catch {
+}
 var counts = { todos: 0, maintenance: 0 };
 var queueReasons = [];
 var drainable = 0;
@@ -6261,7 +6353,7 @@ ${versionLine}`);
 }
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + rotationContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

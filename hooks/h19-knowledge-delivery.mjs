@@ -4731,6 +4731,14 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(80)
     }).default({})
   }).default({}),
+  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
+  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
+  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
+  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
+  delegation_watch: external_exports.object({
+    min_hand_work: external_exports.number().int().positive().default(15),
+    max_dispatches: external_exports.number().int().nonnegative().default(0)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -5959,19 +5967,30 @@ function renderReference(ref) {
   return `\u25B8 reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? "", 200)} \u2014 refresh via knowledge_get ${ref.id}`;
 }
 var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
-function renderHazards(hazards, charCap) {
-  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).map(
+var HAZARD_CAP = 3;
+function cappedHazards(hazards, cap = HAZARD_CAP) {
+  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
+}
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = shown.map(
     (ap) => [
       `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
   );
+  if (hazards.length > shown.length) {
+    const keys = fileKeys.map((k) => `"${k}"`).join(",");
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
+    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  }
+  return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
+function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
@@ -5982,9 +6001,8 @@ function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (decisions.length > shown.length) {
-    lines.push(
-      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length}`;
+    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }
@@ -6035,12 +6053,12 @@ try {
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
   const blocks = [
-    ...renderHazards(freshHazards, charCap),
+    ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
     ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
     ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []
   ];
   const payload = renderPayload(rel, blocks, { unowned });
-  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
   if (mode === "enqueue") {
     enqueuePending(pendingPath(input.cwd), {
       kind: unowned ? "frontier" : "delivery",

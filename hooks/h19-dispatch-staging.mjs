@@ -4734,6 +4734,14 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(80)
     }).default({})
   }).default({}),
+  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
+  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
+  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
+  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
+  delegation_watch: external_exports.object({
+    min_hand_work: external_exports.number().int().positive().default(15),
+    max_dispatches: external_exports.number().int().nonnegative().default(0)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -4910,6 +4918,244 @@ import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
+
+// packages/store/dist/axis.js
+var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
+  // function words
+  "this",
+  "that",
+  "these",
+  "those",
+  "with",
+  "from",
+  "have",
+  "has",
+  "had",
+  "will",
+  "would",
+  "could",
+  "should",
+  "must",
+  "your",
+  "you",
+  "into",
+  "then",
+  "than",
+  "when",
+  "what",
+  "which",
+  "there",
+  "their",
+  "them",
+  "they",
+  "been",
+  "being",
+  "does",
+  "make",
+  "made",
+  "used",
+  "using",
+  "also",
+  "only",
+  "each",
+  "more",
+  "most",
+  "some",
+  "such",
+  "very",
+  "just",
+  "like",
+  "over",
+  "after",
+  "before",
+  "because",
+  "about",
+  "under",
+  "above",
+  "below",
+  "where",
+  "while",
+  "since",
+  "until",
+  "unless",
+  "either",
+  "neither",
+  "both",
+  "every",
+  "not",
+  "but",
+  "and",
+  "the",
+  "for",
+  "are",
+  "was",
+  "were",
+  "its",
+  "here",
+  "how",
+  "why",
+  "who",
+  "whom",
+  "whose",
+  "any",
+  "all",
+  "can",
+  "may",
+  "might",
+  "shall",
+  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
+  "sterling",
+  "conductor",
+  "agent",
+  "agents",
+  "subagent",
+  "dispatch",
+  "report",
+  "return",
+  "verify",
+  "verified",
+  "evidence",
+  "record",
+  "records",
+  "store",
+  "knowledge",
+  "query",
+  "knowledge_get",
+  "knowledge_query",
+  "read",
+  "reads",
+  "grep",
+  "file",
+  "files",
+  "code",
+  "first",
+  "second",
+  "third",
+  "task",
+  "work",
+  "please",
+  "note",
+  "notes",
+  "deliverable",
+  "claim",
+  "claims",
+  "absence",
+  "cite",
+  "cites",
+  "citing",
+  "exactly",
+  "nothing",
+  "else"
+]);
+var AXIS_MIN_TERM_LEN = 4;
+var AXIS_MIN_HITS = 2;
+function extractAxisTerms(text, maxTerms) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < AXIS_MIN_TERM_LEN)
+      continue;
+    if (AXIS_STOPWORDS.has(raw))
+      continue;
+    if (/^\d+$/.test(raw))
+      continue;
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
+}
+function axisNarrowText(record) {
+  if (!record || typeof record !== "object")
+    return "";
+  if (record.type === "anti_pattern")
+    return `${record.title ?? ""}
+${record.trigger ?? ""}`;
+  if (record.type === "decision")
+    return `${record.title ?? ""}
+${record.statement ?? ""}`;
+  return "";
+}
+function axisHits(record, terms) {
+  const hay = axisNarrowText(record).toLowerCase();
+  if (!hay)
+    return [];
+  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+}
+var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
+  "test",
+  "tests",
+  "testing",
+  "script",
+  "scripts",
+  "commit",
+  "commits",
+  "branch",
+  "merge",
+  "build",
+  "builds",
+  "check",
+  "checks",
+  "node",
+  "file",
+  "files",
+  "path",
+  "paths",
+  "run",
+  "runs",
+  "running",
+  "item",
+  "items",
+  "text",
+  "change",
+  "changed",
+  "changes",
+  "code",
+  "repo",
+  "line",
+  "lines",
+  "error",
+  "errors",
+  "string",
+  "value",
+  "values",
+  "field",
+  "fields",
+  "message",
+  "messages",
+  "output",
+  "input",
+  "name",
+  "names",
+  "list",
+  "exact",
+  "existing",
+  "touched",
+  "untouched",
+  "through",
+  "actually",
+  "behavior",
+  "still"
+]);
+function hasDiscriminatingHit(hits) {
+  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+}
+var AXIS_RECORD_TOP_K = 6;
+var AXIS_MIN_RECORD_TERMS = 2;
+function recordCentralityHits(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const words = [
+    ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
+  ];
+  if (!words.length)
+    return [];
+  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
+}
+function hasRecordCentralityHit(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const covered = recordCentralityHits(record, outgoingText, { topK });
+  return covered.length >= Math.min(minTerms, central.length);
+}
 
 // packages/store/dist/index.js
 var DDL = `
@@ -5970,19 +6216,30 @@ function renderReference(ref) {
   return `\u25B8 reference '${ref.title}' (${ref.location}): ${clip(ref.summary ?? "", 200)} \u2014 refresh via knowledge_get ${ref.id}`;
 }
 var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
-function renderHazards(hazards, charCap) {
-  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).map(
+var HAZARD_CAP = 3;
+function cappedHazards(hazards, cap = HAZARD_CAP) {
+  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
+}
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = shown.map(
     (ap) => [
       `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
   );
+  if (hazards.length > shown.length) {
+    const keys = fileKeys.map((k) => `"${k}"`).join(",");
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
+    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  }
+  return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
@@ -5993,9 +6250,8 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (decisions.length > shown.length) {
-    lines.push(
-      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
+    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }
@@ -6010,6 +6266,7 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
 }
 
 // scripts/hooks/h19-dispatch-staging.mjs
+var SUBJECT_MAX_DECISIONS = 5;
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
@@ -6047,25 +6304,72 @@ try {
   const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
   );
-  if (!rels.length) allow();
-  const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree);
-  const hazards = store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 });
-  const decisions = store.query({ types: ["decision"], file_keys: rels, cap: 100 });
-  if (!owners.length && !hazards.length && !decisions.length) allow();
+  const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree) : [];
+  const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
+  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
+  const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
+  const subjectMatches = [];
+  const seenSubject = /* @__PURE__ */ new Set();
+  for (const p of prompts) {
+    const terms = extractAxisTerms(p, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) continue;
+    const candidatesBySubject = [
+      ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
+      ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
+    ];
+    for (const r of candidatesBySubject) {
+      if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
+      const hits = axisHits(r, terms);
+      if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
+        seenSubject.add(r.id);
+        subjectMatches.push({ record: r, hits, prompt: p });
+      }
+    }
+  }
+  subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
+  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
   const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length) allow();
+  const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const blocks = [
-    ...renderHazards(freshHazards, charCap),
-    ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
-    ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
+  const parts = [];
+  if (freshOwners.length || freshHazards.length || freshDecisions.length) {
+    const blocks = [
+      ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+      ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
+      ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
+    ];
+    parts.push(renderPayload(rels.join(", "), blocks, { unowned: false }));
+  }
+  const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
+  const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
+  if (subjectHazards.length || subjectDecisions.length) {
+    const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
+    const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
+    const subjectLabel = prompts.length > 1 ? `the SUBJECT of a task dispatched in this turn (possibly a sibling's)` : `your task's SUBJECT`;
+    const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
+    const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
+    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
+    parts.push(
+      [
+        `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
+        ...renderHazards(subjectHazards, charCap, { remedy }),
+        ...subjectDecisions.length ? [renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy })] : []
+      ].join("\n\n")
+    );
+  }
+  const payload = parts.join("\n\n");
+  const fresh = [
+    ...freshOwners,
+    ...cappedHazards(freshHazards),
+    ...freshDecisions.slice(0, DECISION_POINTER_CAP),
+    ...cappedHazards(subjectHazards),
+    ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS)
   ];
-  const payload = renderPayload(rels.join(", "), blocks, { unowned: false });
-  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: payload } }));
   guard.records.push(...fresh.map((r) => r.id));
   writeGuard(gPath, guard);

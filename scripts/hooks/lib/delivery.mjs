@@ -12,42 +12,27 @@ export function deliveryDir(cwd) {
 }
 
 // ---------------------------------------------------------------------------
-// MECHANISM-AXIS MATCHING (H20, board 62806222). Path-scoped delivery is
-// STRUCTURALLY blind to recurrence: an anti_pattern is filed against the file
-// where the incident HAPPENED, not against every file where the mistake can
-// recur, so no file-key join can ever surface it. The only thing that finds
-// these is a query on the MECHANISM — and the prose rule to run one was missed
-// twice in one session by the person who wrote it. This matches the outgoing
-// dispatch prompt's own vocabulary against stored triggers and titles instead.
-//
-// TWO STAGES, because one is not enough. Stage 1 is the store's FTS: rank_terms
-// genuinely NARROW (index.ts builds `... AND records_fts MATCH ?`), so zero
-// hits is a real zero and the hook can stay silent. But that index spans
-// rationale/right_way/guidance too (records.ts:394,400) — far too much surface
-// to inject from. Stage 2 (axisHits) re-checks against the NARROW fields only,
-// which is what the board item actually asked for: triggers and titles.
+// MECHANISM-AXIS MATCHING (H20, board 62806222; relevance slices 2-4). The
+// matcher/extractor CORE moved to @sterling/store (packages/store/src/axis.ts)
+// so the MCP server's knowledge_preflight and the hooks import ONE definition
+// (the f5638a84 one-mechanism constraint). Re-exported here so every hook
+// consumer keeps its import path; esbuild resolves the workspace import at
+// bundle time exactly as h20's MAX_RANK_TERMS import always has — the old
+// "stays free of workspace imports" note predates that proof.
 // ---------------------------------------------------------------------------
-
-/** Ordinary function words PLUS the boilerplate that appears in essentially
- *  every Sterling dispatch prompt. The second group is the load-bearing half: a
- *  term present in EVERY prompt cannot discriminate BETWEEN prompts, so keeping
- *  it guarantees false positives (every anti_pattern mentions 'record'). */
-const AXIS_STOPWORDS = new Set([
-  // function words
-  'this', 'that', 'these', 'those', 'with', 'from', 'have', 'has', 'had', 'will', 'would', 'could',
-  'should', 'must', 'your', 'you', 'into', 'then', 'than', 'when', 'what', 'which', 'there', 'their',
-  'them', 'they', 'been', 'being', 'does', 'make', 'made', 'used', 'using', 'also', 'only', 'each',
-  'more', 'most', 'some', 'such', 'very', 'just', 'like', 'over', 'after', 'before', 'because',
-  'about', 'under', 'above', 'below', 'where', 'while', 'since', 'until', 'unless', 'either',
-  'neither', 'both', 'every', 'not', 'but', 'and', 'the', 'for', 'are', 'was', 'were', 'its',
-  'here', 'how', 'why', 'who', 'whom', 'whose', 'any', 'all', 'can', 'may', 'might', 'shall',
-  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
-  'sterling', 'conductor', 'agent', 'agents', 'subagent', 'dispatch', 'report', 'return',
-  'verify', 'verified', 'evidence', 'record', 'records', 'store', 'knowledge', 'query',
-  'knowledge_get', 'knowledge_query', 'read', 'reads', 'grep', 'file', 'files', 'code',
-  'first', 'second', 'third', 'task', 'work', 'please', 'note', 'notes', 'deliverable',
-  'claim', 'claims', 'absence', 'cite', 'cites', 'citing', 'exactly', 'nothing', 'else',
-]);
+export {
+  AXIS_MIN_TERM_LEN,
+  AXIS_MIN_HITS,
+  extractAxisTerms,
+  axisNarrowText,
+  axisHits,
+  GENERIC_DEV_TERMS,
+  hasDiscriminatingHit,
+  AXIS_RECORD_TOP_K,
+  AXIS_MIN_RECORD_TERMS,
+  recordCentralityHits,
+  hasRecordCentralityHit,
+} from '@sterling/store';
 
 /** The OUTGOING text H20 scans, PER SURFACE — the two do not share an input
  *  shape, and assuming they do yields a hook that silently never fires.
@@ -75,94 +60,7 @@ export function outgoingProposalText(toolInput) {
   return '';
 }
 
-/** A term shorter than this is too generic to carry a mechanism. */
-export const AXIS_MIN_TERM_LEN = 4;
 
-/** How many DISTINCT extracted terms must land in a record's narrow fields
- *  before it is worth injecting. One shared word is coincidence; two is signal.
- *  HONEST NOTE: 2 is a starting threshold chosen on the two motivating cases
- *  (see the hook header), NOT on measured data — tune it on hit rates, the way
- *  board 8390f8fa says size thresholds should be set. */
-export const AXIS_MIN_HITS = 2;
-
-/** Extract candidate mechanism terms from outgoing prompt text, most
- *  discriminating first. Ranked by TERM FREQUENCY: a dispatch prompt repeats
- *  what it is ABOUT, so a term used three times beats a one-off mention. Ties
- *  break by length (longer is more specific) then lexicographically, so the
- *  result is fully deterministic for a given prompt — the same prompt must
- *  always produce the same query.
- *
- *  `maxTerms` is supplied by the CALLER rather than hardcoded here: the real
- *  ceiling is the store's MAX_RANK_TERMS, and writing 16 in a second place is
- *  the exact drift decision b47889b7 removed. This module also stays free of
- *  workspace imports on purpose (it is bundled into several hooks). */
-export function extractAxisTerms(text, maxTerms) {
-  const counts = new Map();
-  for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (raw.length < AXIS_MIN_TERM_LEN) continue;
-    if (AXIS_STOPWORDS.has(raw)) continue;
-    if (/^\d+$/.test(raw)) continue; // bare numbers carry no mechanism
-    counts.set(raw, (counts.get(raw) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1))
-    .slice(0, Math.max(0, maxTerms))
-    .map(([term]) => term);
-}
-
-/** The NARROW fields a mechanism match is allowed to consider — deliberately
- *  not the whole FTS surface. An anti_pattern's trigger is its statement of WHEN
- *  it recurs, which is precisely the axis; a decision's title and statement are
- *  its ruling. rationale/right_way/guidance are excluded: they are long, they
- *  discuss context rather than assert the rule, and matching them is what would
- *  turn this into noise. */
-export function axisNarrowText(record) {
-  if (!record || typeof record !== 'object') return '';
-  if (record.type === 'anti_pattern') return `${record.title ?? ''}\n${record.trigger ?? ''}`;
-  if (record.type === 'decision') return `${record.title ?? ''}\n${record.statement ?? ''}`;
-  return '';
-}
-
-/** How many DISTINCT terms appear in the record's narrow fields. Substring
- *  match on a word-ish boundary so 'latch' hits 'latches' and 'one-way-latch'
- *  but not an unrelated token that merely contains the letters. */
-export function axisHits(record, terms) {
-  const hay = axisNarrowText(record).toLowerCase();
-  if (!hay) return [];
-  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(hay));
-}
-
-/** UNIVERSAL coding vocabulary — words that show up in essentially every
- *  dispatch prompt regardless of SUBJECT, so a match confined to this set
- *  cannot discriminate between one dispatch and the next. Tuned on the
- *  measured 15/15 fire rate (board 648bb497, research_finding bf74c65f,
- *  2026-08-04): AXIS_MIN_HITS=2 was trivially satisfied by generic vocabulary
- *  alone in a store whose own records are about this repo's machinery.
- *
- *  DELIBERATELY EXCLUDES Sterling domain words ('board', 'decision',
- *  'article', 'triage', 'user', ...) even though several read as ordinary
- *  English — in THIS store they discriminate, because the store's subject
- *  IS Sterling's own mechanism. Widening this set to catch those too would
- *  silence exactly the matches H20 exists to deliver. This is the honest
- *  boundary chosen 2026-08-04: narrow and universal-only, not "words that
- *  merely look generic." */
-export const GENERIC_DEV_TERMS = new Set([
-  'test', 'tests', 'testing', 'script', 'scripts', 'commit', 'commits', 'branch', 'merge',
-  'build', 'builds', 'check', 'checks', 'node', 'file', 'files', 'path', 'paths', 'run', 'runs',
-  'running', 'item', 'items', 'text', 'change', 'changed', 'changes', 'code', 'repo', 'line',
-  'lines', 'error', 'errors', 'string', 'value', 'values', 'field', 'fields', 'message',
-  'messages', 'output', 'input', 'name', 'names', 'list', 'exact', 'existing', 'touched',
-  'untouched', 'through', 'actually', 'behavior', 'still',
-]);
-
-/** True once at least one matched term escapes GENERIC_DEV_TERMS. This is the
- *  floor H20 applies ON TOP OF AXIS_MIN_HITS: two hits of pure universal
- *  vocabulary ("test", "check") describe every dispatch ever written, so they
- *  can never be the reason to interrupt one — a real match needs at least one
- *  term that actually says something about THIS prompt's subject. */
-export function hasDiscriminatingHit(hits) {
-  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
-}
 
 /** Per-agent guard: which record ids / frontier files were already delivered
  *  this session. The conductor (no agent_id) and every subagent get their own
@@ -293,9 +191,29 @@ export function renderReference(ref) {
 // (the schema leaves it optional, and most records omit it).
 const HAZARD_RANK = { block: 0, warn: 1, info: 2 };
 
+/** How many hazard blocks render before the rest are disclosed as dropped.
+ *  ONE definition (invariant 1) — H20's dispatch ceiling reuses it. Added
+ *  2026-08-09 (board a470046d slice 1): ca23c811's no-cap clause was premised on
+ *  measured volume ('0-1 per file'); a hub file then delivered ~25 records for a
+ *  one-block edit, falsifying the premise — capping now HONORS the ruling's own
+ *  anti-flood reasoning (P1/P6). Distinct from payload_char_cap, which clips per
+ *  FIELD and bounds no payload. */
+export const HAZARD_CAP = 3;
+
+/** The severity-sorted survivors the cap keeps — exported so callers guard
+ *  exactly what RENDERED (AC8): a hazard capped out of a payload is never marked
+ *  delivered, so it surfaces on a later touch instead of being lost silently. */
+export function cappedHazards(hazards, cap = HAZARD_CAP) {
+  return [...hazards]
+    .sort((a, b) => (HAZARD_RANK[a.severity ?? 'warn'] ?? 1) - (HAZARD_RANK[b.severity ?? 'warn'] ?? 1))
+    .slice(0, cap);
+}
+
 /** Hazard blocks for the anti_patterns whose file_keys name this path, most
- *  severe first. ALL matches render — measured before choosing the shape
- *  (2026-07-30): anti-patterns are low-volume per file, unlike decisions.
+ *  severe first, capped at HAZARD_CAP with the overflow STATED (never silent —
+ *  a silent cap reads as 'that is all there is', the same failure the decision
+ *  pointer cap discloses against). The cap applies AFTER the severity sort, so
+ *  the dropped hazards are always the least severe.
  *
  *  WHY THIS EXISTS (defect reported from a consuming project 2026-07-30,
  *  decision ca23c811): delivery's owner query was articles-only, so an
@@ -306,16 +224,24 @@ const HAZARD_RANK = { block: 0, warn: 1, info: 2 };
  *  one-way-latch bug in territory that had a stored one-way-latch anti_pattern.
  *  Substance (trigger + right_way), not a pointer: a pointer to a hazard the
  *  reader must choose to follow reproduces the skippable step delivery deletes. */
-export function renderHazards(hazards, charCap) {
-  return [...hazards]
-    .sort((a, b) => (HAZARD_RANK[a.severity ?? 'warn'] ?? 1) - (HAZARD_RANK[b.severity ?? 'warn'] ?? 1))
-    .map((ap) =>
-      [
-        `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}' (full record: knowledge_get ${ap.id})`,
-        `TRIGGER: ${clip(ap.trigger, charCap)}`,
-        `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
-      ].join('\n')
-    );
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = shown.map((ap) =>
+    [
+      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `TRIGGER: ${clip(ap.trigger, charCap)}`,
+      `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
+    ].join('\n')
+  );
+  if (hazards.length > shown.length) {
+    // `remedy` overrides the widening query for callers whose match was not a
+    // file_keys join (the subject channel has no file answer at all — a
+    // file_keys:[] query would be unrunnable; review finding 4, 2026-08-10).
+    const keys = fileKeys.map((k) => `"${k}"`).join(',');
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
+    blocks.push(`… ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
+  }
+  return blocks;
 }
 
 /** How many decision pointers render before the rest are disclosed as dropped. */
@@ -346,7 +272,7 @@ export const DECISION_REJECTED_CLIP = 140;
  *  untouched: it ruled on rendering decision BODIES, not on which field is
  *  clipped. alternatives_rejected needs no wider read — SterlingStore.query
  *  rehydrates whole bodies (packages/store/src/index.ts:289). */
-export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
+export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
@@ -360,9 +286,10 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
     if (rejected) lines.push(`    ✗ ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (decisions.length > shown.length) {
-    lines.push(
-      `  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
-    );
+    // Same remedy override as renderHazards: a subject match has no file_keys
+    // answer, so the widening query must come from the caller there.
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
+    lines.push(`  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return lines.join('\n');
 }

@@ -1,5 +1,5 @@
 ---
-description: List the shared project registry — every /sterling:init'd project, with its stack tags (shared domains), toolchains, and last-seen activity (decision 8f9e6db2).
+description: List the shared project registry — every /sterling:init'd project, with its stack tags (shared domains), toolchains, and last-seen activity (decision c1ffbcb6).
 ---
 
 Run the registry list script: `node "${CLAUDE_PLUGIN_ROOT}/scripts/list-projects.mjs"` (the script ships with the plugin, not the project — a bare `scripts/` path only resolves inside the Sterling repo itself).

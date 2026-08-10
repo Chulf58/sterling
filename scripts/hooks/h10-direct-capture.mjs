@@ -137,23 +137,114 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  // DELEGATION WATCH (decision 8b00e77a — the mechanical half of 677f1639): measure
+  // hand-work vs dispatches from the conductor's OWN transcript. Reads are recorded
+  // nowhere else (touches.json = edits, session-events.json = research/dispatch), and
+  // the transcript is a complete, already-present record — zero new recorders. This
+  // needs the WHOLE session, so it scans the full file, not latestUsage's 1MB tail
+  // (fine at Stop: one pass, once per session end). Advisory and FAIL-OPEN in its own
+  // try — any failure records check_skipped {delegation-watch} and never costs a duty.
+  const delegationMarker = join(input.cwd, '.sterling', 'transient', 'delegation-nagged.json');
+  const delegationSpent = () => {
+    try {
+      return !!input.session_id && JSON.parse(readFileSync(delegationMarker, 'utf8')).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  const delegation = (() => {
+    try {
+      // A spent marker means the advisory can never fire again this session — skip the
+      // whole-file scan (Stop fires per turn boundary, not once per session; without
+      // this guard a long session re-reads its own transcript on every Stop).
+      if (delegationSpent()) return null;
+      const dw = config.delegation_watch;
+      const tPath = input.transcript_path ?? '';
+      if (!tPath || !existsSync(tPath)) {
+        store.recordCheckSkipped('delegation-watch', 'transcript_missing', undefined, now);
+        return null;
+      }
+      const readFiles = new Set();
+      let searches = 0;
+      let dispatches = 0;
+      let assistantEntries = 0;
+      let contentArrays = 0;
+      for (const line of readFileSync(tPath, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        let entry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue; // individual malformed lines are skipped, never fatal
+        }
+        if (entry.type !== 'assistant') continue;
+        // Defensive: subagent turns live in separate agent-*.jsonl files today
+        // (verified 2026-08-10), but the sidechain flag exists — never count a
+        // sidechain's tool calls as conductor hand-work.
+        if (entry.isSidechain === true) continue;
+        assistantEntries++;
+        const content = entry.message?.content;
+        if (!Array.isArray(content)) continue;
+        contentArrays++;
+        for (const b of content) {
+          if (!b || b.type !== 'tool_use') continue;
+          if (b.name === 'Read') {
+            if (b.input?.file_path) readFiles.add(b.input.file_path);
+          } else if (b.name === 'Grep' || b.name === 'Glob') {
+            searches++;
+          } else if (b.name === 'Task' || b.name === 'Agent') {
+            dispatches++;
+          }
+        }
+      }
+      if (assistantEntries > 0 && contentArrays === 0) {
+        // Assistant entries exist but none carried a content array — the transcript
+        // shape has drifted. A silent null here would leave the watch permanently
+        // dead with no trail (P5); mirror the pressure path's format_unparseable.
+        store.recordCheckSkipped('delegation-watch', 'format_unparseable', undefined, now);
+        return null;
+      }
+      if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
+        return { hand_reads: readFiles.size, searches, dispatches };
+      }
+      return null;
+    } catch (e) {
+      try {
+        store.recordCheckSkipped('delegation-watch', String((e && e.message) || e), undefined, now);
+      } catch {
+        // store is the casualty — the watch stays advisory
+      }
+      return null;
+    }
+  })();
+  const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const delegationPart = () =>
+    `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es). Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) — delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
   /**
    * Every direct-mode release path exits through here. At most TWO pressure blocks per
    * session, strictly escalating: soft+dirty fires the slice-boundary nudge once; hard
    * fires once more (even after a soft block — escalation is new information). A spent
-   * hard marker ends all pressure blocking for the session.
+   * hard marker ends all pressure blocking for the session. The delegation-watch
+   * advisory joins the SAME standalone deny when due (one block per Stop, P1);
+   * stop_hook_active suppresses without spending, so a suppressed advisory can still
+   * fire on a later Stop of the same session.
    */
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
+      const parts = [];
       const spent = pressureMarkerState();
       if (pressure.level === 'hard' && (!spent || spent.level !== 'hard')) {
         spendPressureMarker('hard');
-        deny(pressurePart());
-      }
-      if (pressure.level === 'soft' && dirtyPaths > 0 && !spent) {
+        parts.push(pressurePart());
+      } else if (pressure.level === 'soft' && dirtyPaths > 0 && !spent) {
         spendPressureMarker('soft');
-        deny(`H10 slice boundary: ${pressurePart()} This notice fires once per session.`);
+        parts.push(`H10 slice boundary: ${pressurePart()} This notice fires once per session.`);
       }
+      if (delegation && !delegationSpent()) {
+        spendDelegationMarker();
+        parts.push(delegationPart());
+      }
+      if (parts.length) deny(parts.join('\n\n'));
     }
     allow();
   };
@@ -451,6 +542,13 @@ try {
     if (pressure.level === 'soft' || pressure.level === 'hard') {
       parts.push(pressurePart());
       spendPressureMarker(pressure.level);
+    }
+
+    // The delegation-watch advisory rides the same deny and spends its marker, so
+    // no standalone delegation block follows (decision 8b00e77a).
+    if (delegation && !delegationSpent()) {
+      spendDelegationMarker();
+      parts.push(delegationPart());
     }
 
     deny(parts.join('\n\n'));

@@ -27,6 +27,7 @@ import {
   renderArticle,
   renderReference,
   renderHazards,
+  cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
   renderPayload,
@@ -111,7 +112,7 @@ try {
   // Hazards LEAD: "do not do this here" outranks the description of what the
   // territory is, and the reader may stop after the first block.
   const blocks = [
-    ...renderHazards(freshHazards, charCap),
+    ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
     ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
     ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
   ];
@@ -124,7 +125,10 @@ try {
   // only the rendered slice makes the remainder surface on a later touch instead,
   // which is the same "never mark delivered what was not delivered" rule the
   // side-effect-first ordering below enforces for the payload as a whole.
-  const fresh = [...freshOwners, ...freshHazards, ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  // Hazards guard the severity-sorted RENDERED slice only, mirroring the
+  // decision cap below (board a470046d slice 1): a hazard capped out of this
+  // payload must surface on a later touch, not vanish as 'delivered'.
+  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
 
   // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
   // makes delivery once-per-session, so writing it before the delivery actually
