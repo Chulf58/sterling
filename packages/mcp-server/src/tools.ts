@@ -607,6 +607,36 @@ export class SterlingTools {
       skipped.push(this.skip('dedup-merge', this.activeRunId()));
     }
 
+    // STABLE HANDLES (board 1e639f32): decision / anti_pattern / research_finding
+    // gain the slug feature_article and brief already had — the id re-mints on
+    // every supersession, the slug names the CONCEPT and survives. Auto-minted
+    // from the headline when absent (an auto-derived clash takes a -2/-3 suffix,
+    // deterministic); an EXPLICIT slug that collides with ANY slug-bearing
+    // record is refused loudly — same two-records-one-handle reasoning as the
+    // feature_article branch above, across every type knowledge_get resolves.
+    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding') {
+      const explicit = (parsed as { slug?: string }).slug;
+      if (explicit) {
+        if (this.store.recordsBySlug(explicit).length) {
+          throw new Error(
+            `knowledge_create: a record with slug '${explicit}' already exists — one handle resolves to one record. ` +
+              `Choose a distinct slug, or omit it to auto-derive a unique one.`
+          );
+        }
+      } else {
+        const headline = ((parsed as { title?: string; question?: string }).title ?? (parsed as { question?: string }).question ?? '') as string;
+        const base = SterlingTools.slugify(headline);
+        if (base) {
+          let slug = base;
+          for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+          // store.create persists `candidate` (parsed is the dedup-comparison
+          // view), so the minted slug must land on BOTH.
+          (parsed as { slug?: string }).slug = slug;
+          candidate.slug = slug;
+        }
+      }
+    }
+
     // A SYSTEM maintenance item takes the ATOMIC dedup path (board 2ded3b4b):
     // check-and-insert in one transaction, keyed (system_reason, feature_link,
     // file_keys). Every producer funnels through here, so the four hand-rolled
@@ -1424,6 +1454,16 @@ export class SterlingTools {
   /** The citation format the repo actually writes: 8-char id prefixes. */
   private static readonly CITATION_PREFIX_LEN = 8;
 
+  /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
+  private static slugify(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60)
+      .replace(/-+$/, '');
+  }
+
   /**
    * knowledge_get — full uuid, or the 8-char PREFIX every citation in this repo
    * uses (decision 27f148c2). CLAUDE.md, code comments and record prose all cite
@@ -1444,13 +1484,25 @@ export class SterlingTools {
   knowledgeGet(id: string): DurableRecord {
     const direct = this.store.get(id);
     if (direct) return direct;
+    // SLUG resolution before prefix resolution (board 1e639f32): an exact slug
+    // is an IDENTITY, deterministic across the fan, and — unlike an id — it
+    // names the concept, so it serves the live HEAD after any number of
+    // supersessions. Slugs are unique at create, so >1 hit means a legacy or
+    // cross-store clash: refuse rather than pick (P5).
+    const bySlug = this.store.recordsBySlug(id);
+    if (bySlug.length === 1) return bySlug[0];
+    if (bySlug.length > 1) {
+      throw new Error(
+        `knowledge_get: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join('; ')}) — a slug must name one record; cite the id.`
+      );
+    }
     if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
       throw new Error(
-        `knowledge_get: no record '${id}' — and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, or pass the full uuid.`
+        `knowledge_get: no record '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
       );
     }
     const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
-    if (hits.length === 0) throw new Error(`knowledge_get: no record '${id}' in the project store or any mounted domain, at any status`);
+    if (hits.length === 0) throw new Error(`knowledge_get: no record '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
     if (hits.length > 1) {
       throw new Error(
         `knowledge_get: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits

@@ -174,6 +174,14 @@ export class MountedStores {
     return this.all().flatMap((s) => s.articlesBySlug(slug));
   }
 
+  /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
+   *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
+   *  callers are a uniqueness refusal and an identity resolution, and both
+   *  would rather see a domain-store record than miss one. */
+  recordsBySlug(slug: string): DurableRecord[] {
+    return this.all().flatMap((s) => s.recordsBySlug(slug));
+  }
+
   // -- record mutations: route to the store that HOLDS the record --------------
   // A record's scope decided where it lives at create time; a later change has to
   // land in that same store, so these route by where the id actually is — never

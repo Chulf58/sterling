@@ -4124,6 +4124,11 @@ var verifiableAt = external_exports.union([external_exports.literal("final"), ex
 var base = external_exports.object(envelopeFields);
 var decisionSchema = base.extend({
   type: external_exports.literal("decision"),
+  // Stable handle (board 1e639f32): survives supersession the way an id does
+  // not — auto-minted from the title at create when absent; optional so
+  // legacy records round-trip unchanged. Uniqueness is enforced at the write
+  // (knowledgeCreate), spanning every slug-bearing type.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
@@ -4190,6 +4195,8 @@ var featureArticleSchema = base.extend({
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
 var antiPatternSchema = base.extend({
   type: external_exports.literal("anti_pattern"),
+  // Stable handle (board 1e639f32) — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   trigger: external_exports.string().min(1),
   guidance: external_exports.string().min(1),
@@ -4203,6 +4210,8 @@ var antiPatternSchema = base.extend({
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
   status: external_exports.enum(["active", "superseded", "flagged_stale"]),
+  // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   question: external_exports.string().min(1),
   answer: external_exports.string().min(1),
   source_urls: external_exports.array(external_exports.string()),

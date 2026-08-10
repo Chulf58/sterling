@@ -4121,6 +4121,11 @@ var verifiableAt = external_exports.union([external_exports.literal("final"), ex
 var base = external_exports.object(envelopeFields);
 var decisionSchema = base.extend({
   type: external_exports.literal("decision"),
+  // Stable handle (board 1e639f32): survives supersession the way an id does
+  // not — auto-minted from the title at create when absent; optional so
+  // legacy records round-trip unchanged. Uniqueness is enforced at the write
+  // (knowledgeCreate), spanning every slug-bearing type.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
@@ -4187,6 +4192,8 @@ var featureArticleSchema = base.extend({
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
 var antiPatternSchema = base.extend({
   type: external_exports.literal("anti_pattern"),
+  // Stable handle (board 1e639f32) — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   trigger: external_exports.string().min(1),
   guidance: external_exports.string().min(1),
@@ -4200,6 +4207,8 @@ var antiPatternSchema = base.extend({
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
   status: external_exports.enum(["active", "superseded", "flagged_stale"]),
+  // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   question: external_exports.string().min(1),
   answer: external_exports.string().min(1),
   source_urls: external_exports.array(external_exports.string()),
@@ -4407,29 +4416,30 @@ var RECORD_TYPES = {
   decision: {
     schema: decisionSchema,
     immutable: true,
-    fts: (r) => [s(r.title), s(r.statement), s(r.rationale)].join("\n"),
+    fts: (r) => [s(r.slug), s(r.title), s(r.statement), s(r.rationale)].join("\n"),
     fileKeys: (r) => r.file_keys ?? [],
-    // Title only, as asked: a decision's title is written to state the ruling.
-    digest: { title: "plain" }
+    // slug leads for the same reason it does on feature_article: it is the
+    // handle that survives supersession (board 1e639f32); the title states the ruling.
+    digest: { slug: "plain", title: "plain" }
   },
   anti_pattern: {
     schema: antiPatternSchema,
     immutable: false,
-    fts: (r) => [s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
+    fts: (r) => [s(r.slug), s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
     fileKeys: (r) => r.file_keys ?? [],
     // trigger is the field that tells a reader whether the hazard applies to
     // what they are about to do — the whole point of scanning hazards — and
     // severity is the order H19 already renders them in.
-    digest: { title: "plain", trigger: "clip", severity: "plain" }
+    digest: { slug: "plain", title: "plain", trigger: "clip", severity: "plain" }
   },
   research_finding: {
     schema: researchFindingSchema,
     immutable: false,
-    fts: (r) => [s(r.question), s(r.answer)].join("\n"),
+    fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join("\n"),
     fileKeys: () => [],
     // No title on this type — the question IS the identity. Both clocks ride
     // along because a finding's currency decides whether it may be used at all.
-    digest: { question: "clip", source_date: "plain", capture_date: "plain" }
+    digest: { slug: "plain", question: "clip", source_date: "plain", capture_date: "plain" }
   },
   reference_material: {
     schema: referenceMaterialSchema,
@@ -5213,6 +5223,22 @@ var SterlingStore = class _SterlingStore {
       return records;
     const relations = this.activeArticleRelations();
     return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+  /**
+   * Every non-superseded record of ANY type carrying this exact slug, newest
+   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
+   * stable handle feature_article and brief already had). The type-agnostic
+   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
+   * uniqueness and knowledge_get's slug resolution, both of which must see
+   * EVERY slug-bearing record or a clash slips through. Excluding superseded
+   * rows is the point — a slug names the CONCEPT, so resolving it serves the
+   * live head while a version-pinned citation keeps using the id.
+   */
+  recordsBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`).all(slug);
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
   }
   /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +

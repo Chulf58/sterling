@@ -230,6 +230,9 @@ export type ToolStore = Pick<
   // — this is that second consumer). Deterministic, so the refusal can never be
   // a ranking artefact.
   | 'articlesBySlug'
+  // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
+  // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
+  | 'recordsBySlug'
   | 'supersede'
   | 'updateTodo'
   | 'retireInFavorOf'
@@ -471,6 +474,27 @@ export class SterlingStore {
     if (!records.length) return records;
     const relations = this.activeArticleRelations();
     return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+
+  /**
+   * Every non-superseded record of ANY type carrying this exact slug, newest
+   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
+   * stable handle feature_article and brief already had). The type-agnostic
+   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
+   * uniqueness and knowledge_get's slug resolution, both of which must see
+   * EVERY slug-bearing record or a clash slips through. Excluding superseded
+   * rows is the point — a slug names the CONCEPT, so resolving it serves the
+   * live head while a version-pinned citation keeps using the id.
+   */
+  recordsBySlug(slug: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT body FROM records
+          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`
+      )
+      .all(slug) as { body: string }[];
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body) as DurableRecord));
   }
 
   /**

@@ -2616,3 +2616,85 @@ test('article_oversize measures the NON-history body: fat history alone never fl
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Stable handles for decision / anti_pattern / research_finding (board
+// 1e639f32): an optional `slug`, auto-minted from the title/question at create,
+// globally unique across slug-bearing records, resolvable via knowledge_get —
+// and because it names the CONCEPT, it follows supersession to the live head
+// where an id stays pinned to one version.
+// ---------------------------------------------------------------------------
+
+test('stable handle: a decision auto-mints a slug from its title, knowledge_get resolves it, and the slug follows supersession to the HEAD', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: v1 } = tools.knowledgeCreate('decision', {
+      title: 'Write echoes: default to the digest receipt!',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const slug = (v1 as unknown as { slug?: string }).slug;
+    assert.ok(slug, 'slug auto-minted');
+    assert.match(slug!, /^write-echoes-default-to-the-digest-receipt/, 'derived from the title, kebab-case, punctuation dropped');
+
+    assert.equal(tools.knowledgeGet(slug!).id, v1.id, 'knowledge_get resolves the slug');
+
+    const v2 = tools.knowledgeUpdate(v1.id, { rationale: 'revised' });
+    assert.equal(tools.knowledgeGet(slug!).id, v2.id, 'the slug names the CONCEPT — it follows supersession to the live head');
+    assert.equal(tools.knowledgeGet(v1.id).id, v1.id, 'the old id still resolves PINNED to its version (history citations stay correct)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('stable handle: research_finding derives from its question; a second record with the same headline gets a suffixed slug, never a collision', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const mk = () =>
+      tools.knowledgeCreate('research_finding', {
+        question: 'Does the platform fire PostToolUse on MCP tools?',
+        answer: 'a',
+        source_urls: [],
+        source_date: '2026-08-10',
+        capture_date: '2026-08-10',
+      }).record as unknown as { id: string; slug?: string };
+    const first = mk();
+    const second = mk();
+    assert.ok(first.slug && second.slug, 'both minted');
+    assert.notEqual(first.slug, second.slug, 'auto-derived slugs never collide');
+    assert.match(second.slug!, /-2$/, 'the second gets a deterministic suffix');
+  } finally {
+    cleanup();
+  }
+});
+
+test('stable handle: an EXPLICIT slug that collides with any slug-bearing record is refused loudly, nothing written', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.knowledgeCreate('anti_pattern', {
+      title: 'T1',
+      trigger: 'tr',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'rw',
+      source_evidence: 'e',
+      slug: 'shared-handle',
+    });
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('decision', {
+          title: 'T2',
+          statement: 's',
+          alternatives_rejected: [],
+          rationale: 'r',
+          slug: 'shared-handle',
+        }),
+      /slug 'shared-handle' already exists/,
+      'explicit collisions refuse across types'
+    );
+    assert.equal(tools.knowledgeQuery({ types: ['decision'] }).length, 0, 'nothing was written');
+  } finally {
+    cleanup();
+  }
+});
