@@ -252,3 +252,54 @@ test("H10 delegation watch: a marker written by a DIFFERENT session_id never sup
     cleanup();
   }
 });
+
+// --------------------------- (i) sidechain exclusion (review fix, f21e106) ---------------------------
+
+test("H10 delegation watch: isSidechain assistant entries are never counted as conductor hand-work", () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // 16 distinct reads, but every one of them inside a sidechain entry — the
+    // conductor itself did nothing. Subagent turns live in separate agent-*.jsonl
+    // files today (verified 2026-08-10); this pins the defensive guard anyway.
+    const p = join(dir, 't', 's1.jsonl');
+    mkdirSync(dirname(p), { recursive: true });
+    const content = distinctPaths(dir, 16).map((fp) => ({ type: 'tool_use', name: 'Read', input: { file_path: fp } }));
+    const lines = [
+      JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1000, cache_read_input_tokens: 0 }, model: 'claude-fable-5' }, isSidechain: false }),
+      JSON.stringify({ type: 'assistant', isSidechain: true, message: { content } }),
+      JSON.stringify({ type: 'assistant', isSidechain: false, message: { content: [{ type: 'text', text: 'conductor turn' }] } }),
+    ];
+    writeFileSync(p, lines.join('\n') + '\n');
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, "a sidechain's 16 reads are not the conductor's hand-work — no advisory");
+    assert.doesNotMatch(r.stderr, /H10 delegation watch:/);
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- (j) loud shape-drift skip (review fix, f21e106) ---------------------------
+
+test('H10 delegation watch: assistant entries with no content arrays record check_skipped format_unparseable instead of dying silently', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    // Transcript exists and parses, but NO assistant entry carries a content
+    // array — the shape the scan depends on has drifted. A silent null would
+    // leave the watch permanently dead with no trail (P5).
+    const p = join(dir, 't', 's1.jsonl');
+    mkdirSync(dirname(p), { recursive: true });
+    const lines = [
+      JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1000, cache_read_input_tokens: 0 }, model: 'claude-fable-5' } }),
+      JSON.stringify({ type: 'assistant', message: { body: 'a shape the scan does not know' } }),
+    ];
+    writeFileSync(p, lines.join('\n') + '\n');
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'shape drift never blocks and never fires the advisory');
+    assert.doesNotMatch(r.stderr, /H10 delegation watch:/);
+    const skipped = store.listCheckSkipped().filter((c) => c.check_name === 'delegation-watch');
+    assert.equal(skipped.length, 1, 'exactly one check_skipped row for the drifted shape');
+    assert.ok(JSON.stringify(skipped[0]).includes('format_unparseable'), 'the row names format_unparseable as the reason');
+  } finally {
+    cleanup();
+  }
+});
