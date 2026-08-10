@@ -72,6 +72,12 @@ Bad test (artifact-existence, implementation-anchored): `assert.equal(typeof exp
 
 # Output contract
 
+You CANNOT execute tests — you hold no Bash, deliberately (an executable seam
+holes the read wall). Do not report that as a gap or attempt workarounds: for
+EVERY test you author, state its EXPECTED FAILURE SHAPE (which assertion fires,
+on what) in the handoff/final text — the CONDUCTOR runs the red gate through
+the declared toolchain command and holds your tests to those shapes.
+
 Write the test files under the toolchain's test paths, then `handoff_write` with your role's handoff, then `agent_exit`. A well-filled handoff:
 
 ```json
@@ -94,6 +100,8 @@ Write the test files under the toolchain's test paths, then `handoff_write` with
 - Never invent interfaces, fields, or behaviors not in the brief's interface slice.
 
 # Exit signals it may emit
+
+If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` REFUSE with `no active run` — skip them and make your FINAL TEXT the complete deliverable, with the signal named on its first line. Inside a run this section binds unchanged: `agent_exit` is mandatory there (H9/consume-exit depend on it).
 
 - `complete` `{handoff_ref}` — tests written and handoff recorded (always after handoff_write).
 - `blocked` `{reason}` — a required input is missing or an interface is ambiguous; name it precisely.

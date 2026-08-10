@@ -41,9 +41,11 @@ const CONVENTIONS = [
   '- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS — an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise — adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch — hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent\'s claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor\'s attention spent where it should not be (decision 677f1639).',
   // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
   // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
-  // echo each store write returns. Application is moment (3) in recurring form: only the
-  // new id + version is needed, so it is a dispatch. Drafting stays with the conductor.
-  '- ARTICLE APPLICATION IS DISPATCH-SHAPED: every knowledge_update/edit/append echoes the FULL updated record into the caller\'s context (~50KB on large articles). The conductor DRAFTS all reconcile text — the librarian never authors knowledge — then BATCHES the slice\'s drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor\'s next work — never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates (the echo IS the draft), a write needing live adjudication, or a single small-record touch (decision dac3d2c6).',
+  // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
+  // results default to a digest receipt), but the dispatch shape stands: drafting a
+  // slice's reconciles still spends conductor attention per write, and the librarian
+  // batches them off the critical path. Drafting stays with the conductor.
+  '- ARTICLE APPLICATION IS DISPATCH-SHAPED: the conductor DRAFTS all reconcile text — the librarian never authors knowledge — then BATCHES the slice\'s drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. (Write echoes default to a slim digest receipt since board 7ddf13a7 — the old ~50KB full-record echo is opt-in via projection:\'full\' — so the dispatch now buys parallelism and attention, not just tokens.) The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor\'s next work — never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates, a write needing live adjudication, or a single small-record touch (decision dac3d2c6).',
   '- The Workflow tool stays OPT-IN and needs the user\'s explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting — its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.',
   // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
   // stops were rejected verbatim ("demands attention all the time"); the three subagent
@@ -289,6 +291,25 @@ try {
   }
 } catch {
   // fail-open — a malformed note costs the restore, never the conventions injection
+}
+
+// READ-EVIDENCE DOES NOT SURVIVE A SESSION BOUNDARY OR COMPACTION (board
+// 776d2b65): the conductor ledger's entries now expire by FILE CONTENT HASH
+// rather than per prompt, so the two cases a hash cannot vouch for get an
+// explicit clear here. (1) source=compact — compaction can drop a read from
+// the model's window while the file's bytes are unchanged; the old per-prompt
+// clear never covered this either, since compaction does not fire
+// UserPromptSubmit. (2) source=startup|clear — a genuinely NEW session has
+// read nothing, and a dead session's hashed entries would otherwise vouch for
+// unchanged files this model never saw. resume continues the same logical
+// session and keeps its ledger. Fail-open like every H1 read.
+try {
+  if (input.source === 'compact' || input.source === 'startup' || input.source === 'clear') {
+    const conductorLedger = join(input.cwd, '.sterling', 'transient', 'conductor-reads.json');
+    rmSync(conductorLedger, { force: true });
+  }
+} catch {
+  // fail-open — a failed clear costs freshness, never the conventions injection
 }
 
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers

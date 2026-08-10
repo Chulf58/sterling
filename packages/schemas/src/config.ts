@@ -177,6 +177,18 @@ export const configSchema = z.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: z.number().int().positive().default(60000),
+  // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
+  // with more entries than this keeps only the newest N (rotation disclosed on
+  // the write's warnings channel). Nothing is lost: every rotated-away entry
+  // remains readable in the retained superseded versions, which the store keeps
+  // forever — the supersede chain IS the archive, so no new table or archive
+  // record type exists for retrieval to mis-serve. Measured 2026-08-10: the
+  // three oversize articles carried 29/41/46 entries at 0.65–1.5KB each —
+  // 42–57% of their serialized size — and history dominated every write echo
+  // and full read. 20 keeps a reconcile trail deep enough for the brief-lookup
+  // consumers (promotion/completeness match on RECENT entries' target_id)
+  // while bounding the round-trip.
+  article_history_max_entries: z.number().int().positive().default(20),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -222,7 +234,7 @@ export const configSchema = z.object({
     .object({
       allow_scripts: z
         .array(z.string())
-        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'sterling-tui.mjs']),
+        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'scripts/domain-doctor.mjs', 'sterling-tui.mjs']),
     })
     .default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered

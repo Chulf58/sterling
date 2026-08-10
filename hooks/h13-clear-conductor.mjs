@@ -4121,6 +4121,11 @@ var verifiableAt = external_exports.union([external_exports.literal("final"), ex
 var base = external_exports.object(envelopeFields);
 var decisionSchema = base.extend({
   type: external_exports.literal("decision"),
+  // Stable handle (board 1e639f32): survives supersession the way an id does
+  // not — auto-minted from the title at create when absent; optional so
+  // legacy records round-trip unchanged. Uniqueness is enforced at the write
+  // (knowledgeCreate), spanning every slug-bearing type.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
@@ -4187,6 +4192,8 @@ var featureArticleSchema = base.extend({
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
 var antiPatternSchema = base.extend({
   type: external_exports.literal("anti_pattern"),
+  // Stable handle (board 1e639f32) — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   trigger: external_exports.string().min(1),
   guidance: external_exports.string().min(1),
@@ -4200,6 +4207,8 @@ var antiPatternSchema = base.extend({
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
   status: external_exports.enum(["active", "superseded", "flagged_stale"]),
+  // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   question: external_exports.string().min(1),
   answer: external_exports.string().min(1),
   source_urls: external_exports.array(external_exports.string()),
@@ -4290,10 +4299,13 @@ var SYSTEM_REASONS = [
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
   "state_review",
-  // A feature_article's serialized size (as knowledge_get would return it)
-  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
-  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
-  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // A feature_article's NON-HISTORY serialized size crossed
+  // config.article_oversize_chars on a knowledge_update/append/edit — the
+  // registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. History is excluded from the
+  // measure (board 0697c6bd): the lane's remedy is a split, a split only
+  // redistributes prose, and history weight is bounded separately by write-time
+  // rotation (article_history_max_entries). Minted at the WRITE, since that is
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
@@ -4530,6 +4542,21 @@ var runRecordSchema = external_exports.object({
     // the shared mandatory tuple (invariant 1). Optional so legacy summaries
     // round-trip unchanged.
     undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
+    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
+    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
+    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
+    // telemetry a run produces was previously deleted unread at the exact
+    // moment this summary was assembled (a standing P4 violation). The values
+    // are fractions of the model WINDOW, deliberately not tokens or dollars
+    // (true token totals need subagent-transcript usage reads — a separate,
+    // probe-first slice; the transcript path has moved once already).
+    // Optional so legacy summaries round-trip unchanged.
+    agent_fill: external_exports.array(external_exports.object({
+      agent_type: external_exports.string(),
+      samples: external_exports.number().int().positive(),
+      peak_fill_pct: external_exports.number(),
+      median_fill_pct: external_exports.number()
+    })).optional(),
     snapshot_path: external_exports.string()
   }).optional()
 });
@@ -4681,6 +4708,18 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
+  // with more entries than this keeps only the newest N (rotation disclosed on
+  // the write's warnings channel). Nothing is lost: every rotated-away entry
+  // remains readable in the retained superseded versions, which the store keeps
+  // forever — the supersede chain IS the archive, so no new table or archive
+  // record type exists for retrieval to mis-serve. Measured 2026-08-10: the
+  // three oversize articles carried 29/41/46 entries at 0.65–1.5KB each —
+  // 42–57% of their serialized size — and history dominated every write echo
+  // and full read. 20 keeps a reconcile trail deep enough for the brief-lookup
+  // consumers (promotion/completeness match on RECENT entries' target_id)
+  // while bounding the round-trip.
+  article_history_max_entries: external_exports.number().int().positive().default(20),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -4723,7 +4762,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -4825,11 +4864,17 @@ function ledgerPath(cwd, runId, agentId) {
   if (agentId) return join2(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
   return join2(cwd, ".sterling", "transient", "conductor-reads.json");
 }
-function clearLedger(path) {
-  if (existsSync2(path)) rmSync(path);
+function readLedger(path) {
+  return existsSync2(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
+}
+function pruneUnhashed(path) {
+  if (!existsSync2(path)) return;
+  const kept = readLedger(path).filter((e) => e.sha256);
+  if (kept.length) writeFileSync(path, JSON.stringify(kept));
+  else rmSync(path);
 }
 
 // scripts/hooks/h13-clear-conductor.mjs
 var input = readStdin();
-clearLedger(ledgerPath(input.cwd, void 0, void 0));
+pruneUnhashed(ledgerPath(input.cwd, void 0, void 0));
 allow();

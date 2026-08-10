@@ -120,16 +120,21 @@ export interface KnowledgeQueryResult {
   records: Record<string, unknown>[];
 }
 
-/** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b): "does
- *  the store govern this subject?", asked BEFORE dispatching. Reuses the same
- *  axis-extraction + stage-2 centrality floors H20 applies at delivery time,
- *  surfaced as a directly callable tool over anti_pattern + decision records. */
+/** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
+ *  widened + verdict renamed by board 39c3d762): "does the store govern this
+ *  subject?", asked BEFORE dispatching. Reuses the same axis-extraction +
+ *  stage-2 centrality floors H20 applies at delivery time, over anti_pattern +
+ *  decision + feature_article + research_finding records. */
 export interface KnowledgePreflightResult {
   /** 'insufficient' — too little extractable vocabulary to judge at all;
    *  'verify_targets' — the store governs this subject, verify the brief
-   *  against the named matches before dispatching; 'ready' — nothing in the
-   *  store governs this subject. */
-  answerability: 'ready' | 'verify_targets' | 'insufficient';
+   *  against the named matches before dispatching; 'ungoverned' — nothing in
+   *  the store governs this subject. Renamed from 'ready' (board 39c3d762):
+   *  the query envelope's 'ready' means a COMPLETE NON-EMPTY window — the same
+   *  word carried the OPPOSITE reading here, and a false 'nothing governs'
+   *  dressed as 'ready' is exactly the settled-question-presented-as-open
+   *  failure the conduct rules name. */
+  answerability: 'ungoverned' | 'verify_targets' | 'insufficient';
   reason?: 'too_little_vocabulary';
   terms: string[];
   matches: { id: string; type: string; title: string; matched_on: string[]; central: string[] }[];
@@ -607,6 +612,36 @@ export class SterlingTools {
       skipped.push(this.skip('dedup-merge', this.activeRunId()));
     }
 
+    // STABLE HANDLES (board 1e639f32): decision / anti_pattern / research_finding
+    // gain the slug feature_article and brief already had — the id re-mints on
+    // every supersession, the slug names the CONCEPT and survives. Auto-minted
+    // from the headline when absent (an auto-derived clash takes a -2/-3 suffix,
+    // deterministic); an EXPLICIT slug that collides with ANY slug-bearing
+    // record is refused loudly — same two-records-one-handle reasoning as the
+    // feature_article branch above, across every type knowledge_get resolves.
+    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding') {
+      const explicit = (parsed as { slug?: string }).slug;
+      if (explicit) {
+        if (this.store.recordsBySlug(explicit).length) {
+          throw new Error(
+            `knowledge_create: a record with slug '${explicit}' already exists — one handle resolves to one record. ` +
+              `Choose a distinct slug, or omit it to auto-derive a unique one.`
+          );
+        }
+      } else {
+        const headline = ((parsed as { title?: string; question?: string }).title ?? (parsed as { question?: string }).question ?? '') as string;
+        const base = SterlingTools.slugify(headline);
+        if (base) {
+          let slug = base;
+          for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+          // store.create persists `candidate` (parsed is the dedup-comparison
+          // view), so the minted slug must land on BOTH.
+          (parsed as { slug?: string }).slug = slug;
+          candidate.slug = slug;
+        }
+      }
+    }
+
     // A SYSTEM maintenance item takes the ATOMIC dedup path (board 2ded3b4b):
     // check-and-insert in one transaction, keyed (system_reason, feature_link,
     // file_keys). Every producer funnels through here, so the four hand-rolled
@@ -1033,7 +1068,7 @@ export class SterlingTools {
     // including the oversize check (board 8390f8fa): the write's result carries
     // a warning on the SAME channel knowledge_update uses.
     const record = this.knowledgeUpdate(id, { [field]: next });
-    return { record, warnings: this.articleOversizeWarnings(record) };
+    return { record, warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)] };
   }
 
   /**
@@ -1126,7 +1161,7 @@ export class SterlingTools {
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
-        warnings: this.articleOversizeWarnings(record),
+        warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record), ...this.articleOversizeWarnings(record)],
       };
     }
     this.refuseServerOwnedFields({ [field]: replace }, 'knowledge_update');
@@ -1158,7 +1193,7 @@ export class SterlingTools {
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
-      warnings: this.articleOversizeWarnings(record),
+      warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)],
     };
   }
 
@@ -1193,7 +1228,13 @@ export class SterlingTools {
    */
   private articleOversizeWarnings(record: DurableRecord): string[] {
     if (record.type !== 'feature_article') return [];
-    const size = JSON.stringify(record).length;
+    // NON-history body only (board 0697c6bd): the remedy this lane names is a
+    // SPLIT, and a split only ever redistributes prose — history weight is
+    // bounded separately by rotation (article_history_max_entries), so counting
+    // it here flagged articles a split could not fix and minted duplicate items
+    // from writes the reconcile contract itself demanded.
+    const { history: _h, ...body } = record as unknown as Record<string, unknown>;
+    const size = JSON.stringify(body).length;
     const threshold = this.config.article_oversize_chars;
     if (size <= threshold) return [];
     const a = record as unknown as { slug: string; files?: { path: string }[] };
@@ -1202,13 +1243,40 @@ export class SterlingTools {
       'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
     this.maintenanceEnqueue({
       reason: 'article_oversize',
-      text: `article '${a.slug}' is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
+      text: `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
       file_keys: (a.files ?? []).map((f) => f.path),
     });
     return [
-      `feature_article '${a.slug}' is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
+      `feature_article '${a.slug}' non-history body is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
         `A deduped article_oversize maintenance item has been queued.`,
     ];
+  }
+
+  /**
+   * History rotation disclosure (board 0697c6bd). knowledgeUpdate bounds a
+   * feature_article's history to the newest article_history_max_entries at the
+   * write; this reports it on the same warnings channel the coherence and
+   * oversize checks use. `attempted` is what the merged write WOULD have stored
+   * unbounded (computed by attemptedHistoryLen from the caller's body and the
+   * prior record). Nothing is lost by rotation — the store retains every
+   * superseded version, so the chain is the archive — but a silent drop would
+   * still be a lie about what the write stored (P5), hence the disclosure.
+   */
+  private historyRotationWarnings(attempted: number, record: DurableRecord): string[] {
+    if (record.type !== 'feature_article') return [];
+    const kept = ((record as unknown as { history?: unknown[] }).history ?? []).length;
+    if (kept >= attempted) return [];
+    return [
+      `history rotated: kept the newest ${kept} of ${attempted} entries (article_history_max_entries=${this.config.article_history_max_entries}). ` +
+        `Older entries are not lost — they remain readable in the retained superseded versions (knowledge_get a prior version's id).`,
+    ];
+  }
+
+  /** The history length the caller's write would store unbounded: the passed array if the write touches history, else the prior record's. */
+  private attemptedHistoryLen(old: DurableRecord, body: Record<string, unknown>): number {
+    if (Array.isArray(body.history)) return body.history.length;
+    const h = (old as unknown as { history?: unknown[] }).history;
+    return Array.isArray(h) ? h.length : 0;
   }
 
   /**
@@ -1231,7 +1299,7 @@ export class SterlingTools {
   knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[] } {
     const before = this.store.get(id);
     const record = this.knowledgeUpdate(id, body);
-    const warnings: string[] = [];
+    const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
     if (before?.type === 'feature_article' && 'what_it_does' in body) {
       const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
       if (untouched.length > 0) {
@@ -1257,12 +1325,17 @@ export class SterlingTools {
    * check_skipped, replaced, deduped — everything a caller acts on) and only
    * the echoed record collapses to its digestRecord headline, the same
    * projection vocabulary the read side already has (decision 87a12a1e): one
-   * projection concept, not two. The default stays 'full' deliberately —
-   * internal callers and existing consumers read fields off the echoed record,
-   * and a write result must never change shape under them silently.
+   * projection concept, not two. The default is the DIGEST receipt (board
+   * 7ddf13a7, flipping e23f38f8's default-full after the 2026-08-10
+   * retrospective measured the echo as the biggest single context leak): the
+   * envelope a caller acts on (warnings, check_skipped, replaced, deduped)
+   * survives, the body the caller just authored does not come back, and
+   * projection:'full' opts back in. Every boundary consumer of the full echo
+   * was swept before the flip — internal callers use the tools.* methods
+   * directly and still receive full records.
    */
   writeProjected<T>(result: T, projection?: 'full' | 'digest'): T | Record<string, unknown> {
-    if (projection !== 'digest') return result;
+    if (projection === 'full') return result;
     if (result && typeof result === 'object' && 'record' in result) {
       return { ...(result as Record<string, unknown>), record: digestRecord((result as { record: unknown }).record as Record<string, unknown>) };
     }
@@ -1308,11 +1381,15 @@ export class SterlingTools {
 
   /**
    * "Does the store govern this subject?" — asked BEFORE dispatching, rather
-   * than discovering a governing anti_pattern/decision only after a subagent
-   * has already gone wrong (H20/H19 relevance slice 4b). Reuses the SAME axis
-   * extraction + stage-2 centrality floors H20 already applies at delivery
-   * time, over anti_pattern + decision records only (the narrow-field surface
-   * axisNarrowText defines), surfaced as a directly callable tool.
+   * than discovering a governing record only after a subagent has already gone
+   * wrong (H20/H19 relevance slice 4b). Reuses the SAME axis extraction +
+   * stage-2 centrality floors H20 already applies at delivery time. Since
+   * board 39c3d762 the candidate surface spans all four governing types —
+   * anti_pattern, decision, feature_article (territory = slug/family/title),
+   * research_finding (subject = question) — because the two missing types made
+   * an article-governed question answer 'nothing governs this', a false
+   * negative dressed as a verdict; and the no-match verdict is 'ungoverned'
+   * (renamed from 'ready', whose query-envelope reading is the opposite).
    */
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
@@ -1322,6 +1399,8 @@ export class SterlingTools {
     const candidates = [
       ...this.store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
       ...this.store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
+      ...this.store.query({ types: ['feature_article'], rank_terms: terms, cap: 40 }),
+      ...this.store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
     ];
     const matches = candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))
@@ -1333,11 +1412,30 @@ export class SterlingTools {
       .map(({ record, hits }) => ({
         id: record.id,
         type: record.type,
-        title: (record as unknown as { title: string }).title,
+        // research_finding carries no title — its question IS the identity;
+        // an article's slug beats its long title as the handle.
+        title:
+          (record as unknown as { title?: string }).title ??
+          (record as unknown as { question?: string }).question ??
+          (record as unknown as { slug?: string }).slug ??
+          '',
         matched_on: hits,
         central: recordCentralityHits(record, text),
       }));
-    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ready' };
+    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
+  }
+
+  /**
+   * Batch preflight (board 39c3d762 slice 2 — the design_pass core): an agenda
+   * of question texts in, one verdict row per question out, in input order.
+   * A pure loop over knowledgePreflight — the judgment (drafting decisions for
+   * the open questions) deliberately stays with the conductor (P3).
+   */
+  knowledgePreflightBatch(texts: string[]): { verdicts: (KnowledgePreflightResult & { text: string })[] } {
+    if (!Array.isArray(texts) || texts.length === 0) {
+      throw new Error(`knowledge_preflight: 'texts' must be a non-empty array of question texts`);
+    }
+    return { verdicts: texts.map((text) => ({ text, ...this.knowledgePreflight(text) })) };
   }
 
   /**
@@ -1386,6 +1484,16 @@ export class SterlingTools {
   /** The citation format the repo actually writes: 8-char id prefixes. */
   private static readonly CITATION_PREFIX_LEN = 8;
 
+  /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
+  private static slugify(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60)
+      .replace(/-+$/, '');
+  }
+
   /**
    * knowledge_get — full uuid, or the 8-char PREFIX every citation in this repo
    * uses (decision 27f148c2). CLAUDE.md, code comments and record prose all cite
@@ -1406,13 +1514,25 @@ export class SterlingTools {
   knowledgeGet(id: string): DurableRecord {
     const direct = this.store.get(id);
     if (direct) return direct;
+    // SLUG resolution before prefix resolution (board 1e639f32): an exact slug
+    // is an IDENTITY, deterministic across the fan, and — unlike an id — it
+    // names the concept, so it serves the live HEAD after any number of
+    // supersessions. Slugs are unique at create, so >1 hit means a legacy or
+    // cross-store clash: refuse rather than pick (P5).
+    const bySlug = this.store.recordsBySlug(id);
+    if (bySlug.length === 1) return bySlug[0];
+    if (bySlug.length > 1) {
+      throw new Error(
+        `knowledge_get: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join('; ')}) — a slug must name one record; cite the id.`
+      );
+    }
     if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
       throw new Error(
-        `knowledge_get: no record '${id}' — and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, or pass the full uuid.`
+        `knowledge_get: no record '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
       );
     }
     const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
-    if (hits.length === 0) throw new Error(`knowledge_get: no record '${id}' in the project store or any mounted domain, at any status`);
+    if (hits.length === 0) throw new Error(`knowledge_get: no record '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
     if (hits.length > 1) {
       throw new Error(
         `knowledge_get: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits
@@ -1451,6 +1571,18 @@ export class SterlingTools {
     };
     if (old.type === 'feature_article' && body.version === undefined) {
       next.version = (old as { version: number }).version + 1;
+    }
+    // History rotation (board 0697c6bd): bound the stored history to the newest
+    // N entries. The oldest are dropped from THIS version only — the version
+    // being superseded right here retains them forever, so the supersede chain
+    // is the archive and no entry ever becomes unreadable. Callers see the
+    // rotation via historyRotationWarnings on the write's result envelope.
+    if (old.type === 'feature_article') {
+      const hist = next.history as unknown[] | undefined;
+      const max = this.config.article_history_max_entries;
+      if (Array.isArray(hist) && hist.length > max) {
+        next.history = hist.slice(-max);
+      }
     }
     // re-baseline on every reconcile: the new version's owned-file hashes become
     // the truth the next read-time drift check compares against, so reconciling
@@ -1807,9 +1939,32 @@ export class SterlingTools {
     };
   }
 
+  /**
+   * 'ALREADY REMOVED' IS NOT 'NEVER EXISTED' (board 97d773ef): a remove on a
+   * freshly-minted maintenance id routinely finds the item gone because the
+   * article re-baseline AUTO-DRAINED it between minting and the call — the
+   * NORMAL path, not an error in the caller's id. A bare "no record" forced a
+   * board_query round-trip to tell the two apart; the drain-log trace answers
+   * it directly. The log keeps only the newest 50 rows, so a missing trace is
+   * "no recent trace", never proof of non-existence — the message says so.
+   */
+  private removedItemError(op: string, id: string): Error {
+    const trace = this.store.drainLogEntry(id);
+    if (trace) {
+      return new Error(
+        `${op}: item '${id}' was ALREADY REMOVED at ${trace.drained_at} (${trace.system_reason || 'user item'}, per the drain log) — ` +
+          `most likely auto-drained by a knowledge_update re-baseline or closed by an earlier remove. Nothing further to do.`
+      );
+    }
+    return new Error(
+      `${op}: no record '${id}', and no trace of it in the drain log (which keeps the newest 50 removals) — ` +
+        `either the id is wrong, or the item was removed long enough ago that its trace aged out.`
+    );
+  }
+
   boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
-    if (!record) throw new Error(`board_remove: no record '${id}'`);
+    if (!record) throw this.removedItemError('board_remove', id);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a todo`);
     const evidence = this.removalArtifactEvidence(record);
     this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
@@ -1838,7 +1993,7 @@ export class SterlingTools {
    */
   maintenanceRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
-    if (!record) throw new Error(`maintenance_remove: no record '${id}'`);
+    if (!record) throw this.removedItemError('maintenance_remove', id);
     if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
     const source = (record as unknown as { source?: string }).source;
     if (source !== 'system') {

@@ -1,7 +1,21 @@
 // H13 reads ledger (spec §6 H13): transient, lifecycle-bound (P4).
 // pipeline -> <project>/.sterling/runs/<run-id>/reads/agent-<id>.json (dies with the run dir)
-// direct   -> <project>/.sterling/transient/conductor-reads.json (cleared on every UserPromptSubmit)
+// direct   -> <project>/.sterling/transient/conductor-reads.json
+//
+// EVIDENCE EXPIRES WITH THE FILE, NOT THE PROMPT (board 776d2b65): entries
+// carry the file's content hash at read time, and H3 accepts one only while
+// the current bytes still match — the gate's purpose is read-before-edit
+// FRESHNESS, and "the file changed" is the truth that per-prompt clearing only
+// approximated (at the cost of ~7 forced re-reads of byte-current files in one
+// measured session). Hashless legacy entries keep the old per-prompt window:
+// h13-clear-conductor prunes exactly those at each UserPromptSubmit. Context
+// The two cases a hash cannot vouch for get an explicit clear in H1:
+// SessionStart source=compact (compaction can drop a read from the model's
+// window with the bytes unchanged — the old per-prompt clear never covered
+// this either) and source=startup|clear (a new session has read nothing, so a
+// dead session's hashed entries must not vouch for it).
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 
 export function ledgerPath(cwd, runId, agentId) {
@@ -23,6 +37,37 @@ export function appendRead(path, entry) {
 
 export function hasRead(path, repoRelPath) {
   return readLedger(path).some((e) => e.path === repoRelPath);
+}
+
+/** sha256 of the file's current bytes; undefined when unreadable (deleted, permission). */
+export function fileHash(absPath) {
+  try {
+    return createHash('sha256').update(readFileSync(absPath)).digest('hex');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read-evidence with FRESHNESS (board 776d2b65): a hashed entry counts only
+ * while the file's current bytes still match its read-time hash; a hashless
+ * (legacy) entry counts unconditionally — it lives inside the old per-prompt
+ * window, because h13-clear-conductor prunes exactly those at each prompt.
+ */
+export function hasFreshRead(path, repoRelPath, absPath) {
+  return readLedger(path).some((e) => {
+    if (e.path !== repoRelPath) return false;
+    if (!e.sha256) return true;
+    return e.sha256 === fileHash(absPath);
+  });
+}
+
+/** Drop hashless legacy entries; hashed entries expire by content, not by prompt. */
+export function pruneUnhashed(path) {
+  if (!existsSync(path)) return;
+  const kept = readLedger(path).filter((e) => e.sha256);
+  if (kept.length) writeFileSync(path, JSON.stringify(kept));
+  else rmSync(path);
 }
 
 export function clearLedger(path) {

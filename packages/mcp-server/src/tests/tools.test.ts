@@ -851,11 +851,18 @@ test("write tools take projection:'digest' — the envelope survives, only the e
     const body = 'w'.repeat(3000);
     const article = mkArticle(tools, 'echoey', 'src/echoey.ts');
 
-    // DEFAULT UNCHANGED — a write result never changes shape under an existing
-    // caller (same posture as the read-side digest: opt-in, not a migration).
-    const full = tools.writeProjected(tools.knowledgeUpdateResult(article.id, { what_it_does: body }));
+    // DEFAULT IS THE RECEIPT (board 7ddf13a7, flipping e23f38f8's default-full):
+    // the echo was the single biggest measured context leak, and every consumer
+    // of the full body was swept before the flip — 'full' is the opt-in now.
+    const defaulted = tools.writeProjected(tools.knowledgeUpdateResult(article.id, { what_it_does: body })) as Record<string, unknown>;
+    const defaultReceipt = defaulted.record as Record<string, unknown>;
+    assert.ok(!('what_it_does' in defaultReceipt), 'the default echo no longer re-sends the body the caller just wrote');
+    assert.equal(defaultReceipt.slug, 'echoey', 'the default receipt still carries the stable handle');
+    assert.ok(Array.isArray(defaulted.warnings), 'the warnings channel survives the default projection');
+
+    const full = tools.writeProjected(tools.knowledgeUpdateResult(defaultReceipt.id as string, { what_it_does: body }), 'full');
     const fullRecord = (full as { record: Record<string, unknown> }).record;
-    assert.equal(fullRecord.what_it_does, body, "'full' stays the default and still echoes the body");
+    assert.equal(fullRecord.what_it_does, body, "projection:'full' opts back into the whole echoed record");
 
     // digest: the envelope is what a caller ACTS on (warnings, check_skipped,
     // replaced) — it survives; only the echoed record collapses to its digest.
@@ -2492,6 +2499,230 @@ test("state_review does NOT double-report a deletion the drift arm already named
     tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(stateReviews(tools).length, 0);
     assert.equal(tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 10 }).length, 1, 'the deletion IS reported, once');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Article history rotation (board 0697c6bd): history is bounded at the write
+// boundary — the newest article_history_max_entries survive; older entries are
+// NOT lost, they remain readable in the retained superseded versions. The
+// oversize detector measures the NON-history body, since a split (its remedy)
+// only ever fixes prose.
+// ---------------------------------------------------------------------------
+
+test('history rotation: knowledge_append past the cap keeps the newest N, warns, and dropped entries survive in the prior version', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 3 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts'); // history: ['seed']
+    const appended = tools.knowledgeAppend(v1.id, 'history', [
+      { date: NOW, event: 'e2' },
+      { date: NOW, event: 'e3' },
+      { date: NOW, event: 'e4' },
+    ]);
+    const served = appended.record as unknown as { history: { event: string }[] };
+    assert.deepEqual(
+      served.history.map((h) => h.event),
+      ['e2', 'e3', 'e4'],
+      'newest 3 kept, oldest rotated out'
+    );
+    assert.equal(appended.warnings.length, 1, 'rotation is disclosed, never silent');
+    assert.match(appended.warnings[0], /history rotated/, 'names the rotation');
+    assert.match(appended.warnings[0], /3 of 4/, 'names kept-of-attempted counts');
+    assert.match(appended.warnings[0], /superseded/, 'points the reader at the retained prior versions');
+    const prior = tools.knowledgeGet(v1.id) as unknown as { history: { event: string }[] };
+    assert.deepEqual(
+      prior.history.map((h) => h.event),
+      ['seed'],
+      'the rotated-away entry is still readable in the retained prior version'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('history rotation: at or under the cap nothing rotates and nothing warns', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 3 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts'); // 1 entry
+    const appended = tools.knowledgeAppend(v1.id, 'history', [
+      { date: NOW, event: 'e2' },
+      { date: NOW, event: 'e3' },
+    ]);
+    const served = appended.record as unknown as { history: { event: string }[] };
+    assert.equal(served.history.length, 3, 'exactly at the cap — untouched');
+    assert.deepEqual(appended.warnings, [], 'no rotation, no warning');
+  } finally {
+    cleanup();
+  }
+});
+
+test('history rotation: knowledge_update rotates an over-cap history even when the write never touches it', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 2 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
+    // grow to 3 entries under a cap of 2 by appending — the append itself rotates,
+    // so instead build the over-cap state via an explicit history replacement…
+    const grown = tools.knowledgeUpdateResult(v1.id, {
+      history: [
+        { date: NOW, event: 'a' },
+        { date: NOW, event: 'b' },
+        { date: NOW, event: 'c' },
+      ],
+    });
+    const served = grown.record as unknown as { history: { event: string }[] };
+    assert.deepEqual(
+      served.history.map((h) => h.event),
+      ['b', 'c'],
+      'a caller-passed over-cap history is rotated too'
+    );
+    assert.ok(grown.warnings.some((w) => /history rotated/.test(w) && /2 of 3/.test(w)), 'update path discloses on the same channel');
+
+    // an update that never passes history still serves a bounded record
+    const head = served as unknown as { id: string };
+    const next = tools.knowledgeUpdateResult((grown.record as { id: string }).id, { state: 'active' });
+    const nextServed = next.record as unknown as { history: { event: string }[] };
+    assert.equal(nextServed.history.length, 2, 'stays bounded on untouched-history writes');
+    assert.deepEqual(next.warnings, [], 'nothing rotated (already at cap) — nothing to disclose');
+    void head;
+  } finally {
+    cleanup();
+  }
+});
+
+test('article_oversize measures the NON-history body: fat history alone never flags; fat prose still does (board 0697c6bd)', () => {
+  const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 2000, article_history_max_entries: 100 });
+  try {
+    const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
+    // ~10 x 200-char entries: total record far over 2000, body-minus-history well under.
+    const fat = 'x'.repeat(180);
+    const appended = tools.knowledgeAppend(
+      v1.id,
+      'history',
+      Array.from({ length: 10 }, (_, i) => ({ date: NOW, event: `${i}-${fat}` }))
+    );
+    assert.deepEqual(appended.warnings, [], 'history weight alone does not flag the article');
+    assert.equal(tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }).length, 0, 'nothing queued');
+
+    // fat PROSE crosses the same threshold — that is what a split can actually fix.
+    const head = (appended.record as { id: string }).id;
+    const result = tools.knowledgeUpdateResult(head, { what_it_does: 'y'.repeat(2100), intended_behavior: 'z', current_ac: [] });
+    assert.equal(result.warnings.length, 1, 'prose over threshold warns');
+    assert.match(result.warnings[0], /article_oversize_chars threshold/);
+    assert.match(result.warnings[0], /non-history/, 'the warning names the body-only measure');
+    assert.equal(tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }).length, 1, 'one deduped item queued');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Stable handles for decision / anti_pattern / research_finding (board
+// 1e639f32): an optional `slug`, auto-minted from the title/question at create,
+// globally unique across slug-bearing records, resolvable via knowledge_get —
+// and because it names the CONCEPT, it follows supersession to the live head
+// where an id stays pinned to one version.
+// ---------------------------------------------------------------------------
+
+test('stable handle: a decision auto-mints a slug from its title, knowledge_get resolves it, and the slug follows supersession to the HEAD', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: v1 } = tools.knowledgeCreate('decision', {
+      title: 'Write echoes: default to the digest receipt!',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const slug = (v1 as unknown as { slug?: string }).slug;
+    assert.ok(slug, 'slug auto-minted');
+    assert.match(slug!, /^write-echoes-default-to-the-digest-receipt/, 'derived from the title, kebab-case, punctuation dropped');
+
+    assert.equal(tools.knowledgeGet(slug!).id, v1.id, 'knowledge_get resolves the slug');
+
+    const v2 = tools.knowledgeUpdate(v1.id, { rationale: 'revised' });
+    assert.equal(tools.knowledgeGet(slug!).id, v2.id, 'the slug names the CONCEPT — it follows supersession to the live head');
+    assert.equal(tools.knowledgeGet(v1.id).id, v1.id, 'the old id still resolves PINNED to its version (history citations stay correct)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('stable handle: research_finding derives from its question; a second record with the same headline gets a suffixed slug, never a collision', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const mk = () =>
+      tools.knowledgeCreate('research_finding', {
+        question: 'Does the platform fire PostToolUse on MCP tools?',
+        answer: 'a',
+        source_urls: [],
+        source_date: '2026-08-10',
+        capture_date: '2026-08-10',
+      }).record as unknown as { id: string; slug?: string };
+    const first = mk();
+    const second = mk();
+    assert.ok(first.slug && second.slug, 'both minted');
+    assert.notEqual(first.slug, second.slug, 'auto-derived slugs never collide');
+    assert.match(second.slug!, /-2$/, 'the second gets a deterministic suffix');
+  } finally {
+    cleanup();
+  }
+});
+
+test('stable handle: an EXPLICIT slug that collides with any slug-bearing record is refused loudly, nothing written', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.knowledgeCreate('anti_pattern', {
+      title: 'T1',
+      trigger: 'tr',
+      guidance: 'g',
+      wrong_way: 'w',
+      right_way: 'rw',
+      source_evidence: 'e',
+      slug: 'shared-handle',
+    });
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('decision', {
+          title: 'T2',
+          statement: 's',
+          alternatives_rejected: [],
+          rationale: 'r',
+          slug: 'shared-handle',
+        }),
+      /slug 'shared-handle' already exists/,
+      'explicit collisions refuse across types'
+    );
+    assert.equal(tools.knowledgeQuery({ types: ['decision'] }).length, 0, 'nothing was written');
+  } finally {
+    cleanup();
+  }
+});
+
+test("removes distinguish 'already removed' from 'never existed' via the drain-log trace (board 97d773ef)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    // the ROUTINE path: a reconcile_needed item auto-drained by the article
+    // re-baseline between minting and the remove call.
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed',
+      text: `reconcile 'thing'`,
+      file_keys: ['src/thing.ts'],
+      feature_link: article.id,
+    });
+    tools.knowledgeUpdate(article.id, { state: 'active' }); // auto-drains the item
+    assert.throws(
+      () => tools.maintenanceRemove(item.id),
+      /ALREADY REMOVED at .*reconcile_needed.*Nothing further to do/s,
+      'the routine already-auto-drained case is self-explaining'
+    );
+    // a genuinely wrong id: no trace, and the message hedges on the capped log
+    assert.throws(
+      () => tools.boardRemove(randomUUID()),
+      /no trace of it in the drain log.*newest 50/s,
+      "an unknown id says 'no recent trace', never claiming proof of non-existence"
+    );
   } finally {
     cleanup();
   }

@@ -105,12 +105,15 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     assert.deepEqual(listed, [...SERVED_TOOLS].sort(), 'exactly the §10 tool surface is served');
 
     // knowledge round trip over the wire
+    // projection:'full' opts into the whole echoed record — the DEFAULT is the
+    // digest receipt (board 7ddf13a7), asserted further down on board_add.
     const created = payload(
       await client.callTool({
         name: 'knowledge_create',
         arguments: {
           type: 'decision',
           fields: { title: 'T', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src\\x.ts'] },
+          projection: 'full',
         },
       })
     ) as { record: { id: string; file_keys: string[] }; check_skipped: unknown[] };
@@ -179,14 +182,16 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     assert.ok(added.record.id, 'the write landed and the receipt carries the id');
     assert.ok(Array.isArray(added.check_skipped), 'the envelope survives the digest');
     assert.match(added.record.text, /…$/, 'the echoed text is clipped, not returned whole');
+    // NO projection passed — the digest receipt is the DEFAULT at the wire
+    // (board 7ddf13a7); projection:'full' is the opt-in for whole-record echoes.
     const bumped = payload(
       await client.callTool({
         name: 'board_update',
-        arguments: { id: added.record.id, priority: 'high', projection: 'digest' },
+        arguments: { id: added.record.id, priority: 'high' },
       })
     ) as { priority: string; text: string };
     assert.equal(bumped.priority, 'high', 'projection is split from the patch — a leak would be refused BY NAME');
-    assert.match(bumped.text, /…$/);
+    assert.match(bumped.text, /…$/, 'a projection-less write defaults to the clipped receipt');
 
     // protocol loop over the wire
     store.createRun({

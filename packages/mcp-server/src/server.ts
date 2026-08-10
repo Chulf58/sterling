@@ -55,7 +55,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_create',
     {
       description:
-        'Create a knowledge record. Schema-validated against the registered record types; unregistered types are rejected. projection:"digest" returns the result with the echoed record reduced to its one-line digest (id + headline) — the write landed either way; prefer it unless you need the stored record back.',
+        'Create a knowledge record. Schema-validated against the registered record types; unregistered types are rejected. The echoed record defaults to its one-line digest receipt (id + headline) — the write landed either way; pass projection:"full" if you need the stored record back.',
       inputSchema: strict({ type: z.string(), fields: passthrough, projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ type, fields, projection }) => json(tools.writeProjected(tools.knowledgeCreate(type, fields), projection))
@@ -109,7 +109,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description:
-        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. projection:"digest" keeps the warnings but reduces the echoed record to its one-line digest — prefer it: you just authored the content the full echo would re-send.',
+        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. The echo defaults to a one-line digest receipt (warnings kept, body dropped — you just authored it); pass projection:"full" for the whole stored record.',
       inputSchema: strict({ id: z.string(), body: passthrough, projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, body, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body), projection))
@@ -119,7 +119,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_append',
     {
       description:
-        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, the file_baselines re-baseline and the drift-item drain are identical. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). projection:"digest" keeps the warnings but reduces the echoed record to its one-line digest — prefer it on grown articles: a single full-record append echo measured 49.8KB of content the caller had just written.',
+        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, the file_baselines re-baseline and the drift-item drain are identical. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). The echo defaults to a one-line digest receipt (warnings kept) — a single full-record append echo once measured 49.8KB of content the caller had just written; pass projection:"full" for the whole stored record.',
       inputSchema: strict({ id: z.string(), field: z.string(), entries: z.array(z.unknown()), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, field, entries, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries), projection))
@@ -129,7 +129,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_edit',
     {
       description:
-        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical.",
+        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical. The echo defaults to a one-line digest receipt (warnings + replaced counts kept — chars_before/chars_after prove the edit landed); pass projection:\"full\" for the whole stored record.",
       inputSchema: strict({ id: z.string(), field: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, field, find, replace, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace), projection))
@@ -149,7 +149,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_add',
     {
       description:
-        'Add a todo to the board (source: user) or the maintenance queue (source: system, requires system_reason). projection:"digest" returns the result with the echoed item reduced to its one-line digest.',
+        'Add a todo to the board (source: user) or the maintenance queue (source: system, requires system_reason). The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
@@ -204,7 +204,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_update',
     {
       description:
-        'IN-PLACE edit of a board/queue item — text/priority/file_keys only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one of text/priority/file_keys is required. projection:"digest" reduces the echoed item to its one-line digest — board items run to several KB and you just wrote the change.',
+        'IN-PLACE edit of a board/queue item — text/priority/file_keys only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one of text/priority/file_keys is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
       inputSchema: strict({
         id: z.string(),
         text: z.string().optional(),
@@ -307,10 +307,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_preflight',
     {
       description:
-        'Ask "does the store govern this subject?" BEFORE dispatching — verify a brief against store targets instead of discovering a governing anti_pattern/decision only after a subagent has already gone wrong. Reuses the H20 delivery floors (axis-term extraction + record centrality) over anti_pattern + decision records. Returns {terms, matches:[{id,type,title,matched_on,central}], answerability}: "insufficient" means too little extractable vocabulary to judge at all (reason:"too_little_vocabulary"); "verify_targets" means the store governs this subject — verify the brief against the named matches; "ready" means nothing in the store governs it.',
-      inputSchema: strict({ text: z.string() }),
+        'Ask "does the store govern this subject?" BEFORE dispatching or designing — verify a brief or design agenda against store targets instead of discovering a governing record only after the work has gone wrong. Reuses the H20 delivery floors (axis-term extraction + record centrality) over anti_pattern + decision + feature_article + research_finding records. Pass ONE of: text (a single subject) or texts (an agenda — one verdict row per question, in order). Verdicts: "insufficient" means too little extractable vocabulary to judge at all (reason:"too_little_vocabulary"); "verify_targets" means the store governs this subject — verify against the named matches (open the records; a match row is a lookup, never the source); "ungoverned" means nothing in the store governs it (a genuinely open question). Single-text returns {terms, matches:[{id,type,title,matched_on,central}], answerability}; texts returns {verdicts:[{text, ...same}]}.',
+      inputSchema: strict({ text: z.string().optional(), texts: z.array(z.string()).optional() }),
     },
-    ({ text }) => json(tools.knowledgePreflight(text))
+    ({ text, texts }) => {
+      if ((text === undefined) === (texts === undefined)) {
+        throw new Error(`knowledge_preflight: pass exactly ONE of 'text' (single subject) or 'texts' (agenda)`);
+      }
+      return json(texts !== undefined ? tools.knowledgePreflightBatch(texts) : tools.knowledgePreflight(text as string));
+    }
   );
 
   server.registerTool(

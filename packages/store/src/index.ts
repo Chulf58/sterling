@@ -230,10 +230,16 @@ export type ToolStore = Pick<
   // — this is that second consumer). Deterministic, so the refusal can never be
   // a ranking artefact.
   | 'articlesBySlug'
+  // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
+  // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
+  | 'recordsBySlug'
   | 'supersede'
   | 'updateTodo'
   | 'retireInFavorOf'
   | 'remove'
+  // board_remove/maintenance_remove distinguish 'already removed' from 'never
+  // existed' through the drain-log trace (board 97d773ef).
+  | 'drainLogEntry'
   | 'addLink'
   | 'getRun'
   | 'casTransition'
@@ -255,6 +261,16 @@ export class SterlingStore {
     this.db.exec('PRAGMA busy_timeout=5000');
     this.db.exec('PRAGMA foreign_keys=ON');
     this.db.exec(DDL);
+    // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
+    // remove on an already-drained id can answer "already removed <when>"
+    // instead of a bare "no record". CREATE IF NOT EXISTS never alters an
+    // existing table, so the column is added here; the duplicate-column throw
+    // on an already-migrated store is the expected no-op path.
+    try {
+      this.db.exec('ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT');
+    } catch {
+      /* column already exists */
+    }
   }
 
   journalMode(): string {
@@ -471,6 +487,27 @@ export class SterlingStore {
     if (!records.length) return records;
     const relations = this.activeArticleRelations();
     return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+
+  /**
+   * Every non-superseded record of ANY type carrying this exact slug, newest
+   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
+   * stable handle feature_article and brief already had). The type-agnostic
+   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
+   * uniqueness and knowledge_get's slug resolution, both of which must see
+   * EVERY slug-bearing record or a clash slips through. Excluding superseded
+   * rows is the point — a slug names the CONCEPT, so resolving it serves the
+   * live head while a version-pinned citation keeps using the id.
+   */
+  recordsBySlug(slug: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT body FROM records
+          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`
+      )
+      .all(slug) as { body: string }[];
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body) as DurableRecord));
   }
 
   /**
@@ -710,8 +747,8 @@ export class SterlingStore {
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
       if (isSystemDrain && record) {
         this.db
-          .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)')
-          .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []));
+          .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)')
+          .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []), record.id);
         // cap: completed items must never build up (adjudicated 2026-06-12)
         this.db
           .prepare('DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)')
@@ -741,6 +778,19 @@ export class SterlingStore {
       .prepare('SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?')
       .all(limit) as { drained_at: string; system_reason: string; text: string; file_keys: string }[];
     return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) as string[] }));
+  }
+
+  /**
+   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
+   * lets a remove on a gone id say "already removed <when>" instead of a bare
+   * "no record". Returns undefined when no trace remains — which, because the
+   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
+   * id never existed.
+   */
+  drainLogEntry(id: string): { drained_at: string; system_reason: string } | undefined {
+    return this.db
+      .prepare('SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1')
+      .get(id) as { drained_at: string; system_reason: string } | undefined;
   }
 
   /**
@@ -825,21 +875,49 @@ export class SterlingStore {
   }
 
   /**
+   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
+   * array; a LEGACY single-object value reads as a one-element queue), so
+   * parallel agent exits append instead of refusing on a sibling's unconsumed
+   * exit — on 2026-07-03 three separate reviewer exits were refused on one
+   * sibling's slot and each needed a conductor resume round-trip. Consumers
+   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
+   * transition that consumes it POPS the head and preserves the tail.
+   */
+  private static parsePendingQueue(raw: string | null): RecordedExit[] {
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as RecordedExit | RecordedExit[];
+    return Array.isArray(parsed) ? parsed : [parsed];
+  }
+
+  private static serializePendingQueue(queue: RecordedExit[]): string | null {
+    return queue.length ? JSON.stringify(queue) : null;
+  }
+
+  /**
    * §5.2 brain transition: atomic compare-and-swap on machine_state
    * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. Clears any
-   * pending exit (it is consumed by the transition).
+   * caller carried stale state — rejected loudly, never re-applied. POPS the
+   * HEAD pending exit (the one this transition consumes) and PRESERVES the
+   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
+   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
+   * between the read and the write.
    */
   casTransition(observed: MachineState, next: unknown): RunRecord {
     const run = runRecordSchema.parse(next);
-    const res = this.db
-      .prepare('UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
-      .run(run.machine_state, JSON.stringify(run), new Date().toISOString(), run.id, observed);
-    if (res.changes === 0) {
-      throw new Error(
-        `CAS rejected: run '${run.id}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
-      );
-    }
+    this.tx(() => {
+      const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(run.id) as
+        | { pending_exit: string | null }
+        | undefined;
+      const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
+      const res = this.db
+        .prepare('UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
+        .run(run.machine_state, tail, JSON.stringify(run), new Date().toISOString(), run.id, observed);
+      if (res.changes === 0) {
+        throw new Error(
+          `CAS rejected: run '${run.id}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
+        );
+      }
+    });
     return run;
   }
 
@@ -850,16 +928,18 @@ export class SterlingStore {
    * retry loop and applies `mutate` to it — so a concurrent hook write (H7
    * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
    * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on BOTH body and machine_state: a
-   * body change under us retries against the fresh body; a machine_state change is
-   * a stale caller and throws (casTransition's CAS-rejected semantics). Clears
-   * pending_exit — the transition consumes it. State moves through this path or
-   * casTransition, never updateRunOptimistic.
+   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
+   * pending_exit: a body OR queue change under us retries against the fresh row
+   * (so a concurrent recordPendingExit append is never overwritten by a stale
+   * tail); a machine_state change is a stale caller and throws (casTransition's
+   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
+   * (board 81bc3409). State moves through this path or casTransition, never
+   * updateRunOptimistic.
    */
   casTransitionMerge(observed: MachineState, runId: string, mutate: (fresh: RunRecord) => RunRecord, attempts = 5): RunRecord {
     for (let i = 0; i < attempts; i++) {
-      const row = this.db.prepare('SELECT body, machine_state FROM runs WHERE id = ?').get(runId) as
-        | { body: string; machine_state: string }
+      const row = this.db.prepare('SELECT body, machine_state, pending_exit FROM runs WHERE id = ?').get(runId) as
+        | { body: string; machine_state: string; pending_exit: string | null }
         | undefined;
       if (!row) throw new Error(`casTransitionMerge: no run '${runId}'`);
       if (row.machine_state !== observed) {
@@ -869,36 +949,54 @@ export class SterlingStore {
       }
       const current = runRecordSchema.parse(JSON.parse(row.body)) as RunRecord;
       const next = runRecordSchema.parse(mutate(current)) as RunRecord;
+      const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
       const res = this.db
         .prepare(
-          'UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ?'
+          'UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?'
         )
-        .run(next.machine_state, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed);
+        .run(next.machine_state, tail, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed, row.pending_exit);
       if (res.changes === 1) return next;
-      // body changed under us (a concurrent hook write) — retry against the fresh
-      // body; a machine_state change would be caught by the guard at the top.
+      // body or queue changed under us (a concurrent hook write / agent exit) —
+      // retry against the fresh row; a machine_state change is caught above.
     }
     throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
   }
 
-  /** agent_exit lands here; run_signal consumes it. An unconsumed exit is never silently overwritten (P5). */
+  /**
+   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
+   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
+   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
+   * same agent re-exiting before its first exit is consumed is a protocol
+   * violation and is refused loudly with nothing recorded (P5) — a duplicate
+   * would drive the brain twice from one dispatch.
+   */
   recordPendingExit(runId: string, exit: RecordedExit): void {
-    const existing = this.getPendingExit(runId);
-    if (existing) {
-      throw new Error(
-        `recordPendingExit: run '${runId}' already has an unconsumed exit ('${existing.signal}' from ${existing.agent_role ?? 'unknown'}) — call run_signal first`
-      );
-    }
-    const res = this.db.prepare('UPDATE runs SET pending_exit = ? WHERE id = ?').run(JSON.stringify(exit), runId);
-    if (res.changes === 0) throw new Error(`recordPendingExit: no run '${runId}'`);
+    this.tx(() => {
+      const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(runId) as
+        | { pending_exit: string | null }
+        | undefined;
+      if (!row) throw new Error(`recordPendingExit: no run '${runId}'`);
+      const queue = SterlingStore.parsePendingQueue(row.pending_exit);
+      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
+      if (dup) {
+        throw new Error(
+          `recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? 'unknown'} on phase '${dup.phase_id ?? '?'}' ` +
+            `('${dup.signal}') — one exit per dispatched agent; call run_signal (or consume-exit) first`
+        );
+      }
+      this.db
+        .prepare('UPDATE runs SET pending_exit = ? WHERE id = ?')
+        .run(SterlingStore.serializePendingQueue([...queue, exit]), runId);
+    });
   }
 
+  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
   getPendingExit(runId: string): RecordedExit | undefined {
     const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(runId) as
       | { pending_exit: string | null }
       | undefined;
     if (!row) throw new Error(`getPendingExit: no run '${runId}'`);
-    return row.pending_exit ? (JSON.parse(row.pending_exit) as RecordedExit) : undefined;
+    return SterlingStore.parsePendingQueue(row.pending_exit)[0];
   }
 
   /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */

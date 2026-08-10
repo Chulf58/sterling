@@ -5,6 +5,9 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h13-reads-ledger.mjs
+import { join as join3 } from "node:path";
+
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
@@ -4133,6 +4136,11 @@ var verifiableAt = external_exports.union([external_exports.literal("final"), ex
 var base = external_exports.object(envelopeFields);
 var decisionSchema = base.extend({
   type: external_exports.literal("decision"),
+  // Stable handle (board 1e639f32): survives supersession the way an id does
+  // not — auto-minted from the title at create when absent; optional so
+  // legacy records round-trip unchanged. Uniqueness is enforced at the write
+  // (knowledgeCreate), spanning every slug-bearing type.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
@@ -4199,6 +4207,8 @@ var featureArticleSchema = base.extend({
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
 var antiPatternSchema = base.extend({
   type: external_exports.literal("anti_pattern"),
+  // Stable handle (board 1e639f32) — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   title: external_exports.string().min(1),
   trigger: external_exports.string().min(1),
   guidance: external_exports.string().min(1),
@@ -4212,6 +4222,8 @@ var antiPatternSchema = base.extend({
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
   status: external_exports.enum(["active", "superseded", "flagged_stale"]),
+  // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
   question: external_exports.string().min(1),
   answer: external_exports.string().min(1),
   source_urls: external_exports.array(external_exports.string()),
@@ -4302,10 +4314,13 @@ var SYSTEM_REASONS = [
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
   "state_review",
-  // A feature_article's serialized size (as knowledge_get would return it)
-  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
-  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
-  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // A feature_article's NON-HISTORY serialized size crossed
+  // config.article_oversize_chars on a knowledge_update/append/edit — the
+  // registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. History is excluded from the
+  // measure (board 0697c6bd): the lane's remedy is a split, a split only
+  // redistributes prose, and history weight is bounded separately by write-time
+  // rotation (article_history_max_entries). Minted at the WRITE, since that is
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
@@ -4416,29 +4431,30 @@ var RECORD_TYPES = {
   decision: {
     schema: decisionSchema,
     immutable: true,
-    fts: (r) => [s(r.title), s(r.statement), s(r.rationale)].join("\n"),
+    fts: (r) => [s(r.slug), s(r.title), s(r.statement), s(r.rationale)].join("\n"),
     fileKeys: (r) => r.file_keys ?? [],
-    // Title only, as asked: a decision's title is written to state the ruling.
-    digest: { title: "plain" }
+    // slug leads for the same reason it does on feature_article: it is the
+    // handle that survives supersession (board 1e639f32); the title states the ruling.
+    digest: { slug: "plain", title: "plain" }
   },
   anti_pattern: {
     schema: antiPatternSchema,
     immutable: false,
-    fts: (r) => [s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
+    fts: (r) => [s(r.slug), s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
     fileKeys: (r) => r.file_keys ?? [],
     // trigger is the field that tells a reader whether the hazard applies to
     // what they are about to do — the whole point of scanning hazards — and
     // severity is the order H19 already renders them in.
-    digest: { title: "plain", trigger: "clip", severity: "plain" }
+    digest: { slug: "plain", title: "plain", trigger: "clip", severity: "plain" }
   },
   research_finding: {
     schema: researchFindingSchema,
     immutable: false,
-    fts: (r) => [s(r.question), s(r.answer)].join("\n"),
+    fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join("\n"),
     fileKeys: () => [],
     // No title on this type — the question IS the identity. Both clocks ride
     // along because a finding's currency decides whether it may be used at all.
-    digest: { question: "clip", source_date: "plain", capture_date: "plain" }
+    digest: { slug: "plain", question: "clip", source_date: "plain", capture_date: "plain" }
   },
   reference_material: {
     schema: referenceMaterialSchema,
@@ -4651,6 +4667,21 @@ var runRecordSchema = external_exports.object({
     // the shared mandatory tuple (invariant 1). Optional so legacy summaries
     // round-trip unchanged.
     undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
+    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
+    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
+    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
+    // telemetry a run produces was previously deleted unread at the exact
+    // moment this summary was assembled (a standing P4 violation). The values
+    // are fractions of the model WINDOW, deliberately not tokens or dollars
+    // (true token totals need subagent-transcript usage reads — a separate,
+    // probe-first slice; the transcript path has moved once already).
+    // Optional so legacy summaries round-trip unchanged.
+    agent_fill: external_exports.array(external_exports.object({
+      agent_type: external_exports.string(),
+      samples: external_exports.number().int().positive(),
+      peak_fill_pct: external_exports.number(),
+      median_fill_pct: external_exports.number()
+    })).optional(),
     snapshot_path: external_exports.string()
   }).optional()
 });
@@ -4802,6 +4833,18 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
+  // with more entries than this keeps only the newest N (rotation disclosed on
+  // the write's warnings channel). Nothing is lost: every rotated-away entry
+  // remains readable in the retained superseded versions, which the store keeps
+  // forever — the supersede chain IS the archive, so no new table or archive
+  // record type exists for retrieval to mis-serve. Measured 2026-08-10: the
+  // three oversize articles carried 29/41/46 entries at 0.65–1.5KB each —
+  // 42–57% of their serialized size — and history dominated every write echo
+  // and full read. 20 keeps a reconcile trail deep enough for the brief-lookup
+  // consumers (promotion/completeness match on RECENT entries' target_id)
+  // while bounding the round-trip.
+  article_history_max_entries: external_exports.number().int().positive().default(20),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -4844,7 +4887,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5013,7 +5056,7 @@ function deepReplaceString(value, from, to) {
 var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
-var SterlingStore = class {
+var SterlingStore = class _SterlingStore {
   db;
   constructor(path) {
     this.db = new DatabaseSync2(path);
@@ -5021,6 +5064,10 @@ var SterlingStore = class {
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(DDL);
+    try {
+      this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
+    } catch {
+    }
   }
   journalMode() {
     return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
@@ -5210,6 +5257,22 @@ var SterlingStore = class {
       return records;
     const relations = this.activeArticleRelations();
     return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+  /**
+   * Every non-superseded record of ANY type carrying this exact slug, newest
+   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
+   * stable handle feature_article and brief already had). The type-agnostic
+   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
+   * uniqueness and knowledge_get's slug resolution, both of which must see
+   * EVERY slug-bearing record or a clash slips through. Excluding superseded
+   * rows is the point — a slug names the CONCEPT, so resolving it serves the
+   * live head while a version-pinned citation keeps using the id.
+   */
+  recordsBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`).all(slug);
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
   }
   /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
@@ -5411,7 +5474,7 @@ var SterlingStore = class {
       const record = this.get(id);
       const isSystemDrain = record && record.type === "todo" && record.source === "system";
       if (isSystemDrain && record) {
-        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []));
+        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []), record.id);
         this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
       }
       if (record && !isSystemDrain) {
@@ -5429,6 +5492,16 @@ var SterlingStore = class {
   listQueueDrain(limit = 15) {
     const rows = this.db.prepare("SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?").all(limit);
     return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) }));
+  }
+  /**
+   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
+   * lets a remove on a gone id say "already removed <when>" instead of a bare
+   * "no record". Returns undefined when no trace remains — which, because the
+   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
+   * id never existed.
+   */
+  drainLogEntry(id) {
+    return this.db.prepare("SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1").get(id);
   }
   /**
    * Board 39d6462d activity feed — the ONE seam every knowledge write lands
@@ -5487,17 +5560,42 @@ var SterlingStore = class {
     return row ? runRecordSchema.parse(JSON.parse(row.body)) : void 0;
   }
   /**
+   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
+   * array; a LEGACY single-object value reads as a one-element queue), so
+   * parallel agent exits append instead of refusing on a sibling's unconsumed
+   * exit — on 2026-07-03 three separate reviewer exits were refused on one
+   * sibling's slot and each needed a conductor resume round-trip. Consumers
+   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
+   * transition that consumes it POPS the head and preserves the tail.
+   */
+  static parsePendingQueue(raw) {
+    if (!raw)
+      return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  }
+  static serializePendingQueue(queue) {
+    return queue.length ? JSON.stringify(queue) : null;
+  }
+  /**
    * §5.2 brain transition: atomic compare-and-swap on machine_state
    * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. Clears any
-   * pending exit (it is consumed by the transition).
+   * caller carried stale state — rejected loudly, never re-applied. POPS the
+   * HEAD pending exit (the one this transition consumes) and PRESERVES the
+   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
+   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
+   * between the read and the write.
    */
   casTransition(observed, next) {
     const run = runRecordSchema.parse(next);
-    const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
-    if (res.changes === 0) {
-      throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-    }
+    this.tx(() => {
+      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run.id);
+      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
+      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, tail, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
+      if (res.changes === 0) {
+        throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
+      }
+    });
     return run;
   }
   /**
@@ -5507,15 +5605,17 @@ var SterlingStore = class {
    * retry loop and applies `mutate` to it — so a concurrent hook write (H7
    * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
    * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on BOTH body and machine_state: a
-   * body change under us retries against the fresh body; a machine_state change is
-   * a stale caller and throws (casTransition's CAS-rejected semantics). Clears
-   * pending_exit — the transition consumes it. State moves through this path or
-   * casTransition, never updateRunOptimistic.
+   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
+   * pending_exit: a body OR queue change under us retries against the fresh row
+   * (so a concurrent recordPendingExit append is never overwritten by a stale
+   * tail); a machine_state change is a stale caller and throws (casTransition's
+   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
+   * (board 81bc3409). State moves through this path or casTransition, never
+   * updateRunOptimistic.
    */
   casTransitionMerge(observed, runId2, mutate, attempts = 5) {
     for (let i = 0; i < attempts; i++) {
-      const row = this.db.prepare("SELECT body, machine_state FROM runs WHERE id = ?").get(runId2);
+      const row = this.db.prepare("SELECT body, machine_state, pending_exit FROM runs WHERE id = ?").get(runId2);
       if (!row)
         throw new Error(`casTransitionMerge: no run '${runId2}'`);
       if (row.machine_state !== observed) {
@@ -5523,27 +5623,40 @@ var SterlingStore = class {
       }
       const current = runRecordSchema.parse(JSON.parse(row.body));
       const next = runRecordSchema.parse(mutate(current));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId2, row.body, observed);
+      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
+      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId2, row.body, observed, row.pending_exit);
       if (res.changes === 1)
         return next;
     }
     throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId2}' (P5: failing loudly)`);
   }
-  /** agent_exit lands here; run_signal consumes it. An unconsumed exit is never silently overwritten (P5). */
+  /**
+   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
+   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
+   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
+   * same agent re-exiting before its first exit is consumed is a protocol
+   * violation and is refused loudly with nothing recorded (P5) — a duplicate
+   * would drive the brain twice from one dispatch.
+   */
   recordPendingExit(runId2, exit) {
-    const existing = this.getPendingExit(runId2);
-    if (existing) {
-      throw new Error(`recordPendingExit: run '${runId2}' already has an unconsumed exit ('${existing.signal}' from ${existing.agent_role ?? "unknown"}) \u2014 call run_signal first`);
-    }
-    const res = this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(JSON.stringify(exit), runId2);
-    if (res.changes === 0)
-      throw new Error(`recordPendingExit: no run '${runId2}'`);
+    this.tx(() => {
+      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId2);
+      if (!row)
+        throw new Error(`recordPendingExit: no run '${runId2}'`);
+      const queue = _SterlingStore.parsePendingQueue(row.pending_exit);
+      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
+      if (dup) {
+        throw new Error(`recordPendingExit: run '${runId2}' already has an unconsumed exit from ${dup.agent_role ?? "unknown"} on phase '${dup.phase_id ?? "?"}' ('${dup.signal}') \u2014 one exit per dispatched agent; call run_signal (or consume-exit) first`);
+      }
+      this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(_SterlingStore.serializePendingQueue([...queue, exit]), runId2);
+    });
   }
+  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
   getPendingExit(runId2) {
     const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId2);
     if (!row)
       throw new Error(`getPendingExit: no run '${runId2}'`);
-    return row.pending_exit ? JSON.parse(row.pending_exit) : void 0;
+    return _SterlingStore.parsePendingQueue(row.pending_exit)[0];
   }
   /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
   writeHandoff(runId2, input2, at) {
@@ -5894,6 +6007,7 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/ledger.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join as join2, dirname as dirname3 } from "node:path";
 function ledgerPath(cwd, runId2, agentId) {
   if (runId2 && agentId) return join2(cwd, ".sterling", "runs", runId2, "reads", `agent-${agentId}.json`);
@@ -5908,6 +6022,13 @@ function appendRead(path, entry) {
   entries.push(entry);
   mkdirSync2(dirname3(path), { recursive: true });
   writeFileSync(path, JSON.stringify(entries));
+}
+function fileHash(absPath) {
+  try {
+    return createHash("sha256").update(readFileSync2(absPath)).digest("hex");
+  } catch {
+    return void 0;
+  }
 }
 
 // scripts/hooks/h13-reads-ledger.mjs
@@ -5927,7 +6048,12 @@ try {
   appendRead(ledgerPath(input.cwd, runId, input.agent_id), {
     agent_id: input.agent_id ?? "conductor",
     path: rel,
-    at: (/* @__PURE__ */ new Date()).toISOString()
+    at: (/* @__PURE__ */ new Date()).toISOString(),
+    // content hash at read time (board 776d2b65): H3 accepts this entry only
+    // while the file's bytes still match — evidence expires with the FILE.
+    // An unreadable file yields no hash; the entry then lives in the legacy
+    // per-prompt window instead of the hash window.
+    sha256: fileHash(join3(input.cwd, rel))
   });
 } catch (e) {
   warnNonBlocking(`H13: failed to append read-evidence for '${rel}': ${e.message}`);

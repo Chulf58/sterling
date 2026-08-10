@@ -105,6 +105,8 @@ Cite EVERY phase subtask in `subtask_evidence` — the completeness check verifi
 
 # Exit signals it may emit
 
+If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` REFUSE with `no active run` — skip them and make your FINAL TEXT the complete deliverable, with the signal named on its first line. Inside a run this section binds unchanged: `agent_exit` is mandatory there (H9/consume-exit depend on it).
+
 - `complete` `{handoff_ref}` — tests green within contract (after handoff_write).
 - `blocked` `{reason}` — e.g. tests unsatisfiable within the inner-loop cap, or a decision conflict.
 - `tests-invalid` `{evidence}` — you believe a frozen test is wrong; cite the contradiction precisely.

@@ -16,6 +16,11 @@ const base = z.object(envelopeFields);
 export const decisionSchema = base
   .extend({
     type: z.literal('decision'),
+    // Stable handle (board 1e639f32): survives supersession the way an id does
+    // not — auto-minted from the title at create when absent; optional so
+    // legacy records round-trip unchanged. Uniqueness is enforced at the write
+    // (knowledgeCreate), spanning every slug-bearing type.
+    slug: z.string().min(1).optional(),
     title: z.string().min(1),
     statement: z.string().min(1),
     alternatives_rejected: z.array(z.object({ option: z.string(), reason: z.string() })),
@@ -95,6 +100,8 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}/, 'ISO date required');
 export const antiPatternSchema = base
   .extend({
     type: z.literal('anti_pattern'),
+    // Stable handle (board 1e639f32) — see decisionSchema.slug.
+    slug: z.string().min(1).optional(),
     title: z.string().min(1),
     trigger: z.string().min(1),
     guidance: z.string().min(1),
@@ -113,6 +120,8 @@ export const researchFindingSchema = base
   .extend({
     type: z.literal('research_finding'),
     status: z.enum(['active', 'superseded', 'flagged_stale']),
+    // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
+    slug: z.string().min(1).optional(),
     question: z.string().min(1),
     answer: z.string().min(1),
     source_urls: z.array(z.string()),
@@ -226,10 +235,13 @@ export const SYSTEM_REASONS = [
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
   // reader trusts first.
   'state_review',
-  // A feature_article's serialized size (as knowledge_get would return it)
-  // crossed config.article_oversize_chars on a knowledge_update/append/edit —
-  // the registry-style-article round-trip ceiling (board 8390f8fa), hit twice
-  // before anything checked it mechanically. Minted at the WRITE, since that is
+  // A feature_article's NON-HISTORY serialized size crossed
+  // config.article_oversize_chars on a knowledge_update/append/edit — the
+  // registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. History is excluded from the
+  // measure (board 0697c6bd): the lane's remedy is a split, a split only
+  // redistributes prose, and history weight is bounded separately by write-time
+  // rotation (article_history_max_entries). Minted at the WRITE, since that is
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
@@ -461,29 +473,30 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
   decision: {
     schema: decisionSchema,
     immutable: true,
-    fts: (r) => [s(r.title), s(r.statement), s(r.rationale)].join('\n'),
+    fts: (r) => [s(r.slug), s(r.title), s(r.statement), s(r.rationale)].join('\n'),
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
-    // Title only, as asked: a decision's title is written to state the ruling.
-    digest: { title: 'plain' },
+    // slug leads for the same reason it does on feature_article: it is the
+    // handle that survives supersession (board 1e639f32); the title states the ruling.
+    digest: { slug: 'plain', title: 'plain' },
   },
   anti_pattern: {
     schema: antiPatternSchema,
     immutable: false,
-    fts: (r) => [s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join('\n'),
+    fts: (r) => [s(r.slug), s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join('\n'),
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
     // trigger is the field that tells a reader whether the hazard applies to
     // what they are about to do — the whole point of scanning hazards — and
     // severity is the order H19 already renders them in.
-    digest: { title: 'plain', trigger: 'clip', severity: 'plain' },
+    digest: { slug: 'plain', title: 'plain', trigger: 'clip', severity: 'plain' },
   },
   research_finding: {
     schema: researchFindingSchema,
     immutable: false,
-    fts: (r) => [s(r.question), s(r.answer)].join('\n'),
+    fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join('\n'),
     fileKeys: () => [],
     // No title on this type — the question IS the identity. Both clocks ride
     // along because a finding's currency decides whether it may be used at all.
-    digest: { question: 'clip', source_date: 'plain', capture_date: 'plain' },
+    digest: { slug: 'plain', question: 'clip', source_date: 'plain', capture_date: 'plain' },
   },
   reference_material: {
     schema: referenceMaterialSchema,

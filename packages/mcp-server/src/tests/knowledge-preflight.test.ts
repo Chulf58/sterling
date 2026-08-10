@@ -124,7 +124,7 @@ test('AC-b: knowledge_preflight — text hitting only the record\'s PERIPHERAL w
     );
     assert.equal(
       result.answerability,
-      'ready',
+      'ungoverned',
       "the record's central vocabulary never appears in this text — only its peripheral words do"
     );
     assert.deepEqual(result.matches, [], 'peripheral-only overlap must not surface the record as a target');
@@ -147,7 +147,7 @@ test('AC-c: knowledge_preflight — fewer than 2 extractable terms answers insuf
   }
 });
 
-test('AC-d: knowledge_preflight — subject text matching nothing in an empty store answers ready with no matches', () => {
+test('AC-d: knowledge_preflight — subject text matching nothing in an empty store answers ungoverned with no matches', () => {
   const { tools, cleanup } = harness();
   try {
     // No records created at all — this text has ample extractable vocabulary
@@ -156,8 +156,60 @@ test('AC-d: knowledge_preflight — subject text matching nothing in an empty st
       tools,
       'Refactor the vector interpolation code in the physics module for better numerical stability.'
     );
-    assert.equal(result.answerability, 'ready', 'nothing in the store governs this subject');
+    assert.equal(result.answerability, 'ungoverned', 'nothing in the store governs this subject');
     assert.deepEqual(result.matches, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('coverage (board 39c3d762): a feature_article-governed subject answers verify_targets, never a false ungoverned', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.knowledgeCreate('feature_article', {
+      slug: 'quaternion-interpolation',
+      title: 'Quaternion interpolation — slerp pipeline for the camera rig',
+      what_it_does: 'Owns the slerp math.',
+      intended_behavior: 'Smooth camera transitions.',
+      files: [{ path: 'src/quat.ts', role: 'impl' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: new Date().toISOString(), event: 'seed' }],
+      live_test_refs: [],
+    });
+    const result = preflight(
+      tools,
+      'Design the quaternion interpolation change: the slerp pipeline for the camera rig needs quaternion interpolation smoothing.'
+    );
+    assert.equal(result.answerability, 'verify_targets', 'an article now governs — the old decision+anti_pattern-only scope answered a false ungoverned here');
+    assert.equal(result.matches[0].type, 'feature_article');
+    assert.match(result.matches[0].title, /Quaternion interpolation/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('batch (board 39c3d762 slice 2): an agenda returns one verdict row per question, in order', () => {
+  const { tools, cleanup } = harness();
+  try {
+    seedCentralAntiPattern(tools);
+    const { verdicts } = (tools as unknown as {
+      knowledgePreflightBatch: (texts: string[]) => { verdicts: { text: string; answerability: string }[] };
+    }).knowledgePreflightBatch([
+      'the a of',
+      'Refactor the vector interpolation code in the physics module for better numerical stability.',
+    ]);
+    assert.equal(verdicts.length, 2);
+    assert.equal(verdicts[0].answerability, 'insufficient');
+    assert.equal(verdicts[1].answerability, 'ungoverned');
+    assert.match(verdicts[1].text, /vector interpolation/, 'each row carries its question back');
+    assert.throws(
+      () =>
+        (tools as unknown as { knowledgePreflightBatch: (t: string[]) => unknown }).knowledgePreflightBatch([]),
+      /non-empty array/
+    );
   } finally {
     cleanup();
   }

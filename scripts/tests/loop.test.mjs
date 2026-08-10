@@ -603,12 +603,27 @@ test('one-phase pipeline end-to-end: brief → prep → red → green → comple
     tools.knowledgeCreate('decision', { title: 'Minimal add', statement: 'No generics.', alternatives_rejected: [], rationale: 'Spine scope.' });
     tools.boardRemove(todo.id);
 
+    // H6 fill telemetry the run "collected" (board 6b2dd7b0): disposal must fold
+    // it into the surviving summary — before this, the file died unread here.
+    writeFileSync(
+      join(dir, '.sterling', 'runs', 'r-loop', 'h6-fills.jsonl'),
+      [
+        JSON.stringify({ agent_id: 'a1', agent_type: 'coder', fill_pct: 41, model: 'claude-sonnet-5', at: '2026-08-10T00:00:01Z' }),
+        JSON.stringify({ agent_id: 'a1', agent_type: 'coder', fill_pct: 63, model: 'claude-sonnet-5', at: '2026-08-10T00:00:02Z' }),
+        JSON.stringify({ agent_id: 'a2', agent_type: 'test-writer', fill_pct: 22, model: 'claude-opus-5', at: '2026-08-10T00:00:03Z' }),
+        'not json — a torn tail line must never block disposal',
+      ].join('\n')
+    );
+
     // dispose-run: verifies, snapshots, disposes rows + dir, advances state
     const dispose = runScript('dispose-run.mjs', ['--run', 'r-loop', '--target', dir], dir);
     assert.equal(dispose.code, 0, dispose.stdout + dispose.stderr);
     const out = JSON.parse(dispose.stdout);
     assert.ok(existsSync(out.snapshot), 'snapshot exists at the backup path');
     assert.equal(existsSync(join(dir, '.sterling', 'runs', 'r-loop')), false, 'runs/<id>/ disposed');
+    const coderFill = out.agent_fill.find((f) => f.agent_type === 'coder');
+    assert.deepEqual(coderFill, { agent_type: 'coder', samples: 2, peak_fill_pct: 63, median_fill_pct: 52 }, 'per-agent-type peak/median folded');
+    assert.equal(out.agent_fill.find((f) => f.agent_type === 'test-writer').samples, 1);
     assert.equal(store.readHandoffs('r-loop').length, 0, 'handoff rows disposed');
     assert.equal(store.listCheckSkipped('r-loop').length, 0, 'check_skipped rows disposed after folding');
 

@@ -52,6 +52,10 @@ export interface AxisRecord {
   title?: string;
   trigger?: string;
   statement?: string;
+  // preflight coverage (board 39c3d762): article territory + finding subject
+  slug?: string;
+  concept_family?: string;
+  question?: string;
 }
 
 /** Extract candidate mechanism terms from outgoing prompt text, most
@@ -81,11 +85,17 @@ export function extractAxisTerms(text: unknown, maxTerms: number): string[] {
  *  it recurs, which is precisely the axis; a decision's title and statement are
  *  its ruling. rationale/right_way/guidance are excluded: they are long, they
  *  discuss context rather than assert the rule, and matching them is what would
- *  turn this into noise. */
+ *  turn this into noise. Since board 39c3d762 (preflight coverage): a
+ *  feature_article's slug/family/title state its TERRITORY (what_it_does is
+ *  excluded — tens of KB of discussion), and a research_finding's question IS
+ *  its subject (answer excluded, same reason). Additive for existing callers:
+ *  H19/H20 delivery only ever pass anti_pattern/decision records here. */
 export function axisNarrowText(record: AxisRecord | null | undefined): string {
   if (!record || typeof record !== 'object') return '';
   if (record.type === 'anti_pattern') return `${record.title ?? ''}\n${record.trigger ?? ''}`;
   if (record.type === 'decision') return `${record.title ?? ''}\n${record.statement ?? ''}`;
+  if (record.type === 'feature_article') return `${record.slug ?? ''} ${record.concept_family ?? ''}\n${record.title ?? ''}`;
+  if (record.type === 'research_finding') return `${record.question ?? ''}`;
   return '';
 }
 

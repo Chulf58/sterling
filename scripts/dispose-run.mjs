@@ -129,6 +129,42 @@ if (existsSync(dir)) {
     });
   }
 }
+// Per-agent CONTEXT-FILL fold (board 6b2dd7b0): H6 appends one line per
+// roster-agent tool call to runs/<id>/h6-fills.jsonl, and this directory is
+// about to be deleted — fold peak/median fill_pct per agent_type into the
+// surviving summary (P4: durable value promoted before transient state dies;
+// this file was previously deleted UNREAD at the exact moment the summary was
+// assembled). CONTEXT FILL only — a fraction of the model's window, never
+// tokens or cost. A torn/garbled line is skipped, never a disposal blocker.
+const agentFill = [];
+const fillsPath = join(dir, 'h6-fills.jsonl');
+if (existsSync(fillsPath)) {
+  const byType = new Map();
+  for (const line of readFileSync(fillsPath, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof entry?.fill_pct !== 'number') continue;
+    const key = entry.agent_type ?? 'unknown';
+    if (!byType.has(key)) byType.set(key, []);
+    byType.get(key).push(entry.fill_pct);
+  }
+  for (const [agent_type, fills] of [...byType.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    fills.sort((a, b) => a - b);
+    const mid = Math.floor(fills.length / 2);
+    agentFill.push({
+      agent_type,
+      samples: fills.length,
+      peak_fill_pct: fills[fills.length - 1],
+      median_fill_pct: fills.length % 2 ? fills[mid] : (fills[mid - 1] + fills[mid]) / 2,
+    });
+  }
+}
+
 const skipCounts = new Map();
 for (const s of store.listCheckSkipped(run.id)) {
   // JSON tuple key: self-documenting and text-safe. The previous separator was a
@@ -198,6 +234,7 @@ store.disposeRunRows(run.id, {
   check_skipped: checkSkippedSummary,
   knowledge_packs: packs,
   undispositioned_mandatory: undispositionedMandatory,
+  ...(agentFill.length ? { agent_fill: agentFill } : {}),
   snapshot_path: snapshotPath,
 });
 if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
@@ -212,5 +249,6 @@ console.log(
     check_skipped: checkSkippedSummary,
     knowledge_packs: packs.length,
     undispositioned_mandatory: undispositionedMandatory.length,
+    agent_fill: agentFill,
   })
 );
