@@ -6103,9 +6103,13 @@ var AXIS_MIN_RECORD_TERMS = 2;
 function recordCentralityHits(record, outgoingText, opts = {}) {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
   const central = extractAxisTerms(axisNarrowText(record), topK);
-  const hay = String(outgoingText ?? "").toLowerCase();
-  if (!hay) return [];
-  return central.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+  const words = [
+    ...new Set(
+      String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN)
+    )
+  ];
+  if (!words.length) return [];
+  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
 }
 function hasRecordCentralityHit(record, outgoingText, opts = {}) {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
@@ -6143,7 +6147,7 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map(
     (ap) => [
@@ -6154,16 +6158,15 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {
   );
   if (hazards.length > shown.length) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    blocks.push(
-      `\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
+    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
@@ -6174,9 +6177,8 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (decisions.length > shown.length) {
-    lines.push(
-      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
+    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }
@@ -6211,13 +6213,18 @@ try {
   const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
   const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made \u2014 and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
+  const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+  const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const blocks = [
     header,
-    ...renderHazards(
-      hazards.map((x) => x.record),
-      NARROW_CLIP
-    ),
-    ...decisions.length ? [renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS)] : []
+    ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
+      remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
+    }),
+    ...decisions.length ? [
+      renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, {
+        remedy: `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`
+      })
+    ] : []
   ];
   process.stdout.write(
     JSON.stringify({

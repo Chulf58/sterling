@@ -178,15 +178,27 @@ export function hasDiscriminatingHit(hits) {
 export const AXIS_RECORD_TOP_K = 6;
 export const AXIS_MIN_RECORD_TERMS = 2;
 
-/** The record's central terms that actually appear in the outgoing text —
- *  same left-boundary matching as axisHits, direction reversed. Exported so
- *  H20's header can NAME the covered central terms. */
+/** The record's central terms that the outgoing text actually covers.
+ *  SYMMETRIC prefix matching (review finding 2, 2026-08-10): axisHits tests the
+ *  prompt's term as a prefix inside the record ('latch' hits 'latches'), but the
+ *  record's own extracted term is the full inflected word — one-directional
+ *  matching here would let the earlier floor COUNT an inflected pair and this
+ *  floor SILENCE it, failing closed on a technicality. So a central term is
+ *  covered when it and a prompt word prefix each other, either direction.
+ *  Exported so headers can NAME the covered central terms. */
 export function recordCentralityHits(record, outgoingText, opts = {}) {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
   const central = extractAxisTerms(axisNarrowText(record), topK);
-  const hay = String(outgoingText ?? '').toLowerCase();
-  if (!hay) return [];
-  return central.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(hay));
+  const words = [
+    ...new Set(
+      String(outgoingText ?? '')
+        .toLowerCase()
+        .split(/[^a-z0-9_]+/)
+        .filter((w) => w.length >= AXIS_MIN_TERM_LEN)
+    ),
+  ];
+  if (!words.length) return [];
+  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
 }
 
 export function hasRecordCentralityHit(record, outgoingText, opts = {}) {
@@ -194,10 +206,15 @@ export function hasRecordCentralityHit(record, outgoingText, opts = {}) {
   const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
   const central = extractAxisTerms(axisNarrowText(record), topK);
   const covered = recordCentralityHits(record, outgoingText, { topK });
-  // A terse record scales the requirement down to what it can offer (a record
-  // with one extractable own term needs only that one present); zero
-  // extractable terms is unreachable behind the earlier floors and passes
-  // vacuously rather than silencing on a technicality.
+  // A terse record scales the requirement down to what it can offer (one
+  // extractable own term needs only that one present). Zero extractable terms
+  // passes vacuously — NOT provably unreachable (a narrow text of pure
+  // stopwords can in principle clear the earlier floors via prefix matches
+  // into its raw tokens; review finding 3), but the deliberate direction here
+  // is fail-open: this floor removes noise, it never manufactures silence.
+  // Known limit (review finding 1, accepted): a record with <= topK extractable
+  // own terms makes EVERY term central, so the floor only bites on verbose
+  // records — frequency cannot discriminate where there is no repetition.
   return covered.length >= Math.min(minTerms, central.length);
 }
 
@@ -363,7 +380,7 @@ export function cappedHazards(hazards, cap = HAZARD_CAP) {
  *  one-way-latch bug in territory that had a stored one-way-latch anti_pattern.
  *  Substance (trigger + right_way), not a pointer: a pointer to a hazard the
  *  reader must choose to follow reproduces the skippable step delivery deletes. */
-export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {}) {
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map((ap) =>
     [
@@ -373,10 +390,12 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
     ].join('\n')
   );
   if (hazards.length > shown.length) {
+    // `remedy` overrides the widening query for callers whose match was not a
+    // file_keys join (the subject channel has no file answer at all — a
+    // file_keys:[] query would be unrunnable; review finding 4, 2026-08-10).
     const keys = fileKeys.map((k) => `"${k}"`).join(',');
-    blocks.push(
-      `… ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) — knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
+    blocks.push(`… ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return blocks;
 }
@@ -409,7 +428,7 @@ export const DECISION_REJECTED_CLIP = 140;
  *  untouched: it ruled on rendering decision BODIES, not on which field is
  *  clipped. alternatives_rejected needs no wider read — SterlingStore.query
  *  rehydrates whole bodies (packages/store/src/index.ts:289). */
-export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
+export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
@@ -423,9 +442,10 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
     if (rejected) lines.push(`    ✗ ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (decisions.length > shown.length) {
-    lines.push(
-      `  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
-    );
+    // Same remedy override as renderHazards: a subject match has no file_keys
+    // answer, so the widening query must come from the caller there.
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
+    lines.push(`  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return lines.join('\n');
 }

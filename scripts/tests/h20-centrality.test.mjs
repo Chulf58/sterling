@@ -239,3 +239,18 @@ test('H20: centrality passing is NOT enough on its own — a single distinct pro
     cleanup();
   }
 });
+
+// --- 6. UNIT: inflection symmetry (review finding 2, commit follows 45bb722) ---
+
+test('hasRecordCentralityHit: an inflected central term is covered by its stem in the prompt (symmetric prefix matching)', () => {
+  // One extractable own term, 'latches' — the record's inflected form. A prompt
+  // saying 'latch' must cover it: axisHits counts the pair (prompt term as
+  // prefix in the record), and a floor that silences what the earlier floor
+  // counted would fail closed on a technicality.
+  const record = antiPattern(
+    'Latches',
+    'verify record store report evidence this file the latches latches latches the file evidence report store record verify this'
+  );
+  assert.equal(hasRecordCentralityHit(record, 'The one-way latch mechanism re-arms on close.'), true, "'latch' covers central term 'latches'");
+  assert.equal(hasRecordCentralityHit(record, 'The one-way gate mechanism re-arms on close.'), false, 'no stem overlap — not covered');
+});

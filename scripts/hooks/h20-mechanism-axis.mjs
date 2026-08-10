@@ -147,13 +147,22 @@ try {
     : `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to dispatch '${input.tool_input?.subagent_type ?? 'an agent'}'. ` +
       `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
       `Path-scoped delivery cannot find these. Check them BEFORE the brief goes out — a fan-out multiplies a bad premise by N.`;
+  // A subject match has no file_keys answer — overflow widening queries are
+  // rank_terms-shaped (review finding 4's class, fixed at both call sites).
+  const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
+  const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
   const blocks = [
     header,
-    ...renderHazards(
-      hazards.map((x) => x.record),
-      NARROW_CLIP
-    ),
-    ...(decisions.length ? [renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS)] : []),
+    ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
+      remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
+    }),
+    ...(decisions.length
+      ? [
+          renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, {
+            remedy: `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`,
+          }),
+        ]
+      : []),
   ];
 
   // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19 (council wf_db9a59aa-0af):

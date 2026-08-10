@@ -324,3 +324,32 @@ test('g. no path candidates AND no subject match in the prompt: stays silent und
     cleanup();
   }
 });
+
+// --- h. per-prompt matching: a long sibling prompt cannot dilute a short one
+//        (review finding 5, commit follows 45bb722) -------------------------
+
+test('h. parallel dispatch: subject matching runs PER PROMPT, so a long sibling prompt cannot dilute a short matching one to silence', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
+    // Sibling prompt: 20 distinct unrelated words repeated 3x each — under a
+    // UNION match these dominate the top-16 extracted terms and evict
+    // boolean/mesh/modifier entirely, silencing the short prompt's match.
+    const sibWords = [
+      'ledger', 'warehouse', 'invoice', 'shipment', 'customs', 'freight', 'container', 'harbor',
+      'manifest', 'pallet', 'carrier', 'tariff', 'voyage', 'dockyard', 'consignment', 'logistics',
+      'clearance', 'transit', 'billing', 'quotation',
+    ];
+    const sibling = Array.from({ length: 3 }, () => sibWords.join(' ')).join(' ');
+    const short = 'Investigate why the boolean operation corrupts the mesh: the modifier stack introduces non-manifold geometry.';
+    const transcript = writeTranscript(dir, [assistantLine([taskBlock(sibling), taskBlock(short)])]);
+    const r = runHook(subagentStart(dir, transcript), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.notEqual(r.stdout, '', 'the short prompt matches on its own — per-prompt matching must deliver');
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, new RegExp(CENTRAL_TITLE), 'the subject-matched record reaches the spawned agent');
+    assert.match(ctx, /dispatched in this turn/, 'with parallel dispatches the header does not claim "your task"');
+  } finally {
+    cleanup();
+  }
+});

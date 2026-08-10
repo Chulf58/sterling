@@ -5971,7 +5971,7 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map(
     (ap) => [
@@ -5982,16 +5982,15 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {
   );
   if (hazards.length > shown.length) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    blocks.push(
-      `\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
+    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
+function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
@@ -6002,9 +6001,8 @@ function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP) {
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (decisions.length > shown.length) {
-    lines.push(
-      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length}`;
+    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }

@@ -6137,9 +6137,13 @@ var AXIS_MIN_RECORD_TERMS = 2;
 function recordCentralityHits(record, outgoingText, opts = {}) {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
   const central = extractAxisTerms(axisNarrowText(record), topK);
-  const hay = String(outgoingText ?? "").toLowerCase();
-  if (!hay) return [];
-  return central.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+  const words = [
+    ...new Set(
+      String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN)
+    )
+  ];
+  if (!words.length) return [];
+  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
 }
 function hasRecordCentralityHit(record, outgoingText, opts = {}) {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
@@ -6208,7 +6212,7 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map(
     (ap) => [
@@ -6219,16 +6223,15 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [] } = {
   );
   if (hazards.length > shown.length) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    blocks.push(
-      `\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
+    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
   const shown = decisions.slice(0, cap);
   const lines = [
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
@@ -6239,9 +6242,8 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP) {
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (decisions.length > shown.length) {
-    lines.push(
-      `  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length} for the full set`
-    );
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
+    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }
@@ -6297,17 +6299,26 @@ try {
   const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree) : [];
   const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
   const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
-  const outgoing = prompts.join("\n\n");
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
-  let subjectMatches = [];
-  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
-  if (terms.length >= AXIS_MIN_HITS) {
+  const subjectMatches = [];
+  const seenSubject = /* @__PURE__ */ new Set();
+  for (const p of prompts) {
+    const terms = extractAxisTerms(p, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) continue;
     const candidatesBySubject = [
       ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
       ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
     ];
-    subjectMatches = candidatesBySubject.filter((r) => !pathIds.has(r.id)).map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
+    for (const r of candidatesBySubject) {
+      if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
+      const hits = axisHits(r, terms);
+      if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
+        seenSubject.add(r.id);
+        subjectMatches.push({ record: r, hits, prompt: p });
+      }
+    }
   }
+  subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
   if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
@@ -6330,12 +6341,16 @@ try {
   const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
   if (subjectHazards.length || subjectDecisions.length) {
     const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
-    const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
+    const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
+    const subjectLabel = prompts.length > 1 ? `the SUBJECT of a task dispatched in this turn (possibly a sibling's)` : `your task's SUBJECT`;
+    const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
+    const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
+    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
     parts.push(
       [
-        `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching your task's SUBJECT (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
-        ...renderHazards(subjectHazards, charCap),
-        ...subjectDecisions.length ? [renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS)] : []
+        `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
+        ...renderHazards(subjectHazards, charCap, { remedy }),
+        ...subjectDecisions.length ? [renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy })] : []
       ].join("\n\n")
     );
   }
