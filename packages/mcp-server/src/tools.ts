@@ -1909,9 +1909,32 @@ export class SterlingTools {
     };
   }
 
+  /**
+   * 'ALREADY REMOVED' IS NOT 'NEVER EXISTED' (board 97d773ef): a remove on a
+   * freshly-minted maintenance id routinely finds the item gone because the
+   * article re-baseline AUTO-DRAINED it between minting and the call — the
+   * NORMAL path, not an error in the caller's id. A bare "no record" forced a
+   * board_query round-trip to tell the two apart; the drain-log trace answers
+   * it directly. The log keeps only the newest 50 rows, so a missing trace is
+   * "no recent trace", never proof of non-existence — the message says so.
+   */
+  private removedItemError(op: string, id: string): Error {
+    const trace = this.store.drainLogEntry(id);
+    if (trace) {
+      return new Error(
+        `${op}: item '${id}' was ALREADY REMOVED at ${trace.drained_at} (${trace.system_reason || 'user item'}, per the drain log) — ` +
+          `most likely auto-drained by a knowledge_update re-baseline or closed by an earlier remove. Nothing further to do.`
+      );
+    }
+    return new Error(
+      `${op}: no record '${id}', and no trace of it in the drain log (which keeps the newest 50 removals) — ` +
+        `either the id is wrong, or the item was removed long enough ago that its trace aged out.`
+    );
+  }
+
   boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
-    if (!record) throw new Error(`board_remove: no record '${id}'`);
+    if (!record) throw this.removedItemError('board_remove', id);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a todo`);
     const evidence = this.removalArtifactEvidence(record);
     this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
@@ -1940,7 +1963,7 @@ export class SterlingTools {
    */
   maintenanceRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
-    if (!record) throw new Error(`maintenance_remove: no record '${id}'`);
+    if (!record) throw this.removedItemError('maintenance_remove', id);
     if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
     const source = (record as unknown as { source?: string }).source;
     if (source !== 'system') {

@@ -237,6 +237,9 @@ export type ToolStore = Pick<
   | 'updateTodo'
   | 'retireInFavorOf'
   | 'remove'
+  // board_remove/maintenance_remove distinguish 'already removed' from 'never
+  // existed' through the drain-log trace (board 97d773ef).
+  | 'drainLogEntry'
   | 'addLink'
   | 'getRun'
   | 'casTransition'
@@ -258,6 +261,16 @@ export class SterlingStore {
     this.db.exec('PRAGMA busy_timeout=5000');
     this.db.exec('PRAGMA foreign_keys=ON');
     this.db.exec(DDL);
+    // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
+    // remove on an already-drained id can answer "already removed <when>"
+    // instead of a bare "no record". CREATE IF NOT EXISTS never alters an
+    // existing table, so the column is added here; the duplicate-column throw
+    // on an already-migrated store is the expected no-op path.
+    try {
+      this.db.exec('ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT');
+    } catch {
+      /* column already exists */
+    }
   }
 
   journalMode(): string {
@@ -734,8 +747,8 @@ export class SterlingStore {
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
       if (isSystemDrain && record) {
         this.db
-          .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)')
-          .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []));
+          .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)')
+          .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []), record.id);
         // cap: completed items must never build up (adjudicated 2026-06-12)
         this.db
           .prepare('DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)')
@@ -765,6 +778,19 @@ export class SterlingStore {
       .prepare('SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?')
       .all(limit) as { drained_at: string; system_reason: string; text: string; file_keys: string }[];
     return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) as string[] }));
+  }
+
+  /**
+   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
+   * lets a remove on a gone id say "already removed <when>" instead of a bare
+   * "no record". Returns undefined when no trace remains — which, because the
+   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
+   * id never existed.
+   */
+  drainLogEntry(id: string): { drained_at: string; system_reason: string } | undefined {
+    return this.db
+      .prepare('SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1')
+      .get(id) as { drained_at: string; system_reason: string } | undefined;
   }
 
   /**

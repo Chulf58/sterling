@@ -5051,6 +5051,10 @@ var SterlingStore = class _SterlingStore {
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(DDL);
+    try {
+      this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
+    } catch {
+    }
   }
   journalMode() {
     return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
@@ -5457,7 +5461,7 @@ var SterlingStore = class _SterlingStore {
       const record = this.get(id);
       const isSystemDrain = record && record.type === "todo" && record.source === "system";
       if (isSystemDrain && record) {
-        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys) VALUES (?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []));
+        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []), record.id);
         this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
       }
       if (record && !isSystemDrain) {
@@ -5475,6 +5479,16 @@ var SterlingStore = class _SterlingStore {
   listQueueDrain(limit = 15) {
     const rows = this.db.prepare("SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?").all(limit);
     return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) }));
+  }
+  /**
+   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
+   * lets a remove on a gone id say "already removed <when>" instead of a bare
+   * "no record". Returns undefined when no trace remains — which, because the
+   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
+   * id never existed.
+   */
+  drainLogEntry(id) {
+    return this.db.prepare("SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1").get(id);
   }
   /**
    * Board 39d6462d activity feed — the ONE seam every knowledge write lands

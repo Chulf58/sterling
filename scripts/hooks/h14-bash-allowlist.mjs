@@ -17,6 +17,12 @@
 //     and run a declared interpreter over it can run arbitrary code. Path-scoping
 //     the argument does not change that — the debugger's legitimate probe road is
 //     exactly "write a scratchpad file, run it through the declared command".
+//     That road is for PROBES, not for reaching undeclared project commands:
+//     since 2026-08-10 (board 6c4d9659) a repo whose briefs say "npm run build"
+//     DECLARES build/check run_commands in its toolchain — driving them through
+//     a node-driver file instead is the 3261fd4f smuggling shape even when
+//     disclosed. If a needed command is missing here, the fix is declaring it
+//     in config, never routing around the allowlist.
 // What H14 DOES buy, and why it stays: agents stay on the project's declared
 // toolchain commands instead of inventing shell; chaining and redirection are
 // denied so an allowed prefix cannot smuggle a second command or redirect into an

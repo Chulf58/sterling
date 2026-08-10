@@ -265,6 +265,10 @@ export class MountedStores {
   writeHandoff(...args: Parameters<SterlingStore['writeHandoff']>): ReturnType<SterlingStore['writeHandoff']> {
     return this.project.writeHandoff(...args);
   }
+  /** The drain log is project-local (§3.2.7) — forwarded like every run/board surface. */
+  drainLogEntry(...args: Parameters<SterlingStore['drainLogEntry']>): ReturnType<SterlingStore['drainLogEntry']> {
+    return this.project.drainLogEntry(...args);
+  }
   readHandoffs(...args: Parameters<SterlingStore['readHandoffs']>): ReturnType<SterlingStore['readHandoffs']> {
     return this.project.readHandoffs(...args);
   }

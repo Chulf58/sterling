@@ -2698,3 +2698,32 @@ test('stable handle: an EXPLICIT slug that collides with any slug-bearing record
     cleanup();
   }
 });
+
+test("removes distinguish 'already removed' from 'never existed' via the drain-log trace (board 97d773ef)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    // the ROUTINE path: a reconcile_needed item auto-drained by the article
+    // re-baseline between minting and the remove call.
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed',
+      text: `reconcile 'thing'`,
+      file_keys: ['src/thing.ts'],
+      feature_link: article.id,
+    });
+    tools.knowledgeUpdate(article.id, { state: 'active' }); // auto-drains the item
+    assert.throws(
+      () => tools.maintenanceRemove(item.id),
+      /ALREADY REMOVED at .*reconcile_needed.*Nothing further to do/s,
+      'the routine already-auto-drained case is self-explaining'
+    );
+    // a genuinely wrong id: no trace, and the message hedges on the capped log
+    assert.throws(
+      () => tools.boardRemove(randomUUID()),
+      /no trace of it in the drain log.*newest 50/s,
+      "an unknown id says 'no recent trace', never claiming proof of non-existence"
+    );
+  } finally {
+    cleanup();
+  }
+});
