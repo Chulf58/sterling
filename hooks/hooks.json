@@ -47,6 +47,10 @@
       {
         "matcher": "Bash|PowerShell",
         "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h15-store-guard.mjs\"" }]
+      },
+      {
+        "matcher": "mcp__sterling__knowledge_update|mcp__sterling__knowledge_append|mcp__sterling__knowledge_edit|mcp__plugin_sterling_sterling__knowledge_update|mcp__plugin_sterling_sterling__knowledge_append|mcp__plugin_sterling_sterling__knowledge_edit|Read|Grep|Glob|Task|Agent",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h21-delegation-live.mjs\"" }]
       }
     ],
     "PostToolUse": [

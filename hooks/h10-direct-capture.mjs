@@ -4786,7 +4786,11 @@ var configSchema = external_exports.object({
   // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
   delegation_watch: external_exports.object({
     min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
+    max_dispatches: external_exports.number().int().nonnegative().default(0),
+    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
+    // paths + searches since the last Task/Agent dispatch crossing this
+    // threshold injects ONE moment-3 advisory per streak episode.
+    streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
@@ -6175,6 +6179,23 @@ try {
       return false;
     }
   };
+  const articleWritesPath = join2(input.cwd, ".sterling", "transient", "article-writes.json");
+  const readArticleWrites = () => {
+    try {
+      const raw = JSON.parse(readFileSync2(articleWritesPath, "utf8"));
+      return raw.session_id === input.session_id && Number.isFinite(raw.count) ? raw.count : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const statsPath = join2(input.cwd, ".sterling", "transient", "delegation-stats.json");
+  const writeDelegationStats = (stats) => {
+    try {
+      mkdirSync2(join2(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync(statsPath, JSON.stringify(stats));
+    } catch {
+    }
+  };
   const delegation = (() => {
     try {
       if (delegationSpent()) return null;
@@ -6187,6 +6208,8 @@ try {
       const readFiles = /* @__PURE__ */ new Set();
       let searches = 0;
       let dispatches = 0;
+      let maxBatch = 0;
+      let soloDispatches = 0;
       let assistantEntries = 0;
       let contentArrays = 0;
       for (const line of readFileSync2(tPath, "utf8").split("\n")) {
@@ -6203,6 +6226,7 @@ try {
         const content = entry.message?.content;
         if (!Array.isArray(content)) continue;
         contentArrays++;
+        let batchCount = 0;
         for (const b of content) {
           if (!b || b.type !== "tool_use") continue;
           if (b.name === "Read") {
@@ -6211,15 +6235,29 @@ try {
             searches++;
           } else if (b.name === "Task" || b.name === "Agent") {
             dispatches++;
+            batchCount++;
           }
         }
+        if (batchCount > maxBatch) maxBatch = batchCount;
+        if (batchCount === 1) soloDispatches++;
       }
       if (assistantEntries > 0 && contentArrays === 0) {
         store.recordCheckSkipped("delegation-watch", "format_unparseable", void 0, now);
         return null;
       }
+      const articleWrites = readArticleWrites();
+      writeDelegationStats({
+        session_id: input.session_id,
+        hand_reads: readFiles.size,
+        searches,
+        dispatches,
+        max_batch: maxBatch,
+        solo_dispatches: soloDispatches,
+        article_writes: articleWrites,
+        at: now
+      });
       if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
-        return { hand_reads: readFiles.size, searches, dispatches };
+        return { hand_reads: readFiles.size, searches, dispatches, max_batch: maxBatch, solo_dispatches: soloDispatches, article_writes: articleWrites };
       }
       return null;
     } catch (e) {
@@ -6231,7 +6269,7 @@ try {
     }
   })();
   const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const delegationPart = () => `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es). Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) \u2014 delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
+  const delegationPart = () => `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es) (largest single-message batch: ${delegation.max_batch}, solo dispatches: ${delegation.solo_dispatches}) and ${delegation.article_writes} hand-run article write(s) this session. Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) \u2014 delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
       const parts = [];

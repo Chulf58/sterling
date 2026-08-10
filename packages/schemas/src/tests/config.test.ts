@@ -228,3 +228,48 @@ test('delegation_watch: min_hand_work is zod-positive (0 and negative rejected);
   const zeroOk = parseConfig({ delegation_watch: { max_dispatches: 0 } }) as unknown as CfgWithDelegationWatch;
   assert.equal(zeroOk.delegation_watch?.max_dispatches, 0, 'max_dispatches: 0 is a valid, explicit, nonnegative value');
 });
+
+// ------------------- delegation_watch.streak_threshold (H21 hand-work-streak advisory, decision 677f1639) -------------------
+
+// streak_threshold is a NEW field on the EXISTING delegation_watch block — a
+// sibling of min_hand_work/max_dispatches, which this addition must leave
+// untouched. Accessed through a cast for the same reason as the block above:
+// the assertions fail cleanly (not the package build) until parseConfig grows
+// the field.
+type CfgWithStreakThreshold = {
+  delegation_watch?: { min_hand_work?: number; max_dispatches?: number; streak_threshold?: number };
+};
+
+test('delegation_watch.streak_threshold: defaults to 10 from an empty config; existing min_hand_work/max_dispatches untouched', () => {
+  const empty = parseConfig({}) as unknown as CfgWithStreakThreshold;
+  assert.ok(empty.delegation_watch, 'parseConfig defaults must add a delegation_watch block');
+  assert.equal(empty.delegation_watch?.streak_threshold, 10, 'streak_threshold defaults to 10');
+  assert.equal(empty.delegation_watch?.min_hand_work, 15, 'min_hand_work default is unchanged by the new sibling field');
+  assert.equal(empty.delegation_watch?.max_dispatches, 0, 'max_dispatches default is unchanged by the new sibling field');
+});
+
+test('delegation_watch.streak_threshold: an explicit value is tunable alongside the other two fields', () => {
+  const tuned = parseConfig({
+    delegation_watch: { min_hand_work: 20, max_dispatches: 2, streak_threshold: 5 },
+  }) as unknown as CfgWithStreakThreshold;
+  assert.equal(tuned.delegation_watch?.streak_threshold, 5, 'an explicit streak_threshold overrides the default 10');
+  assert.equal(tuned.delegation_watch?.min_hand_work, 20, 'sibling field min_hand_work still honored alongside the new field');
+  assert.equal(tuned.delegation_watch?.max_dispatches, 2, 'sibling field max_dispatches still honored alongside the new field');
+});
+
+test('delegation_watch.streak_threshold: positive int only — 0, negative, fractional, and non-number all rejected loud', () => {
+  assert.throws(
+    () => parseConfig({ delegation_watch: { streak_threshold: 'many' } }),
+    /invalid/i,
+    'streak_threshold must be a number — a non-number fails loud'
+  );
+  assert.throws(() => parseConfig({ delegation_watch: { streak_threshold: 0 } }), 'streak_threshold is zod-positive — 0 is rejected');
+  assert.throws(() => parseConfig({ delegation_watch: { streak_threshold: -3 } }), 'streak_threshold is zod-positive — a negative is rejected');
+  assert.throws(() => parseConfig({ delegation_watch: { streak_threshold: 2.5 } }), 'streak_threshold is a zod int — a fractional value is rejected');
+});
+
+test('templates/default-config.json still parses and carries a delegation_watch.streak_threshold of 10', () => {
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithStreakThreshold;
+  assert.ok(shipped.delegation_watch, 'parseConfig always supplies a delegation_watch block, shipped config or not');
+  assert.equal(shipped.delegation_watch?.streak_threshold, 10, 'the shipped/defaulted streak_threshold is 10');
+});
