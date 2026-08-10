@@ -24,6 +24,7 @@
 import { existsSync } from 'node:fs';
 import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel } from './lib/common.mjs';
 import { readTail } from './lib/transcript.mjs';
+import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
   readGuard,
@@ -35,7 +36,17 @@ import {
   renderDecisionPointers,
   DECISION_POINTER_CAP,
   renderPayload,
+  extractAxisTerms,
+  axisHits,
+  AXIS_MIN_HITS,
+  hasDiscriminatingHit,
+  hasRecordCentralityHit,
+  recordCentralityHits,
 } from './lib/delivery.mjs';
+
+// Subject-channel decision ceiling — mirrors H20's MAX_DECISIONS: a keyword
+// match is weaker evidence than a file_keys join, so it earns less attention.
+const SUBJECT_MAX_DECISIONS = 5;
 
 // Path-candidate extraction from free-form prompt prose. No shared extractor
 // exists yet in this codebase for this shape (grepped: absent) — the nearest
@@ -97,22 +108,44 @@ try {
     (r) => r !== '.git' && !r.startsWith('.git/') && !r.startsWith('.sterling/')
   );
 
-  // AC5's contract: "a dispatch with declared file_keys gets the payload
-  // staged; undeclared dispatches are unchanged" — no candidates at all is the
-  // undeclared case, exit 0 with no output.
-  if (!rels.length) allow();
+  // PATH CHANNEL (AC5's original contract): declared file_keys get the payload
+  // staged. No candidates is no longer an early exit — the SUBJECT channel
+  // below (relevance slice 3, board 8f3141d4) can deliver on a pathless
+  // dispatch, which is exactly the case path-scoping is structurally blind to.
+  const owners = rels.length
+    ? store.query({ types: ['feature_article', 'reference_material'], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree)
+    : [];
+  const hazards = rels.length ? store.query({ types: ['anti_pattern'], file_keys: rels, cap: 100 }) : [];
+  const decisions = rels.length ? store.query({ types: ['decision'], file_keys: rels, cap: 100 }) : [];
 
-  const owners = store
-    .query({ types: ['feature_article', 'reference_material'], file_keys: rels, cap: 100 })
-    .filter((r) => !r.working_tree);
-  const hazards = store.query({ types: ['anti_pattern'], file_keys: rels, cap: 100 });
-  const decisions = store.query({ types: ['decision'], file_keys: rels, cap: 100 });
+  // SUBJECT CHANNEL (relevance slice 3): the same mechanism-axis match H20
+  // applies at the conductor's dispatch seam, run over the SAME recovered
+  // prompt text, delivered to the SPAWNED agent — one mechanism, imported
+  // never reimplemented (decision f5638a84 constraint). All three stage-2
+  // floors apply (AXIS_MIN_HITS, discriminating hit, record centrality) so the
+  // measured 1-in-3 noise problem is not replicated one seam deeper. Records
+  // the path channel already carries are excluded — one payload, one mention.
+  const outgoing = prompts.join('\n\n');
+  const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
+  let subjectMatches = [];
+  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
+  if (terms.length >= AXIS_MIN_HITS) {
+    const candidatesBySubject = [
+      ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
+      ...store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
+    ];
+    subjectMatches = candidatesBySubject
+      .filter((r) => !pathIds.has(r.id))
+      .map((r) => ({ record: r, hits: axisHits(r, terms) }))
+      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing))
+      .sort((a, b) => b.hits.length - a.hits.length);
+  }
 
-  // Candidates resolved but named nothing the store governs: still the
-  // undeclared case for AC5's purposes — no frontier notice here (that signal
-  // belongs to the file-touch hook, which fires once the agent actually
-  // touches the path; staging is a bonus, not a second frontier surface).
-  if (!owners.length && !hazards.length && !decisions.length) allow();
+  // Nothing on either channel: still the undeclared case for AC5's purposes —
+  // no frontier notice here (that signal belongs to the file-touch hook, which
+  // fires once the agent actually touches the path; staging is a bonus, not a
+  // second frontier surface).
+  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) allow();
 
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
@@ -120,18 +153,44 @@ try {
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
   const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length) allow();
+  const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) allow();
 
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const blocks = [
-    ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
-    ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
-    ...(freshDecisions.length ? [renderDecisionPointers(rels.join(', '), freshDecisions)] : []),
-  ];
-  const payload = renderPayload(rels.join(', '), blocks, { unowned: false });
+  const parts = [];
+  if (freshOwners.length || freshHazards.length || freshDecisions.length) {
+    const blocks = [
+      ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+      ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
+      ...(freshDecisions.length ? [renderDecisionPointers(rels.join(', '), freshDecisions)] : []),
+    ];
+    parts.push(renderPayload(rels.join(', '), blocks, { unowned: false }));
+  }
+  const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
+  const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
+  if (subjectHazards.length || subjectDecisions.length) {
+    const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(', ');
+    const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(', ');
+    parts.push(
+      [
+        `STERLING MECHANISM-AXIS STAGING (H19) — the store holds records matching your task's SUBJECT ` +
+          `(matched on: ${matched}; central to the record: ${central}), beyond any file the task names. ` +
+          `Path-scoped delivery cannot find these — consult them before acting on the premise they govern.`,
+        ...renderHazards(subjectHazards, charCap),
+        ...(subjectDecisions.length ? [renderDecisionPointers('(subject match)', subjectDecisions, SUBJECT_MAX_DECISIONS)] : []),
+      ].join('\n\n')
+    );
+  }
+  const payload = parts.join('\n\n');
   // Hazards guard the severity-sorted RENDERED slice only (board a470046d
   // slice 1) — same AC8 rule as the decision slice beside it.
-  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  const fresh = [
+    ...freshOwners,
+    ...cappedHazards(freshHazards),
+    ...freshDecisions.slice(0, DECISION_POINTER_CAP),
+    ...cappedHazards(subjectHazards),
+    ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS),
+  ];
 
   // Side effect first, guard second (council wf_db9a59aa-0af precedent,
   // mirrored from h19-knowledge-delivery.mjs): a throw before this line leaves

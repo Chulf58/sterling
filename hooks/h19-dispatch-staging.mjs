@@ -5922,6 +5922,232 @@ import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
+var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
+  // function words
+  "this",
+  "that",
+  "these",
+  "those",
+  "with",
+  "from",
+  "have",
+  "has",
+  "had",
+  "will",
+  "would",
+  "could",
+  "should",
+  "must",
+  "your",
+  "you",
+  "into",
+  "then",
+  "than",
+  "when",
+  "what",
+  "which",
+  "there",
+  "their",
+  "them",
+  "they",
+  "been",
+  "being",
+  "does",
+  "make",
+  "made",
+  "used",
+  "using",
+  "also",
+  "only",
+  "each",
+  "more",
+  "most",
+  "some",
+  "such",
+  "very",
+  "just",
+  "like",
+  "over",
+  "after",
+  "before",
+  "because",
+  "about",
+  "under",
+  "above",
+  "below",
+  "where",
+  "while",
+  "since",
+  "until",
+  "unless",
+  "either",
+  "neither",
+  "both",
+  "every",
+  "not",
+  "but",
+  "and",
+  "the",
+  "for",
+  "are",
+  "was",
+  "were",
+  "its",
+  "here",
+  "how",
+  "why",
+  "who",
+  "whom",
+  "whose",
+  "any",
+  "all",
+  "can",
+  "may",
+  "might",
+  "shall",
+  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
+  "sterling",
+  "conductor",
+  "agent",
+  "agents",
+  "subagent",
+  "dispatch",
+  "report",
+  "return",
+  "verify",
+  "verified",
+  "evidence",
+  "record",
+  "records",
+  "store",
+  "knowledge",
+  "query",
+  "knowledge_get",
+  "knowledge_query",
+  "read",
+  "reads",
+  "grep",
+  "file",
+  "files",
+  "code",
+  "first",
+  "second",
+  "third",
+  "task",
+  "work",
+  "please",
+  "note",
+  "notes",
+  "deliverable",
+  "claim",
+  "claims",
+  "absence",
+  "cite",
+  "cites",
+  "citing",
+  "exactly",
+  "nothing",
+  "else"
+]);
+var AXIS_MIN_TERM_LEN = 4;
+var AXIS_MIN_HITS = 2;
+function extractAxisTerms(text, maxTerms) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < AXIS_MIN_TERM_LEN) continue;
+    if (AXIS_STOPWORDS.has(raw)) continue;
+    if (/^\d+$/.test(raw)) continue;
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
+}
+function axisNarrowText(record) {
+  if (!record || typeof record !== "object") return "";
+  if (record.type === "anti_pattern") return `${record.title ?? ""}
+${record.trigger ?? ""}`;
+  if (record.type === "decision") return `${record.title ?? ""}
+${record.statement ?? ""}`;
+  return "";
+}
+function axisHits(record, terms) {
+  const hay = axisNarrowText(record).toLowerCase();
+  if (!hay) return [];
+  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+}
+var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
+  "test",
+  "tests",
+  "testing",
+  "script",
+  "scripts",
+  "commit",
+  "commits",
+  "branch",
+  "merge",
+  "build",
+  "builds",
+  "check",
+  "checks",
+  "node",
+  "file",
+  "files",
+  "path",
+  "paths",
+  "run",
+  "runs",
+  "running",
+  "item",
+  "items",
+  "text",
+  "change",
+  "changed",
+  "changes",
+  "code",
+  "repo",
+  "line",
+  "lines",
+  "error",
+  "errors",
+  "string",
+  "value",
+  "values",
+  "field",
+  "fields",
+  "message",
+  "messages",
+  "output",
+  "input",
+  "name",
+  "names",
+  "list",
+  "exact",
+  "existing",
+  "touched",
+  "untouched",
+  "through",
+  "actually",
+  "behavior",
+  "still"
+]);
+function hasDiscriminatingHit(hits) {
+  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+}
+var AXIS_RECORD_TOP_K = 6;
+var AXIS_MIN_RECORD_TERMS = 2;
+function recordCentralityHits(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const hay = String(outgoingText ?? "").toLowerCase();
+  if (!hay) return [];
+  return central.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+}
+function hasRecordCentralityHit(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
+  const central = extractAxisTerms(axisNarrowText(record), topK);
+  const covered = recordCentralityHits(record, outgoingText, { topK });
+  return covered.length >= Math.min(minTerms, central.length);
+}
 function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
@@ -6030,6 +6256,7 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
 }
 
 // scripts/hooks/h19-dispatch-staging.mjs
+var SUBJECT_MAX_DECISIONS = 5;
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
@@ -6067,25 +6294,59 @@ try {
   const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
   );
-  if (!rels.length) allow();
-  const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree);
-  const hazards = store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 });
-  const decisions = store.query({ types: ["decision"], file_keys: rels, cap: 100 });
-  if (!owners.length && !hazards.length && !decisions.length) allow();
+  const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree) : [];
+  const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
+  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
+  const outgoing = prompts.join("\n\n");
+  const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
+  let subjectMatches = [];
+  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
+  if (terms.length >= AXIS_MIN_HITS) {
+    const candidatesBySubject = [
+      ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
+      ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
+    ];
+    subjectMatches = candidatesBySubject.filter((r) => !pathIds.has(r.id)).map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
+  }
+  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
   const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length) allow();
+  const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const blocks = [
-    ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
-    ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
-    ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
+  const parts = [];
+  if (freshOwners.length || freshHazards.length || freshDecisions.length) {
+    const blocks = [
+      ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+      ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
+      ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
+    ];
+    parts.push(renderPayload(rels.join(", "), blocks, { unowned: false }));
+  }
+  const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
+  const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
+  if (subjectHazards.length || subjectDecisions.length) {
+    const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
+    const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
+    parts.push(
+      [
+        `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching your task's SUBJECT (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
+        ...renderHazards(subjectHazards, charCap),
+        ...subjectDecisions.length ? [renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS)] : []
+      ].join("\n\n")
+    );
+  }
+  const payload = parts.join("\n\n");
+  const fresh = [
+    ...freshOwners,
+    ...cappedHazards(freshHazards),
+    ...freshDecisions.slice(0, DECISION_POINTER_CAP),
+    ...cappedHazards(subjectHazards),
+    ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS)
   ];
-  const payload = renderPayload(rels.join(", "), blocks, { unowned: false });
-  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: payload } }));
   guard.records.push(...fresh.map((r) => r.id));
   writeGuard(gPath, guard);
