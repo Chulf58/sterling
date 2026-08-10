@@ -56,6 +56,10 @@
   "session_events": {
     "research_agents": ["researcher", "claude-code-guide"]
   },
+  "delegation_watch": {
+    "min_hand_work": 15,
+    "max_dispatches": 0
+  },
   "maintenance_queue": {
     "deep_threshold": 15
   },

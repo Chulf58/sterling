@@ -98,8 +98,8 @@ export const configSchema = z.object({
   // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
   delegation_watch: z
     .object({
-      min_hand_work: z.number().positive().default(15),
-      max_dispatches: z.number().nonnegative().default(0),
+      min_hand_work: z.number().int().positive().default(15),
+      max_dispatches: z.number().int().nonnegative().default(0),
     })
     .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).

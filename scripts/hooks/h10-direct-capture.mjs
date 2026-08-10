@@ -145,8 +145,19 @@ try {
   // (fine at Stop: one pass, once per session end). Advisory and FAIL-OPEN in its own
   // try — any failure records check_skipped {delegation-watch} and never costs a duty.
   const delegationMarker = join(input.cwd, '.sterling', 'transient', 'delegation-nagged.json');
+  const delegationSpent = () => {
+    try {
+      return !!input.session_id && JSON.parse(readFileSync(delegationMarker, 'utf8')).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
   const delegation = (() => {
     try {
+      // A spent marker means the advisory can never fire again this session — skip the
+      // whole-file scan (Stop fires per turn boundary, not once per session; without
+      // this guard a long session re-reads its own transcript on every Stop).
+      if (delegationSpent()) return null;
       const dw = config.delegation_watch;
       const tPath = input.transcript_path ?? '';
       if (!tPath || !existsSync(tPath)) {
@@ -156,6 +167,8 @@ try {
       const readFiles = new Set();
       let searches = 0;
       let dispatches = 0;
+      let assistantEntries = 0;
+      let contentArrays = 0;
       for (const line of readFileSync(tPath, 'utf8').split('\n')) {
         if (!line.trim()) continue;
         let entry;
@@ -165,8 +178,14 @@ try {
           continue; // individual malformed lines are skipped, never fatal
         }
         if (entry.type !== 'assistant') continue;
+        // Defensive: subagent turns live in separate agent-*.jsonl files today
+        // (verified 2026-08-10), but the sidechain flag exists — never count a
+        // sidechain's tool calls as conductor hand-work.
+        if (entry.isSidechain === true) continue;
+        assistantEntries++;
         const content = entry.message?.content;
         if (!Array.isArray(content)) continue;
+        contentArrays++;
         for (const b of content) {
           if (!b || b.type !== 'tool_use') continue;
           if (b.name === 'Read') {
@@ -177,6 +196,13 @@ try {
             dispatches++;
           }
         }
+      }
+      if (assistantEntries > 0 && contentArrays === 0) {
+        // Assistant entries exist but none carried a content array — the transcript
+        // shape has drifted. A silent null here would leave the watch permanently
+        // dead with no trail (P5); mirror the pressure path's format_unparseable.
+        store.recordCheckSkipped('delegation-watch', 'format_unparseable', undefined, now);
+        return null;
       }
       if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
         return { hand_reads: readFiles.size, searches, dispatches };
@@ -191,13 +217,6 @@ try {
       return null;
     }
   })();
-  const delegationSpent = () => {
-    try {
-      return JSON.parse(readFileSync(delegationMarker, 'utf8')).session_id === input.session_id;
-    } catch {
-      return false;
-    }
-  };
   const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const delegationPart = () =>
     `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es). Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) — delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
