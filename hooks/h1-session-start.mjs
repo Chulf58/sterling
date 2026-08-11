@@ -4318,7 +4318,12 @@ var todoSchema = base.extend({
   file_keys: external_exports.array(repoPath).optional(),
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
-  system_reason: external_exports.enum(SYSTEM_REASONS).optional()
+  system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
+  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // share this label and the TUI groups them under it. A grouping FIELD, not
+  // a parent record — absent means standalone. The 'standalone' sentinel is
+  // normalized to absent at the TOOL layer; the schema stores what it gets.
+  objective: external_exports.string().min(1).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -4490,7 +4495,7 @@ var RECORD_TYPES = {
     // The measured worst case for full bodies: board items run to ~8 KB each,
     // so a whole-board read spilled 478 KB. system_reason is what sorts the
     // maintenance queue into lanes; priority/source sort the board.
-    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain" }
+    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
   },
   brief: {
     schema: briefSchema,
@@ -6351,13 +6356,17 @@ SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient regis
   }
 } catch {
 }
-var counts = { todos: 0, maintenance: 0 };
+var counts = { todos: 0, maintenance: 0, groupedTodos: 0, objectives: 0 };
 var queueReasons = [];
 var drainable = 0;
 var parked = 0;
 try {
   const todos = store.query({ types: ["todo"], cap: 1e3 });
-  counts.todos = todos.filter((t) => t.source === "user").length;
+  const userTodos = todos.filter((t) => t.source === "user");
+  counts.todos = userTodos.length;
+  const grouped = userTodos.filter((t) => t.objective);
+  counts.groupedTodos = grouped.length;
+  counts.objectives = new Set(grouped.map((t) => t.objective)).size;
   const system = todos.filter((t) => t.source === "system");
   counts.maintenance = system.length;
   const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
@@ -6453,7 +6462,7 @@ if (process.env.STERLING_NO_BANNER !== "1") {
 ${versionLine}`);
 }
 var output = {
-  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));

@@ -421,13 +421,20 @@ try {
   // fail-open — residue conversion must never break SessionStart
 }
 
-let counts = { todos: 0, maintenance: 0 };
+let counts = { todos: 0, maintenance: 0, groupedTodos: 0, objectives: 0 };
 let queueReasons = [];
 let drainable = 0;
 let parked = 0;
 try {
   const todos = store.query({ types: ['todo'], cap: 1000 });
-  counts.todos = todos.filter((t) => t.source === 'user').length;
+  const userTodos = todos.filter((t) => t.source === 'user');
+  counts.todos = userTodos.length;
+  // Objective grouping (decision a8d2ce6c): the banner discloses how many of
+  // the open tasks are slices of larger objectives, so a sliced board reads
+  // as N objectives to the human too — not only in the TUI's grouped view.
+  const grouped = userTodos.filter((t) => t.objective);
+  counts.groupedTodos = grouped.length;
+  counts.objectives = new Set(grouped.map((t) => t.objective)).size;
   const system = todos.filter((t) => t.source === 'system');
   counts.maintenance = system.length;
   // file_parked closes at branch merge (direct-merge sweeps it), never by
@@ -602,7 +609,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));

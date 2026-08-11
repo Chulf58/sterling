@@ -14,6 +14,8 @@ export interface Card {
   detail: string;
   /** physical store this card came from: 'project' or a domain name */
   source?: string;
+  /** indentation depth for grouped rows (objective children sit at 1); absent = 0 */
+  depth?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,21 +256,51 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
     .map(([key, cards]) => ({ key, label: subcatLabel(key), cards }));
 }
 
-export function todoCards(store: SterlingStore): Card[] {
-  return store
-    .query({ types: ['todo'], source: 'user', cap: 200 })
-    .map((t) => {
-      const todo = t as unknown as { id: string; text: string; priority?: string; file_keys?: string[] };
-      return {
-        id: todo.id,
-        type: 'todo',
-        title: todo.text.split('\n')[0],
-        body: todo.text,
-        detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
-          .filter(Boolean)
-          .join(' · '),
-      };
+/**
+ * Tasks-tab cards. Items sharing an `objective` (decision a8d2ce6c) collapse
+ * under one `obj:<name>` header entry — children are emitted only when the
+ * header id is in `expanded` (the same fold mechanism the Knowledge tree
+ * uses), so the board reads as N objectives, not N×slices. Standalone items
+ * stay flat cards. A group with zero open members never renders (its items
+ * were removed, so the map never sees the name).
+ */
+export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
+  const groups = new Map<string, Card[]>();
+  const flat: Card[] = [];
+  for (const t of store.query({ types: ['todo'], source: 'user', cap: 200 })) {
+    const todo = t as unknown as { id: string; text: string; priority?: string; file_keys?: string[]; objective?: string };
+    const card: Card = {
+      id: todo.id,
+      type: 'todo',
+      title: todo.text.split('\n')[0],
+      body: todo.text,
+      detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
+        .filter(Boolean)
+        .join(' · '),
+    };
+    if (todo.objective) {
+      const list = groups.get(todo.objective) ?? [];
+      list.push(card);
+      groups.set(todo.objective, list);
+    } else {
+      flat.push(card);
+    }
+  }
+  const out: Card[] = [];
+  for (const [name, cards] of groups) {
+    const id = `obj:${name}`;
+    const open = expanded.includes(id);
+    out.push({
+      id,
+      type: 'objective',
+      title: `${open ? '▾' : '▸'} ${name} (${cards.length} open)`,
+      body: `${cards.length} open task${cards.length === 1 ? '' : 's'} under this objective`,
+      detail: 'objective',
     });
+    if (open) out.push(...cards.map((c) => ({ ...c, depth: 1 })));
+  }
+  out.push(...flat);
+  return out;
 }
 
 export function queueCards(store: SterlingStore): Card[] {
