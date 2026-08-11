@@ -107,21 +107,6 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
       }
     }
   }
-  if (state.run && y <= lastBodyLine) {
-    const head = `run ${state.run.id} — `;
-    screen.put({ x: 0, y, attr: {} }, head);
-    screen.put({ x: head.length, y, attr: { bold: true } }, state.run.machine_state);
-    screen.put({ x: head.length + state.run.machine_state.length, y, attr: {} }, ` · ${state.run.phaseLabel}`);
-    y += 1;
-    if (y <= lastBodyLine) {
-      screen.put({ x: 0, y, attr: {} }, `last signal: ${state.run.lastSignal} · context warns: ${state.run.warnFlags}`);
-      y += 1;
-    }
-    if (state.run.pendingJudgment && y <= lastBodyLine) {
-      screen.put({ x: 0, y, attr: { color: 'yellow' } }, `pending judgment: ${state.run.pendingJudgment}`);
-      y += 1;
-    }
-  }
   screen.put({ x: 0, y: Math.min(y + 1, screen.height - 1), attr: { dim: true } }, state.footer);
   screen.draw({ delta: true });
 }

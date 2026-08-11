@@ -341,29 +341,3 @@ export function noteCards(store: SterlingStore): Card[] {
   });
 }
 
-export interface RunView {
-  id: string;
-  machine_state: string;
-  phaseLabel: string;
-  lastSignal: string;
-  warnFlags: number;
-  pendingJudgment?: string;
-}
-
-export function runView(store: SterlingStore): RunView | undefined {
-  const run = store.getRun();
-  if (!run) return undefined;
-  const idx = run.phases.findIndex((p) => p.status === 'in_progress');
-  const signals = run.phases.flatMap((p) => p.signals as { signal?: string }[]);
-  const last = signals[signals.length - 1];
-  const escalations = run.escalations as { kind?: string; reason?: string; fill_pct?: number }[];
-  const judgment = [...escalations].reverse().find((e) => e.kind === 'judgment_needed' || e.kind === 'halt');
-  return {
-    id: run.id,
-    machine_state: run.machine_state,
-    phaseLabel: `phase ${idx === -1 ? run.phases.length : idx + 1} of ${run.phases.length}`,
-    lastSignal: last?.signal ?? '(none)',
-    warnFlags: escalations.filter((e) => e.kind === 'context_warn').length,
-    pendingJudgment: judgment?.reason,
-  };
-}

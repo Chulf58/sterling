@@ -5,9 +5,9 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore, MountedStores } from '@sterling/store';
-import { todoCards, noteCards, runView } from '../viewmodel.js';
+import { todoCards, noteCards } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, QUEUE_TAB, TABS, type UiState, type DashboardState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLines, wrapText, QUEUE_TAB, TABS, type UiState, type DashboardState } from '../state.js';
 import * as stateMod from '../state.js';
 import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
 import { keyToEvent, mouseToEvent, draw } from '../render.js';
@@ -63,40 +63,21 @@ function article(store: SterlingStore, slug: string, title: string, what: string
   }) as { id: string };
 }
 
-test('view models: board filters source=user; note first line; run view summarizes (§11)', () => {
+test('view models: board filters source=user; note first line', () => {
   const { store, cleanup } = fixture();
   try {
     assert.deepEqual(todoCards(store).map((c) => c.title), ['first todo', 'second todo']);
     assert.equal(noteCards(store)[0].title, 'a note');
-    assert.equal(runView(store), undefined);
-    store.createRun({
-      id: 'r-1',
-      brief_ref: randomUUID(),
-      branch: 'b',
-      machine_state: 'running',
-      phases: [
-        { id: 'p1', status: 'complete', signals: [{ signal: 'complete' }], commits: [] },
-        { id: 'p2', status: 'in_progress', signals: [], commits: [] },
-      ],
-      dispatch_counts: {},
-      escalations: [{ kind: 'context_warn', fill_pct: 70 }, { kind: 'judgment_needed', reason: 'blocked' }],
-      started_at: NOW,
-    });
-    const rv = runView(store)!;
-    assert.equal(rv.phaseLabel, 'phase 2 of 2');
-    assert.equal(rv.lastSignal, 'complete');
-    assert.equal(rv.warnFlags, 1);
-    assert.equal(rv.pendingJudgment, 'blocked');
   } finally {
     cleanup();
   }
 });
 
-test('buildDashboardState: rows with screen offsets; expansion adds detail lines; empty + run tabs', () => {
+test('buildDashboardState: rows with screen offsets; expansion adds detail lines; empty tab', () => {
   const { store, t1, cleanup } = fixture();
   try {
     let s = buildDashboardState(store, initialUi);
-    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false, false, false, false]);
+    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false, false, false]);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 1]);
     assert.equal(s.rows[0].selected, true);
     assert.equal(s.rows[0].lines.length, 1, 'collapsed by default: one title line');
@@ -106,10 +87,6 @@ test('buildDashboardState: rows with screen offsets; expansion adds detail lines
     assert.equal(meta.kind, 'meta');
     assert.match(meta.text, /priority: high/);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 2], 'expanded row occupies body + meta lines');
-
-    s = buildDashboardState(store, st({ tab: RUN_TAB }));
-    assert.equal(s.emptyMessage, 'no active run');
-    assert.equal(s.runSelected, true);
   } finally {
     cleanup();
   }
@@ -527,32 +504,6 @@ test('scroll: wheel scrolls the viewport, arrows follow the cursor, hit-test tra
 
     // back-compat: an unbounded viewport never scrolls (wheel is a clamped no-op)
     assert.equal(reduce(store, st(), { kind: 'wheel', dy: 1 }).ui.scroll ?? 0, 0);
-  } finally {
-    cleanup();
-  }
-});
-
-test('reduce + runEffects: run-tab activation selects the run; effects write the one-shot store row (§11/H2)', () => {
-  const { store, cleanup } = fixture();
-  try {
-    store.createRun({
-      id: 'r-sel',
-      brief_ref: randomUUID(),
-      branch: 'b',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: NOW,
-    });
-    const ui: UiState = st({ tab: RUN_TAB });
-    const { effects } = reduce(store, ui, { kind: 'key', name: 'ENTER' });
-    assert.deepEqual(effects, [{ type: 'select', recordType: 'run', id: 'r-sel' }]);
-    const quit = runEffects(store, effects, () => NOW);
-    assert.equal(quit, false);
-    assert.deepEqual({ ...store.takeSelection() }, { type: 'run', record_id: 'r-sel', at: NOW });
-    assert.equal(store.takeSelection(), undefined, 'one-shot');
-    assert.equal(runEffects(store, [{ type: 'quit' }]), true);
   } finally {
     cleanup();
   }

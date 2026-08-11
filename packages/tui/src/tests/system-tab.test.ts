@@ -82,7 +82,7 @@ import * as viewmodel from '../viewmodel.js';
 /** The System tab index used to DRIVE the entry points without passing a raw
  *  `undefined` tab (mirrors KNOW_TAB=2 in state.test.ts). The exported
  *  state.SYSTEM_TAB is asserted to equal this by the registry test below. */
-const SYS_TAB = 5;
+const SYS_TAB = 4;
 
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 
@@ -260,36 +260,35 @@ const key = (name: string) => ({ kind: 'key', name });
 // TABS registry — the sixth tab; hotkey + hit-test scale by TABS.length
 // ===========================================================================
 
-test('phase4 registry: TABS gains "System" as the sixth entry; state.SYSTEM_TAB === 5', () => {
+test('phase4 registry: TABS gains "System" as the fifth entry; state.SYSTEM_TAB === 4', () => {
   assert.strictEqual(typeof STc.SYSTEM_TAB, 'number', 'state.SYSTEM_TAB must be an exported number');
-  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 5 (appended sixth)');
-  assert.equal(TABS.length, 6, 'TABS grows to six entries');
-  assert.equal(TABS[5], 'System', 'TABS[5] is the "System" label');
+  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 4 (appended fifth)');
+  assert.equal(TABS.length, 5, 'TABS has five entries');
+  assert.equal(TABS[4], 'System', 'TABS[4] is the "System" label');
 });
 
-test('phase4 registry: the digit-6 hotkey scales via TABS.length and selects the System tab', () => {
+test('phase4 registry: the digit-5 hotkey scales via TABS.length and selects the System tab', () => {
   const { store, cleanup } = storeFixture();
   try {
-    // '6' is out of range while TABS.length is 5 (RED: stays on tab 0); once the
-    // sixth tab is registered it selects index 5 (GREEN). Hotkeys scale by count.
-    const r = SR.reduce(store, st(), { kind: 'char', ch: '6' });
-    assert.equal(r.ui.tab, SYS_TAB, "the '6' hotkey switches to the sixth (System) tab");
+    // '5' selects index 4, the last of five tabs. Hotkeys scale by count.
+    const r = SR.reduce(store, st(), { kind: 'char', ch: '5' });
+    assert.equal(r.ui.tab, SYS_TAB, "the '5' hotkey switches to the fifth (System) tab");
   } finally {
     cleanup();
   }
 });
 
-test('phase4 registry: a tab-bar click on the sixth cell hit-tests to the System tab (layout scales by TABS.length)', () => {
+test('phase4 registry: a tab-bar click on the fifth cell hit-tests to the System tab (layout scales by TABS.length)', () => {
   const { store, cleanup } = storeFixture();
   try {
     // the established tab-bar layout (state.test.ts: Notes clicked at x=9) is a
     // 1-space-padded cell per label on terminal row 2: cell_i starts at
-    // 1 + Σ_{j<i}(len_j + 2); its label's first char is start+1. The sixth cell
+    // 1 + Σ_{j<i}(len_j + 2); its label's first char is start+1. The fifth cell
     // must appear by the SAME formula — that IS the scaling contract.
-    const start = 1 + TABS.slice(0, 5).reduce((acc, label) => acc + label.length + 2, 0);
+    const start = 1 + TABS.slice(0, 4).reduce((acc, label) => acc + label.length + 2, 0);
     const x = start + 1;
     const r = SR.reduce(store, st(), { kind: 'click', x, y: 2 });
-    assert.equal(r.ui.tab, SYS_TAB, 'clicking the sixth tab cell selects the System tab');
+    assert.equal(r.ui.tab, SYS_TAB, 'clicking the fifth tab cell selects the System tab');
   } finally {
     cleanup();
   }

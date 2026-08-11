@@ -5,13 +5,10 @@
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
-import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, noteCards, runView, type Card, type RunView } from './viewmodel.js';
+import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, noteCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
-export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'Live-run', 'System'] as const;
-/** the live-run tab — a FIXED index (no longer the last entry: System follows it),
- *  so run-tab semantics track 'Live-run' rather than TABS.length-1 */
-export const RUN_TAB = TABS.indexOf('Live-run');
+export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'System'] as const;
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
 export const KNOWLEDGE_TAB = 2;
 export const QUEUE_TAB = 3;
@@ -28,8 +25,8 @@ export interface UiState {
   searchQuery: string;
   /** body scroll offset in display LINES (0-based) for the scrollable card tabs
    *  (Todos/Notes/Knowledge). Absent → 0. buildDashboardState clamps it to the
-   *  content height each frame; the queue/run tabs have fixed layouts and never
-   *  scroll. Wheel moves it; ↑/↓ adjust it to keep the selected row in view. */
+   *  content height each frame; the queue tab has a fixed layout and never
+   *  scrolls. Wheel moves it; ↑/↓ adjust it to keep the selected row in view. */
   scroll?: number;
   /** System tab (run r-f9a7): the inline model/effort selector state machine.
    *  Absent → the plain roster is shown; present → a picker is open on
@@ -163,8 +160,6 @@ export interface Viewport {
 export interface DashboardState {
   tabs: { label: string; active: boolean }[];
   rows: Row[];
-  run?: RunView;
-  runSelected: boolean;
   emptyMessage?: string;
   footer: string;
   /** Knowledge-tab search bar (always-visible field), shown on the spacer line */
@@ -203,7 +198,7 @@ export interface DashboardState {
   bodyTop: number;
   /** body scroll offset in display lines, clamped to [0, total − maxBodyLines].
    *  The render draws the body window starting at this line and screenLineToRow
-   *  adds it back, so screen and clicks agree. 0 on the queue/run tabs and
+   *  adds it back, so screen and clicks agree. 0 on the queue tab and
    *  whenever the body fits (maxBodyLines ≥ content, e.g. an unbounded viewport). */
   scroll: number;
 }
@@ -292,7 +287,6 @@ function rankTermsOf(query: string): string[] {
  * (every term prefix-starred). The other card tabs stay flat lists.
  */
 export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedStores): Node[] {
-  if (ui.tab === RUN_TAB) return [];
   if (ui.tab === QUEUE_TAB) return queueCards(store).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
   if (ui.tab !== KNOWLEDGE_TAB) return cardsFor(store, ui.tab).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
 
@@ -513,7 +507,6 @@ function systemDashboardState(
   return {
     tabs: TABS.map((label, i) => ({ label, active: i === ui.tab })),
     rows,
-    runSelected: false,
     emptyMessage: view.rows.length ? undefined : '(no configured models)',
     footer: `←/→ or 1-${TABS.length} tabs · ↑/↓ rows · enter change model/effort · esc cancel · q quit`,
     banner,
@@ -621,34 +614,27 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
   }
   // body scroll (scrollable card tabs only): clamp the persisted offset to the
   // content height so the render window and the click hit-test agree. The
-  // queue/run tabs have fixed layouts and never scroll; an unbounded viewport
+  // queue tab has a fixed layout and never scrolls; an unbounded viewport
   // (maxBodyLines = Infinity, e.g. tests) yields maxScroll 0 → scroll 0, so all
   // pre-scroll behaviour is unchanged.
-  const scrollable = ui.tab !== QUEUE_TAB && ui.tab !== RUN_TAB;
+  const scrollable = ui.tab !== QUEUE_TAB;
   const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
   const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
   const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
-  const run = ui.tab === RUN_TAB ? runView(store) : undefined;
   // the Knowledge search field is ALWAYS visible (no '/' toggle) — its line
   // shows on the spacer row on the Knowledge tab regardless of the query.
   const searchActive = ui.tab === KNOWLEDGE_TAB;
   return {
     tabs: TABS.map((label, i) => ({ label, active: i === ui.tab })),
     rows,
-    run,
-    runSelected: ui.tab === RUN_TAB,
     emptyMessage:
-      ui.tab === RUN_TAB
-        ? run
-          ? undefined
-          : 'no active run'
-        : nodes.length === 0
-          ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery
-            ? '(no matches)'
-            : ui.tab === QUEUE_TAB
-              ? '(queue empty)'
-              : '(empty)'
-          : undefined,
+      nodes.length === 0
+        ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery
+          ? '(no matches)'
+          : ui.tab === QUEUE_TAB
+            ? '(queue empty)'
+            : '(empty)'
+        : undefined,
     footer:
       `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
       (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : ''),
@@ -687,8 +673,8 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
   // a tab switch resets the cursor + scroll AND dismisses any open selector
   const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined });
 
-  // the queue/run tabs have fixed layouts; only the card tabs scroll
-  const scrollable = ui.tab !== QUEUE_TAB && ui.tab !== RUN_TAB;
+  // the queue tab has a fixed layout; only the card tabs scroll
+  const scrollable = ui.tab !== QUEUE_TAB;
   const buildSelf = (uiNext: UiState): DashboardState =>
     buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster);
 
@@ -716,11 +702,6 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
 
   const activate = (index: number): UiState => {
-    if (ui.tab === RUN_TAB) {
-      const run = runView(store);
-      if (run) effects.push({ type: 'select', recordType: 'run', id: run.id });
-      return ui;
-    }
     const node = nodes[index];
     if (!node) return ui;
     if (node.kind === 'category') {
@@ -871,7 +852,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       return { ui: switchTab(event.index), effects };
     case 'wheel': {
       // wheel scrolls the viewport by lines (so you can read a tall expanded
-      // record); on the fixed queue/run tabs it keeps moving the cursor.
+      // record); on the fixed queue tab it keeps moving the cursor.
       if (!scrollable) return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
       const desired = (ui.scroll ?? 0) + (event.dy > 0 ? 3 : -3);
       const st = buildSelf({ ...ui, scroll: desired });
