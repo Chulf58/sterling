@@ -261,8 +261,10 @@ test('H20: reads the AskUserQuestion surface, which has NO prompt field — the 
     );
     assert.equal(r.code, 0, 'never blocks (AC7)');
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /No surface may display when the next breach arrives/, 'the ruling reaches the conductor BEFORE the question is asked');
+    assert.match(ctx, /No surface may display when the next breach arrives/, 'the ruling reaches the conductor (post-answer — the audit framing owns the timing)');
     assert.match(ctx, /put a CHOICE TO THE USER/, 'the header names the surface — a user answer becomes authoritative');
+    assert.match(ctx, /POST-ANSWER AUDIT, NOT A GATE/, 'the header owns its timing honestly — it cannot arrive before the ask (research_finding 63a9646d)');
+    assert.doesNotMatch(ctx, /BEFORE ASKING/, 'the unachievable pre-ask framing is gone');
     assert.doesNotMatch(ctx, /about to dispatch/, 'and does NOT use the dispatch wording');
   } finally {
     cleanup();

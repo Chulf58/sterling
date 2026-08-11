@@ -54,6 +54,9 @@ function envelope(type, at = NOW) {
 const CONFIG = {
   toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**', '**/*.test.mjs'], run_commands: { test: 'node --test' } }],
   caps: { dispatch_per_agent_type: 25, inner_loop_n: 3, outer_loop_m: 2, research_resume_per_phase: 2, phase_death_cap: 1 },
+  // The pressure tests' model is MAPPED (as the shipped default-config maps the
+  // live tier models); the unmapped-model gauge warning has its own test.
+  context_watch: { windows: { default: 200_000, 'claude-fable-5': 200_000 } },
 };
 
 function makeProject({ withRun = false } = {}) {
@@ -1213,8 +1216,11 @@ test('H18 test-write wall: the test-writer writes ONLY test files; source / enfo
     // DENIED — outside the repository
     assert.equal(w('/etc/passwd').code, 2, 'a path outside the repo is denied');
 
-    // MultiEdit is gated identically
+    // MultiEdit and Edit are gated identically (Edit joined the grant + matcher
+    // 2026-08-11 so incremental test additions don't force wholesale rewrites)
     assert.equal(w(join(dir, 'src', 'x.mjs'), 'MultiEdit').code, 2, 'MultiEdit to source is denied too');
+    assert.equal(w(join(dir, 'src', 'x.mjs'), 'Edit').code, 2, 'Edit to source is denied too');
+    assert.equal(w(join(dir, 'tests', 'export.test.mjs'), 'Edit').code, 0, 'Edit within a test glob is allowed');
   } finally {
     cleanup();
   }
@@ -2575,6 +2581,40 @@ test('H10 conductor pressure: hard denies ONCE per session naming fill, threshol
     assert.equal(readPressureFile(dir).level, 'hard');
     const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(second.code, 0, 'once per session — marker spent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: an UNMAPPED model warns loudly ONCE at any fill level — the gauge names the model, the default window, and the config key to add', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // 25% of the 200k DEFAULT — a plausible-looking number, previously silent:
+    // the dangerous case (2026-08-11 retrospective: 48% believed at ~10% of real
+    // capacity because the project config lacked the model's window entry).
+    writeConductorTranscript(dir, 50_000, { model: 'claude-novel-9' });
+    const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(first.code, 2, 'the gauge warning soft-blocks once even below every threshold');
+    assert.match(first.stderr, /claude-novel-9/, 'names the unmapped model');
+    assert.match(first.stderr, /context_watch\.windows/, 'names the config key to add');
+    assert.match(first.stderr, /200000|200[,_]000|200k/i, 'names the default window it fell back to');
+    const sample = readPressureFile(dir);
+    assert.equal(sample.unmapped_model, 'claude-novel-9', 'the sample carries the unmapped model');
+    assert.equal(sample.level, 'below_soft', 'classification still runs against the default');
+    const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(second.code, 0, 'once per session — gauge marker spent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 conductor pressure: a MAPPED model stays silent below thresholds — no gauge warning, no unmapped_model in the sample', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeConductorTranscript(dir, 50_000); // claude-fable-5, mapped in CONFIG
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'mapped + below-soft releases clean');
+    assert.equal(readPressureFile(dir).unmapped_model, undefined);
   } finally {
     cleanup();
   }

@@ -971,8 +971,7 @@ export class SterlingTools {
    * their own tool and a second path would let the record_links index drift.
    */
   knowledgeAppend(id: string, field: string, entries: unknown[]): { record: DurableRecord; warnings: string[] } {
-    const old = this.store.get(id);
-    if (!old) throw new Error(`knowledge_append: no record '${id}'`);
+    const old = this.resolveRecordId(id, 'knowledge_append');
     if (!Array.isArray(entries) || entries.length === 0) {
       throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
     }
@@ -991,7 +990,7 @@ export class SterlingTools {
     // Straight through the ONE update path — every guarantee above rides along,
     // including the oversize check (board 8390f8fa): the write's result carries
     // a warning on the SAME channel knowledge_update uses.
-    const record = this.knowledgeUpdate(id, { [field]: next });
+    const record = this.knowledgeUpdate(old.id, { [field]: next });
     return { record, warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)] };
   }
 
@@ -1028,8 +1027,7 @@ export class SterlingTools {
     find: string,
     replace: string
   ): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number }; warnings: string[] } {
-    const old = this.store.get(id);
-    if (!old) throw new Error(`knowledge_edit: no record '${id}'`);
+    const old = this.resolveRecordId(id, 'knowledge_edit');
     if (typeof find !== 'string' || find.length === 0) {
       throw new Error(`knowledge_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
     }
@@ -1081,7 +1079,7 @@ export class SterlingTools {
       }
       const nextEl = { ...el, [sub]: cur.replace(find, replace) };
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
-      const record = this.knowledgeUpdate(id, { [base]: nextArr });
+      const record = this.knowledgeUpdate(old.id, { [base]: nextArr });
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
@@ -1113,7 +1111,7 @@ export class SterlingTools {
       );
     }
     const next = current.replace(find, replace);
-    const record = this.knowledgeUpdate(id, { [field]: next });
+    const record = this.knowledgeUpdate(old.id, { [field]: next });
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
@@ -1165,11 +1163,23 @@ export class SterlingTools {
     const remedy =
       'split it (one feature_article per concept FAMILY — the concept-article granularity rubric; a sub-concept splits out only when it accrues its own intent + interactions distinct from the parent) ' +
       'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
-    this.maintenanceEnqueue({
-      reason: 'article_oversize',
-      text: `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
-      file_keys: (a.files ?? []).map((f) => f.path),
-    });
+    const text = `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`;
+    const fileKeys = (a.files ?? []).map((f) => f.path);
+    // Dedup on the SLUG, here at the site that owns the text format (board
+    // 3acb0126): the generic enqueue dedup keys on the exact sorted file set,
+    // and a reconcile that legitimately grows files[] changes that key and
+    // mints a duplicate — measured 2026-08-11, contradicting decision
+    // 86216751's refreshes-in-place contract. The slug is the one handle
+    // stable across versions AND files[] changes; the closing quote in the
+    // marker keeps a slug from prefix-matching a longer sibling.
+    const marker = `article '${a.slug}'`;
+    const open = this.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }) as unknown as { id: string; text?: string }[];
+    const existing = open.find((t) => (t.text ?? '').startsWith(marker));
+    if (existing) {
+      this.boardUpdate(existing.id, { text, file_keys: fileKeys });
+    } else {
+      this.maintenanceEnqueue({ reason: 'article_oversize', text, file_keys: fileKeys });
+    }
     return [
       `feature_article '${a.slug}' non-history body is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
         `A deduped article_oversize maintenance item has been queued.`,
@@ -1434,8 +1444,30 @@ export class SterlingTools {
    * than picking: a prefix collision means the caller's citation is under-specified,
    * and silently serving one of two records is how a reader ends up acting on the
    * wrong one (P5).
+   *
+   * Extracted to `resolveRecordId` (board slice 85ecfe43) so the five write
+   * tools that also take a caller-addressed id (knowledge_append, _edit,
+   * _update, _retire, _link) resolve through the exact same three-form
+   * contract instead of a bare store.get — knowledge_get is now a thin
+   * wrapper over it.
    */
   knowledgeGet(id: string): DurableRecord {
+    return this.resolveRecordId(id, 'knowledge_get');
+  }
+
+  /**
+   * Shared id resolution (board slice 85ecfe43): full uuid, exact slug (board
+   * 1e639f32), or the 8-char citation prefix (decision 27f148c2) — the same
+   * three forms knowledge_get has always resolved, now reused by every write
+   * tool that addresses a record by caller-supplied id so none of them can
+   * drift from knowledge_get's own resolution or its ambiguity wording.
+   *
+   * `toolName` only changes the error prefix. `noun` lets a caller addressing
+   * a LINK TARGET (knowledge_link's `to`) keep its existing "no target
+   * record" phrasing distinct from "no record" for a primary subject —
+   * callers outside this file already match on that distinction.
+   */
+  private resolveRecordId(id: string, toolName: string, noun: 'record' | 'target record' = 'record'): DurableRecord {
     const direct = this.store.get(id);
     if (direct) return direct;
     // SLUG resolution before prefix resolution (board 1e639f32): an exact slug
@@ -1447,19 +1479,19 @@ export class SterlingTools {
     if (bySlug.length === 1) return bySlug[0];
     if (bySlug.length > 1) {
       throw new Error(
-        `knowledge_get: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join('; ')}) — a slug must name one record; cite the id.`
+        `${toolName}: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join('; ')}) — a slug must name one record; cite the id.`
       );
     }
     if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
       throw new Error(
-        `knowledge_get: no record '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
+        `${toolName}: no ${noun} '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
       );
     }
     const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
-    if (hits.length === 0) throw new Error(`knowledge_get: no record '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
+    if (hits.length === 0) throw new Error(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
     if (hits.length > 1) {
       throw new Error(
-        `knowledge_get: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits
+        `${toolName}: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits
           .map((r) => `${r.id} (${r.type}, ${r.status})`)
           .join('; ')}. Cite more of the id.`
       );
@@ -1467,14 +1499,13 @@ export class SterlingTools {
     const record = this.store.get(hits[0].id);
     // The index and the bodies come from the same rows, so a hit with no body is
     // a torn store, not a miss — say which it is rather than reporting "no record".
-    if (!record) throw new Error(`knowledge_get: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
+    if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
     return record;
   }
 
   /** Versioned change (§10): new version + supersede prior. Never mutates in place. */
   knowledgeUpdate(id: string, body: Record<string, unknown>): DurableRecord {
-    const old = this.store.get(id);
-    if (!old) throw new Error(`knowledge_update: no record '${id}'`);
+    const old = this.resolveRecordId(id, 'knowledge_update');
     this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
     const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, ...overrides } = body;
@@ -1515,12 +1546,12 @@ export class SterlingTools {
     if (next.type === 'feature_article' || next.type === 'reference_material') {
       next.file_baselines = this.computeBaselines(next);
     }
-    const updated = this.store.supersede(id, next);
+    const updated = this.store.supersede(old.id, next);
     // The item's feature_link points to whatever version was current when it was
     // raised, which may now be an ancestor, so match the whole supersede chain —
     // computed for every type, since promotion_review (below) can point at any
     // supersedable record, not only feature_article/reference_material.
-    const chain = new Set<string>([id]);
+    const chain = new Set<string>([old.id]);
     for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
       if (link.rel === 'supersedes') chain.add(link.target_id);
     }
@@ -1987,8 +2018,9 @@ export class SterlingTools {
    */
   knowledgeRetire(id: string, inFavorOf: string): { retired: DurableRecord } {
     if (id === inFavorOf) throw new Error(`knowledge_retire: a record cannot be retired in favour of itself ('${id}')`);
-    const record = this.store.get(id);
-    if (!record) throw new Error(`knowledge_retire: no record '${id}'`);
+    // Only the id BEING RETIRED resolves through the shared contract
+    // (slug/prefix/uuid) — in_favor_of stays a plain lookup, unchanged.
+    const record = this.resolveRecordId(id, 'knowledge_retire');
     // The transient/user surfaces have their own P4 removal paths and must not
     // acquire a second one that leaves a superseded husk behind in a queue.
     if (record.type === 'todo') {
@@ -2013,7 +2045,7 @@ export class SterlingTools {
     // and there is no deferred retirement check to declare. Emitting one would
     // claim an obligation nobody planned — the opposite of what the loud-skip
     // channel is for.
-    const retired = this.store.retireInFavorOf(id, inFavorOf, this.now());
+    const retired = this.store.retireInFavorOf(record.id, inFavorOf, this.now());
     return { retired };
   }
 
@@ -2201,9 +2233,17 @@ export class SterlingTools {
     return { action, machine_state: nextState, run_id: run.id };
   }
 
-  /** knowledge_link (§10): typed graph edge. */
+  /**
+   * knowledge_link (§10): typed graph edge. Both endpoints resolve through the
+   * shared contract (board slice 85ecfe43) before reaching store.addLink, so a
+   * slug or citation prefix links the SAME record knowledge_get would show —
+   * `to` keeps the 'target record' noun addLink's own target-not-found error
+   * already used, so an unresolvable target still reads the way it always has.
+   */
   knowledgeLink(from: string, rel: string, to: string): DurableRecord {
-    return this.store.addLink(from, rel, to);
+    const fromRecord = this.resolveRecordId(from, 'knowledge_link');
+    const toRecord = this.resolveRecordId(to, 'knowledge_link', 'target record');
+    return this.store.addLink(fromRecord.id, rel, toRecord.id);
   }
 
   /** run_escalate (§10): surface a judgment branch / typed escalation onto the run record. */

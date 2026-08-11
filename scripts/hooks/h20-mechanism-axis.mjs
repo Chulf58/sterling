@@ -1,6 +1,16 @@
 // H20 — mechanism-axis delivery at DISPATCH (board 62806222; concept family
-// knowledge-delivery, member 7). Registered at PreToolUse Task|Agent. Like every
-// delivery member it NEVER blocks: this hook has no exit-2 path (AC7).
+// knowledge-delivery, member 7). Registered at PreToolUse on TWO matcher entries:
+// Task|Agent (the dispatch surface) and AskUserQuestion (the question surface,
+// decision f5638a84). Like every delivery member it NEVER blocks: this hook has
+// no exit-2 path (AC7).
+//
+// TIMING, probed live 2026-08-11 (research_finding 63a9646d-2f0d-406e-8a36-9e95d0b11dbd):
+// PreToolUse additionalContext reaches the model WITH the tool result — and
+// structurally, a PreToolUse hook fires only after the model has already emitted
+// the call. On the dispatch surface that is still pre-flight enough to matter
+// (the conductor reads it before acting on the subagent's report); on the
+// question surface it lands after the user has ANSWERED, so the question payload
+// is a POST-ANSWER AUDIT, never a pre-ask gate — the header wording says so.
 //
 // WHY IT EXISTS, and why no H19 improvement could have covered it: H19 joins the
 // store on the FILE PATH being touched. An anti_pattern is filed against the file
@@ -140,10 +150,12 @@ try {
   // the store then holds both (board 4e6eb510). So the question wording is
   // deliberately the stronger of the two.
   const header = isQuestion
-    ? `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to put a CHOICE TO THE USER. ` +
+    ? `STERLING MECHANISM-AXIS DELIVERY (H20) — you have just put a CHOICE TO THE USER. ` +
       `The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. ` +
-      `READ THESE BEFORE ASKING: if one of them already decides this, you are inviting a ruling that has already been made — ` +
-      `and a user's answer becomes authoritative, so a bad option that gets picked does not just waste work, it manufactures a contradiction.`
+      `THIS IS A POST-ANSWER AUDIT, NOT A GATE — it reaches you with the answer, never before the ask (probed 2026-08-11). ` +
+      `Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them ` +
+      `already decides the question, the pick just manufactured a contradiction with a settled ruling — ` +
+      `disclose the record to the user and re-affirm before acting on the answer.`
     : `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to dispatch '${input.tool_input?.subagent_type ?? 'an agent'}'. ` +
       `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
       `Path-scoped delivery cannot find these. Check them BEFORE the brief goes out — a fan-out multiplies a bad premise by N.`;

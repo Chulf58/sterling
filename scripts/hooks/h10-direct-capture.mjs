@@ -65,7 +65,14 @@ try {
         store.recordCheckSkipped('conductor-pressure', reason ?? 'format_unparseable', undefined, now);
         sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, reason, at: now };
       } else {
-        const windowSize = (model && cw.windows[model]) || cw.windows.default;
+        // A model with no windows entry falls back to the default — and a wrong
+        // denominator that still yields a BELIEVABLE percentage is the dangerous
+        // case (2026-08-11 consuming-project retrospective: 48% accepted at ~10%
+        // of real capacity). The unmapped model rides the sample so the release
+        // path can warn ONCE per session at ANY fill level, not only above 100%.
+        const mapped = Boolean(model && cw.windows[model]);
+        const windowSize = mapped ? cw.windows[model] : cw.windows.default;
+        const unmapped = !mapped && model ? { unmapped_model: model } : {};
         const fill = fillPct(usage, windowSize);
         if (fill > 100) {
           // Impossible with a correct denominator — the windows map lacks this model's true
@@ -73,10 +80,10 @@ try {
           // Evidence of MISCONFIGURATION, not pressure: classify unknown + check_skipped
           // (loud, fail-open) instead of false-hard-blocking every session on this machine.
           store.recordCheckSkipped('conductor-pressure', `window_mismatch:${model ?? 'unknown-model'}:${fill.toFixed(1)}pct`, undefined, now);
-          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', at: now };
+          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', ...unmapped, at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? 'hard' : fill >= cw.conductor.soft_pct ? 'soft' : 'below_soft';
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
         }
       }
       mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
@@ -137,6 +144,21 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  // WINDOW-GAUGE WARNING (retro slice 2): an unmapped model means every fill %
+  // this session is measured against the default window — say so loudly once,
+  // at any fill level, until the config gains the entry. Same marker pattern as
+  // pressure (latest-value cell keyed by session_id; P4 by supersession).
+  const gaugeMarker = join(input.cwd, '.sterling', 'transient', 'gauge-warned.json');
+  const gaugeSpent = () => {
+    try {
+      return JSON.parse(readFileSync(gaugeMarker, 'utf8')).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const gaugePart = () =>
+    `H10 window gauge: transcript model '${pressure.unmapped_model}' has NO entry in config.context_watch.windows — pressure is measured against the ${pressure.window}-token DEFAULT, so every fill % this session may be wrong in either direction, and a plausible-looking number is the dangerous case. Fix: add context_watch.windows["${pressure.unmapped_model}"] with the model's true window to .sterling/config.json. This notice fires once per session.`;
   // DELEGATION WATCH (decision 8b00e77a — the mechanical half of 677f1639): measure
   // hand-work vs dispatches from the conductor's OWN transcript. Reads are recorded
   // nowhere else (touches.json = edits, session-events.json = research/dispatch), and
@@ -290,6 +312,10 @@ try {
       if (delegation && !delegationSpent()) {
         spendDelegationMarker();
         parts.push(delegationPart());
+      }
+      if (pressure.unmapped_model && !gaugeSpent()) {
+        spendGaugeMarker();
+        parts.push(gaugePart());
       }
       if (parts.length) deny(parts.join('\n\n'));
     }

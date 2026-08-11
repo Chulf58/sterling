@@ -78,6 +78,9 @@ function envelope(type, at = NOW) {
 const CONFIG = {
   toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**', '**/*.test.mjs'], run_commands: { test: 'node --test' } }],
   caps: { dispatch_per_agent_type: 25, inner_loop_n: 3, outer_loop_m: 2, research_resume_per_phase: 2, phase_death_cap: 1 },
+  // Map the fixture transcripts' model so H10's unmapped-model gauge warning
+  // (its own test lives in hooks-full.test.mjs) stays out of these assertions.
+  context_watch: { windows: { default: 200_000, 'claude-fable-5': 200_000 } },
 };
 
 function makeProject() {
