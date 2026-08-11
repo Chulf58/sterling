@@ -86,8 +86,8 @@ export const configSchema = z.object({
       // different consequences (run escalation / dispatch deny in enforce mode).
       conductor: z
         .object({
-          soft_pct: z.number().positive().default(65),
-          hard_pct: z.number().positive().default(80),
+          soft_pct: z.number().positive().default(35),
+          hard_pct: z.number().positive().default(50),
         })
         .default({}),
     })
