@@ -2552,7 +2552,7 @@ test('H10 conductor pressure: below-soft classifies below_soft, no deny, sample 
 test('H10 conductor pressure: soft classifies soft — advisory only, never a standalone deny', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeConductorTranscript(dir, 140_000); // 70% — between soft 65 and hard 80 defaults
+    writeConductorTranscript(dir, 80_000); // 40% — between soft 35 and hard 50 defaults
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(r.code, 0, 'soft pressure never blocks on its own (P1)');
     assert.equal(readPressureFile(dir).level, 'soft');
@@ -2564,12 +2564,12 @@ test('H10 conductor pressure: soft classifies soft — advisory only, never a st
 test('H10 conductor pressure: hard denies ONCE per session naming fill, threshold and the delegation remedy; spent marker releases the next Stop', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeConductorTranscript(dir, 170_000); // 85% — past hard 80 default
+    writeConductorTranscript(dir, 170_000); // 85% — past hard 50 default
     const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(first.code, 2, 'hard pressure soft-blocks once');
     assert.match(first.stderr, /conductor context pressure/i);
     assert.match(first.stderr, /85\.0%/, 'names the fill');
-    assert.match(first.stderr, /80%/, 'names the threshold');
+    assert.match(first.stderr, /50%/, 'names the threshold');
     assert.match(first.stderr, /delegat/i, 'names the delegation remedy');
     assert.doesNotMatch(first.stderr, /\/clear/, 'slice 1 never instructs /clear');
     assert.equal(readPressureFile(dir).level, 'hard');
@@ -2697,7 +2697,7 @@ function gitProject() {
 test('H10 slice boundary: soft pressure + dirty tree soft-blocks ONCE naming the commit boundary; clean release after', () => {
   const { dir, dirty, cleanup } = gitProject();
   try {
-    writeConductorTranscript(dir, 140_000); // 70% of the 200k default — soft
+    writeConductorTranscript(dir, 80_000); // 40% of the 200k default — soft
     dirty();
     const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(first.code, 2, 'soft + dirty tree blocks once');
@@ -2714,7 +2714,7 @@ test('H10 slice boundary: soft pressure + dirty tree soft-blocks ONCE naming the
 test('H10 slice boundary: soft pressure + CLEAN tree stays advisory-silent (commit-ready needs no nudge)', () => {
   const { dir, cleanup } = gitProject();
   try {
-    writeConductorTranscript(dir, 140_000);
+    writeConductorTranscript(dir, 80_000);
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(r.code, 0, 'clean tree at soft never blocks');
   } finally {
@@ -2739,7 +2739,7 @@ test('H10 slice boundary: hard pressure + dirty tree carries the boundary addend
 test('H10 slice boundary: soft-boundary block does not suppress a later hard escalation; hard marker ends it', () => {
   const { dir, dirty, cleanup } = gitProject();
   try {
-    writeConductorTranscript(dir, 140_000);
+    writeConductorTranscript(dir, 80_000);
     dirty();
     assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 2, 'soft boundary block');
     writeConductorTranscript(dir, 170_000); // escalate to hard
@@ -2755,7 +2755,7 @@ test('H10 slice boundary: soft-boundary block does not suppress a later hard esc
 test('H10 slice boundary: no git degrades LOUD and open — soft + non-repo never blocks, check_skipped recorded', () => {
   const { dir, store, cleanup } = makeProject(); // no git init
   try {
-    writeConductorTranscript(dir, 140_000);
+    writeConductorTranscript(dir, 80_000);
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(r.code, 0, 'advisory fails open');
     assert.ok(
