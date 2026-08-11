@@ -5,13 +5,13 @@
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
-import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, noteCards, type Card } from './viewmodel.js';
+import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
-export const TABS = ['Todos', 'Notes', 'Knowledge', 'Queue', 'System'] as const;
+export const TABS = ['Todos', 'Knowledge', 'Queue', 'System'] as const;
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
-export const KNOWLEDGE_TAB = 2;
-export const QUEUE_TAB = 3;
+export const KNOWLEDGE_TAB = TABS.indexOf('Knowledge');
+export const QUEUE_TAB = TABS.indexOf('Queue');
 /** the System tab (run r-f9a7): the agent roster with drift + catalog status,
  *  and the inline model/effort swap selector — the TUI's first write surface */
 export const SYSTEM_TAB = TABS.indexOf('System');
@@ -24,7 +24,7 @@ export interface UiState {
    *  directly (no '/' toggle). Persists across tab switches until ESC clears it. */
   searchQuery: string;
   /** body scroll offset in display LINES (0-based) for the scrollable card tabs
-   *  (Todos/Notes/Knowledge). Absent → 0. buildDashboardState clamps it to the
+   *  (Todos/Knowledge). Absent → 0. buildDashboardState clamps it to the
    *  content height each frame; the queue tab has a fixed layout and never
    *  scrolls. Wheel moves it; ↑/↓ adjust it to keep the selected row in view. */
   scroll?: number;
@@ -234,7 +234,6 @@ export type UiEvent =
 
 export function cardsFor(store: SterlingStore, tab: number): Card[] {
   if (tab === 0) return todoCards(store);
-  if (tab === 1) return noteCards(store);
   return [];
 }
 
@@ -242,7 +241,7 @@ export function cardsFor(store: SterlingStore, tab: number): Card[] {
  * A navigable line-owning entry. On the Knowledge tab the tree has up to four
  * node kinds (category → source → sub-category → record), each carrying its
  * depth for indentation; card nodes also flag whether they are knowledge-tab
- * cards (readable layout) or plain cards (todos/notes/queue, the legacy
+ * cards (readable layout) or plain cards (todos/queue, the legacy
  * expansion). The sub-category level is OMITTED when a source resolves to a
  * single bucket (collapse-single-bucket), so its cards sit at depth 2 directly
  * under the source. Every other tab is a flat list of plain card nodes at
@@ -565,7 +564,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
         for (const text of wrapText(card.body, wrapWidth)) lines.push({ text: indent + text, kind: 'body' });
         lines.push({ text: clipEllipsis(`${indent}${card.detail}`, width), kind: 'meta' });
       } else if (expanded) {
-        // legacy card expansion (todos/notes/queue): first wrapped body line
+        // legacy card expansion (todos/queue): first wrapped body line
         // carries the 'title' kind, then body lines, then meta.
         const prefix = 2 + pad.length;
         const wrapWidth = Number.isFinite(width) ? Math.max(1, width - prefix) : width;

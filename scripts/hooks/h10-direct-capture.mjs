@@ -394,9 +394,9 @@ try {
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
 
-  // Widened captured set: decision|anti_pattern|note|feature_article|research_finding|disconfirmed_hypothesis
+  // Widened captured set: decision|anti_pattern|feature_article|research_finding|disconfirmed_hypothesis
   const captured = store
-    .query({ types: ['decision', 'anti_pattern', 'note', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000, include_unconfirmed: true })
+    .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000, include_unconfirmed: true })
     .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
 
   // Research duty satisfaction: research_finding|decision|anti_pattern since earliest research event.
@@ -543,14 +543,14 @@ try {
         `capture drafted and riding an in-flight commit/agent → the capture_pending MCP tool. A false declaration is drift.`;
       if (hasDebug) {
         let capturePart =
-          `H10: direct-mode work included debug investigation but nothing was captured (no decision/note/article since ${earliest}).\n` +
+          `H10: direct-mode work included debug investigation but nothing was captured (no decision/article since ${earliest}).\n` +
           `Capture what was learned inline — expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).\n` +
           declareLine;
         capturePart += integrityNote;
         parts.push(capturePart);
       } else {
         parts.push(
-          `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/note/article since ${earliest}).\n` +
+          `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/article since ${earliest}).\n` +
             `Capture what was learned inline (knowledge_create). ${declareLine}` +
             integrityNote
         );

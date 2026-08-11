@@ -18,7 +18,7 @@ export interface Card {
 
 // ---------------------------------------------------------------------------
 // Knowledge category registry (AC3) — the ordered set of knowledge types the
-// TUI surfaces. note has its own tab; disconfirmed_hypothesis is niche.
+// TUI surfaces. disconfirmed_hypothesis is niche.
 // ---------------------------------------------------------------------------
 export const KNOWLEDGE_CATEGORIES: { type: string; label: string }[] = [
   { type: 'feature_article',   label: 'Features' },
@@ -176,7 +176,7 @@ export function subgroupKey(path: string): string {
   return '(root)';
 }
 
-/** Records with no file keys (research_finding, note, url/pdf references, empty
+/** Records with no file keys (research_finding, url/pdf references, empty
  *  articles) cluster here; the state layer SKIPS the sub-category level when a
  *  source resolves to only this one bucket (collapse-single-bucket, P1). */
 export const SUBCAT_GENERAL = '(general)';
@@ -325,19 +325,6 @@ export function activityLines(store: SterlingStore, now: () => Date = () => new 
     const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
     const stamp = `${sameDay ? '' : `${pad(at.getMonth() + 1)}-${pad(at.getDate())} `}${pad(at.getHours())}:${pad(at.getMinutes())}`;
     return `${stamp} ${e.verb} · ${e.title}`;
-  });
-}
-
-export function noteCards(store: SterlingStore): Card[] {
-  return store.query({ types: ['note'], cap: 200 }).map((n) => {
-    const note = n as unknown as { id: string; raw_text: string; captured_at: string; derived: string[] };
-    return {
-      id: note.id,
-      type: 'note',
-      title: note.raw_text.split('\n')[0].slice(0, 80),
-      body: note.raw_text,
-      detail: `captured ${note.captured_at}${note.derived.length ? ` · ${note.derived.length} extraction(s)` : ''}`,
-    };
   });
 }
 

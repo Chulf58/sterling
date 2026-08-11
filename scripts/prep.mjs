@@ -72,9 +72,9 @@ const capOmissionsConcept = Math.max(0, conceptPool.length - conceptSlice.length
 // Mandatory items (§3.7): known_gaps on returned articles touching the phase's
 // files — a mechanically proven map of prior blind spots. severity_block
 // anti-patterns join this list when the type lands (full build). When it does,
-// keep the query on DEFAULT retrieval (no include_unconfirmed): an H11-derived
-// anti_pattern's severity is unconfirmed Haiku output steerable by note text
-// (decision a6a0dd7b) — it must not gate a phase until a human confirms it.
+// keep the query on DEFAULT retrieval (no include_unconfirmed): a machine-derived
+// anti_pattern's severity is unconfirmed extractor output steerable by its source
+// text (decision a6a0dd7b) — it must not gate a phase until a human confirms it.
 const fileSet = new Set(files);
 const mandatory = [];
 for (const rec of returned) {
@@ -149,8 +149,6 @@ function primaryField(rec) {
       return rec.answer;
     case 'reference_material':
       return rec.summary;
-    case 'note':
-      return rec.raw_text;
     default:
       return rec.title ?? '';
   }

@@ -11,7 +11,6 @@ import {
   decisionSchema,
   featureArticleSchema,
   todoSchema,
-  noteSchema,
   briefSchema,
   handoffSchema,
   runRecordSchema,
@@ -220,14 +219,7 @@ test('brief: attribution sections and verifiable_at syntax (§4)', () => {
   );
 });
 
-test('note schema and handoff/run-record transient shapes', () => {
-  noteSchema.parse({
-    ...envelope('note'),
-    raw_text: 'genesys api rate limits are per-org not per-token',
-    captured_at: NOW,
-    capture_source: 'tui',
-    derived: [],
-  });
+test('handoff/run-record transient shapes', () => {
   const h = handoffSchema.parse({
     phase_id: 'p1',
     agent_role: 'coder',
@@ -313,7 +305,6 @@ test('registry: full record set registered 1:1, unregistered type rejected loudl
     'decision',
     'disconfirmed_hypothesis',
     'feature_article',
-    'note',
     'reference_material',
     'research_finding',
     'todo',

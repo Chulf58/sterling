@@ -24,7 +24,7 @@ import * as viewmodel from '../viewmodel.js';
 //        the surgical installed-frontmatter projection, and a swap DECISION
 //        record titled 'Model swap: <key> <old>→<new> (System tab)'.
 //
-// Plus the phase-4 machinery the ACs ride on: the sixth TABS entry + hotkey/
+// Plus the phase-4 machinery the ACs ride on: the last TABS entry + hotkey/
 // hit-test scaling by TABS.length; the inline selector state machine
 // (open/navigate/commit/cancel); the effort rule (no xhigh/max for subagent
 // keys, xhigh only on coder_hard); the ^claude- model-value refusal; the
@@ -43,7 +43,7 @@ import * as viewmodel from '../viewmodel.js';
 // them, exactly as the run r-dd88 oracles defined the cat:/src: id conventions
 // and the { type:'select', ... } effect shape):
 //
-//   • state.SYSTEM_TAB === 5; TABS[5] === 'System'; TABS.length === 6.
+//   • state.SYSTEM_TAB === 3; TABS[3] === 'System'; TABS.length === 4.
 //   • buildSystemTab(snapshot, ui, width?) is a PURE projection returning
 //     { rows, banner }. rows carry ONE row per config.models KEY, in the
 //     configModels key insertion order, id 'sys:<key>'.
@@ -75,14 +75,14 @@ import * as viewmodel from '../viewmodel.js';
 //     unimplemented symbol yields a clean AssertionError, never a TypeError.
 //   • reduce ALREADY exists and is defensive, so the selector/commit tests
 //     drive it with a REAL store + the roster cast: today it ignores the extra
-//     arg and the tab-5 ui, emitting no swap effect → the AC5 assertions fail
+//     arg and the System-tab ui, emitting no swap effect → the AC5 assertions fail
 //     RED on AssertionError, never a crash.
 // ===========================================================================
 
 /** The System tab index used to DRIVE the entry points without passing a raw
  *  `undefined` tab (mirrors KNOW_TAB=2 in state.test.ts). The exported
  *  state.SYSTEM_TAB is asserted to equal this by the registry test below. */
-const SYS_TAB = 4;
+const SYS_TAB = 3;
 
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 
@@ -257,38 +257,38 @@ function findSwap(effects: { type: string }[]): ModelSwapEffect | undefined {
 const key = (name: string) => ({ kind: 'key', name });
 
 // ===========================================================================
-// TABS registry — the sixth tab; hotkey + hit-test scale by TABS.length
+// TABS registry — the last tab; hotkey + hit-test scale by TABS.length
 // ===========================================================================
 
-test('phase4 registry: TABS gains "System" as the fifth entry; state.SYSTEM_TAB === 4', () => {
+test('phase4 registry: TABS gains "System" as the fourth entry; state.SYSTEM_TAB === 3', () => {
   assert.strictEqual(typeof STc.SYSTEM_TAB, 'number', 'state.SYSTEM_TAB must be an exported number');
-  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 4 (appended fifth)');
-  assert.equal(TABS.length, 5, 'TABS has five entries');
-  assert.equal(TABS[4], 'System', 'TABS[4] is the "System" label');
+  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 3 (appended fourth)');
+  assert.equal(TABS.length, 4, 'TABS has four entries');
+  assert.equal(TABS[3], 'System', 'TABS[3] is the "System" label');
 });
 
-test('phase4 registry: the digit-5 hotkey scales via TABS.length and selects the System tab', () => {
+test('phase4 registry: the digit-4 hotkey scales via TABS.length and selects the System tab', () => {
   const { store, cleanup } = storeFixture();
   try {
-    // '5' selects index 4, the last of five tabs. Hotkeys scale by count.
-    const r = SR.reduce(store, st(), { kind: 'char', ch: '5' });
-    assert.equal(r.ui.tab, SYS_TAB, "the '5' hotkey switches to the fifth (System) tab");
+    // '4' selects index 3, the last of four tabs. Hotkeys scale by count.
+    const r = SR.reduce(store, st(), { kind: 'char', ch: '4' });
+    assert.equal(r.ui.tab, SYS_TAB, "the '4' hotkey switches to the fourth (System) tab");
   } finally {
     cleanup();
   }
 });
 
-test('phase4 registry: a tab-bar click on the fifth cell hit-tests to the System tab (layout scales by TABS.length)', () => {
+test('phase4 registry: a tab-bar click on the last cell hit-tests to the System tab (layout scales by TABS.length)', () => {
   const { store, cleanup } = storeFixture();
   try {
-    // the established tab-bar layout (state.test.ts: Notes clicked at x=9) is a
-    // 1-space-padded cell per label on terminal row 2: cell_i starts at
-    // 1 + Σ_{j<i}(len_j + 2); its label's first char is start+1. The fifth cell
+    // the established tab-bar layout (state.test.ts: Knowledge clicked at x=9) is
+    // a 1-space-padded cell per label on terminal row 2: cell_i starts at
+    // 1 + Σ_{j<i}(len_j + 2); its label's first char is start+1. The last cell
     // must appear by the SAME formula — that IS the scaling contract.
-    const start = 1 + TABS.slice(0, 4).reduce((acc, label) => acc + label.length + 2, 0);
+    const start = 1 + TABS.slice(0, 3).reduce((acc, label) => acc + label.length + 2, 0);
     const x = start + 1;
     const r = SR.reduce(store, st(), { kind: 'click', x, y: 2 });
-    assert.equal(r.ui.tab, SYS_TAB, 'clicking the fifth tab cell selects the System tab');
+    assert.equal(r.ui.tab, SYS_TAB, 'clicking the last tab cell selects the System tab');
   } finally {
     cleanup();
   }

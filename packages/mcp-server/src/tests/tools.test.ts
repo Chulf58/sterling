@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
 import { REVIEWER_ROLES, parseConfig } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
-import { SterlingTools, type NoteExtractionPayload } from '../tools.js';
+import { SterlingTools } from '../tools.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 
@@ -63,46 +63,6 @@ test('knowledge_create assembles the envelope server-side and emits check_skippe
     assert.match(record.id, /^[0-9a-f-]{36}$/);
     assert.deepEqual(check_skipped, [{ check: 'dedup-merge', reason: 'not_built' }]);
     assert.throws(() => tools.knowledgeCreate('escalation_log', { title: 'x' }), /unregistered record type/);
-  } finally {
-    cleanup();
-  }
-});
-
-test('note_remove deletes a note outright and refuses non-notes; inbound cites survive (§3.2.6)', () => {
-  const { tools, cleanup } = harness();
-  try {
-    const { record: note } = tools.knowledgeCreate('note', {
-      raw_text: 'a user note, later spent',
-      captured_at: NOW,
-      capture_source: 'tui',
-      derived: [],
-    });
-    const { record: extraction } = tools.knowledgeCreate('decision', {
-      title: 'extracted',
-      statement: 's',
-      alternatives_rejected: [],
-      rationale: 'r',
-      links: [{ rel: 'cites', target_id: note.id }],
-    });
-    const { record: keeper } = tools.knowledgeCreate('note', {
-      raw_text: 'another note that stays',
-      captured_at: NOW,
-      capture_source: 'command',
-      derived: [],
-    });
-
-    assert.throws(() => tools.noteRemove(extraction.id), /not a note/);
-    assert.throws(() => tools.noteRemove(randomUUID()), /no record/);
-
-    assert.deepEqual(tools.noteRemove(note.id), { removed: note.id });
-    assert.throws(() => tools.knowledgeGet(note.id), /no record/, 'the note is gone, not superseded');
-    assert.deepEqual(
-      tools.knowledgeQuery({ types: ['note'] }).map((r) => r.id),
-      [keeper.id],
-      'only the removed note left the Notes surface'
-    );
-    const survivor = tools.knowledgeGet(extraction.id);
-    assert.ok(survivor.links.some((l) => l.rel === 'cites' && l.target_id === note.id), 'extraction stands alone with its cite intact');
   } finally {
     cleanup();
   }
@@ -1216,7 +1176,7 @@ test('knowledge_link, run_escalate, maintenance queue tools (§10)', () => {
   const { store, tools, cleanup } = harness();
   try {
     const { record: a } = tools.knowledgeCreate('decision', { title: 'a', statement: 's', alternatives_rejected: [], rationale: 'r' });
-    const { record: b } = tools.knowledgeCreate('note', { raw_text: 'context note', captured_at: NOW, capture_source: 'conductor', derived: [] });
+    const { record: b } = tools.knowledgeCreate('decision', { title: 'b', statement: 's', alternatives_rejected: [], rationale: 'r' });
     const linked = tools.knowledgeLink(a.id, 'informed_by', b.id);
     assert.ok(linked.links.some((l) => l.rel === 'informed_by' && l.target_id === b.id));
     assert.throws(() => tools.knowledgeLink(a.id, 'replaces', b.id), /invalid/i, 'rel is the closed §3.2 set');
@@ -1655,128 +1615,6 @@ test('AC2: non-reviewer handoffs are entirely unaffected — they land with or w
   }
 });
 
-// --------------------------- note structuring dispatch (board ccb14030) ---------------------------
-// knowledgeCreate itself dispatches the bundled worker — originally because
-// PostToolUse did not fire on MCP tool calls (CC 2.1.198), now by decision
-// 5ef11bd4 since that constraint was disproven (research_finding e7bd5c19).
-// These tests pin the
-// dispatch seam; the worker's own behavior stays covered in hooks-full.test.mjs.
-
-test('note create dispatches note-structuring with the hook-shaped payload; success is not a skip', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-'));
-  const store = new SterlingStore(join(dir, 'sterling.db'));
-  const payloads: NoteExtractionPayload[] = [];
-  const tools = new SterlingTools({
-    store,
-    now: () => NOW,
-    repoRoot: dir,
-    noteExtraction: (p) => {
-      payloads.push(p);
-      return { dispatched: true };
-    },
-  });
-  try {
-    const { record, check_skipped } = tools.knowledgeCreate('note', {
-      raw_text: 'queue-level retries beat global backoff',
-      captured_at: NOW,
-      capture_source: 'conductor',
-      derived: [],
-    });
-    assert.equal(payloads.length, 1);
-    assert.equal(payloads[0].cwd, dir, 'worker opens the store at the project root');
-    assert.equal(payloads[0].tool_input.type, 'note');
-    assert.equal(payloads[0].tool_input.fields.raw_text, 'queue-level retries beat global backoff');
-    const echoed = JSON.parse(payloads[0].tool_response.content[0].text) as { record: { id: string } };
-    assert.equal(echoed.record.id, record.id, 'tool_response carries the created record like the hook input did');
-    assert.ok(
-      !check_skipped.some((s) => s.check === 'note-structuring-h11'),
-      'a dispatched extraction is not a skipped check'
-    );
-  } finally {
-    store.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('note-structuring dispatch failure is loud: reason in the envelope AND a store row (P5)', () => {
-  // no repoRoot → the server cannot tell the worker where the store lives
-  const { store, tools, cleanup } = harness();
-  try {
-    const { check_skipped } = tools.knowledgeCreate('note', {
-      raw_text: 'a note with nowhere to extract',
-      captured_at: NOW,
-      capture_source: 'conductor',
-      derived: [],
-    });
-    assert.ok(check_skipped.some((s) => s.check === 'note-structuring-h11' && s.reason === 'no_repo_root'));
-    assert.ok(store.listCheckSkipped().some((s) => s.check_name === 'note-structuring-h11' && s.reason === 'no_repo_root'));
-  } finally {
-    cleanup();
-  }
-
-  // an injected dispatcher that reports failure (e.g. worker script missing) surfaces its reason
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-'));
-  const store2 = new SterlingStore(join(dir, 'sterling.db'));
-  const tools2 = new SterlingTools({
-    store: store2,
-    now: () => NOW,
-    repoRoot: dir,
-    noteExtraction: () => ({ dispatched: false, reason: 'worker_script_missing' }),
-  });
-  try {
-    const { check_skipped } = tools2.knowledgeCreate('note', {
-      raw_text: 'another note',
-      captured_at: NOW,
-      capture_source: 'conductor',
-      derived: [],
-    });
-    assert.ok(check_skipped.some((s) => s.check === 'note-structuring-h11' && s.reason === 'worker_script_missing'));
-  } finally {
-    store2.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('default dispatch spawns the bundled worker end-to-end: candidate lands derived_unconfirmed citing the note', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-note-e2e-'));
-  mkdirSync(join(dir, '.sterling'), { recursive: true });
-  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
-  const fake = join(dir, 'fake-extractor.mjs');
-  writeFileSync(
-    fake,
-    `process.stdout.write(JSON.stringify({ candidates: [{ type: 'decision', fields: { title: 'Queue-level retries', statement: 'Retry per queue, not global backoff.', alternatives_rejected: [], rationale: 'per-org limits' } }] }));`
-  );
-  const prevExtractor = process.env.STERLING_H11_EXTRACTOR;
-  process.env.STERLING_H11_EXTRACTOR = fake;
-  const tools = new SterlingTools({ store, repoRoot: dir }); // default noteExtraction — the real spawn
-  try {
-    const { record, check_skipped } = tools.knowledgeCreate('note', {
-      raw_text: 'genesys rate limits are per-org; we chose queue-level retries',
-      captured_at: NOW,
-      capture_source: 'conductor',
-      derived: [],
-    });
-    assert.ok(!check_skipped.some((s) => s.check === 'note-structuring-h11'), 'dispatch started');
-    // fire-and-forget: poll the store for the worker's cross-process write
-    const deadline = Date.now() + 20_000;
-    let candidates: DurableRecord[] = [];
-    while (Date.now() < deadline) {
-      candidates = store.query({ types: ['decision'], include_unconfirmed: true, cap: 5 });
-      if (candidates.length) break;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    assert.equal(candidates.length, 1, 'worker wrote the extraction candidate');
-    assert.equal(candidates[0].derived_unconfirmed, true);
-    assert.ok(candidates[0].links.some((l) => l.rel === 'cites' && l.target_id === record.id), 'candidate cites the note');
-    assert.deepEqual((store.get(record.id) as { derived: string[] }).derived, [candidates[0].id], 'note.derived[] updated');
-  } finally {
-    if (prevExtractor === undefined) delete process.env.STERLING_H11_EXTRACTOR;
-    else process.env.STERLING_H11_EXTRACTOR = prevExtractor;
-    store.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 // ---------------------------------------------------------------------------
 // knowledge_get id-PREFIX resolution (decision 27f148c2) — the citation format
 // the whole repo writes, which get() alone could not serve.
@@ -1980,7 +1818,7 @@ test('knowledge_schema reports required vs optional, types and closed enums (§2
 test('knowledge_schema is derived from the live schema — every registered type answers', () => {
   const { tools, cleanup } = harness();
   try {
-    for (const type of ['decision', 'anti_pattern', 'research_finding', 'reference_material', 'feature_article', 'note', 'todo', 'brief']) {
+    for (const type of ['decision', 'anti_pattern', 'research_finding', 'reference_material', 'feature_article', 'todo', 'brief']) {
       const s = tools.knowledgeSchema(type);
       assert.ok(s.fields.length > 0, `${type} reports fields`);
       assert.ok(s.required.includes('type'), `${type} reports the envelope`);
@@ -2017,7 +1855,7 @@ test('knowledge_retire supersedes in favour of a survivor; queries stop serving 
 });
 
 test('knowledge_retire refuses self-retirement, a missing or dead survivor, and P4 record types', () => {
-  const { tools, store, cleanup } = harness();
+  const { tools, cleanup } = harness();
   try {
     const { record: a } = tools.knowledgeCreate('decision', { title: 'a', statement: 's', alternatives_rejected: [], rationale: 'r' });
     const { record: b } = tools.knowledgeCreate('decision', { title: 'b', statement: 's', alternatives_rejected: [], rationale: 'r' });
@@ -2030,16 +1868,9 @@ test('knowledge_retire refuses self-retirement, a missing or dead survivor, and 
     tools.knowledgeRetire(c.id, b.id);
     assert.throws(() => tools.knowledgeRetire(a.id, c.id), /itself superseded/);
 
-    // todos/notes have their own P4 removal path and must not gain a second one.
+    // todos have their own P4 removal path and must not gain a second one.
     const { record: todo } = tools.boardAdd({ text: 'a todo', source: 'user' });
     assert.throws(() => tools.knowledgeRetire(todo.id, b.id), /board_remove \/ maintenance_remove/);
-    // Field set read off knowledge_schema('note') rather than guessed.
-    const note = store.create({
-      id: randomUUID(), type: 'note', created_at: NOW, updated_at: NOW, author: 'user', status: 'active',
-      superseded_by: null, links: [], scope: 'project', stack_tags: [],
-      raw_text: 'n', captured_at: NOW, capture_source: 'conductor', derived: [],
-    } as unknown as DurableRecord);
-    assert.throws(() => tools.knowledgeRetire(note.id, b.id), /note_remove/);
   } finally {
     cleanup();
   }

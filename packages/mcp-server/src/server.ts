@@ -99,7 +99,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_retire',
     {
       description:
-        'Retire a record in favour of a surviving one: sets status=superseded and superseded_by=<in_favor_of> with NO new row, so queries stop serving it while provenance and inbound links survive and it stays fetchable by id. THIS IS NOT FOR A MERELY WRONG RECORD — fix those FORWARD with knowledge_update, which supersedes the error. Use it for the one shape update cannot repair: a genuine DUPLICATE, where two records claim to describe one thing and the reader must be sent to the survivor. in_favor_of is required and must be a live record — retiring into a void or into a tombstone leaves the reader nowhere. todos and notes are refused (they leave via board_remove / maintenance_remove / note_remove, P4).',
+        'Retire a record in favour of a surviving one: sets status=superseded and superseded_by=<in_favor_of> with NO new row, so queries stop serving it while provenance and inbound links survive and it stays fetchable by id. THIS IS NOT FOR A MERELY WRONG RECORD — fix those FORWARD with knowledge_update, which supersedes the error. Use it for the one shape update cannot repair: a genuine DUPLICATE, where two records claim to describe one thing and the reader must be sent to the survivor. in_favor_of is required and must be a live record — retiring into a void or into a tombstone leaves the reader nowhere. todos are refused (they leave via board_remove / maintenance_remove, P4).',
       inputSchema: strict({ id: z.string(), in_favor_of: z.string() }),
     },
     ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of))
@@ -139,7 +139,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_promote',
     {
       description:
-        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo/note never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome.',
+        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome.',
       inputSchema: strict({ id: z.string(), domain: z.string() }),
     },
     ({ id, domain }) => json(tools.knowledgePromote(id, domain))
@@ -214,16 +214,6 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       }),
     },
     ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection))
-  );
-
-  server.registerTool(
-    'note_remove',
-    {
-      description:
-        "Remove a note outright — notes are the user's capture surface (§3.2.6); misfiled or spent notes leave the Notes tab here. Refuses non-note records.",
-      inputSchema: strict({ id: z.string() }),
-    },
-    ({ id }) => json(tools.noteRemove(id))
   );
 
   server.registerTool(

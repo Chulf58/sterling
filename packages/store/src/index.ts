@@ -151,13 +151,13 @@ export function catalogStatus(
 /**
  * Board 39d6462d activity feed: the "title-or-slug clipped" the record is
  * shown under on the Queue tab's activity section. Most types carry `title`;
- * feature_article also carries `slug` but title wins when both exist; todo/
- * note carry neither and fall back to their first text line. Clipped to 80
- * chars — the same clip the note-card title already uses (viewmodel.ts).
+ * feature_article also carries `slug` but title wins when both exist; todo
+ * carries neither and falls back to its first text line. Clipped to 80
+ * chars — the same clip the card titles use (viewmodel.ts).
  */
 function activityTitleOf(record: DurableRecord): string {
-  const r = record as unknown as { title?: string; slug?: string; text?: string; raw_text?: string; id: string };
-  const raw = r.title ?? r.slug ?? r.text?.split('\n')[0] ?? r.raw_text?.split('\n')[0] ?? r.id;
+  const r = record as unknown as { title?: string; slug?: string; text?: string; id: string };
+  const raw = r.title ?? r.slug ?? r.text?.split('\n')[0] ?? r.id;
   return raw.slice(0, 80);
 }
 
@@ -1100,14 +1100,6 @@ export class SterlingStore {
       dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 },
     }));
     return next.dispatch_counts[agentType];
-  }
-
-  /** H11 (§3.2.6): append extraction ids to a note's derived[] — raw_text is never touched. */
-  appendNoteDerived(noteId: string, derivedIds: string[]): void {
-    const note = this.get(noteId);
-    if (!note || note.type !== 'note') throw new Error(`appendNoteDerived: '${noteId}' is not a note`);
-    const updated = validateRecord({ ...note, derived: [...new Set([...(note as { derived: string[] }).derived, ...derivedIds])] });
-    this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(updated), noteId);
   }
 
   /**

@@ -4106,7 +4106,7 @@ var envelopeFields = {
   links: external_exports.array(linkSchema),
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string()),
-  // §3.2.6: note-extraction candidates are flagged lower-trust; excluded from
+  // §3.2.6: machine-extracted candidates are flagged lower-trust; excluded from
   // retrieval unless the caller opts in. Lives on the envelope because any
   // extractable type (decision, anti-pattern, ...) can carry it.
   derived_unconfirmed: external_exports.boolean().optional()
@@ -4265,13 +4265,6 @@ var disconfirmedHypothesisSchema = base.extend({
   rejected_answer: external_exports.string().min(1),
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
-}).superRefine(refineSupersession);
-var noteSchema = base.extend({
-  type: external_exports.literal("note"),
-  raw_text: external_exports.string().min(1),
-  captured_at: external_exports.string().datetime(),
-  capture_source: external_exports.enum(["tui", "command", "conductor"]),
-  derived: external_exports.array(external_exports.string().uuid())
 }).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
   "reconcile_needed",

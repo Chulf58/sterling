@@ -4106,7 +4106,7 @@ var envelopeFields = {
   links: external_exports.array(linkSchema),
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string()),
-  // §3.2.6: note-extraction candidates are flagged lower-trust; excluded from
+  // §3.2.6: machine-extracted candidates are flagged lower-trust; excluded from
   // retrieval unless the caller opts in. Lives on the envelope because any
   // extractable type (decision, anti-pattern, ...) can carry it.
   derived_unconfirmed: external_exports.boolean().optional()
@@ -4265,13 +4265,6 @@ var disconfirmedHypothesisSchema = base.extend({
   rejected_answer: external_exports.string().min(1),
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
-}).superRefine(refineSupersession);
-var noteSchema = base.extend({
-  type: external_exports.literal("note"),
-  raw_text: external_exports.string().min(1),
-  captured_at: external_exports.string().datetime(),
-  capture_source: external_exports.enum(["tui", "command", "conductor"]),
-  derived: external_exports.array(external_exports.string().uuid())
 }).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
   "reconcile_needed",
@@ -4889,7 +4882,7 @@ try {
 if (allowScripts.some((s) => command.includes(s))) allow();
 deny(
   `H15: shell access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
-Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / note_remove / maintenance_enqueue / run_signal / agent_exit.
+Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / maintenance_enqueue / run_signal / agent_exit.
 Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts).
 THIS GATE MATCHES COMMAND TEXT: a store path appearing only as PROSE \u2014 a commit message, an echo, a search pattern \u2014 trips it too, even though nothing would be accessed. Do not rewrite the command to evade the match; write the text to a file OUTSIDE the store and pass it by path (e.g. git commit -F <file>).
 If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`
