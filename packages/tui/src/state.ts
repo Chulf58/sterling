@@ -232,8 +232,8 @@ export type UiEvent =
   | { kind: 'rightclick' }
   | { kind: 'wheel'; dy: number };
 
-export function cardsFor(store: SterlingStore, tab: number): Card[] {
-  if (tab === 0) return todoCards(store);
+export function cardsFor(store: SterlingStore, tab: number, expanded: string[] = []): Card[] {
+  if (tab === 0) return todoCards(store, expanded);
   return [];
 }
 
@@ -287,7 +287,7 @@ function rankTermsOf(query: string): string[] {
  */
 export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedStores): Node[] {
   if (ui.tab === QUEUE_TAB) return queueCards(store).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
-  if (ui.tab !== KNOWLEDGE_TAB) return cardsFor(store, ui.tab).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: false }));
+  if (ui.tab !== KNOWLEDGE_TAB) return cardsFor(store, ui.tab, ui.expanded).map((card) => ({ kind: 'card' as const, card, depth: card.depth ?? 0, knowledge: false }));
 
   const cap = 500;
   const query = ui.searchQuery.trim();
@@ -716,6 +716,11 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       return { ...ui, cursor: index, expanded: toggle(subId(node.catType, node.source, node.key)) };
     }
     const card = node.card;
+    if (card.type === 'objective') {
+      // objective group header (decision a8d2ce6c): fold/unfold — navigation,
+      // not a selection; nothing durable to select behind the derived label.
+      return { ...ui, cursor: index, expanded: toggle(card.id) };
+    }
     effects.push({ type: 'select', recordType: card.type, id: card.id });
     return { ...ui, cursor: index, expanded: toggle(card.id) };
   };
