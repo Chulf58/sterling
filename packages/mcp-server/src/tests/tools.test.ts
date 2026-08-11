@@ -293,6 +293,36 @@ test('article_oversize: over threshold, knowledge_update warns via the coherence
   }
 });
 
+test('article_oversize: a files[] change between two oversize writes refreshes the ONE open item in place — never a second (board 3acb0126)', () => {
+  // The 2026-08-11 incident: dedup keyed on the exact sorted file set, so a
+  // reconcile that legitimately grew files[] changed the key and minted a
+  // duplicate, contradicting decision 86216751's refreshes-in-place contract.
+  const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 200 });
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    tools.knowledgeUpdateResult(article.id, { state: 'active' });
+    const first = tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 });
+    assert.equal(first.length, 1, 'one item after the first oversize write');
+    const firstItem = first[0] as unknown as { id: string; text: string };
+
+    // Grow files[] (a legitimate reconcile shape) and write again while oversize.
+    const head2 = (tools.knowledgeQuery({ types: ['feature_article'] })[0] as unknown as { id: string }).id;
+    tools.knowledgeUpdateResult(head2, {
+      files: [
+        { path: 'src/thing.ts', role: 'impl' },
+        { path: 'src/thing.test.ts', role: 'tests' },
+      ],
+    });
+    const after = tools.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 });
+    assert.equal(after.length, 1, 'still exactly ONE open item — a files[] change must not mint a duplicate');
+    const afterItem = after[0] as unknown as { id: string; text: string; file_keys?: string[] };
+    assert.equal(afterItem.id, firstItem.id, 'the SAME item was refreshed in place, not replaced');
+    assert.ok((afterItem.file_keys ?? []).includes('src/thing.test.ts'), 'its file_keys follow the article');
+  } finally {
+    cleanup();
+  }
+});
+
 test('article_oversize lane is registered: SYSTEM_REASONS/DRAIN_VERBS totality holds', async () => {
   const { SYSTEM_REASONS, DRAIN_VERBS } = await import('@sterling/schemas');
   assert.ok((SYSTEM_REASONS as readonly string[]).includes('article_oversize'), 'article_oversize must join SYSTEM_REASONS');

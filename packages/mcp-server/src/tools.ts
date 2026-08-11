@@ -1163,11 +1163,23 @@ export class SterlingTools {
     const remedy =
       'split it (one feature_article per concept FAMILY — the concept-article granularity rubric; a sub-concept splits out only when it accrues its own intent + interactions distinct from the parent) ' +
       'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
-    this.maintenanceEnqueue({
-      reason: 'article_oversize',
-      text: `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`,
-      file_keys: (a.files ?? []).map((f) => f.path),
-    });
+    const text = `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`;
+    const fileKeys = (a.files ?? []).map((f) => f.path);
+    // Dedup on the SLUG, here at the site that owns the text format (board
+    // 3acb0126): the generic enqueue dedup keys on the exact sorted file set,
+    // and a reconcile that legitimately grows files[] changes that key and
+    // mints a duplicate — measured 2026-08-11, contradicting decision
+    // 86216751's refreshes-in-place contract. The slug is the one handle
+    // stable across versions AND files[] changes; the closing quote in the
+    // marker keeps a slug from prefix-matching a longer sibling.
+    const marker = `article '${a.slug}'`;
+    const open = this.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }) as unknown as { id: string; text?: string }[];
+    const existing = open.find((t) => (t.text ?? '').startsWith(marker));
+    if (existing) {
+      this.boardUpdate(existing.id, { text, file_keys: fileKeys });
+    } else {
+      this.maintenanceEnqueue({ reason: 'article_oversize', text, file_keys: fileKeys });
+    }
     return [
       `feature_article '${a.slug}' non-history body is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
         `A deduped article_oversize maintenance item has been queued.`,
