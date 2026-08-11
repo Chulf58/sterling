@@ -1686,9 +1686,34 @@ export class SterlingTools {
 
   // -- board (§3.2.7) ----------------------------------------------------------
 
-  boardAdd(args: Record<string, unknown>): CreateResult {
-    const { text, source, ...rest } = args;
-    return this.knowledgeCreate('todo', { text, source, ...rest });
+  boardAdd(args: Record<string, unknown>): CreateResult & { notice?: string } {
+    const { text, source, objective, ...rest } = args;
+    // Objective grouping (decision a8d2ce6c): a grouping key for the human's
+    // board only — maintenance items are lane-keyed by system_reason.
+    if (objective !== undefined && source === 'system') {
+      throw new Error(
+        `board_add: 'objective' groups source:'user' board tasks only — maintenance-queue items are lane-keyed by system_reason, never objective-grouped`
+      );
+    }
+    // 'standalone' (exact lowercase) is the declared answer for "not a slice";
+    // it normalizes to field-absent so ungrouped items stay shapeless.
+    const normalized = objective === 'standalone' ? undefined : objective;
+    const res = this.knowledgeCreate('todo', {
+      text,
+      source,
+      ...(normalized !== undefined ? { objective: normalized } : {}),
+      ...rest,
+    });
+    if (source === 'user' && objective === undefined) {
+      // Never a throw on the capture path — the item is saved; the default is
+      // disclosed loudly with its remedy (decision a8d2ce6c: the server has no
+      // caller identity, so a refusal could lose a user-stated task).
+      return {
+        ...res,
+        notice: `objective undeclared — saved as standalone; if this task is a slice of a larger objective, set it via board_update {objective: "<name>"}`,
+      };
+    }
+    return res;
   }
 
   /**
@@ -1788,7 +1813,7 @@ export class SterlingTools {
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys'] as const;
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective'] as const;
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
     const old = this.store.get(id);
@@ -1807,8 +1832,11 @@ export class SterlingTools {
     if (Object.keys(patch).length === 0) {
       throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
     }
-    const next = { ...old, ...patch, updated_at: this.now() };
-    return this.store.updateTodo(id, next);
+    const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
+    // 'standalone' clears the grouping to absent (decision a8d2ce6c) — the same
+    // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
+    if (next.objective === 'standalone') delete next.objective;
+    return this.store.updateTodo(id, next as typeof old);
   }
 
   /**

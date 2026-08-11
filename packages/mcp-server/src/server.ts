@@ -149,10 +149,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_add',
     {
       description:
-        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
+        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). EVERY user-source add answers parentage via `objective` (decision a8d2ce6c): when the task is a SLICE of a larger objective — the conductor slicing a big ask mints one board_add per slice, all sharing the objective name — pass objective:"<name>"; a freestanding task passes objective:"standalone" (exact lowercase, stored as ungrouped). The TUI groups slices under their objective, so declared parentage is what keeps the board readable as N objectives instead of N×slices. Omitting objective never loses the task — it saves ungrouped with a loud notice, and board_update can group it later. system-source items never take an objective (lane-keyed by system_reason). The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
+        objective: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         feature_link: z.string().optional(),
@@ -204,12 +205,13 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_update',
     {
       description:
-        'IN-PLACE edit of a board/queue item — text/priority/file_keys only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one of text/priority/file_keys is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
+        'IN-PLACE edit of a board/queue item — text/priority/file_keys/objective only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). objective (re)groups a task under a larger objective (decision a8d2ce6c — the remedy for a slice saved ungrouped or a late-discovered slice); objective:"standalone" un-groups it. Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one updatable field is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
       inputSchema: strict({
         id: z.string(),
         text: z.string().optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         file_keys: z.array(z.string()).optional(),
+        objective: z.string().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },

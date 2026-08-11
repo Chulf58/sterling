@@ -4346,7 +4346,12 @@ var todoSchema = base.extend({
   file_keys: external_exports.array(repoPath).optional(),
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
-  system_reason: external_exports.enum(SYSTEM_REASONS).optional()
+  system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
+  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // share this label and the TUI groups them under it. A grouping FIELD, not
+  // a parent record — absent means standalone. The 'standalone' sentinel is
+  // normalized to absent at the TOOL layer; the schema stores what it gets.
+  objective: external_exports.string().min(1).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {

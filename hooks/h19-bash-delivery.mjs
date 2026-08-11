@@ -4323,7 +4323,12 @@ var todoSchema = base.extend({
   file_keys: external_exports.array(repoPath).optional(),
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
-  system_reason: external_exports.enum(SYSTEM_REASONS).optional()
+  system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
+  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // share this label and the TUI groups them under it. A grouping FIELD, not
+  // a parent record — absent means standalone. The 'standalone' sentinel is
+  // normalized to absent at the TOOL layer; the schema stores what it gets.
+  objective: external_exports.string().min(1).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -4495,7 +4500,7 @@ var RECORD_TYPES = {
     // The measured worst case for full bodies: board items run to ~8 KB each,
     // so a whole-board read spilled 478 KB. system_reason is what sorts the
     // maintenance queue into lanes; priority/source sort the board.
-    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain" }
+    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
   },
   brief: {
     schema: briefSchema,
