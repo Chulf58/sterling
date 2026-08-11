@@ -8,7 +8,7 @@ import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
-export const TABS = ['Todos', 'Knowledge', 'Queue', 'System'] as const;
+export const TABS = ['Tasks', 'Knowledge', 'Queue', 'System'] as const;
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
 export const KNOWLEDGE_TAB = TABS.indexOf('Knowledge');
 export const QUEUE_TAB = TABS.indexOf('Queue');
@@ -24,7 +24,7 @@ export interface UiState {
    *  directly (no '/' toggle). Persists across tab switches until ESC clears it. */
   searchQuery: string;
   /** body scroll offset in display LINES (0-based) for the scrollable card tabs
-   *  (Todos/Knowledge). Absent → 0. buildDashboardState clamps it to the
+   *  (Tasks/Knowledge). Absent → 0. buildDashboardState clamps it to the
    *  content height each frame; the queue tab has a fixed layout and never
    *  scrolls. Wheel moves it; ↑/↓ adjust it to keep the selected row in view. */
   scroll?: number;

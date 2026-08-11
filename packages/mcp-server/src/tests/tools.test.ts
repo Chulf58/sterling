@@ -355,7 +355,7 @@ test('board tools: add/query separates board from maintenance queue; remove is t
       alternatives_rejected: [],
       rationale: 'r',
     });
-    assert.throws(() => tools.boardRemove(d.id), /not a todo/);
+    assert.throws(() => tools.boardRemove(d.id), /not a task/);
     const res = tools.boardRemove(userTodo.id);
     // the artifact binding is BUILT now (board b8ff0b68): a keyless item still
     // reports the check as skipped, but for the real reason — no file identity
@@ -412,7 +412,7 @@ test('board_update: in-place edit of text/priority/file_keys — id stable, no n
 
     // refuses a non-todo id
     const { record: d } = tools.knowledgeCreate('decision', { title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' });
-    assert.throws(() => tools.boardUpdate(d.id, { text: 'x' }), /not a todo/);
+    assert.throws(() => tools.boardUpdate(d.id, { text: 'x' }), /not a task/);
 
     // refuses an unknown id
     assert.throws(() => tools.boardUpdate(randomUUID(), { text: 'x' }), /no record/);

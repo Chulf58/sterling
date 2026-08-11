@@ -1793,7 +1793,7 @@ export class SterlingTools {
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
     const old = this.store.get(id);
     if (!old) throw new Error(`board_update: no record '${id}'`);
-    if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a todo — board_update only edits board/queue items`);
+    if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a task — board_update only edits board/queue items`);
     const updatable: readonly string[] = SterlingTools.BOARD_UPDATABLE_FIELDS;
     const unknown = Object.keys(patch).filter((k) => !updatable.includes(k));
     if (unknown.length) {
@@ -1889,7 +1889,7 @@ export class SterlingTools {
   boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
     if (!record) throw this.removedItemError('board_remove', id);
-    if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a todo`);
+    if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
     const evidence = this.removalArtifactEvidence(record);
     this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: id, ...evidence };

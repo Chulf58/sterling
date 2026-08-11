@@ -602,7 +602,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));

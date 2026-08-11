@@ -130,7 +130,7 @@ test('H1: banner art to stderr (env-only suppression), counts to the human, conv
     const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' });
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
-    assert.match(out.systemMessage, /^2 todos · 1 maintenance item pending/);
+    assert.match(out.systemMessage, /^2 tasks · 1 maintenance item pending/);
     assert.match(out.hookSpecificOutput.additionalContext, /Anti-speculation/);
     assert.ok(r.stderr.includes(ART_ROW), 'banner art on stderr');
     assert.ok(!r.stderr.includes('\x1b['), 'NO_COLOR strips ANSI');
@@ -140,7 +140,7 @@ test('H1: banner art to stderr (env-only suppression), counts to the human, conv
     const suppressed = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { STERLING_NO_BANNER: '1' });
     assert.equal(suppressed.code, 0);
     assert.ok(!suppressed.stderr.includes('▀'), 'STERLING_NO_BANNER=1 silences the art');
-    assert.match(JSON.parse(suppressed.stdout).systemMessage, /^2 todos/, 'counts line survives suppression');
+    assert.match(JSON.parse(suppressed.stdout).systemMessage, /^2 tasks/, 'counts line survives suppression');
   } finally {
     cleanup();
   }
@@ -475,7 +475,7 @@ test('H1 stale-server guard: a marker build-id differing from the current build 
     writeMarker('BUILD_CURRENT', decoy.pid);
     let out = run();
     assert.doesNotMatch(out.systemMessage, /STALE/, 'matching build-id → no stale warning');
-    assert.match(out.systemMessage, /^0 todos/, 'systemMessage is counts-only when fresh');
+    assert.match(out.systemMessage, /^0 tasks/, 'systemMessage is counts-only when fresh');
 
     // stale: the running server (live writer, server cmdline) predates the current
     // build → loud restart warning — the case the guard exists for

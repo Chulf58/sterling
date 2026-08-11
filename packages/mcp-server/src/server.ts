@@ -149,7 +149,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_add',
     {
       description:
-        'Add a todo to the board (source: user) or the maintenance queue (source: system, requires system_reason). The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
+        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
@@ -184,7 +184,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_remove',
     {
       description:
-        "Remove a todo — the only way items leave the board (done = removed, bound to the artifact-write). The result discloses artifact_evidence: durable records touching the item's file_keys written since the item was created. An empty list means the close rides YOUR word — legitimate for genuine abandonment, drift if work fulfilled the item and its capture is missing.",
+        "Remove a task — the only way items leave the board (done = removed, bound to the artifact-write). The result discloses artifact_evidence: durable records touching the item's file_keys written since the item was created. An empty list means the close rides YOUR word — legitimate for genuine abandonment, drift if work fulfilled the item and its capture is missing.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardRemove(id))

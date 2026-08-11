@@ -443,7 +443,7 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
     assert.equal(clickFirst.effects[0]!.type, 'select');
     assert.equal((clickFirst.effects[0] as { id: string }).id, t1.id);
 
-    // tab bar is the SECOND row now (project name is row 1): ' Todos  Knowledge … ' — Knowledge after ' Todos ' (7 cols)
+    // tab bar is the SECOND row now (project name is row 1): ' Tasks  Knowledge … ' — Knowledge after ' Tasks ' (7 cols)
     const tabClick = reduce(store, ui, { kind: 'click', x: 9, y: 2 });
     assert.equal(tabClick.ui.tab, 1, 'clicked Knowledge');
 
@@ -1186,7 +1186,7 @@ test('P3 AC9: arrows navigate the Knowledge tree (cursor moves, no quit); other 
     // cross-check: on a NON-Knowledge tab, 'q' still quits and a digit still switches tabs
     const onTodos = st({ tab: 0 });
     const qQuit = reduce(store, onTodos, { kind: 'char', ch: 'q' });
-    assert.deepEqual(qQuit.effects, [{ type: 'quit' }], "'q' keeps quitting on the Todos tab (hotkeys preserved off the Knowledge tab)");
+    assert.deepEqual(qQuit.effects, [{ type: 'quit' }], "'q' keeps quitting on the Tasks tab (hotkeys preserved off the Knowledge tab)");
     const digit = reduce(store, onTodos, { kind: 'char', ch: '2' });
     assert.equal(digit.ui.tab, 1, "a digit still switches tabs off the Knowledge tab (TABS index '2' → tab 1)");
   } finally {
