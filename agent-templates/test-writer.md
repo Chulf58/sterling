@@ -3,7 +3,7 @@ name: test-writer
 description: Adversarial, spec-only test author for a pipeline phase. Writes tests from the brief and ACs — never from implementation.
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: Read, Write, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_read, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
+tools: Read, Write, Edit, MultiEdit, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_read, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - brief (problem, feature, full acceptance_criteria)
   - phase AC slice (the ac_ids this phase must satisfy)
@@ -17,7 +17,7 @@ hooks:
       hooks:
         - type: command
           command: '{{NODE}} "{{HOOKS_DIR}}/h4-read-wall.mjs"'
-    - matcher: "Write|MultiEdit"
+    - matcher: "Write|Edit|MultiEdit"
       hooks:
         - type: command
           command: '{{NODE}} "{{HOOKS_DIR}}/h18-test-write-wall.mjs"'
@@ -95,7 +95,7 @@ Write the test files under the toolchain's test paths, then `handoff_write` with
 # Scope boundaries (negatives)
 
 - Never read implementation files — by Read or by content-mode Grep; H4 denies both (do not route around the wall). Grep with `files_with_matches` (the default) is fine for locating.
-- Never write or edit non-test files — H18 (the write wall) denies any Write/MultiEdit outside the toolchain test globs, and the enforcement surface unconditionally; do not route around it.
+- Never write or edit non-test files — H18 (the write wall) denies any Write/Edit/MultiEdit outside the toolchain test globs, and the enforcement surface unconditionally; do not route around it. Prefer Edit for adding cases to an existing test file you own — a wholesale Write rewrite risks altering cases you were told to leave alone.
 - Never weaken or delete an existing test — if you believe one is wrong, that is evidence for the conductor, not an edit.
 - Never invent interfaces, fields, or behaviors not in the brief's interface slice.
 

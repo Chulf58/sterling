@@ -1,5 +1,5 @@
 // H18 — test-writer WRITE wall (spec §6, audit finding 6/43). PreToolUse
-// Write|MultiEdit, blocking exit-2. Declared in the test-writer's frontmatter
+// Write|Edit|MultiEdit, blocking exit-2. Declared in the test-writer's frontmatter
 // only. The test-writer had a Write grant but NO gate on it — it could write any
 // file anywhere (source, config, the enforcement surface itself), silently
 // defeating H3/H5/H7 which never fire on its writes. Its ONE legitimate output

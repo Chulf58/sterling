@@ -1213,8 +1213,11 @@ test('H18 test-write wall: the test-writer writes ONLY test files; source / enfo
     // DENIED — outside the repository
     assert.equal(w('/etc/passwd').code, 2, 'a path outside the repo is denied');
 
-    // MultiEdit is gated identically
+    // MultiEdit and Edit are gated identically (Edit joined the grant + matcher
+    // 2026-08-11 so incremental test additions don't force wholesale rewrites)
     assert.equal(w(join(dir, 'src', 'x.mjs'), 'MultiEdit').code, 2, 'MultiEdit to source is denied too');
+    assert.equal(w(join(dir, 'src', 'x.mjs'), 'Edit').code, 2, 'Edit to source is denied too');
+    assert.equal(w(join(dir, 'tests', 'export.test.mjs'), 'Edit').code, 0, 'Edit within a test glob is allowed');
   } finally {
     cleanup();
   }
