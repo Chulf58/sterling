@@ -6104,14 +6104,16 @@ try {
         store.recordCheckSkipped("conductor-pressure", reason ?? "format_unparseable", void 0, now);
         sample = { session_id: input.session_id, level: "unknown", fill_pct: null, reason, at: now };
       } else {
-        const windowSize = model && cw.windows[model] || cw.windows.default;
+        const mapped = Boolean(model && cw.windows[model]);
+        const windowSize = mapped ? cw.windows[model] : cw.windows.default;
+        const unmapped = !mapped && model ? { unmapped_model: model } : {};
         const fill = fillPct(usage, windowSize);
         if (fill > 100) {
           store.recordCheckSkipped("conductor-pressure", `window_mismatch:${model ?? "unknown-model"}:${fill.toFixed(1)}pct`, void 0, now);
-          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", at: now };
+          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", ...unmapped, at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? "hard" : fill >= cw.conductor.soft_pct ? "soft" : "below_soft";
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
         }
       }
       mkdirSync2(join2(input.cwd, ".sterling", "transient"), { recursive: true });
@@ -6154,6 +6156,16 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  const gaugeMarker = join2(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const gaugeSpent = () => {
+    try {
+      return JSON.parse(readFileSync2(gaugeMarker, "utf8")).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const gaugePart = () => `H10 window gauge: transcript model '${pressure.unmapped_model}' has NO entry in config.context_watch.windows \u2014 pressure is measured against the ${pressure.window}-token DEFAULT, so every fill % this session may be wrong in either direction, and a plausible-looking number is the dangerous case. Fix: add context_watch.windows["${pressure.unmapped_model}"] with the model's true window to .sterling/config.json. This notice fires once per session.`;
   const delegationMarker = join2(input.cwd, ".sterling", "transient", "delegation-nagged.json");
   const delegationSpent = () => {
     try {
@@ -6267,6 +6279,10 @@ try {
       if (delegation && !delegationSpent()) {
         spendDelegationMarker();
         parts.push(delegationPart());
+      }
+      if (pressure.unmapped_model && !gaugeSpent()) {
+        spendGaugeMarker();
+        parts.push(gaugePart());
       }
       if (parts.length) deny(parts.join("\n\n"));
     }
