@@ -9,7 +9,6 @@ export {
   referenceMaterialSchema,
   disconfirmedHypothesisSchema,
   featureArticleSchema,
-  noteSchema,
   todoSchema,
   briefSchema,
   SYSTEM_REASONS,

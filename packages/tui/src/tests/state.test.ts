@@ -5,9 +5,9 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore, MountedStores } from '@sterling/store';
-import { todoCards, noteCards, runView } from '../viewmodel.js';
+import { todoCards } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, runEffects, screenLineToRow, visibleBodyLines, wrapText, RUN_TAB, QUEUE_TAB, TABS, type UiState, type DashboardState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLines, wrapText, QUEUE_TAB, TABS, type UiState, type DashboardState } from '../state.js';
 import * as stateMod from '../state.js';
 import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
 import { keyToEvent, mouseToEvent, draw } from '../render.js';
@@ -38,7 +38,6 @@ function fixture() {
   const t1 = store.create({ ...envelope('todo'), text: 'first todo', source: 'user', priority: 'high' }) as { id: string };
   const t2 = store.create({ ...envelope('todo'), text: 'second todo', source: 'user' }) as { id: string };
   store.create({ ...envelope('todo'), text: 'hidden maintenance', source: 'system', system_reason: 'reconcile_needed' });
-  store.create({ ...envelope('note'), raw_text: 'a note\nbody', captured_at: NOW, capture_source: 'tui', derived: [] });
   const cleanup = () => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -63,40 +62,20 @@ function article(store: SterlingStore, slug: string, title: string, what: string
   }) as { id: string };
 }
 
-test('view models: board filters source=user; note first line; run view summarizes (§11)', () => {
+test('view models: board filters source=user', () => {
   const { store, cleanup } = fixture();
   try {
     assert.deepEqual(todoCards(store).map((c) => c.title), ['first todo', 'second todo']);
-    assert.equal(noteCards(store)[0].title, 'a note');
-    assert.equal(runView(store), undefined);
-    store.createRun({
-      id: 'r-1',
-      brief_ref: randomUUID(),
-      branch: 'b',
-      machine_state: 'running',
-      phases: [
-        { id: 'p1', status: 'complete', signals: [{ signal: 'complete' }], commits: [] },
-        { id: 'p2', status: 'in_progress', signals: [], commits: [] },
-      ],
-      dispatch_counts: {},
-      escalations: [{ kind: 'context_warn', fill_pct: 70 }, { kind: 'judgment_needed', reason: 'blocked' }],
-      started_at: NOW,
-    });
-    const rv = runView(store)!;
-    assert.equal(rv.phaseLabel, 'phase 2 of 2');
-    assert.equal(rv.lastSignal, 'complete');
-    assert.equal(rv.warnFlags, 1);
-    assert.equal(rv.pendingJudgment, 'blocked');
   } finally {
     cleanup();
   }
 });
 
-test('buildDashboardState: rows with screen offsets; expansion adds detail lines; empty + run tabs', () => {
+test('buildDashboardState: rows with screen offsets; expansion adds detail lines; empty tab', () => {
   const { store, t1, cleanup } = fixture();
   try {
     let s = buildDashboardState(store, initialUi);
-    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false, false, false, false]);
+    assert.deepEqual(s.tabs.map((t) => t.active), [true, false, false, false]);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 1]);
     assert.equal(s.rows[0].selected, true);
     assert.equal(s.rows[0].lines.length, 1, 'collapsed by default: one title line');
@@ -106,10 +85,6 @@ test('buildDashboardState: rows with screen offsets; expansion adds detail lines
     assert.equal(meta.kind, 'meta');
     assert.match(meta.text, /priority: high/);
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 2], 'expanded row occupies body + meta lines');
-
-    s = buildDashboardState(store, st({ tab: RUN_TAB }));
-    assert.equal(s.emptyMessage, 'no active run');
-    assert.equal(s.runSelected, true);
   } finally {
     cleanup();
   }
@@ -192,7 +167,7 @@ test('queue tab activity section (board 39d6462d): every knowledge write, drawn 
   try {
     const ui = st({ tab: QUEUE_TAB });
     let s = buildDashboardState(store, ui);
-    // the fixture already created todos/notes/an article before this build, so
+    // the fixture already created todos/an article before this build, so
     // the activity log is non-empty from the start — a fresh store's would say
     // '(no activity yet)', mirroring queueCompleted's own empty-state message.
     assert.ok(s.queueActivity, 'activity section always present on the queue tab');
@@ -244,7 +219,7 @@ test('header row: project folder name rides on the state; tabs shift to the seco
 
     // tab-bar clicks now land on terminal line 2 — the project name owns line 1
     const tabClick = reduce(store, initialUi, { kind: 'click', x: 9, y: 2 });
-    assert.equal(tabClick.ui.tab, 1, 'Notes selected on the shifted tab row');
+    assert.equal(tabClick.ui.tab, 1, 'Knowledge selected on the shifted tab row');
 
     // a click on the header row itself selects nothing
     const headerClick = reduce(store, initialUi, { kind: 'click', x: 1, y: 1 });
@@ -295,7 +270,7 @@ test('banner layout: bodyTop follows banner height; suppressed = today\'s layout
 
     // tab-bar click now lands on terminal line bodyTop-1 (=5), not 2
     const tabClick = reduce(store, initialUi, { kind: 'click', x: 9, y: 5 }, { showBanner: true });
-    assert.equal(tabClick.ui.tab, 1, 'Notes selected on the banner-shifted tab row');
+    assert.equal(tabClick.ui.tab, 1, 'Knowledge selected on the banner-shifted tab row');
     // a click on a banner row selects nothing
     const bannerClick = reduce(store, initialUi, { kind: 'click', x: 1, y: 2 }, { showBanner: true });
     assert.deepEqual(bannerClick.effects, []);
@@ -468,9 +443,9 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
     assert.equal(clickFirst.effects[0]!.type, 'select');
     assert.equal((clickFirst.effects[0] as { id: string }).id, t1.id);
 
-    // tab bar is the SECOND row now (project name is row 1): ' Todos  Notes … ' — Notes after ' Todos ' (7 cols)
+    // tab bar is the SECOND row now (project name is row 1): ' Tasks  Knowledge … ' — Knowledge after ' Tasks ' (7 cols)
     const tabClick = reduce(store, ui, { kind: 'click', x: 9, y: 2 });
-    assert.equal(tabClick.ui.tab, 1, 'clicked Notes');
+    assert.equal(tabClick.ui.tab, 1, 'clicked Knowledge');
 
     const rc = reduce(store, click.ui, { kind: 'rightclick' });
     assert.deepEqual(rc.ui.expanded, [], 'right-click collapses everything');
@@ -527,32 +502,6 @@ test('scroll: wheel scrolls the viewport, arrows follow the cursor, hit-test tra
 
     // back-compat: an unbounded viewport never scrolls (wheel is a clamped no-op)
     assert.equal(reduce(store, st(), { kind: 'wheel', dy: 1 }).ui.scroll ?? 0, 0);
-  } finally {
-    cleanup();
-  }
-});
-
-test('reduce + runEffects: run-tab activation selects the run; effects write the one-shot store row (§11/H2)', () => {
-  const { store, cleanup } = fixture();
-  try {
-    store.createRun({
-      id: 'r-sel',
-      brief_ref: randomUUID(),
-      branch: 'b',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: NOW,
-    });
-    const ui: UiState = st({ tab: RUN_TAB });
-    const { effects } = reduce(store, ui, { kind: 'key', name: 'ENTER' });
-    assert.deepEqual(effects, [{ type: 'select', recordType: 'run', id: 'r-sel' }]);
-    const quit = runEffects(store, effects, () => NOW);
-    assert.equal(quit, false);
-    assert.deepEqual({ ...store.takeSelection() }, { type: 'run', record_id: 'r-sel', at: NOW });
-    assert.equal(store.takeSelection(), undefined, 'one-shot');
-    assert.equal(runEffects(store, [{ type: 'quit' }]), true);
   } finally {
     cleanup();
   }
@@ -703,7 +652,7 @@ function mountedFixture(domains: string[] = ['node']) {
   return { dir, stores, cleanup: () => { stores.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
-test('P2 AC3: KNOWLEDGE_CATEGORIES is the exact ordered registry — 5 knowledge types, note + disconfirmed_hypothesis EXCLUDED', () => {
+test('P2 AC3: KNOWLEDGE_CATEGORIES is the exact ordered registry — 5 knowledge types, disconfirmed_hypothesis EXCLUDED', () => {
   assert.ok(Array.isArray(vm.KNOWLEDGE_CATEGORIES), 'viewmodel.KNOWLEDGE_CATEGORIES must be an exported array (AC3)');
   const cats = vm.KNOWLEDGE_CATEGORIES!;
   // exact set AND order (the tree iterates this registry in order)
@@ -712,8 +661,7 @@ test('P2 AC3: KNOWLEDGE_CATEGORIES is the exact ordered registry — 5 knowledge
     ['feature_article', 'decision', 'anti_pattern', 'research_finding', 'reference_material'],
     'the five knowledge categories, in this order'
   );
-  // explicit exclusions — note has its own tab, disconfirmed_hypothesis is niche
-  assert.ok(!cats.some((c) => c.type === 'note'), 'note is NOT a knowledge category (it has its own tab)');
+  // explicit exclusion — disconfirmed_hypothesis is niche
   assert.ok(!cats.some((c) => c.type === 'disconfirmed_hypothesis'), 'disconfirmed_hypothesis is excluded');
   // every entry carries a non-empty human label
   for (const c of cats) assert.ok(typeof c.label === 'string' && c.label.length > 0, `category '${c.type}' has a label`);
@@ -893,21 +841,17 @@ test('P2 AC5: knowledgeSearch uses AND (match_all) — a multi-term query return
   }
 });
 
-test('P2 regression: project-local readers (todoCards/noteCards) stay project-only — never fanned across domains', () => {
+test('P2 regression: project-local readers (todoCards) stay project-only — never fanned across domains', () => {
   const { stores, cleanup } = mountedFixture(['node']);
   try {
-    // a user todo + a note in the PROJECT store
+    // a user todo in the PROJECT store
     stores.create({ ...kenv('todo'), text: 'project todo', source: 'user', priority: 'high' });
-    stores.create({ ...kenv('note'), raw_text: 'project note\nbody', captured_at: NOW, capture_source: 'tui', derived: [] });
-    // a user todo + a note physically in the DOMAIN store — must NOT surface in the board/notes tabs
+    // a user todo physically in the DOMAIN store — must NOT surface in the board tab
     stores.create({ ...kenv('todo', 'domain:node'), text: 'domain todo', source: 'user' });
-    stores.create({ ...kenv('note', 'domain:node'), raw_text: 'domain note', captured_at: NOW, capture_source: 'tui', derived: [] });
 
     // the project-local readers take the PROJECT store, not the MountedStores fan-out
     const todoTitles = todoCards(stores.project).map((c) => c.title);
     assert.deepEqual(todoTitles, ['project todo'], 'board reads the project store only — no domain todos');
-    const noteTitles = noteCards(stores.project).map((c) => c.title);
-    assert.deepEqual(noteTitles, ['project note'], 'notes read the project store only — no domain notes');
   } finally {
     cleanup();
   }
@@ -955,10 +899,10 @@ interface KnowledgeStateMod {
 }
 const S = stateMod as unknown as KnowledgeStateMod;
 
-/** The Knowledge tab index is unchanged from ARTICLES_TAB (2) — used to drive
+/** The Knowledge tab index (1 since the Notes tab was retired) — used to drive
  *  buildDashboardState / reduce without depending on the not-yet-renamed const
  *  (so we never pass `undefined` as a tab → no throw). */
-const KNOW_TAB = 2;
+const KNOW_TAB = 1;
 
 /** Seed one record of every knowledge category into a bare project store, plus
  *  a couple of extra decisions so a source/category holds multiple cards. */
@@ -972,10 +916,10 @@ function seedKnowledge(store: SterlingStore) {
   return { dec, dec2, ap, rf, rm, fa };
 }
 
-test('P3 AC9-prereq: the Articles tab is renamed Knowledge — KNOWLEDGE_TAB === 2 and TABS[2] === "Knowledge"', () => {
+test('P3 AC9-prereq: the Articles tab is renamed Knowledge — KNOWLEDGE_TAB === 1 and TABS[1] === "Knowledge"', () => {
   assert.strictEqual(typeof S.KNOWLEDGE_TAB, 'number', 'state.KNOWLEDGE_TAB must be an exported number (replaces ARTICLES_TAB)');
-  assert.equal(S.KNOWLEDGE_TAB, 2, 'the knowledge tab keeps index 2');
-  assert.equal(TABS[2], 'Knowledge', 'TABS[2] is the renamed "Knowledge" label');
+  assert.equal(S.KNOWLEDGE_TAB, KNOW_TAB, 'the knowledge tab sits at index 1 since the Notes tab was retired');
+  assert.equal(TABS[KNOW_TAB], 'Knowledge', 'TABS[1] is the renamed "Knowledge" label');
 });
 
 test('P3 AC1: collapsed by default — the Knowledge tab shows ONLY non-empty category rows, in KNOWLEDGE_CATEGORIES order; empty categories absent', () => {
@@ -1242,7 +1186,7 @@ test('P3 AC9: arrows navigate the Knowledge tree (cursor moves, no quit); other 
     // cross-check: on a NON-Knowledge tab, 'q' still quits and a digit still switches tabs
     const onTodos = st({ tab: 0 });
     const qQuit = reduce(store, onTodos, { kind: 'char', ch: 'q' });
-    assert.deepEqual(qQuit.effects, [{ type: 'quit' }], "'q' keeps quitting on the Todos tab (hotkeys preserved off the Knowledge tab)");
+    assert.deepEqual(qQuit.effects, [{ type: 'quit' }], "'q' keeps quitting on the Tasks tab (hotkeys preserved off the Knowledge tab)");
     const digit = reduce(store, onTodos, { kind: 'char', ch: '2' });
     assert.equal(digit.ui.tab, 1, "a digit still switches tabs off the Knowledge tab (TABS index '2' → tab 1)");
   } finally {

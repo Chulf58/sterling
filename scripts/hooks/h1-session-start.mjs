@@ -21,7 +21,7 @@ const CONVENTIONS = [
   '- Canonical naming: one name per concept, from the registries; phase execution, intake, steps — kill synonyms on sight.',
   // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
   // reach every project at its next session start with no per-project copy and no
-  // stamp-contract propagation — the same reason the todo/note routing lines live on
+  // stamp-contract propagation — the same reason the todo/queue routing lines live on
   // the commands. Stated because the user was otherwise re-declaring them per project.
   // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
   // rule read "3-5 active at all times" in a consuming project and the user withdrew it
@@ -366,7 +366,7 @@ try {
           earliest !== null &&
           store
             .query({
-              types: ['decision', 'anti_pattern', 'note', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'],
+              types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'],
               cap: 1000,
               include_unconfirmed: true,
             })
@@ -602,7 +602,7 @@ if (process.env.STERLING_NO_BANNER !== '1') {
 }
 
 const output = {
-  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));

@@ -24,7 +24,7 @@ export const envelopeFields = {
   links: z.array(linkSchema),
   scope: z.string().regex(SCOPE_RE, 'scope must be project | domain:<name>'),
   stack_tags: z.array(z.string()),
-  // §3.2.6: note-extraction candidates are flagged lower-trust; excluded from
+  // §3.2.6: machine-extracted candidates are flagged lower-trust; excluded from
   // retrieval unless the caller opts in. Lives on the envelope because any
   // extractable type (decision, anti-pattern, ...) can carry it.
   derived_unconfirmed: z.boolean().optional(),

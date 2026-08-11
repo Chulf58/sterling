@@ -4117,7 +4117,7 @@ var envelopeFields = {
   links: external_exports.array(linkSchema),
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string()),
-  // §3.2.6: note-extraction candidates are flagged lower-trust; excluded from
+  // §3.2.6: machine-extracted candidates are flagged lower-trust; excluded from
   // retrieval unless the caller opts in. Lives on the envelope because any
   // extractable type (decision, anti-pattern, ...) can carry it.
   derived_unconfirmed: external_exports.boolean().optional()
@@ -4276,13 +4276,6 @@ var disconfirmedHypothesisSchema = base.extend({
   rejected_answer: external_exports.string().min(1),
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
-}).superRefine(refineSupersession);
-var noteSchema = base.extend({
-  type: external_exports.literal("note"),
-  raw_text: external_exports.string().min(1),
-  captured_at: external_exports.string().datetime(),
-  capture_source: external_exports.enum(["tui", "command", "conductor"]),
-  derived: external_exports.array(external_exports.string().uuid())
 }).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
   "reconcile_needed",
@@ -4496,13 +4489,6 @@ var RECORD_TYPES = {
     // and the id in the envelope beside it is not. version + state say whether
     // this is a moving target and whether it is wired yet.
     digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
-  },
-  note: {
-    schema: noteSchema,
-    immutable: false,
-    fts: (r) => s(r.raw_text),
-    fileKeys: () => [],
-    digest: { raw_text: "clip" }
   },
   todo: {
     schema: todoSchema,
@@ -5287,7 +5273,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
-  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.raw_text?.split("\n")[0] ?? r.id;
+  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.id;
   return raw.slice(0, 80);
 }
 function deepReplaceString(value, from, to) {
@@ -5985,14 +5971,6 @@ var SterlingStore = class _SterlingStore {
       dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
     }));
     return next.dispatch_counts[agentType];
-  }
-  /** H11 (§3.2.6): append extraction ids to a note's derived[] — raw_text is never touched. */
-  appendNoteDerived(noteId, derivedIds) {
-    const note = this.get(noteId);
-    if (!note || note.type !== "note")
-      throw new Error(`appendNoteDerived: '${noteId}' is not a note`);
-    const updated = validateRecord({ ...note, derived: [.../* @__PURE__ */ new Set([...note.derived, ...derivedIds])] });
-    this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(updated), noteId);
   }
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,

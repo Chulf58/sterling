@@ -4109,7 +4109,7 @@ var envelopeFields = {
   links: external_exports.array(linkSchema),
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string()),
-  // §3.2.6: note-extraction candidates are flagged lower-trust; excluded from
+  // §3.2.6: machine-extracted candidates are flagged lower-trust; excluded from
   // retrieval unless the caller opts in. Lives on the envelope because any
   // extractable type (decision, anti-pattern, ...) can carry it.
   derived_unconfirmed: external_exports.boolean().optional()
@@ -4268,13 +4268,6 @@ var disconfirmedHypothesisSchema = base.extend({
   rejected_answer: external_exports.string().min(1),
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
-}).superRefine(refineSupersession);
-var noteSchema = base.extend({
-  type: external_exports.literal("note"),
-  raw_text: external_exports.string().min(1),
-  captured_at: external_exports.string().datetime(),
-  capture_source: external_exports.enum(["tui", "command", "conductor"]),
-  derived: external_exports.array(external_exports.string().uuid())
 }).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
   "reconcile_needed",
@@ -4488,13 +4481,6 @@ var RECORD_TYPES = {
     // and the id in the envelope beside it is not. version + state say whether
     // this is a moving target and whether it is wired yet.
     digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
-  },
-  note: {
-    schema: noteSchema,
-    immutable: false,
-    fts: (r) => s(r.raw_text),
-    fileKeys: () => [],
-    digest: { raw_text: "clip" }
   },
   todo: {
     schema: todoSchema,
@@ -5114,7 +5100,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
-  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.raw_text?.split("\n")[0] ?? r.id;
+  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.id;
   return raw.slice(0, 80);
 }
 function deepReplaceString(value, from, to) {
@@ -5813,14 +5799,6 @@ var SterlingStore = class _SterlingStore {
     }));
     return next.dispatch_counts[agentType];
   }
-  /** H11 (§3.2.6): append extraction ids to a note's derived[] — raw_text is never touched. */
-  appendNoteDerived(noteId, derivedIds) {
-    const note = this.get(noteId);
-    if (!note || note.type !== "note")
-      throw new Error(`appendNoteDerived: '${noteId}' is not a note`);
-    const updated = validateRecord({ ...note, derived: [.../* @__PURE__ */ new Set([...note.derived, ...derivedIds])] });
-    this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(updated), noteId);
-  }
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
    * transactionally — read + delete in one transaction, never a signal file (P4).
@@ -6108,7 +6086,7 @@ var CONVENTIONS = [
   "- Canonical naming: one name per concept, from the registries; phase execution, intake, steps \u2014 kill synonyms on sight.",
   // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
   // reach every project at its next session start with no per-project copy and no
-  // stamp-contract propagation — the same reason the todo/note routing lines live on
+  // stamp-contract propagation — the same reason the todo/queue routing lines live on
   // the commands. Stated because the user was otherwise re-declaring them per project.
   // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
   // rule read "3-5 active at all times" in a consuming project and the user withdrew it
@@ -6336,7 +6314,7 @@ try {
         const stamps = [...touches.map((t) => t?.at), ...events.map((e) => e?.at)].filter(Boolean).sort();
         const earliest = stamps.length ? stamps[0] : null;
         const paid = !malformed && earliest !== null && store.query({
-          types: ["decision", "anti_pattern", "note", "feature_article", "research_finding", "disconfirmed_hypothesis"],
+          types: ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis"],
           cap: 1e3,
           include_unconfirmed: true
         }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
@@ -6475,7 +6453,7 @@ if (process.env.STERLING_NO_BANNER !== "1") {
 ${versionLine}`);
 }
 var output = {
-  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} todo${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
+  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));

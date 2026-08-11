@@ -240,8 +240,8 @@ test('AC-g1: knowledge_query envelope — a capped result answers verify_targets
 test('AC-g2: knowledge_query envelope — a zero-return result answers insufficient', () => {
   const { tools, cleanup } = harness();
   try {
-    // No notes were ever created in this fresh store.
-    const zero = tools.knowledgeQueryResult({ types: ['note'] }) as unknown as {
+    // No anti-patterns were ever created in this fresh store.
+    const zero = tools.knowledgeQueryResult({ types: ['anti_pattern'] }) as unknown as {
       returned: number;
       answerability?: string;
     };

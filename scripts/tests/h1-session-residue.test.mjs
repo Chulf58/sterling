@@ -171,9 +171,6 @@ function antiPatternAt(store, at) {
     file_keys: [],
   });
 }
-function noteAt(store, at) {
-  return store.create({ ...envelope('note', at), raw_text: 'note text', captured_at: at, capture_source: 'conductor', derived: [] });
-}
 function featureArticleAt(store, at, slug = 'feat-x') {
   return store.create({
     ...envelope('feature_article', at),
@@ -299,11 +296,10 @@ test('AC1b/AC1e: a durable record at/after the earliest residue timestamp pays t
   }
 });
 
-test('AC1b: every declared durable record TYPE pays the debt — decision, anti_pattern, note, feature_article, research_finding, disconfirmed_hypothesis', () => {
+test('AC1b: every declared durable record TYPE pays the debt — decision, anti_pattern, feature_article, research_finding, disconfirmed_hypothesis', () => {
   const creators = [
     ['decision', decisionAt],
     ['anti_pattern', antiPatternAt],
-    ['note', noteAt],
     ['feature_article', (store, at) => featureArticleAt(store, at)],
     ['research_finding', researchFindingAt],
     ['disconfirmed_hypothesis', disconfirmedAt],

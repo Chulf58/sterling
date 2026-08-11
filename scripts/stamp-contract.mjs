@@ -57,13 +57,22 @@ const TARGET_LEADS = [
   // APPEND ONLY: reordering this array retargets that insert into foreign repos.
   '- **Anti-speculation:**',
   '- **No false action claims:**',
-  // Added 2026-07-27: projects were observed using notes and the maintenance queue
-  // as a todo board. The board/queue/note distinction rides INSIDE the existing
-  // Notes bullet, whose lead is left byte-identical so extractBlock's startsWith
-  // still anchors in every sibling — the fold pattern, for the same reason as the
-  // H19 caveat above: a renamed lead matches nothing and would refuse in all seven.
-  "- **Notes are the user's surface.**",
+  // 2026-08-11: the note surface was retired (decision 'note-surface-retired')
+  // and the bullet's lead was renamed from "- **Notes are the user's surface.**"
+  // to the one below. A renamed lead matches nothing in an already-stamped
+  // sibling by itself, so RENAMED_LEADS below carries the old lead: a sibling
+  // block found under the OLD lead is replaced by the new bullet under the SAME
+  // template-descended guard as the normal replace path.
+  '- **Knowledge is born structured.**',
 ];
+
+// Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
+// absent from a sibling, a block under an old lead is replaced by the new bullet
+// ONLY if it matches a historical template variant of that old lead (P5 — a
+// hand-tuned old block is refused exactly like the normal replace path).
+const RENAMED_LEADS = new Map([
+  ['- **Knowledge is born structured.**', ["- **Notes are the user's surface.**"]],
+]);
 
 // A block = the bullet line plus continuation lines until the next top-level
 // bullet, heading, or blank line (template bullets are single long lines today;
@@ -82,11 +91,12 @@ function extractBlock(text, lead) {
 function historicalVariants() {
   const log = spawnSync('git', ['log', '--format=%H', '--', TEMPLATE_REL], { cwd: repoRoot, encoding: 'utf8' });
   if (log.status !== 0) throw new Error(`stamp-contract: git log failed in ${repoRoot}: ${log.stderr}`);
-  const variants = new Map(TARGET_LEADS.map((l) => [l, new Set()]));
+  const allLeads = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
+  const variants = new Map(allLeads.map((l) => [l, new Set()]));
   for (const sha of log.stdout.split('\n').filter(Boolean)) {
     const show = spawnSync('git', ['show', `${sha}:${TEMPLATE_REL}`], { cwd: repoRoot, encoding: 'utf8' });
     if (show.status !== 0) continue;
-    for (const lead of TARGET_LEADS) {
+    for (const lead of allLeads) {
       const found = extractBlock(show.stdout, lead);
       if (found) variants.get(lead).add(found.block);
     }
@@ -152,7 +162,27 @@ for (const p of projects) {
       }
       continue;
     }
-    // Bullet absent. The Concept bullet is NEW — insert it after the sibling's
+    // Bullet absent. A RENAMED bullet may still sit under its old lead — replace
+    // a clean template-descended old block with the new bullet; a hand-tuned old
+    // block is refused (P5), same as the normal replace path.
+    let renamed = false;
+    for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
+      const oldFound = extractBlock(text, oldLead);
+      if (!oldFound) continue;
+      renamed = true;
+      if (variants.get(oldLead).has(oldFound.block)) {
+        const lines = text.split('\n');
+        lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split('\n'));
+        text = lines.join('\n');
+        actions.push({ lead, action: APPLY ? 'renamed' : 'would_rename' });
+      } else {
+        actions.push({ lead, action: 'HAND_TUNED_REFUSED', have: oldFound.block });
+        drift++;
+      }
+      break;
+    }
+    if (renamed) continue;
+    // The Concept bullet is NEW — insert it after the sibling's
     // Reconcile bullet when that anchor is clean; everything else missing = drift.
     if (lead === TARGET_LEADS[1]) {
       const anchor = extractBlock(text, TARGET_LEADS[0]);
@@ -168,7 +198,7 @@ for (const p of projects) {
     drift++;
   }
 
-  const dirty = actions.some((a) => ['updated', 'inserted'].includes(a.action));
+  const dirty = actions.some((a) => ['updated', 'inserted', 'renamed'].includes(a.action));
   if (APPLY && dirty) writeFileSync(claudeMd, text);
   results.push({ project: p.name, status: 'processed', file: claudeMd, actions });
 }

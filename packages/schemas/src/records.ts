@@ -3,7 +3,7 @@ import { envelopeFields, refineSupersession } from './envelope.js';
 import { normalizeRepoPath, repoPath } from './paths.js';
 
 // Durable record schemas — MVP-spine set (spec §16.1 item 2): decision,
-// feature_article, note, todo, brief. Remaining §3.2 types arrive at full-build
+// feature_article, todo, brief. Remaining §3.2 types arrive at full-build
 // step 2 by adding registry members (the registry + checks already guard them).
 
 // 'final' | 'phase:<n>' — §4 brief AC syntax; §3.2.3 article current_ac uses the
@@ -195,17 +195,6 @@ export const disconfirmedHypothesisSchema = base
     rejected_answer: z.string().min(1),
     evidence: z.string().min(1),
     file_keys: z.array(repoPath).optional(),
-  })
-  .superRefine(refineSupersession);
-
-// §3.2.6 — raw text immutable; extraction re-runnable.
-export const noteSchema = base
-  .extend({
-    type: z.literal('note'),
-    raw_text: z.string().min(1),
-    captured_at: z.string().datetime(),
-    capture_source: z.enum(['tui', 'command', 'conductor']),
-    derived: z.array(z.string().uuid()),
   })
   .superRefine(refineSupersession);
 
@@ -538,13 +527,6 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     // this is a moving target and whether it is wired yet.
     digest: { slug: 'plain', title: 'plain', state: 'plain', version: 'plain', concept_family: 'plain' },
   },
-  note: {
-    schema: noteSchema,
-    immutable: false,
-    fts: (r) => s(r.raw_text),
-    fileKeys: () => [],
-    digest: { raw_text: 'clip' },
-  },
   todo: {
     schema: todoSchema,
     immutable: false,
@@ -607,7 +589,6 @@ export type DurableRecord =
   | z.infer<typeof referenceMaterialSchema>
   | z.infer<typeof disconfirmedHypothesisSchema>
   | z.infer<typeof featureArticleSchema>
-  | z.infer<typeof noteSchema>
   | z.infer<typeof todoSchema>
   | z.infer<typeof briefSchema>;
 

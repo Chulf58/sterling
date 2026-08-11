@@ -2,11 +2,10 @@
 // the logic is unit-testable; server.ts wires them to MCP. Coarse tools are
 // safe because schemas are exact: every write revalidates at the store.
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
@@ -147,50 +146,6 @@ export interface ToolDeps {
   newId?: () => string;
   /** project root for §3.2.5 repo-located doc mtime checks; absent → check inert */
   repoRoot?: string;
-  /** note-structuring dispatch override (tests); default detach-spawns the bundled worker */
-  noteExtraction?: (payload: NoteExtractionPayload) => NoteExtractionDispatch;
-}
-
-/**
- * stdin payload for the bundled note-structuring worker
- * (hooks/h11-note-structure.mjs) — mirrors the PostToolUse hook input shape the
- * script was built against, so the worker runs unchanged now that the server,
- * not the platform, spawns it. That placement was originally forced by the
- * platform (PostToolUse did not fire on MCP tool calls on CC 2.1.198) but is now
- * a DECISION (5ef11bd4) — the constraint was disproven on CC 2.1.215, corrected
- * finding research_finding e7bd5c19, and the seam stays because it works and is
- * mode-independent.
- */
-export interface NoteExtractionPayload {
-  cwd: string;
-  tool_input: { type: 'note'; fields: Record<string, unknown> };
-  tool_response: { content: { type: 'text'; text: string }[] };
-}
-
-export interface NoteExtractionDispatch {
-  dispatched: boolean;
-  reason?: string;
-}
-
-// The bundled worker ships with the plugin; resolve it relative to this module
-// (dist/tools.js → repo root is three levels up) so the path holds wherever the
-// server runs — self-hosted or launched from a consuming project.
-const NOTE_WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'hooks', 'h11-note-structure.mjs');
-
-function spawnNoteExtraction(payload: NoteExtractionPayload): NoteExtractionDispatch {
-  if (!existsSync(NOTE_WORKER)) return { dispatched: false, reason: 'worker_script_missing' };
-  // windowsHide: a detached console child on Windows otherwise auto-allocates
-  // a visible console window that steals focus on every note capture.
-  const child = spawn(process.execPath, [NOTE_WORKER], { detached: true, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
-  // A dead child must not crash the server: 'error' fires async on both the
-  // process and its stdin pipe. Nothing to record from here — the worker owns
-  // its own check_skipped once running, and pre-exec failures are covered by
-  // the existsSync guard (process.execPath is the running node, always valid).
-  child.on('error', () => {});
-  child.stdin.on('error', () => {});
-  child.stdin.end(JSON.stringify(payload));
-  child.unref();
-  return { dispatched: true };
 }
 
 const DAY_MS = 86_400_000;
@@ -230,7 +185,6 @@ export class SterlingTools {
   private now: () => string;
   private newId: () => string;
   private repoRoot?: string;
-  private noteExtraction: (payload: NoteExtractionPayload) => NoteExtractionDispatch;
 
   constructor(deps: ToolDeps) {
     this.store = deps.store;
@@ -238,7 +192,6 @@ export class SterlingTools {
     this.now = deps.now ?? (() => new Date().toISOString());
     this.newId = deps.newId ?? randomUUID;
     this.repoRoot = deps.repoRoot;
-    this.noteExtraction = deps.noteExtraction ?? spawnNoteExtraction;
   }
 
   /** §16.1.9: unbuilt checks emit check_skipped where they would have run — never silent success. */
@@ -663,37 +616,8 @@ export class SterlingTools {
       };
     }
     const record = this.store.create(candidate);
-    if (type === 'note') {
-      const failed = this.dispatchNoteStructuring(record, fields);
-      if (failed) skipped.push(failed);
-    }
     this.surfacePromotionCandidate(record, type);
     return { record, check_skipped: skipped };
-  }
-
-  /**
-   * §3.2.6 note structuring, dispatched from the server: knowledge_create itself
-   * detach-spawns the bundled worker — the one seam that provably runs on every
-   * note capture. Originally because PostToolUse did not fire on MCP tool calls
-   * (CC 2.1.198, board ccb14030); that premise was disproven on CC 2.1.215
-   * (corrected finding research_finding e7bd5c19) and the server-side seam now
-   * stays BY DECISION (5ef11bd4) rather than by platform limit.
-   * Fire-and-forget: the worker opens the store at cwd and records its own
-   * check_skipped on every failure path; only a dispatch that never starts is
-   * recorded here (loud, P5).
-   */
-  private dispatchNoteStructuring(record: DurableRecord, fields: Record<string, unknown>): SkippedCheck | undefined {
-    const dispatch = this.repoRoot
-      ? this.noteExtraction({
-          cwd: this.repoRoot,
-          tool_input: { type: 'note', fields },
-          tool_response: { content: [{ type: 'text', text: JSON.stringify({ record }) }] },
-        })
-      : { dispatched: false, reason: 'no_repo_root' };
-    if (dispatch.dispatched) return undefined;
-    const reason = dispatch.reason ?? 'dispatch_failed';
-    this.store.recordCheckSkipped('note-structuring-h11', reason, this.activeRunId(), this.now());
-    return { check: 'note-structuring-h11', reason };
   }
 
   /**
@@ -1643,8 +1567,8 @@ export class SterlingTools {
    * link back to the origin) and retires the project original as a superseded
    * tombstone pointing at the promoted copy — provenance and inbound links
    * survive. Promoting IS the review outcome, so a matching promotion_review is
-   * drained (done = removed). feature_article is always project (§3.3); todo/note
-   * are project/user surfaces — none promote. An unmounted target domain is
+   * drained (done = removed). feature_article is always project (§3.3); todo is
+   * a project surface — neither promotes. An unmounted target domain is
    * rejected loudly by the store routing before anything is written.
    */
   knowledgePromote(id: string, domain: string): { promoted: DurableRecord; retired: string; drained_review: string | null } {
@@ -1652,9 +1576,9 @@ export class SterlingTools {
     if (!original) throw new Error(`knowledge_promote: no record '${id}'`);
     if (original.status !== 'active') throw new Error(`knowledge_promote: record '${id}' is not active (status ${original.status})`);
     if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${id}' is ${original.scope} — only project-scoped records promote`);
-    const UNPROMOTABLE = ['feature_article', 'todo', 'note'];
+    const UNPROMOTABLE = ['feature_article', 'todo'];
     if (UNPROMOTABLE.includes(original.type)) {
-      throw new Error(`knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo/note are project/user surfaces`);
+      throw new Error(`knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo is a project surface`);
     }
     const ts = this.now();
     // copy content; the envelope (id/clocks/status/scope/links) is rebuilt for the domain
@@ -1869,7 +1793,7 @@ export class SterlingTools {
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
     const old = this.store.get(id);
     if (!old) throw new Error(`board_update: no record '${id}'`);
-    if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a todo — board_update only edits board/queue items`);
+    if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a task — board_update only edits board/queue items`);
     const updatable: readonly string[] = SterlingTools.BOARD_UPDATABLE_FIELDS;
     const unknown = Object.keys(patch).filter((k) => !updatable.includes(k));
     if (unknown.length) {
@@ -1965,7 +1889,7 @@ export class SterlingTools {
   boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const record = this.store.get(id);
     if (!record) throw this.removedItemError('board_remove', id);
-    if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a todo`);
+    if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
     const evidence = this.removalArtifactEvidence(record);
     this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: id, ...evidence };
@@ -2039,9 +1963,9 @@ export class SterlingTools {
     if (!record) throw new Error(`knowledge_retire: no record '${id}'`);
     // The transient/user surfaces have their own P4 removal paths and must not
     // acquire a second one that leaves a superseded husk behind in a queue.
-    if (record.type === 'todo' || record.type === 'note') {
+    if (record.type === 'todo') {
       throw new Error(
-        `knowledge_retire: '${id}' is a ${record.type} — those leave through ${record.type === 'todo' ? 'board_remove / maintenance_remove' : 'note_remove'} (done = removed, P4), not retirement.`
+        `knowledge_retire: '${id}' is a todo — those leave through board_remove / maintenance_remove (done = removed, P4), not retirement.`
       );
     }
     const survivor = this.store.get(inFavorOf);
@@ -2063,21 +1987,6 @@ export class SterlingTools {
     // channel is for.
     const retired = this.store.retireInFavorOf(id, inFavorOf, this.now());
     return { retired };
-  }
-
-  /**
-   * note_remove — the user-surface mirror of board_remove (§3.2.6, adjudicated
-   * 2026-06-12): notes are the user's capture surface; a misfiled or spent note
-   * leaves outright. Hard removal like todos (P4); raw-text immutability governs
-   * edits, not deletion. Inbound cites/derived extractions survive as
-   * independent records, exactly as fulfills-links survive board_remove.
-   */
-  noteRemove(id: string): { removed: string } {
-    const record = this.store.get(id);
-    if (!record) throw new Error(`note_remove: no record '${id}'`);
-    if (record.type !== 'note') throw new Error(`note_remove: '${id}' is a ${record.type}, not a note`);
-    this.store.remove(id);
-    return { removed: id };
   }
 
   // -- run protocol (§5.2, §10) -------------------------------------------------

@@ -14,7 +14,7 @@
 //   2. resolve at ANY status — store.query() serves active records only, but
 //      citing a SUPERSEDED record is legitimate and common (a comment names the
 //      decision that originally justified a design). Tombstones pass.
-// Plus the type-word rule in lib/checks.mjs: board/todo/note/maintenance ids are
+// Plus the type-word rule in lib/checks.mjs: board/todo/maintenance ids are
 // NOT required to resolve, because those records are removed when drained (P4).
 //
 // Outside an initialized project (no store) — and inside one whose PROJECT store

@@ -36,17 +36,9 @@ for (const v of await checkAdapterRegistry()) {
 // frontmatter) and sources ↔ bundles must be 1:1 — a hook added and bundled but
 // registered nowhere is the P5 'half-wired extension' and previously passed
 // every checker. Deliberate exceptions are listed with their reason.
-const HOOK_REGISTRATION_EXCEPTIONS = new Map([
-  // The exception is the PLACEMENT, not a platform limit. It originally read
-  // "PostToolUse never fires on MCP tool calls (research_finding 5e7d0a78)" —
-  // that claim was disproven on CC 2.1.215 (Pre/PostToolUse both fire on MCP
-  // calls and PostToolUse carries tool_response), and 5e7d0a78 is now a
-  // superseded tombstone. The server-side trigger stays BY DECISION (5ef11bd4:
-  // it works, it is mode-independent, and it does not ride a volatile platform
-  // fact), so this hook is legitimately absent from hooks.json and every
-  // frontmatter. Corrected 2026-07-26; the check itself is unchanged.
-  ['h11-note-structure.mjs', 'trigger lives in the MCP server BY DECISION (5ef11bd4), so it is registered nowhere — corrected successor of the disproven no-fire premise: research_finding e7bd5c19'],
-]);
+// (The sole entry, h11-note-structure.mjs, left with the note surface on
+// 2026-08-11 — decision 'note-surface-retired'.)
+const HOOK_REGISTRATION_EXCEPTIONS = new Map([]);
 const bundlesDir = join(pluginRoot, 'hooks');
 const hookSrcDir = join(pluginRoot, 'scripts', 'hooks');
 const hookFile = (f) => f.startsWith('h') && f.endsWith('.mjs');

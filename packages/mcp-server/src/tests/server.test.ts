@@ -38,7 +38,6 @@ const SERVED_TOOLS = [
   'board_query',
   'board_remove',
   'board_update',
-  'note_remove',
   // Session-event register writers (boards 75b1a05f + 1af5d630): the script
   // paths were unreachable from a consuming project's shell; the MCP surface
   // is mounted wherever the store is. Scripts remain the no-server fallback.

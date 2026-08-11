@@ -506,13 +506,13 @@ test('activity log (board 39d6462d): create/supersede/link/remove/retire/promote
     store.addLink(d2.id, 'cites', target.id); // identical edge — dedups, no new row
     assert.equal(store.listActivityLog(10).length, afterFirstLink, 'a deduped identical edge logs no second row');
 
-    // remove on a NON-todo (note_remove's primitive) → 'removed'
-    const note = store.create({ ...envelope('note'), raw_text: 'a captured note', captured_at: NOW, capture_source: 'command', derived: [] });
-    store.remove(note.id);
+    // remove on a NON-todo record → 'removed'
+    const removable = store.create(decision({ title: 'a removable decision' }));
+    store.remove(removable.id);
     rows = store.listActivityLog(10);
     assert.equal(rows[0].verb, 'removed');
-    assert.equal(rows[0].type, 'note');
-    assert.equal(rows[0].id, note.id);
+    assert.equal(rows[0].type, 'decision');
+    assert.equal(rows[0].id, removable.id);
 
     // remove on a USER todo → 'removed' in the activity log (never in the drain log)
     const userTodo = store.create({ ...envelope('todo'), text: 'a user todo', source: 'user' });
@@ -550,7 +550,7 @@ test('activity log (board 39d6462d): create/supersede/link/remove/retire/promote
   }
 });
 
-test('activity log title-or-slug: todo/note fall back to their first text line; feature_article uses title over slug', () => {
+test('activity log title-or-slug: todo falls back to its first text line; feature_article uses title over slug', () => {
   const { dir, store } = tempStore();
   try {
     const a = store.create(article({ slug: 'csv-export', title: 'CSV export' }));
@@ -559,9 +559,7 @@ test('activity log title-or-slug: todo/note fall back to their first text line; 
     const t = store.create({ ...envelope('todo'), text: 'first line\nsecond line', source: 'user' });
     assert.equal(store.listActivityLog(1)[0].title, 'first line', 'todo falls back to its first text line, clipped');
 
-    const n = store.create({ ...envelope('note'), raw_text: 'note first line\nrest', captured_at: NOW, capture_source: 'command', derived: [] });
-    assert.equal(store.listActivityLog(1)[0].title, 'note first line', 'note falls back to its first raw_text line');
-    void a; void t; void n;
+    void a; void t;
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
