@@ -4746,8 +4746,8 @@ var configSchema = external_exports.object({
     // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
     // different consequences (run escalation / dispatch deny in enforce mode).
     conductor: external_exports.object({
-      soft_pct: external_exports.number().positive().default(65),
-      hard_pct: external_exports.number().positive().default(80)
+      soft_pct: external_exports.number().positive().default(35),
+      hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
   // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):

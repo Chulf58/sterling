@@ -19,7 +19,7 @@
       "claude-sonnet-5": 1000000,
       "claude-haiku-4-5": 200000
     },
-    "conductor": { "soft_pct": 65, "hard_pct": 80 }
+    "conductor": { "soft_pct": 35, "hard_pct": 50 }
   },
   "models": {
     "test_writer": { "model": "claude-opus-5", "effort": "high" },
