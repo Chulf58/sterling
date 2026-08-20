@@ -2366,14 +2366,15 @@ test("state_review does NOT double-report a deletion the drift arm already named
 });
 
 // ---------------------------------------------------------------------------
-// Article history rotation (board 0697c6bd): history is bounded at the write
-// boundary — the newest article_history_max_entries survive; older entries are
+// Article history rotation (board 0697c6bd; middle-out since ab87fe24): history
+// is bounded at the write boundary — the genesis entries plus the newest
+// remainder survive (total article_history_max_entries); evicted entries are
 // NOT lost, they remain readable in the retained superseded versions. The
 // oversize detector measures the NON-history body, since a split (its remedy)
 // only ever fixes prose.
 // ---------------------------------------------------------------------------
 
-test('history rotation: knowledge_append past the cap keeps the newest N, warns, and dropped entries survive in the prior version', () => {
+test('history rotation: knowledge_append past the cap keeps genesis + newest, warns, and evicted entries survive in the prior version', () => {
   const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 3 });
   try {
     const v1 = mkArticle(tools, 'thing', 'src/thing.ts'); // history: ['seed']
@@ -2385,8 +2386,8 @@ test('history rotation: knowledge_append past the cap keeps the newest N, warns,
     const served = appended.record as unknown as { history: { event: string }[] };
     assert.deepEqual(
       served.history.map((h) => h.event),
-      ['e2', 'e3', 'e4'],
-      'newest 3 kept, oldest rotated out'
+      ['seed', 'e2', 'e4'],
+      'middle-out rotation: genesis (seed, e2) survive at the front, newest 1 (e4) at the back, e3 evicted from the middle'
     );
     assert.equal(appended.warnings.length, 1, 'rotation is disclosed, never silent');
     assert.match(appended.warnings[0], /history rotated/, 'names the rotation');
@@ -2435,8 +2436,8 @@ test('history rotation: knowledge_update rotates an over-cap history even when t
     const served = grown.record as unknown as { history: { event: string }[] };
     assert.deepEqual(
       served.history.map((h) => h.event),
-      ['b', 'c'],
-      'a caller-passed over-cap history is rotated too'
+      ['a', 'c'],
+      'middle-out rotation: genesis clamped to max-1=1 (keep a), newest 1 (c); b evicted from the middle'
     );
     assert.ok(grown.warnings.some((w) => /history rotated/.test(w) && /2 of 3/.test(w)), 'update path discloses on the same channel');
 

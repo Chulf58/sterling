@@ -1340,8 +1340,9 @@ export class SterlingTools {
   }
 
   /**
-   * History rotation disclosure (board 0697c6bd). knowledgeUpdate bounds a
-   * feature_article's history to the newest article_history_max_entries at the
+   * History rotation disclosure (board 0697c6bd; middle-out since ab87fe24).
+   * knowledgeUpdate bounds a feature_article's history to the first
+   * article_history_genesis_entries plus the newest remainder at the
    * write; this reports it on the same warnings channel the coherence and
    * oversize checks use. `attempted` is what the merged write WOULD have stored
    * unbounded (computed by attemptedHistoryLen from the caller's body and the
@@ -1353,9 +1354,13 @@ export class SterlingTools {
     if (record.type !== 'feature_article') return [];
     const kept = ((record as unknown as { history?: unknown[] }).history ?? []).length;
     if (kept >= attempted) return [];
+    const max = this.config.article_history_max_entries;
+    const genesis = Math.min(this.config.article_history_genesis_entries, max - 1);
+    const recentKeep = max - genesis;
     return [
-      `history rotated: kept the newest ${kept} of ${attempted} entries (article_history_max_entries=${this.config.article_history_max_entries}). ` +
-        `Older entries are not lost — they remain readable in the retained superseded versions (knowledge_get a prior version's id).`,
+      `history rotated (middle-out): kept ${kept} of ${attempted} entries — the ${genesis} genesis/founding entries plus the newest ${recentKeep} ` +
+        `(article_history_max_entries=${max}, article_history_genesis_entries=${this.config.article_history_genesis_entries}); the entries evicted from the middle ` +
+        `are not lost — they remain readable in the retained superseded prior version (knowledge_get a prior version's id).`,
     ];
   }
 
@@ -1910,8 +1915,8 @@ export class SterlingTools {
     if (old.type === 'feature_article' && body.version === undefined) {
       next.version = (old as { version: number }).version + 1;
     }
-    // History rotation (board 0697c6bd): bound the stored history to the newest
-    // N entries. The oldest are dropped from THIS version only — the version
+    // History rotation (board 0697c6bd): bound the stored history to genesis +
+    // newest entries. The middle is dropped from THIS version only — the version
     // being superseded right here retains them forever, so the supersede chain
     // is the archive and no entry ever becomes unreadable. Callers see the
     // rotation via historyRotationWarnings on the write's result envelope.
@@ -1919,7 +1924,14 @@ export class SterlingTools {
       const hist = next.history as unknown[] | undefined;
       const max = this.config.article_history_max_entries;
       if (Array.isArray(hist) && hist.length > max) {
-        next.history = hist.slice(-max);
+        // MIDDLE-OUT rotation (board ab87fe24, replacing the old "keep newest
+        // max" behavior): keep the first `genesis` entries (founding, by array
+        // position) plus the newest (max - genesis) entries, evicting the
+        // middle. genesis clamps to max - 1 so at least one recent entry
+        // always survives even when genesis_entries >= max.
+        const genesis = Math.min(this.config.article_history_genesis_entries, max - 1);
+        const recentKeep = max - genesis;
+        next.history = [...hist.slice(0, genesis), ...hist.slice(hist.length - recentKeep)];
       }
     }
     // re-baseline on every reconcile: the new version's owned-file hashes become

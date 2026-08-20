@@ -77,5 +77,6 @@
   "delivery": {
     "injection_rung": "prompt",
     "payload_char_cap": 2400
-  }
+  },
+  "article_history_genesis_entries": 2
 }
