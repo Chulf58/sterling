@@ -4877,7 +4877,9 @@ function loadConfig(cwd) {
 var input = readStdin();
 if (!input.cwd || !existsSync2(join2(input.cwd, ".sterling"))) allow();
 var command = String(input.tool_input?.command ?? "");
-if (!/\.sterling(?![\w.-])|sterling\.db/i.test(command)) allow();
+var STORE_MENTION_RE = /\.sterling(?![\w.-])|sterling\.db/i;
+var DB_MENTION_RE = /sterling\.db/i;
+if (!STORE_MENTION_RE.test(command)) allow();
 var allowScripts;
 try {
   allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;
@@ -4885,10 +4887,135 @@ try {
   deny(`H15: store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`);
 }
 if (allowScripts.some((s) => command.includes(s))) allow();
+function splitFragments(cmd) {
+  const parts = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (inSingle) {
+      current += c;
+      if (c === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      current += c;
+      if (c === '"' && cmd[i - 1] !== "\\") inDouble = false;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      current += c;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      current += c;
+      continue;
+    }
+    if (c === "\n" || c === "\r") {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    if (c === "&" && cmd[i + 1] === "&") {
+      parts.push(current);
+      current = "";
+      i++;
+      continue;
+    }
+    if (c === "|" && cmd[i + 1] === "|") {
+      parts.push(current);
+      current = "";
+      i++;
+      continue;
+    }
+    if (c === ";" || c === "|") {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += c;
+  }
+  parts.push(current);
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+var MUTATING_VERBS = /* @__PURE__ */ new Set([
+  "rm",
+  "mv",
+  "cp",
+  "tee",
+  "truncate",
+  "dd",
+  "chmod",
+  "chown",
+  "rsync",
+  "ln",
+  "unlink",
+  "patch",
+  "shred",
+  "install",
+  "mkfifo"
+]);
+var READONLY_VERBS = /* @__PURE__ */ new Set([
+  "git",
+  "grep",
+  "egrep",
+  "fgrep",
+  "zgrep",
+  "rgrep",
+  "ls",
+  "cat",
+  "head",
+  "tail",
+  "wc",
+  "find",
+  "awk",
+  "diff",
+  "file",
+  "stat",
+  "less",
+  "more",
+  "tree",
+  "du",
+  "od",
+  "xxd",
+  "hexdump"
+]);
+function firstWord(fragment) {
+  const m = fragment.match(/^\s*(\S+)/);
+  return m ? m[1].toLowerCase() : "";
+}
+function classifyFragment(fragment) {
+  const trimmed = fragment.trim();
+  if (!trimmed || !STORE_MENTION_RE.test(trimmed)) return { write: false, fragment: trimmed };
+  if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed };
+  if (/>/.test(trimmed)) return { write: true, fragment: trimmed };
+  const verb = firstWord(trimmed);
+  if (verb === "sed") {
+    if (/(^|\s)-\w*i\w*(\s|=|$)/.test(trimmed)) return { write: true, fragment: trimmed };
+    return { write: false, fragment: trimmed };
+  }
+  if (MUTATING_VERBS.has(verb)) return { write: true, fragment: trimmed };
+  if (READONLY_VERBS.has(verb)) return { write: false, fragment: trimmed };
+  return { write: true, fragment: trimmed };
+}
+var offending = null;
+for (const frag of splitFragments(command)) {
+  const result = classifyFragment(frag);
+  if (result.write) {
+    offending = result.fragment;
+    break;
+  }
+}
+if (!offending) allow();
 deny(
-  `H15: shell access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
+  `H15: shell write access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
+Denied fragment: ${offending}
 Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / maintenance_enqueue / run_signal / agent_exit.
 Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts).
-THIS GATE MATCHES COMMAND TEXT: a store path appearing only as PROSE \u2014 a commit message, an echo, a search pattern \u2014 trips it too, even though nothing would be accessed. Do not rewrite the command to evade the match; write the text to a file OUTSIDE the store and pass it by path (e.g. git commit -F <file>).
+.sterling/sterling.db is sealed to shell access for EVERY verb, reads included \u2014 DB access is the MCP tool surface's job, never raw shell.
+Non-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c) \u2014 only writes, redirections, and moves/copies INTO .sterling/ are denied.
 If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`
 );

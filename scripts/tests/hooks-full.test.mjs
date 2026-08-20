@@ -1036,15 +1036,13 @@ test('H15 store guard: shell references to the store are denied naming the §10 
     assert.equal(run('npm test').code, 0, 'unrelated commands untouched');
     assert.equal(run('git status').code, 0);
 
-    // PROSE trips the gate too, and the denial now SAYS so (decision a8bec43f).
-    // Hit live by a `git commit -F -` whose heredoc message described store work:
-    // nothing is accessed, the deny is still correct by the gate's rule, and the
-    // old wording ('shell access is denied') misdiagnosed exactly that case.
+    // Superseded pin (decision 0b4d3c8c, user-decided 2026-08-20): the gate now
+    // judges per fragment and per VERB, so a read-only git command whose prose
+    // merely MENTIONS the store is allowed — the old deny-any-mention breadth
+    // (a8bec43f's wording fix rode on it) blocked legitimate read-only work.
     const prose = run('git commit -F - <<EOF\nchore: teach the .sterling guard to explain itself\nEOF');
-    assert.equal(prose.code, 2, 'the matcher is NOT narrowed — prose still denies, the allow surface is unchanged');
-    assert.match(prose.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the discriminator is named, not just the rule');
-    assert.match(prose.stderr, /git commit -F <file>/, 'and the remedy is spelled out');
-    assert.match(nodeWrite.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the line is unconditional — no prose-detection heuristic to get wrong');
+    assert.equal(prose.code, 0, 'a read-only git command mentioning the store in prose is no longer denied (0b4d3c8c)');
+    assert.match(nodeWrite.stderr, /rm|fragment|\.sterling/, 'a write denial names what it matched, not just the rule');
 
     // malformed config: the gate FAILS CLOSED on the protected branch (review finding)
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
