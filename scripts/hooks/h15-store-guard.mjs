@@ -26,7 +26,7 @@
 // read-only, exactly the "grow incident-by-incident" posture above.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
+import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 import { parseConfig } from '@sterling/schemas';
 
 const input = readStdin();
@@ -48,7 +48,11 @@ let allowScripts;
 try {
   allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;
 } catch (e) {
-  deny(`H15: store access denied — .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`);
+  deny(
+    environmentDefectDenial('H15', `Store access denied — .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {
+      agentId: input.agent_id,
+    })
+  );
 }
 
 // Split on shell control operators so each fragment is judged independently
@@ -287,14 +291,20 @@ try {
   // which the platform treats as non-blocking — a silently VOIDED gate (the
   // F5 fail-open class, anti_pattern e13f0fb5). Any unexpected internal error
   // during evaluation must deny, not disappear.
-  deny(`H15: internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`);
+  deny(
+    environmentDefectDenial(
+      'H15',
+      `Internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`,
+      { agentId: input.agent_id }
+    )
+  );
 }
 if (!offending) allow();
 
 deny(
   'H15: shell write access to the Sterling store is denied — the store is read and written through the §10 MCP tool surface ONLY.\n' +
     `Denied fragment: ${offending}\n` +
-    'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / maintenance_enqueue / run_signal / agent_exit.\n' +
+    'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
     `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts).\n` +
     ".sterling/sterling.db is sealed to shell access for EVERY verb, reads included — DB access is the MCP tool surface's job, never raw shell.\n" +
     'Non-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c) — only writes, redirections, and moves/copies INTO .sterling/ are denied.\n' +

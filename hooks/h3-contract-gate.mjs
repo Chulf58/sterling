@@ -4864,7 +4864,8 @@ var configSchema = external_exports.object({
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps only the newest N (rotation disclosed on
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
   // the write's warnings channel). Nothing is lost: every rotated-away entry
   // remains readable in the retained superseded versions, which the store keeps
   // forever — the supersede chain IS the archive, so no new table or archive
@@ -4875,6 +4876,12 @@ var configSchema = external_exports.object({
   // consumers (promotion/completeness match on RECENT entries' target_id)
   // while bounding the round-trip.
   article_history_max_entries: external_exports.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -6062,6 +6069,23 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function environmentDefectDenial(gateName, detail, opts = {}) {
+  const audienceAware = "agentId" in opts;
+  const { agentId, selfHeal } = opts;
+  const repair = "repair it (or restart the session) before proceeding";
+  const noConductorAbove = `there is no conductor above you to exit \`blocked\` to \u2014 ${repair}.`;
+  const agentFacing = `Do not diagnose, repair, or retry ${gateName} yourself \u2014 exit \`blocked\`, citing this message VERBATIM, and let the conductor fix the environment.`;
+  let instruction;
+  if (selfHeal) {
+    const resolution = !audienceAware || agentId ? "exit `blocked` citing it." : noConductorAbove;
+    instruction = `${selfHeal.action} ${selfHeal.onRepeat}, ${resolution}`;
+  } else if (audienceAware && !agentId) {
+    instruction = `This is broken state, and ${noConductorAbove}`;
+  } else {
+    instruction = agentFacing;
+  }
+  return `\u26A0 ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
+}
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -6132,6 +6156,17 @@ function hasFreshRead(path, repoRelPath, absPath) {
     return e.sha256 === fileHash(absPath);
   });
 }
+function isLedgerTorn(path) {
+  if (!existsSync3(path)) return false;
+  const raw = readFileSync2(path, "utf8");
+  if (!raw.trim()) return false;
+  try {
+    JSON.parse(raw);
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 // scripts/hooks/lib/contract.mjs
 import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, existsSync as existsSync4 } from "node:fs";
@@ -6172,6 +6207,20 @@ var cwd = input.cwd;
 var toolPath = input.tool_input?.file_path;
 var rel = repoRel(toolPath, cwd);
 function evidenceDenial(mode, lp, path) {
+  if (isLedgerTorn(lp)) {
+    const salvagedCount = readLedger(lp).length;
+    return environmentDefectDenial(
+      "H3",
+      `The read-evidence ledger '${lp}' is TORN \u2014 present, non-empty, and not valid JSON (a concurrent writer likely interleaved two writes). ${salvagedCount} entr${salvagedCount === 1 ? "y" : "ies"} were salvaged from the leading valid array; any record of a fresh read of '${path}' beyond that point may have been silently lost in the tear. This is NOT evidence that you skipped the Read.`,
+      {
+        agentId: input.agent_id,
+        selfHeal: {
+          action: "Read the target file now \u2014 a successful Read is valid evidence AND repairs the torn ledger.",
+          onRepeat: "If this same TORN denial repeats after that Read"
+        }
+      }
+    );
+  }
   const count = readLedger(lp).length;
   const window = input.agent_id ? "this AGENT's own ledger \u2014 reads by the conductor or by another agent are never yours" : "the CONDUCTOR ledger. Evidence EXPIRES WHEN THE FILE CHANGES (read-time content hash vs current bytes) and on context compaction \u2014 so either you never Read this exact file, or it has been modified since your last Read";
   return `H3 [${mode}]: no fresh read-evidence for '${path}' \u2014 Read the exact file before editing. Checked ${lp} (${count} entr${count === 1 ? "y" : "ies"}), which is ${window}. Grep/Glob hits are not read-evidence.`;
@@ -6189,7 +6238,12 @@ if (input.agent_id && toolPath) {
 var store;
 try {
   store = openStore(cwd);
-  if (!store) deny("H3: no Sterling store at .sterling/ \u2014 the contract gate cannot evaluate scope; failing closed (P5)");
+  if (!store)
+    deny(
+      environmentDefectDenial("H3", "No Sterling store at .sterling/ \u2014 the contract gate cannot evaluate scope; failing closed (P5).", {
+        agentId: input.agent_id
+      })
+    );
   const run = withRetry(() => store.getRun());
   const absolute = toolPath && (isAbsolute(String(toolPath)) || /^[A-Za-z]:/.test(String(toolPath)));
   const absPath = rel ? join4(cwd, rel) : absolute ? String(toolPath) : void 0;
@@ -6197,7 +6251,12 @@ try {
   if (run) {
     if (!rel) deny(`H3 [run mode]: '${toolPath}' is outside the repository \u2014 the run owns only the working tree; out of scope`);
     const brief = withRetry(() => store.get(run.brief_ref));
-    if (!brief || brief.type !== "brief") deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
+    if (!brief || brief.type !== "brief")
+      deny(
+        environmentDefectDenial("H3", `Run '${run.id}' points at brief '${run.brief_ref}', which is not found in the store; failing closed (P5).`, {
+          agentId: input.agent_id
+        })
+      );
     const scope2 = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope2.deny) deny(`H3 [run mode]: ${scope2.deny}`);
     if (!isCreation && !hasFreshRead(ledgerPath(cwd, run.id, input.agent_id), rel, absPath)) {
@@ -6213,5 +6272,9 @@ try {
   }
   allow();
 } catch (e) {
-  deny(`H3: contract evaluation failed (${e && e.message || e}) \u2014 failing closed (P5); retry the edit`);
+  deny(
+    environmentDefectDenial("H3", `Contract evaluation failed (${e && e.message || e}) \u2014 failing closed (P5).`, {
+      agentId: input.agent_id
+    })
+  );
 }

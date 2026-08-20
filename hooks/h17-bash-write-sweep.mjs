@@ -4854,7 +4854,8 @@ var configSchema = external_exports.object({
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps only the newest N (rotation disclosed on
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
   // the write's warnings channel). Nothing is lost: every rotated-away entry
   // remains readable in the retained superseded versions, which the store keeps
   // forever — the supersede chain IS the archive, so no new table or archive
@@ -4865,6 +4866,12 @@ var configSchema = external_exports.object({
   // consumers (promotion/completeness match on RECENT entries' target_id)
   // while bounding the round-trip.
   article_history_max_entries: external_exports.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -6052,6 +6059,23 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function environmentDefectDenial(gateName, detail, opts = {}) {
+  const audienceAware = "agentId" in opts;
+  const { agentId, selfHeal } = opts;
+  const repair = "repair it (or restart the session) before proceeding";
+  const noConductorAbove = `there is no conductor above you to exit \`blocked\` to \u2014 ${repair}.`;
+  const agentFacing = `Do not diagnose, repair, or retry ${gateName} yourself \u2014 exit \`blocked\`, citing this message VERBATIM, and let the conductor fix the environment.`;
+  let instruction;
+  if (selfHeal) {
+    const resolution = !audienceAware || agentId ? "exit `blocked` citing it." : noConductorAbove;
+    instruction = `${selfHeal.action} ${selfHeal.onRepeat}, ${resolution}`;
+  } else if (audienceAware && !agentId) {
+    instruction = `This is broken state, and ${noConductorAbove}`;
+  } else {
+    instruction = agentFacing;
+  }
+  return `\u26A0 ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
+}
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -6211,7 +6235,7 @@ if (event === "PreToolUse") {
     writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyTrackedRels(cwd)));
     allow();
   } catch (e) {
-    deny(`H17 [pre]: baseline snapshot failed (${e && e.message || e}) \u2014 failing closed (P5).`);
+    deny(environmentDefectDenial("H17", `[pre] Baseline snapshot failed (${e && e.message || e}) \u2014 failing closed (P5).`, { agentId: input.agent_id }));
   }
 }
 try {
@@ -6234,7 +6258,13 @@ try {
     }
     if (!brief || brief.type !== "brief") {
       store?.close();
-      deny(`H17: run '${runId}' active but brief '${run.brief_ref}' unresolvable \u2014 cannot verify contract; failing closed (P5).`);
+      deny(
+        environmentDefectDenial(
+          "H17",
+          `Run '${runId}' active but brief '${run.brief_ref}' unresolvable \u2014 cannot verify contract; failing closed (P5).`,
+          { agentId: input.agent_id }
+        )
+      );
     }
   }
   store?.close();
@@ -6243,14 +6273,22 @@ try {
   const dPath = dirtyFile(cwd, runId);
   if (!existsSync3(dPath)) {
     deny(
-      `H17: attribution record '${dPath}' absent at Post \u2014 cannot tell this command's writes from pre-existing ones; failing closed (P5). If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`
+      environmentDefectDenial(
+        "H17",
+        `attribution record '${dPath}' absent at Post \u2014 cannot tell this command's writes from pre-existing ones; failing closed (P5). If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`,
+        { agentId: input.agent_id }
+      )
     );
   }
   let preDirty;
   try {
     preDirty = new Set(JSON.parse(readFileSync2(dPath, "utf8")));
   } catch {
-    deny(`H17: attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`);
+    deny(
+      environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`, {
+        agentId: input.agent_id
+      })
+    );
   }
   const status = spawnSync("git", ["-C", cwd, "status", "--porcelain", "-z"], { encoding: "utf8" });
   if (status.error || status.status !== 0) {
@@ -6274,14 +6312,22 @@ try {
   const bPath = baselineFile(cwd, runId);
   if (!existsSync3(bPath)) {
     deny(
-      `H17: baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`
+      environmentDefectDenial(
+        "H17",
+        `Baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`,
+        { agentId: input.agent_id }
+      )
     );
   }
   let baseline;
   try {
     baseline = JSON.parse(readFileSync2(bPath, "utf8"));
   } catch {
-    deny(`H17: baseline '${bPath}' corrupt/unparseable \u2014 cannot verify the enforcement surface; failing closed (P5).`);
+    deny(
+      environmentDefectDenial("H17", `Baseline '${bPath}' corrupt/unparseable \u2014 cannot verify the enforcement surface; failing closed (P5).`, {
+        agentId: input.agent_id
+      })
+    );
   }
   const valid = {};
   for (const key of Object.keys(baseline)) {
@@ -6316,7 +6362,11 @@ try {
     }
     if (preExisting.length) {
       parts.push(
-        `H17: PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside \u2014 commit or revert these (the conductor's own work, e.g. a mid-run bundle rebuild), then rerun.`
+        environmentDefectDenial(
+          "H17",
+          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).`,
+          { agentId: input.agent_id }
+        )
       );
     }
     deny(parts.join("\n"));
@@ -6324,6 +6374,8 @@ try {
   allow();
 } catch (e) {
   deny(
-    `H17: enforcement verification failed (${e && e.message || e}) \u2014 a denial exits contract-violated, never route around; failing closed (P5).`
+    environmentDefectDenial("H17", `Enforcement verification failed (${e && e.message || e}) \u2014 failing closed (P5).`, {
+      agentId: input.agent_id
+    })
   );
 }

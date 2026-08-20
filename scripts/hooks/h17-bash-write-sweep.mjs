@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { matchesGlob } from '@sterling/schemas';
-import { readStdin, allow, deny, openStore, withRetry } from './lib/common.mjs';
+import { readStdin, allow, deny, openStore, withRetry, environmentDefectDenial } from './lib/common.mjs';
 import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 
 // The (B) gitignored baseline set (v3.1: settings*.json added — the gitignored
@@ -177,7 +177,7 @@ if (event === 'PreToolUse') {
   } catch (e) {
     // A snapshot failure during an active agent run cannot be verified later —
     // fail closed (P5).
-    deny(`H17 [pre]: baseline snapshot failed (${(e && e.message) || e}) — failing closed (P5).`);
+    deny(environmentDefectDenial('H17', `[pre] Baseline snapshot failed (${(e && e.message) || e}) — failing closed (P5).`, { agentId: input.agent_id }));
   }
 }
 
@@ -207,7 +207,13 @@ try {
     if (!brief || brief.type !== 'brief') {
       store?.close();
       // run active but brief unresolvable → fail CLOSED (unlike H3), P5 (AC9f).
-      deny(`H17: run '${runId}' active but brief '${run.brief_ref}' unresolvable — cannot verify contract; failing closed (P5).`);
+      deny(
+        environmentDefectDenial(
+          'H17',
+          `Run '${runId}' active but brief '${run.brief_ref}' unresolvable — cannot verify contract; failing closed (P5).`,
+          { agentId: input.agent_id }
+        )
+      );
     }
   }
   store?.close();
@@ -227,15 +233,23 @@ try {
     // Reached when Pre did not run, when a run boundary moved the runId between
     // Pre and Post, or when a Pre written by an OLDER bundle predates this file.
     deny(
-      `H17: attribution record '${dPath}' absent at Post — cannot tell this command's writes from pre-existing ones; failing closed (P5). ` +
-        `If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`
+      environmentDefectDenial(
+        'H17',
+        `attribution record '${dPath}' absent at Post — cannot tell this command's writes from pre-existing ones; failing closed (P5). ` +
+          `If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`,
+        { agentId: input.agent_id }
+      )
     );
   }
   let preDirty;
   try {
     preDirty = new Set(JSON.parse(readFileSync(dPath, 'utf8')));
   } catch {
-    deny(`H17: attribution record '${dPath}' corrupt/unparseable — cannot attribute writes; failing closed (P5).`);
+    deny(
+      environmentDefectDenial('H17', `attribution record '${dPath}' corrupt/unparseable — cannot attribute writes; failing closed (P5).`, {
+        agentId: input.agent_id,
+      })
+    );
   }
 
   // --- (A) TRACKED writes via git ---
@@ -269,20 +283,37 @@ try {
   const bPath = baselineFile(cwd, runId);
   if (!existsSync(bPath)) {
     deny(
-      `H17: baseline '${bPath}' absent at Post (no Pre snapshot) — cannot verify the enforcement surface; failing closed (P5). ` +
-        `Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and ` +
-        `Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`
+      environmentDefectDenial(
+        'H17',
+        `Baseline '${bPath}' absent at Post (no Pre snapshot) — cannot verify the enforcement surface; failing closed (P5). ` +
+          `Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and ` +
+          `Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`,
+        { agentId: input.agent_id }
+      )
     );
   }
   let baseline;
   try {
     baseline = JSON.parse(readFileSync(bPath, 'utf8'));
   } catch {
-    deny(`H17: baseline '${bPath}' corrupt/unparseable — cannot verify the enforcement surface; failing closed (P5).`);
+    deny(
+      environmentDefectDenial('H17', `Baseline '${bPath}' corrupt/unparseable — cannot verify the enforcement surface; failing closed (P5).`, {
+        agentId: input.agent_id,
+      })
+    );
   }
 
   // Validate EVERY key BEFORE any restore write — a bad key (traversal/absolute/
   // off-glob) is a crafted baseline; deny with NO out-of-tree write (AC10).
+  // UNWRAPPED, deliberately (review finding F4), unlike the corrupt-baseline
+  // branch one line up: a CORRUPT baseline (unparseable JSON) can only arise
+  // from something damaging the file out from under the gate — an environment
+  // defect. A CRAFTED key (well-formed JSON, but a key that is absolute, a
+  // traversal, or off the (B) glob set) implies an AUTHOR: the same agent
+  // whose Bash command this hook is auditing can itself write arbitrary bytes
+  // to os.tmpdir() (no store/enforcement-surface guard covers that path), so
+  // a hand-shaped payload here is conduct, not environment — the misconduct
+  // framing (and its fail-closed-with-no-write remedy) stays correct.
   const valid = {};
   for (const key of Object.keys(baseline)) {
     const norm = validateBaselineKey(key);
@@ -319,10 +350,22 @@ try {
       );
     }
     if (preExisting.length) {
+      // ENVIRONMENT DEFECT, not misconduct (decision f76d7c5c, review finding
+      // F3): this state existed BEFORE the command ran, by construction never
+      // the calling agent's doing — yet the old wording read as misconduct
+      // and prescribed remedies (commit/revert) the agent cannot perform (no
+      // Bash path to the enforcement surface, H15/H3 deny it). h17 always
+      // short-circuits to allow() when input.agent_id is absent (line ~155),
+      // so the audience here is unconditionally an agent — no conductor case
+      // to compose with F2.
       parts.push(
-        `H17: PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
-          `Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside — ` +
-          `commit or revert these (the conductor's own work, e.g. a mid-run bundle rebuild), then rerun.`
+        environmentDefectDenial(
+          'H17',
+          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
+            `Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside ` +
+            `(the conductor's own work, e.g. a mid-run bundle rebuild).`,
+          { agentId: input.agent_id }
+        )
       );
     }
     deny(parts.join('\n'));
@@ -330,8 +373,13 @@ try {
   allow();
 } catch (e) {
   // Universal fail-closed catch-all: anything unforeseen during an active agent
-  // run denies (exit 2), never a non-blocking exit 1.
+  // run denies (exit 2), never a non-blocking exit 1. This branch is reached
+  // only by UNEXPECTED internal failures (git errors, restore fs-errors, a
+  // corrupt store) — never by an actual verified contract violation, which
+  // denies explicitly above with its own contract-violated wording untouched.
   deny(
-    `H17: enforcement verification failed (${(e && e.message) || e}) — a denial exits contract-violated, never route around; failing closed (P5).`
+    environmentDefectDenial('H17', `Enforcement verification failed (${(e && e.message) || e}) — failing closed (P5).`, {
+      agentId: input.agent_id,
+    })
   );
 }

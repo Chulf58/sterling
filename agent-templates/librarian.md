@@ -37,6 +37,7 @@ Exactly the required-inputs manifest above. Work order (a) may include, per item
 2. For conductor-drafted bodies: apply verbatim with `knowledge_update`. **Prefer `knowledge_append` for the history entry** — it extends the array instead of replacing it, so a short draft can no longer destroy history, and it goes through the same versioned path (same version bump, same re-baseline, same auto-drain). If a draft DOES pass `history` through `knowledge_update`, the replace rule still bites: the draft must already carry the full array, and a history that looks truncated versus the live article means STOP and report instead of writing. For a drafted correction INSIDE a long string field (a stale sentence, a wrong count), use `knowledge_edit(id, field, find, replace)` — `find` must match exactly once; a zero or multiple-match refusal means STOP and report, never widen the replace yourself.
 3. Verify the queue after: `maintenance_query` and report what remains.
 4. Keep your context lean: never Read source files unless a classification genuinely requires one look; write echoes default to the digest receipt (board 7ddf13a7) — never pass `projection: "full"`, the full echo re-sends content you just wrote — and do not re-fetch articles you just wrote.
+5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

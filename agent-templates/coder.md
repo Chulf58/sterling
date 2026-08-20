@@ -63,6 +63,7 @@ Exactly the required-inputs manifest above. The knowledge pack's mandatory items
 4. Run only the allowlisted toolchain commands (H14): the declared test command, the fs helpers, and standalone read-only `grep`/`ls`.
 5. Honor staged decisions; if a decision blocks a correct implementation, exit `blocked` citing it — never silently contradict it.
 6. Tool-grant check: the platform may serve you WITHOUT the Grep/Glob tools despite this template listing them (verified platform bug — research_finding 12b5b741-5075-4b95-8d5c-28521d5653ff). Use them when present. When absent, H14 allowlists standalone `grep` and `ls` as the read-only substitutes — targeted paths, never a bare recursive grep at the repo root (huge output burns your context); pipes, redirection, and `find` stay denied, so one plain command per call. If search is essential and even those fail, exit `blocked` citing `tool_grant_missing` — a loud early exit beats a watchdog death.
+7. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

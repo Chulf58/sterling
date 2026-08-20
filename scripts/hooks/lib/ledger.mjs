@@ -97,3 +97,25 @@ export function pruneUnhashed(path) {
 export function clearLedger(path) {
   if (existsSync(path)) rmSync(path);
 }
+
+/**
+ * Whether the ledger file's RAW bytes are TORN — present, non-empty, and not
+ * valid JSON (board c7b81456, the same 2026-08-20 race documented above:
+ * concurrent PostToolUse:Read hooks interleaved two appendRead writes).
+ * readLedger() already SALVAGES a torn file (leading array, else empty) so a
+ * consumer never throws — but that silent recovery is exactly why a torn
+ * ledger's resulting "no evidence" denial reads like ordinary "you never read
+ * it" misconduct: the entries are just gone, and nothing said so. This lets a
+ * caller (H3's evidenceDenial) tell the two apart before wording the denial.
+ */
+export function isLedgerTorn(path) {
+  if (!existsSync(path)) return false;
+  const raw = readFileSync(path, 'utf8');
+  if (!raw.trim()) return false;
+  try {
+    JSON.parse(raw);
+    return false;
+  } catch {
+    return true;
+  }
+}

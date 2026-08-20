@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readLedger, appendRead, hasFreshRead } from '../hooks/lib/ledger.mjs';
+import { readLedger, appendRead, hasFreshRead, isLedgerTorn } from '../hooks/lib/ledger.mjs';
 
 const TORN =
   '[{"agent_id":"a1","path":"src/a.mjs","at":"2026-08-20T16:00:00.000Z","sha256":"aaaa"},' +
@@ -77,6 +77,25 @@ test('hasFreshRead on a torn ledger answers false for an unread path — a clean
       fresh = hasFreshRead(p, 'src/never-read.mjs', join(tmpdir(), 'nope'));
     }, "H3's evidence check must produce its normal worded denial, not 'contract evaluation failed'");
     assert.equal(fresh, false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('isLedgerTorn: true on torn bytes (including irrecoverable garbage), false on absent/empty/well-formed', () => {
+  const { p, dir, cleanup } = tornFile();
+  try {
+    assert.equal(isLedgerTorn(p), true, 'present, non-empty, invalid JSON — the exact race shape');
+    assert.equal(isLedgerTorn(join(dir, 'does-not-exist.json')), false, 'absent is not torn');
+    const empty = join(dir, 'empty.json');
+    writeFileSync(empty, '');
+    assert.equal(isLedgerTorn(empty), false, 'empty is not torn — never written yet');
+    const wellFormed = join(dir, 'ok.json');
+    writeFileSync(wellFormed, JSON.stringify([{ agent_id: 'a1', path: 'src/a.mjs', at: '2026-08-20T16:00:00.000Z' }]));
+    assert.equal(isLedgerTorn(wellFormed), false, 'valid JSON is not torn');
+    const garbage = join(dir, 'garbage.json');
+    writeFileSync(garbage, '{not json at all');
+    assert.equal(isLedgerTorn(garbage), true, 'irrecoverable garbage is still torn bytes');
   } finally {
     cleanup();
   }

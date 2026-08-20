@@ -8,8 +8,8 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesGlob } from '@sterling/schemas';
-import { readStdin, deny, allow, openStore, repoRel, withRetry } from './lib/common.mjs';
-import { ledgerPath, hasFreshRead, readLedger } from './lib/ledger.mjs';
+import { readStdin, deny, allow, openStore, repoRel, withRetry, environmentDefectDenial } from './lib/common.mjs';
+import { ledgerPath, hasFreshRead, readLedger, isLedgerTorn } from './lib/ledger.mjs';
 import { scopeCheck, readDebugScope, ENFORCEMENT_SURFACE } from './lib/contract.mjs';
 
 const input = readStdin();
@@ -26,6 +26,34 @@ const rel = repoRel(toolPath, cwd);
 // the file has CHANGED since", and (post-compaction) "the ledger was cleared
 // because compaction may have dropped the read from your window".
 function evidenceDenial(mode, lp, path) {
+  // ENVIRONMENT DEFECT, not misconduct (board c7b81456): a torn ledger file
+  // (readLedger salvages it silently — see lib/ledger.mjs) means entries may
+  // have been lost to a concurrent-write race, not that the agent skipped
+  // the Read. Without this check the resulting denial is indistinguishable
+  // from ordinary "you never read it" wording, which is exactly what burned
+  // ~205k tokens in the motivating incident: the agent diagnosed its own
+  // conduct instead of exiting blocked over broken ledger state.
+  if (isLedgerTorn(lp)) {
+    // SELF-HEALING (review finding F1): unlike the other environment-defect
+    // branches, a torn ledger repairs itself on the caller's very next
+    // successful Read — appendRead rewrites the file from the salvaged
+    // entries (lib/ledger.mjs). "Do not retry" is exactly the wrong
+    // instruction here; the fix IS the retry.
+    const salvagedCount = readLedger(lp).length;
+    return environmentDefectDenial(
+      'H3',
+      `The read-evidence ledger '${lp}' is TORN — present, non-empty, and not valid JSON (a concurrent writer likely interleaved two writes). ` +
+        `${salvagedCount} entr${salvagedCount === 1 ? 'y' : 'ies'} were salvaged from the leading valid array; any record of a fresh read of '${path}' beyond ` +
+        `that point may have been silently lost in the tear. This is NOT evidence that you skipped the Read.`,
+      {
+        agentId: input.agent_id,
+        selfHeal: {
+          action: 'Read the target file now — a successful Read is valid evidence AND repairs the torn ledger.',
+          onRepeat: 'If this same TORN denial repeats after that Read',
+        },
+      }
+    );
+  }
   const count = readLedger(lp).length;
   const window = input.agent_id
     ? "this AGENT's own ledger — reads by the conductor or by another agent are never yours"
@@ -60,7 +88,12 @@ if (input.agent_id && toolPath) {
 let store;
 try {
   store = openStore(cwd);
-  if (!store) deny('H3: no Sterling store at .sterling/ — the contract gate cannot evaluate scope; failing closed (P5)');
+  if (!store)
+    deny(
+      environmentDefectDenial('H3', 'No Sterling store at .sterling/ — the contract gate cannot evaluate scope; failing closed (P5).', {
+        agentId: input.agent_id,
+      })
+    );
 
   const run = withRetry(() => store.getRun());
   const absolute = toolPath && (isAbsolute(String(toolPath)) || /^[A-Za-z]:/.test(String(toolPath)));
@@ -70,7 +103,12 @@ try {
   if (run) {
     if (!rel) deny(`H3 [run mode]: '${toolPath}' is outside the repository — the run owns only the working tree; out of scope`);
     const brief = withRetry(() => store.get(run.brief_ref));
-    if (!brief || brief.type !== 'brief') deny(`H3 [run mode]: brief '${run.brief_ref}' not found in the store; failing closed (P5)`);
+    if (!brief || brief.type !== 'brief')
+      deny(
+        environmentDefectDenial('H3', `Run '${run.id}' points at brief '${run.brief_ref}', which is not found in the store; failing closed (P5).`, {
+          agentId: input.agent_id,
+        })
+      );
     const scope = scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) });
     if (scope.deny) deny(`H3 [run mode]: ${scope.deny}`);
     if (!isCreation && !hasFreshRead(ledgerPath(cwd, run.id, input.agent_id), rel, absPath)) {
@@ -88,6 +126,10 @@ try {
   }
   allow();
 } catch (e) {
-  deny(`H3: contract evaluation failed (${(e && e.message) || e}) — failing closed (P5); retry the edit`);
+  deny(
+    environmentDefectDenial('H3', `Contract evaluation failed (${(e && e.message) || e}) — failing closed (P5).`, {
+      agentId: input.agent_id,
+    })
+  );
 }
 // no close: every path above exits the process, which releases the handle (board f81b1987)

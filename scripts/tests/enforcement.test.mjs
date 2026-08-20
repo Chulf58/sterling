@@ -470,6 +470,10 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
     let r = edit(join(dir, 'src', 'feature.ts'));
     assert.equal(r.code, 2);
     assert.match(r.stderr, /read-evidence/);
+    // Separation pin (board c7b81456 review): an ordinary misconduct denial
+    // must never carry the environment-defect marker — a mis-wrap here would
+    // teach agents to exit blocked on their own fixable conduct.
+    assert.doesNotMatch(r.stderr, /ENVIRONMENT DEFECT/);
     // NAME THE LEDGER AND ITS WINDOW. ledgerPath resolves three different files, so
     // one sentence used to cover "never read it", "read it in an earlier prompt
     // turn" and "a different agent read it" — and the conductor case reads as a
@@ -587,8 +591,32 @@ test('H3: fails closed without a Sterling store (P5)', () => {
     const r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'x.ts') } }), dir);
     assert.equal(r.code, 2);
     assert.match(r.stderr, /failing closed/);
+    assert.match(r.stderr, /ENVIRONMENT DEFECT/);
+    assert.match(r.stderr, /exit `blocked`/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H3: a TORN read-evidence ledger denies as an ENVIRONMENT DEFECT, not ordinary misconduct (board c7b81456)', () => {
+  const { dir, cleanup } = makeProject({ withRun: true });
+  try {
+    const lp = join(dir, '.sterling', 'runs', 'r-1', 'reads', 'agent-a1.json');
+    mkdirSync(dirname(lp), { recursive: true });
+    writeFileSync(lp, '{not json at all'); // torn: present, non-empty, unparseable
+    const r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'feature.ts') }, agent_id: 'a1' }), dir);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /ENVIRONMENT DEFECT/);
+    assert.match(r.stderr, /TORN/);
+    assert.match(r.stderr, /not your conduct/i);
+    // Self-healing state: the denial instructs the ONE repairing action (a
+    // re-Read rebuilds the ledger from salvage) instead of do-not-retry, and
+    // escalates to blocked only if the denial repeats (review F1, c7b81456).
+    assert.match(r.stderr, /Read the target file now/);
+    assert.match(r.stderr, /repairs the torn ledger/);
+    assert.match(r.stderr, /exit `blocked`/);
+  } finally {
+    cleanup();
   }
 });
 

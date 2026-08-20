@@ -6,7 +6,7 @@
 // Denied: repo source CONTENT — via Read or content-mode Grep alike (the r-ea9e
 // bypass: a denied Read re-fetched through Grep with -C context lines).
 import { matchesGlob } from '@sterling/schemas';
-import { readStdin, deny, allow, loadConfig, repoRel } from './lib/common.mjs';
+import { readStdin, deny, allow, loadConfig, repoRel, environmentDefectDenial } from './lib/common.mjs';
 
 const input = readStdin();
 
@@ -56,7 +56,7 @@ if (DOC_RE.test(rel) || rel.startsWith('docs/')) allow();
 try {
   const config = loadConfig(input.cwd);
   if (!config?.toolchains?.length) {
-    deny('H4: no toolchains in .sterling/config.json — the read wall cannot resolve test globs; failing closed (P5)');
+    deny(environmentDefectDenial('H4', 'No toolchains in .sterling/config.json — the read wall cannot resolve test globs; failing closed (P5).'));
   }
   for (const tc of config.toolchains) {
     for (const glob of tc.test_globs ?? []) {
@@ -81,5 +81,5 @@ try {
       : `H4: '${rel}' is implementation — the test-writer never reads code (§6 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
   );
 } catch (e) {
-  deny(`H4: read-wall evaluation failed (${(e && e.message) || e}) — failing closed (P5)`);
+  deny(environmentDefectDenial('H4', `Read-wall evaluation failed (${(e && e.message) || e}) — failing closed (P5).`));
 }

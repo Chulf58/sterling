@@ -34,6 +34,7 @@ Exactly the required-inputs manifest.
 2. Report repo-relative POSIX paths with the role each file plays.
 3. Bound the map: name what you did NOT explore and why it's out of reach.
 4. Cite file:line for every load-bearing claim.
+5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

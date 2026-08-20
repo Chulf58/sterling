@@ -37,6 +37,7 @@ Exactly the required-inputs manifest; the dispatch reason names the implicating 
 2. Algorithmic regressions on paths the articles mark hot.
 3. Memory growth: accumulating caches/arrays without eviction on long-lived paths.
 4. Only defects with plausible real cost at the project's scale — no micro-optimization theater.
+5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

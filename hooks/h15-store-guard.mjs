@@ -4725,7 +4725,8 @@ var configSchema = external_exports.object({
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps only the newest N (rotation disclosed on
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
   // the write's warnings channel). Nothing is lost: every rotated-away entry
   // remains readable in the retained superseded versions, which the store keeps
   // forever — the supersede chain IS the archive, so no new table or archive
@@ -4736,6 +4737,12 @@ var configSchema = external_exports.object({
   // consumers (promotion/completeness match on RECENT entries' target_id)
   // while bounding the round-trip.
   article_history_max_entries: external_exports.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -4878,6 +4885,23 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
+function environmentDefectDenial(gateName, detail, opts = {}) {
+  const audienceAware = "agentId" in opts;
+  const { agentId, selfHeal } = opts;
+  const repair = "repair it (or restart the session) before proceeding";
+  const noConductorAbove = `there is no conductor above you to exit \`blocked\` to \u2014 ${repair}.`;
+  const agentFacing = `Do not diagnose, repair, or retry ${gateName} yourself \u2014 exit \`blocked\`, citing this message VERBATIM, and let the conductor fix the environment.`;
+  let instruction;
+  if (selfHeal) {
+    const resolution = !audienceAware || agentId ? "exit `blocked` citing it." : noConductorAbove;
+    instruction = `${selfHeal.action} ${selfHeal.onRepeat}, ${resolution}`;
+  } else if (audienceAware && !agentId) {
+    instruction = `This is broken state, and ${noConductorAbove}`;
+  } else {
+    instruction = agentFacing;
+  }
+  return `\u26A0 ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
+}
 function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -4894,7 +4918,11 @@ var allowScripts;
 try {
   allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;
 } catch (e) {
-  deny(`H15: store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`);
+  deny(
+    environmentDefectDenial("H15", `Store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {
+      agentId: input.agent_id
+    })
+  );
 }
 function splitFragments(cmd) {
   const parts = [];
@@ -5080,13 +5108,19 @@ try {
     }
   }
 } catch (e) {
-  deny(`H15: internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`);
+  deny(
+    environmentDefectDenial(
+      "H15",
+      `Internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`,
+      { agentId: input.agent_id }
+    )
+  );
 }
 if (!offending) allow();
 deny(
   `H15: shell write access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
 Denied fragment: ${offending}
-Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / maintenance_enqueue / run_signal / agent_exit.
+Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
 Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts).
 .sterling/sterling.db is sealed to shell access for EVERY verb, reads included \u2014 DB access is the MCP tool surface's job, never raw shell.
 Non-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c) \u2014 only writes, redirections, and moves/copies INTO .sterling/ are denied.

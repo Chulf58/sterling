@@ -30,7 +30,7 @@
 // (write contract), H5 (frozen tests), H17 (bash write sweep) — and in Sterling
 // running agents that are already trusted to write code.
 import { relative, resolve, sep } from 'node:path';
-import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
+import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 
 const input = readStdin();
 
@@ -43,7 +43,7 @@ const input = readStdin();
 try {
   const config = loadConfig(input.cwd);
   if (!config?.toolchains?.length) {
-    deny('H14: no toolchains in .sterling/config.json — the Bash allowlist cannot resolve run commands; failing closed (P5)');
+    deny(environmentDefectDenial('H14', 'No toolchains in .sterling/config.json — the Bash allowlist cannot resolve run commands; failing closed (P5).'));
   }
 
   const command = String(input.tool_input?.command ?? '').trim();
@@ -220,5 +220,5 @@ try {
   }
   allow();
 } catch (e) {
-  deny(`H14: allowlist evaluation failed (${(e && e.message) || e}) — failing closed (P5)`);
+  deny(environmentDefectDenial('H14', `Allowlist evaluation failed (${(e && e.message) || e}) — failing closed (P5).`));
 }
