@@ -68,6 +68,18 @@ export interface BoardFilter {
    * this adds one more JS predicate to that same pass, not a second table scan.
    */
   contains?: string;
+  /**
+   * Narrow to items owned by ONE feature_article, resolved from its slug
+   * (board e725979c — maintenance_query's feature_slug gap). Resolution is
+   * CHAIN-AWARE: it matches the live article's id AND every ancestor id in
+   * its supersede chain (the same rel:'supersedes' links join knowledgeUpdate's
+   * drift-item auto-drain already walks, decision 8ecd435f) — an item raised
+   * against an earlier version of the article still matches after a later
+   * reconcile superseded it. An unresolvable slug narrows to NOTHING rather
+   * than erroring (no article to own anything), and combines with every other
+   * filter as a genuine AND, applied in the same JS pass as system_reason/contains.
+   */
+  feature_slug?: string;
   cap?: number;
   projection?: Projection;
 }
@@ -1874,9 +1886,35 @@ export class SterlingTools {
       const needle = filter.contains.toLowerCase();
       filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
     }
+    if (filter.feature_slug !== undefined) {
+      const chain = this.articleChainIds(filter.feature_slug);
+      filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
+    }
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
     return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
+  }
+
+  /**
+   * Resolves a feature_slug to its owning article's id PLUS every ancestor id
+   * in its supersede chain — the article's own rel:'supersedes' links, which
+   * accumulate every prior version across reconciles (the same join
+   * knowledgeUpdate's drift-item auto-drain already walks, decision 8ecd435f),
+   * so an item raised against an earlier version of the article still matches
+   * after it was superseded. Returns null when the slug resolves to no article
+   * at all — the caller treats that as "narrows to nothing", not an error.
+   */
+  private articleChainIds(slug: string): Set<string> | null {
+    const articles = this.store.articlesBySlug(slug);
+    if (articles.length === 0) return null;
+    const chain = new Set<string>();
+    for (const article of articles) {
+      chain.add(article.id);
+      for (const link of (article.links ?? []) as { rel: string; target_id: string }[]) {
+        if (link.rel === 'supersedes') chain.add(link.target_id);
+      }
+    }
+    return chain;
   }
 
   boardQuery(filter: BoardFilter = {}): DurableRecord[] {
@@ -1976,6 +2014,73 @@ export class SterlingTools {
     // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
     if (next.objective === 'standalone') delete next.objective;
     return this.store.updateTodo(id, next as typeof old);
+  }
+
+  /**
+   * board_get(id) — the full, untruncated board/queue item (board e725979c):
+   * board_query/maintenance_query's projection:'digest' clips text at
+   * DIGEST_CLIP, and until now there was no escape hatch back to the whole
+   * record short of an uncapped full-projection re-query. Resolves through the
+   * SAME three-form ladder as knowledge_get (full uuid, exact slug, 8-char
+   * citation prefix — resolveRecordId, board slice 85ecfe43), so a citation
+   * copied from anywhere in this store resolves the same way here as
+   * everywhere else. An unknown id is refused, naming the id that was not
+   * found, rather than returning undefined.
+   */
+  boardGet(id: string): DurableRecord {
+    const record = this.resolveRecordId(id, 'board_get');
+    if (record.type !== 'todo') {
+      throw new Error(
+        `board_get: '${id}' resolves to a ${record.type}, not a board/queue item — board_get reads board_add/maintenance_enqueue items only; use knowledge_get for other record types`
+      );
+    }
+    return record;
+  }
+
+  /**
+   * board_edit(id, find, replace) — knowledge_edit's exactly-once find/replace
+   * contract (board fd6d8da9), applied to a board/queue item's `text` IN
+   * PLACE: id preserved, no new version minted, unlike knowledge_edit's
+   * supersession (decision a91c80b5 — board_update's identity semantics, not
+   * knowledge_update's). Delegates the actual write to boardUpdate so there is
+   * exactly one in-place-edit code path — source/system_reason cannot move an
+   * item between surfaces, status/id/created_at stay server-owned, updated_at
+   * moves to the write-time clock — and works identically on a user task or a
+   * system maintenance item; this method only adds the surgical find/replace
+   * over `text` that boardUpdate's retransmit-the-whole-field shape lacked.
+   * FIND MUST MATCH EXACTLY ONCE: zero and multiple matches are BOTH refused,
+   * naming the count, with nothing written — the same contract knowledge_edit
+   * already holds callers to, so a caller cannot lean on a blind
+   * replace-first-occurrence against text nobody re-read in full.
+   */
+  boardEdit(id: string, find: string, replace: string): { record: DurableRecord; replaced: { chars_before: number; chars_after: number } } {
+    const old = this.resolveRecordId(id, 'board_edit');
+    if (old.type !== 'todo') {
+      throw new Error(`board_edit: '${id}' is a ${old.type}, not a task — board_edit only edits board/queue items`);
+    }
+    if (typeof find !== 'string' || find.length === 0) {
+      throw new Error(`board_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
+    }
+    const current = (old as unknown as { text?: string }).text;
+    if (typeof current !== 'string') {
+      throw new Error(`board_edit: '${id}' has no 'text' field to edit`);
+    }
+    const occurrences = current.split(find).length - 1;
+    if (occurrences === 0) {
+      throw new Error(
+        `board_edit: 'find' does not appear in the item's text — nothing was written. ` +
+          `The text is ${current.length} chars; confirm the exact text (including whitespace and punctuation) before retrying.`
+      );
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `board_edit: 'find' appears ${occurrences} times in the item's text — refused as ambiguous, nothing was written. ` +
+          `Extend 'find' with surrounding text until it identifies exactly one site.`
+      );
+    }
+    const next = current.replace(find, replace);
+    const record = this.boardUpdate(old.id, { text: next });
+    return { record, replaced: { chars_before: current.length, chars_after: next.length } };
   }
 
   /**
@@ -2379,26 +2484,31 @@ export class SterlingTools {
     });
   }
 
-  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number } = {}): DurableRecord[] {
+  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number } = {}): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap. contains
-    // (work order d9960c98) rides the same boardFiltered pass for the same reason.
+    // (work order d9960c98) and feature_slug (board e725979c) ride the same
+    // boardFiltered pass for the same reason, and combine as a genuine AND.
     return this.boardQuery({
       source: 'system',
       system_reason: filter.system_reason,
       file_keys: filter.file_keys,
       contains: filter.contains,
+      feature_slug: filter.feature_slug,
       cap: filter.cap,
     });
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
-  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number; projection?: Projection } = {}): BoardQueryResult {
+  maintenanceQueryResult(
+    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; projection?: Projection } = {}
+  ): BoardQueryResult {
     return this.boardQueryResult({
       source: 'system',
       system_reason: filter.system_reason,
       file_keys: filter.file_keys,
       contains: filter.contains,
+      feature_slug: filter.feature_slug,
       cap: filter.cap,
       projection: filter.projection,
     });

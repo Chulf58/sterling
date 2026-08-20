@@ -219,6 +219,26 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'board_get',
+    {
+      description:
+        'Fetch a board/queue item by id — the full, untruncated record (board_query\'s projection:"digest" clips text; this is the escape hatch back to the whole item). Resolves through the same ladder as knowledge_get: full uuid, exact slug, or an unambiguous 8-char citation prefix. An unknown id is refused, naming the id that was not found.',
+      inputSchema: strict({ id: z.string() }),
+    },
+    ({ id }) => json(tools.boardGet(id))
+  );
+
+  server.registerTool(
+    'board_edit',
+    {
+      description:
+        'Replace a passage INSIDE a board/queue item\'s text without retransmitting the whole field — knowledge_edit\'s exactly-once find/replace contract, but IN PLACE: id stable, no new version minted (decision a91c80b5 — board_update\'s identity semantics, not knowledge_update\'s supersession). \'find\' must match EXACTLY ONCE: zero matches and multiple matches are both refused, naming the count, with nothing written. Works identically on a user task or a system maintenance item. The echo defaults to a one-line digest receipt; pass projection:"full" for the whole stored record.',
+      inputSchema: strict({ id: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
+    },
+    ({ id, find, replace, projection }) => json(tools.writeProjected(tools.boardEdit(id, find, replace), projection))
+  );
+
+  server.registerTool(
     'no_capture',
     {
       description:
@@ -337,11 +357,12 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_query',
     {
       description:
-        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, or contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
+        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax), or feature_slug (narrows to items owned by ONE article, resolved from its slug and CHAIN-AWARE — an item raised against an earlier superseded version of the article still matches; every filter combines as a genuine AND). An unresolvable feature_slug narrows to nothing rather than erroring. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         contains: z.string().optional(),
+        feature_slug: z.string().optional(),
         cap: z.number().int().positive().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
