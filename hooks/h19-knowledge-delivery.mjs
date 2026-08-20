@@ -8,6 +8,7 @@ var __export = (target, all) => {
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5978,6 +5979,18 @@ function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
+function gitIgnored(paths, cwd) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return /* @__PURE__ */ new Set();
+  const res = spawnSync("git", ["check-ignore", "-z", "--stdin"], {
+    cwd,
+    input: list.join("\0") + "\0",
+    encoding: "utf8",
+    timeout: 3e4
+  });
+  if (res.status !== 0 && res.status !== 1) return null;
+  return new Set((res.stdout || "").split("\0").filter(Boolean));
+}
 function openStore(cwd) {
   const p = join(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -6145,7 +6158,8 @@ try {
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
   const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
-  const unowned = owners.length === 0;
+  const bare = owners.length === 0;
+  const unowned = bare && !(gitIgnored([rel], input.cwd)?.has(rel) ?? false);
   const frontierFresh = unowned && !guard.frontier_files.includes(rel);
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;

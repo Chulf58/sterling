@@ -7,13 +7,14 @@ var __export = (target, all) => {
 
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 import { readFileSync as readFileSync2, writeFileSync, rmSync, existsSync as existsSync4, mkdirSync as mkdirSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -6006,6 +6007,18 @@ function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
+function gitIgnored(paths, cwd) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return /* @__PURE__ */ new Set();
+  const res = spawnSync("git", ["check-ignore", "-z", "--stdin"], {
+    cwd,
+    input: list.join("\0") + "\0",
+    encoding: "utf8",
+    timeout: 3e4
+  });
+  if (res.status !== 0 && res.status !== 1) return null;
+  return new Set((res.stdout || "").split("\0").filter(Boolean));
+}
 function openStore(cwd) {
   const p = join(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -6058,9 +6071,9 @@ function fillPct(usage, windowSize) {
 }
 
 // scripts/lib/test-integrity.mjs
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
-  const r = spawnSync("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync2("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
@@ -6130,7 +6143,7 @@ try {
   const dirtyPaths = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      const st = spawnSync2("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      const st = spawnSync3("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
       if (st.status !== 0) {
         store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
         return 0;
@@ -6354,12 +6367,17 @@ try {
     ).map(([family]) => family);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
-  const unowned = paths.filter(
+  let unowned = paths.filter(
     (p) => !store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 25 }).some((r) => !r.working_tree)
   );
+  if (unowned.length) {
+    const ignored = gitIgnored(unowned, input.cwd);
+    if (ignored === null) store.recordCheckSkipped("article-demand-gitignore", "no_git", void 0, now);
+    else unowned = unowned.filter((p) => !ignored.has(p));
+  }
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync2("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+    const head = spawnSync3("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4

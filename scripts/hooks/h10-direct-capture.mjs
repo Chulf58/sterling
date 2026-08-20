@@ -29,7 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking } from './lib/common.mjs';
+import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking, gitIgnored } from './lib/common.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
@@ -459,9 +459,17 @@ try {
   // record, never a forced feature article (adjudicated 2026-06-12).
   // A record declaring a working_tree owns files in a DIFFERENT tree — it never
   // grants ownership of this root's same-named path (comsoft-juiced 2026-07-17).
-  const unowned = paths.filter(
+  let unowned = paths.filter(
     (p) => !store.query({ types: ['feature_article', 'reference_material'], file_keys: [p], cap: 25 }).some((r) => !r.working_tree)
   );
+  // A gitignored path is never governed territory (board 1de3653b) — it cannot
+  // be owned, so demanding an article for it is a false demand. A failed ignore
+  // check degrades to the unfiltered list (toward signaling), recorded loudly.
+  if (unowned.length) {
+    const ignored = gitIgnored(unowned, input.cwd);
+    if (ignored === null) store.recordCheckSkipped('article-demand-gitignore', 'no_git', undefined, now);
+    else unowned = unowned.filter((p) => !ignored.has(p));
+  }
   let newUnowned = [];
   if (unowned.length) {
     const head = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only', '--', ...unowned], {

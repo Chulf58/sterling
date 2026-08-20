@@ -17,7 +17,7 @@
 // Pipeline: during an active run, agents with an agent_id got prep's
 // knowledge_pack — H19 stays silent for them (AC6, no double-delivery); the
 // conductor's own inline touches still deliver.
-import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
 import {
   guardPath,
   pendingPath,
@@ -104,7 +104,14 @@ try {
   // not accept), but it is now the payload HEADER rather than a separate
   // emission that returned early. That early return was why a hazard in UNOWNED
   // territory — the reporting project's exact case — was swallowed.
-  const unowned = owners.length === 0;
+  // A gitignored path is never governed territory (board 1de3653b): no article
+  // will ever own it and H10 will not demand one, so the frontier signal — whose
+  // whole message is "H10 will demand an article here" — would be false on it.
+  // gitIgnored's null (git cannot answer) degrades TOWARD signaling: unowned
+  // stands, exactly the pre-feature behavior. Checked only on unowned paths so
+  // the owned-territory fast path spawns nothing.
+  const bare = owners.length === 0;
+  const unowned = bare && !(gitIgnored([rel], input.cwd)?.has(rel) ?? false);
   const frontierFresh = unowned && !guard.frontier_files.includes(rel);
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
 

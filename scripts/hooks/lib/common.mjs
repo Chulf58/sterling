@@ -2,6 +2,7 @@
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 
@@ -122,6 +123,30 @@ export function warnNonBlocking(message) {
 export function loadConfig(cwd) {
   const p = join(cwd, '.sterling', 'config.json');
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+}
+
+/**
+ * Which of the given repo-relative paths git ignores, as a Set (board 1de3653b:
+ * an ignored path is never governed territory, so the H19 frontier signal and
+ * the H10 article demand must not fire on it — measured at ~20 false
+ * firings/session on render output across the 2026-08-14→20 feedback batch).
+ *
+ * Returns null when git cannot answer (no repo, no git, timeout) — the CALLER
+ * owns the degrade, and it must degrade TOWARD signaling (treat nothing as
+ * ignored), never toward silence. Exit 0 = some ignored, 1 = none ignored;
+ * both are answers. Anything else is a failure.
+ */
+export function gitIgnored(paths, cwd) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return new Set();
+  const res = spawnSync('git', ['check-ignore', '-z', '--stdin'], {
+    cwd,
+    input: list.join('\0') + '\0',
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  if (res.status !== 0 && res.status !== 1) return null;
+  return new Set((res.stdout || '').split('\0').filter(Boolean));
 }
 
 /** Synchronous sleep for the store busy-retry (no async in a hook body). */
