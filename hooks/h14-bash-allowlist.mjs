@@ -4901,20 +4901,53 @@ try {
   const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
   const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + " "));
   const matchedPrefixOf = (candidate) => runCommandPrefixes.find((p) => candidate === p || candidate.startsWith(p + " "));
-  const pathArgEscapesRoot = (tok) => {
-    if (tok.startsWith("-")) return false;
-    const quoted = tok.match(/^(["'])([^\s"']*)\1$/);
-    const clean = quoted ? quoted[2] : tok;
+  const tokenizeRemainder = (str) => {
+    const tokens = [];
+    let cur = "";
+    let quote = null;
+    let any = false;
+    for (const ch of str) {
+      if (quote) {
+        if (ch === quote) quote = null;
+        else cur += ch;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        any = true;
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        if (any) tokens.push(cur);
+        cur = "";
+        any = false;
+        continue;
+      }
+      cur += ch;
+      any = true;
+    }
+    if (any) tokens.push(cur);
+    return tokens;
+  };
+  const valueEscapesRoot = (clean) => {
     if (!clean) return false;
     const rel = relative(input.cwd, resolve2(input.cwd, clean));
     return rel === ".." || rel.startsWith(".." + sep);
+  };
+  const pathArgEscapesRoot = (tok) => {
+    if (tok.startsWith("-")) {
+      const eq = tok.indexOf("=");
+      if (eq === -1) return false;
+      return valueEscapesRoot(tok.slice(eq + 1));
+    }
+    return valueEscapesRoot(tok);
   };
   const prefixMatchEscapes = (candidate) => {
     const prefix = matchedPrefixOf(candidate);
     if (!prefix) return false;
     const remainder = candidate.slice(prefix.length).trim();
     if (!remainder) return false;
-    return remainder.split(/\s+/).filter(Boolean).some(pathArgEscapesRoot);
+    return tokenizeRemainder(remainder).some(pathArgEscapesRoot);
   };
   const runCommandMatch = matchesPrefix(command) ? command : strictUnquoted !== null && matchesPrefix(strictUnquoted) ? strictUnquoted : null;
   const runCommandAllowed = runCommandMatch !== null && !prefixMatchEscapes(runCommandMatch);

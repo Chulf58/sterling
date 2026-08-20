@@ -259,3 +259,36 @@ test('H14 AC4 regression: chaining/control-operators, redirection, find, arbitra
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// AC-Y / AC-Z — escaping paths riding inside flag tokens or shell quoting
+// must not be laundered past the allowlist by normalization
+// ---------------------------------------------------------------------------
+
+test('H14 AC-Y: an allowed toolchain prefix whose ESCAPING path rides inside a flag token is denied (node --test --import=../../outside.mjs)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = bash(dir, 'node --test --import=../../outside.mjs');
+    assert.equal(
+      r.code,
+      2,
+      'a traversal path embedded inside a --flag=value token must be extracted and boundary-checked the same as a bare positional path argument — a matcher that only checks the literal "node --test" prefix and never inspects subsequent flag values would incorrectly match this as the allowed command and let the escape through'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H14 AC-Z: a QUOTED path argument containing whitespace that climbs out of the repo is denied — the quote must not shield the traversal from the boundary check', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = bash(dir, 'node --test "../../x y/evil.test.mjs"');
+    assert.equal(
+      r.code,
+      2,
+      'quoting a whitespace-containing traversal path must not shield it from the repo-boundary check — a matcher that naively splits on whitespace before stripping quotes would either mis-tokenize this argument or skip boundary-checking it entirely, incorrectly allowing an escape that plain (unquoted) traversal already denies (AC2 boundary)'
+    );
+  } finally {
+    cleanup();
+  }
+});

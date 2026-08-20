@@ -111,20 +111,66 @@ try {
   // command whose argument climbs (via '../') to a path outside the root is
   // denied even though its textual prefix matches — a genuinely different
   // command (AC1 boundary) is unaffected because it never reaches this check.
-  const pathArgEscapesRoot = (tok) => {
-    if (tok.startsWith('-')) return false; // a flag, not a path
-    const quoted = tok.match(/^(["'])([^\s"']*)\1$/);
-    const clean = quoted ? quoted[2] : tok;
+  // Quote-aware tokenizer for the REMAINDER only (never the executed command
+  // itself, never the operator gate above) — a quoted span, however it
+  // contains whitespace, is ONE token with its quote characters stripped, so a
+  // traversal path riding inside "../../x y/evil.mjs" is boundary-checked as
+  // the single path it is instead of being shredded on the interior space
+  // (board 4c7b84d3 follow-up, AC-Z). No escape-sequence handling: this only
+  // needs to reunite a quoted span, not fully emulate shell quoting.
+  const tokenizeRemainder = (str) => {
+    const tokens = [];
+    let cur = '';
+    let quote = null;
+    let any = false;
+    for (const ch of str) {
+      if (quote) {
+        if (ch === quote) quote = null;
+        else cur += ch;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        any = true;
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        if (any) tokens.push(cur);
+        cur = '';
+        any = false;
+        continue;
+      }
+      cur += ch;
+      any = true;
+    }
+    if (any) tokens.push(cur);
+    return tokens;
+  };
+
+  const valueEscapesRoot = (clean) => {
     if (!clean) return false;
     const rel = relative(input.cwd, resolve(input.cwd, clean));
     return rel === '..' || rel.startsWith('..' + sep);
+  };
+  // A flag token ('-x', '--import=path') is skipped for BARE flags (no path
+  // value to check) but a '--flag=value' token's value is boundary-checked
+  // the same as a bare positional path argument (board 4c7b84d3 follow-up,
+  // AC-Y) — an escaping path does not stop being a path for riding inside a
+  // flag's '=value' half.
+  const pathArgEscapesRoot = (tok) => {
+    if (tok.startsWith('-')) {
+      const eq = tok.indexOf('=');
+      if (eq === -1) return false; // a bare flag, no value to check
+      return valueEscapesRoot(tok.slice(eq + 1));
+    }
+    return valueEscapesRoot(tok);
   };
   const prefixMatchEscapes = (candidate) => {
     const prefix = matchedPrefixOf(candidate);
     if (!prefix) return false;
     const remainder = candidate.slice(prefix.length).trim();
     if (!remainder) return false;
-    return remainder.split(/\s+/).filter(Boolean).some(pathArgEscapesRoot);
+    return tokenizeRemainder(remainder).some(pathArgEscapesRoot);
   };
 
   const runCommandMatch =
