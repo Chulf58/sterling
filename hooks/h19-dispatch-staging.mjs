@@ -5523,6 +5523,22 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
   }
   /**
+   * Every SUPERSEDED record carrying this exact slug, newest first — the
+   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
+   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
+   * can never shadow a live record: a slug still carried by a non-superseded
+   * row belongs to recordsBySlug, not here. The write surface never calls
+   * this — a dead slug addresses no write handle, fix-forward goes to the
+   * live head via recordsBySlug's own resolution.
+   */
+  supersededRecordsBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC, rowid DESC`).all(slug);
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+  }
+  /**
    * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
    * stay version-pinned — this DISCLOSES where the chain currently ends, it
    * never redirects the pinned record itself). A live (non-superseded)
@@ -6366,7 +6382,7 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map(
     (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
@@ -6387,7 +6403,7 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
-    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }

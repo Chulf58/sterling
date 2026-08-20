@@ -5265,6 +5265,22 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
   }
   /**
+   * Every SUPERSEDED record carrying this exact slug, newest first — the
+   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
+   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
+   * can never shadow a live record: a slug still carried by a non-superseded
+   * row belongs to recordsBySlug, not here. The write surface never calls
+   * this — a dead slug addresses no write handle, fix-forward goes to the
+   * live head via recordsBySlug's own resolution.
+   */
+  supersededRecordsBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC, rowid DESC`).all(slug);
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+  }
+  /**
    * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
    * stay version-pinned — this DISCLOSES where the chain currently ends, it
    * never redirects the pinned record itself). A live (non-superseded)

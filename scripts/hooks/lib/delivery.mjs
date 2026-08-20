@@ -257,7 +257,7 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map((ap) =>
     [
-      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ''} (full record: knowledge_get ${ap.id})`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
     ].join('\n')
@@ -342,7 +342,7 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
     `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
   ];
   for (const d of shown) {
-    lines.push(`  → ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    lines.push(`  → ${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
       .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
       .filter(Boolean)
@@ -449,11 +449,12 @@ export function renderBashPointers(entries) {
   ];
   for (const e of entries) {
     for (const h of e.hazards) {
-      lines.push(`  • ${e.rel} — ⚠ HAZARD anti_pattern '${h.title ?? h.slug ?? h.id}' · knowledge_get ${h.id}`);
+      const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : (h.title ?? h.slug ?? h.id);
+      lines.push(`  • ${e.rel} — ⚠ HAZARD anti_pattern '${hazardLabel}' · knowledge_get ${h.id}`);
     }
     for (const o of e.owners) {
       const kind = o.type === 'reference_material' ? 'reference' : 'article';
-      const label = o.slug ?? o.title ?? o.id;
+      const label = o.title && o.slug ? `${o.title} [${o.slug}]` : (o.slug ?? o.title ?? o.id);
       const state = o.state ? ` (${o.state})` : '';
       lines.push(`  • ${e.rel} — ${kind} '${label}'${state} · knowledge_get ${o.id}`);
     }

@@ -212,6 +212,17 @@ const DRIFT_ITEMS_PER_READ = 3;
 // is plausibly still a placeholder; several hundred lines is not.
 const PLANNED_CREDIBLE_BYTES = 2000;
 
+/**
+ * Tags resolveRecordId's two genuine MISS throws — too-short-to-resolve and
+ * no-prefix-match — where nothing at all matched the caller's identifier.
+ * knowledge_get's dead-slug fallthrough gates on this tag so it only ever
+ * fires for a true miss; every other resolveRecordId refusal (a slug
+ * collision, an ambiguous prefix, or a torn-store inconsistency) names
+ * records that DID match and must reach the caller unchanged, never be
+ * swallowed in favour of a superseded body (review finding, 2026-08-20).
+ */
+export class UnresolvedIdentifierError extends Error {}
+
 export class SterlingTools {
   private store: ToolStore;
   private config: SterlingConfig;
@@ -1601,7 +1612,33 @@ export class SterlingTools {
    * wrapper over it.
    */
   knowledgeGet(id: string): DurableRecord {
-    const record = this.resolveRecordId(id, 'knowledge_get');
+    let record: DurableRecord;
+    try {
+      record = this.resolveRecordId(id, 'knowledge_get');
+    } catch (err) {
+      // DEAD-SLUG FALLTHROUGH (decision df361a0f, board 2b9f2f1a part 3,
+      // 'supersede + disclose'), knowledge_get-ONLY: resolveRecordId already
+      // tried live-slug then id-prefix resolution and both failed, so this
+      // can never shadow a live record. If the id names a slug carried only
+      // by superseded rows, serve the NEWEST carrier, version-pinned (own
+      // id/body/status) — never redirected to the live head, which stays a
+      // straight id/slug citation. No match at all (a slug never carried, or
+      // an ambiguous/torn-store error) rethrows the original refusal
+      // unchanged. The write surface (resolveRecordId's other callers) never
+      // sees this fallback — a dead slug is not a write handle.
+      //
+      // The fallthrough only fires for a genuine UNRESOLVED IDENTIFIER
+      // (UnresolvedIdentifierError — see resolveRecordId): the too-short and
+      // no-match throws, where nothing at all matched the citation. Every
+      // other refusal — a live slug collision, an ambiguous id prefix, or a
+      // torn-store inconsistency — names records that DID match and must
+      // reach the caller unchanged, never be swallowed in favour of a
+      // superseded body (review finding, 2026-08-20).
+      if (!(err instanceof UnresolvedIdentifierError)) throw err;
+      const deadSlugCarriers = this.store.supersededRecordsBySlug(id);
+      if (!deadSlugCarriers.length) throw err;
+      record = deadSlugCarriers[0];
+    }
     // Additive terminus disclosure (decision de1a7329): the pinned record's own
     // fields are never touched — a live record gets no `terminus` key at all,
     // never a null/undefined one (AC6). Only a superseded record gains it,
@@ -1636,18 +1673,26 @@ export class SterlingTools {
     const bySlug = this.store.recordsBySlug(id);
     if (bySlug.length === 1) return bySlug[0];
     if (bySlug.length > 1) {
+      // NOT an UnresolvedIdentifierError: the slug matched — more than one
+      // record — so this is a genuine collision (e.g. a project record plus
+      // a promoted domain copy under one slug), not a miss. knowledge_get's
+      // dead-slug fallthrough must never swallow this in favour of a
+      // superseded body (review finding, 2026-08-20).
       throw new Error(
         `${toolName}: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join('; ')}) — a slug must name one record; cite the id.`
       );
     }
     if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
-      throw new Error(
+      throw new UnresolvedIdentifierError(
         `${toolName}: no ${noun} '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
       );
     }
     const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
-    if (hits.length === 0) throw new Error(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
+    if (hits.length === 0) throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
     if (hits.length > 1) {
+      // NOT an UnresolvedIdentifierError: the prefix matched multiple records
+      // — an ambiguity between real hits, not a miss. Must reach the caller
+      // unchanged, same reasoning as the slug-collision throw above.
       throw new Error(
         `${toolName}: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits
           .map((r) => `${r.id} (${r.type}, ${r.status})`)
@@ -1657,6 +1702,8 @@ export class SterlingTools {
     const record = this.store.get(hits[0].id);
     // The index and the bodies come from the same rows, so a hit with no body is
     // a torn store, not a miss — say which it is rather than reporting "no record".
+    // NOT an UnresolvedIdentifierError: the index DID resolve the id; the
+    // inconsistency is in the store, not the citation.
     if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
     return record;
   }
