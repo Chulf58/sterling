@@ -27,6 +27,12 @@ const SERVED_TOOLS = [
   // The retirement path: supersede in favour of a survivor, so a duplicate stops
   // being served instead of becoming MORE visible (board 77f00139).
   'knowledge_retire',
+  // Atomic replace-and-mark-superseded for one ruling record (decision /
+  // anti_pattern / research_finding), with orphan detection over enumerated
+  // rulings — distinct from knowledge_update (fix-forward delta) and
+  // knowledge_retire (duplicate tombstone, no new row). Board
+  // 0b33c27b-f36c-4d66-b92d-83885dbb1725 (ADDENDUM 08-14-2045).
+  'knowledge_supersede',
   'knowledge_promote',
   'knowledge_link',
   // H20/H19 relevance slice 4 (board 5fac3459): the conductor-callable analog

@@ -473,7 +473,10 @@ export class SterlingTools {
    * want either and pointing at retirement alone would trade a stale denial for an
    * invitation to retire away every error instead of correcting it.
    */
-  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append'): void {
+  private refuseServerOwnedFields(
+    fields: Record<string, unknown>,
+    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede'
+  ): void {
     const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
     const attempted = SERVER_OWNED.filter((k) => k in fields);
     if (attempted.length === 0) return;
@@ -657,14 +660,12 @@ export class SterlingTools {
         }
       } else {
         const headline = ((parsed as { title?: string; question?: string }).title ?? (parsed as { question?: string }).question ?? '') as string;
-        const base = SterlingTools.slugify(headline);
-        if (base) {
-          let slug = base;
-          for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+        const minted = this.mintSlug(headline);
+        if (minted) {
           // store.create persists `candidate` (parsed is the dedup-comparison
           // view), so the minted slug must land on BOTH.
-          (parsed as { slug?: string }).slug = slug;
-          candidate.slug = slug;
+          (parsed as { slug?: string }).slug = minted;
+          candidate.slug = minted;
         }
       }
     }
@@ -1560,6 +1561,23 @@ export class SterlingTools {
   }
 
   /**
+   * Auto-mint a slug from a headline (title, or question for
+   * research_finding), suffixing -2/-3/... on collision. Returns undefined
+   * when the headline slugifies to nothing (blank/symbols-only headline).
+   * Shared by knowledgeCreate (a new record with no explicit slug) and
+   * knowledge_supersede (F4 review finding: a slugless old record — e.g. a
+   * pre-slug legacy row — must not silently produce a slugless new head; it
+   * mints exactly the same way a brand-new create would).
+   */
+  private mintSlug(headline: string): string | undefined {
+    const base = SterlingTools.slugify(headline);
+    if (!base) return undefined;
+    let slug = base;
+    for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+    return slug;
+  }
+
+  /**
    * knowledge_get — full uuid, or the 8-char PREFIX every citation in this repo
    * uses (decision 27f148c2). CLAUDE.md, code comments and record prose all cite
    * "decision 6dfbe675" style, and check-record-citations already resolves that
@@ -1771,18 +1789,31 @@ export class SterlingTools {
         }
       }
     }
-    // promotion_review stays a human gate (P1) — a supersession never DRAINS it,
-    // it is not the review being paid. But leaving its feature_link pointed at the
-    // now-superseded id STRANDS it silently (todo 6202a0f5): the review is still
-    // owed, same lineage, so RE-POINT rather than drop. In-place via updateTodo
-    // (no new version, no id churn) so every other reference to the item survives.
-    for (const item of this.maintenanceQuery({ cap: 1000 })) {
+    this.repointPromotionReview(chain, updated.id, ts);
+    return updated;
+  }
+
+  /**
+   * promotion_review stays a human gate (P1) — a supersession never DRAINS it,
+   * it is not the review being paid. But leaving its feature_link pointed at a
+   * now-superseded id STRANDS it silently (todo 6202a0f5): the review is still
+   * owed, same lineage, so RE-POINT rather than drop. In-place via updateTodo
+   * (no new version, no id churn) so every other reference to the item survives.
+   *
+   * Shared by knowledgeUpdate (decision 01f31039) and knowledge_supersede
+   * (decision e17794ea) — both mint a new id for the same lineage, so both owe
+   * the same re-point. `chain` is every id this supersession's target answers
+   * for (the old id plus any ancestors it already carries a 'supersedes' link
+   * to) — computed for every type, since promotion_review can point at any
+   * supersedable record, not only feature_article/reference_material.
+   */
+  private repointPromotionReview(chain: Set<string>, newId: string, ts: string): void {
+    for (const item of this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 })) {
       const it = item as DurableRecord & { feature_link?: string; system_reason?: string };
-      if (it.system_reason === 'promotion_review' && it.feature_link !== undefined && chain.has(it.feature_link) && it.feature_link !== updated.id) {
-        this.store.updateTodo(it.id, { ...it, feature_link: updated.id, updated_at: ts });
+      if (it.feature_link !== undefined && chain.has(it.feature_link) && it.feature_link !== newId) {
+        this.store.updateTodo(it.id, { ...it, feature_link: newId, updated_at: ts });
       }
     }
-    return updated;
   }
 
   /**
@@ -2354,6 +2385,240 @@ export class SterlingTools {
     // channel is for.
     const retired = this.store.retireInFavorOf(record.id, inFavorOf, this.now());
     return { retired };
+  }
+
+  // -- knowledge_supersede (decision e17794ea, board 0b33c27b) ----------------
+
+  /** old-record types knowledge_supersede accepts — see the class comment above. */
+  private static readonly SUPERSEDE_ALLOWED_TYPES = ['decision', 'anti_pattern', 'research_finding'];
+
+  /** Coverage threshold: a ruling unit counts as covered when at least this fraction of its own content words reappear in the replacement fields. */
+  private static readonly ORPHAN_COVERAGE_THRESHOLD = 0.4;
+
+  private static readonly ORPHAN_STOPWORDS = new Set([
+    'this', 'that', 'with', 'from', 'have', 'will', 'were', 'been', 'into', 'than', 'then', 'them',
+    'they', 'also', 'each', 'such', 'some', 'more', 'most', 'over', 'under', 'about', 'which',
+    'while', 'still', 'only', 'just', 'very', 'much', 'many', 'both', 'after', 'before', 'being',
+    'doing', 'having', 'itself', 'those', 'these', 'would', 'could', 'should', 'shall', 'must',
+    'might', 'when', 'where', 'what', 'your', 'their', 'there', 'here', 'other', 'above', 'below',
+    'again', 'because',
+  ]);
+
+  /** Numbered marker forms: "1.", "2)", "(3)" — a marker sits at the start of the string or after whitespace, and is itself followed by whitespace. Digits land in either capture group depending on which form matched. */
+  private static readonly ORPHAN_NUMBER_RE = /(?:^|(?<=\s))(?:(\d{1,3})[).]|\((\d{1,3})\))(?=\s)/g;
+
+  /** Bulleted marker forms: "- ", "* ", "• " — counted ONLY at the start of a line (start of text, or immediately after a newline plus optional indent) so a mid-sentence prose dash ("the gate holds - which surprised us") never counts as a marker (F1 review finding). */
+  private static readonly ORPHAN_BULLET_RE = /(?:^|\n)[ \t]*[-*•](?=\s)/g;
+
+  /** The old record's primary ruling fields, per type — the fields a ruling actually lives in, not provenance/rationale filler. Returned as SEPARATE field texts, not joined, so segmentation never straddles a field boundary (F2 review finding: a final unit used to run from a marker in one field into the next field's own text). */
+  private static rulingSourceFields(record: DurableRecord): string[] {
+    const r = record as unknown as Record<string, unknown>;
+    const parts: unknown[] =
+      record.type === 'decision'
+        ? [r.title, r.statement]
+        : record.type === 'anti_pattern'
+          ? [r.title, r.trigger, r.guidance, r.wrong_way, r.right_way]
+          : record.type === 'research_finding'
+            ? [r.question, r.answer]
+            : [];
+    return parts.filter((v): v is string => typeof v === 'string');
+  }
+
+  /**
+   * Enumerated ruling units — numbered or bulleted items — segmented from
+   * `text`. Bullets count only at line-start (see ORPHAN_BULLET_RE). Numbered
+   * markers count as an enumeration only when the FULL sequence of numbers
+   * found in `text`, in order, forms an ascending run starting at 1 — "as of
+   * step 2. ... fixed in phase 3." starts at 2 and is discarded WHOLE (not
+   * partially), because a fragment of an unrelated list is not evidence of an
+   * enumerated ruling. Fewer than 2 total markers (bullets plus a qualifying
+   * numbered run) means the record makes no enumerated claim, so this returns
+   * [].
+   */
+  private static segmentRulingUnits(text: string): string[] {
+    const bulletRe = new RegExp(SterlingTools.ORPHAN_BULLET_RE.source, 'g');
+    const bulletMarkers: { start: number; contentStart: number }[] = [];
+    let bm: RegExpExecArray | null;
+    while ((bm = bulletRe.exec(text))) {
+      const bulletPos = bm.index + bm[0].length - 1;
+      bulletMarkers.push({ start: bulletPos, contentStart: bulletPos + 1 });
+    }
+
+    const numberRe = new RegExp(SterlingTools.ORPHAN_NUMBER_RE.source, 'g');
+    const numberMarkers: { start: number; contentStart: number; value: number }[] = [];
+    let nm: RegExpExecArray | null;
+    while ((nm = numberRe.exec(text))) {
+      numberMarkers.push({ start: nm.index, contentStart: nm.index + nm[0].length, value: Number(nm[1] ?? nm[2]) });
+    }
+    const numbersAscendFromOne = numberMarkers.length > 0 && numberMarkers.every((mk, i) => mk.value === i + 1);
+
+    const markers = [...bulletMarkers, ...(numbersAscendFromOne ? numberMarkers : [])].sort((a, b) => a.start - b.start);
+    if (markers.length < 2) return [];
+    return markers
+      .map((mk, i) => text.slice(mk.contentStart, i + 1 < markers.length ? markers[i + 1].start : text.length).trim())
+      .filter((u) => u.length > 0);
+  }
+
+  /** Every distinct content word (lowercase, alphanumeric, 4+ chars, not a stopword) in `text`. */
+  private static contentWords(text: string): Set<string> {
+    const words = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').match(/[a-z0-9]{4,}/g) ?? [];
+    return new Set(words.filter((w) => !SterlingTools.ORPHAN_STOPWORDS.has(w)));
+  }
+
+  /** Every string value in `value`, recursively (arrays and plain objects) — "the combined text of fields". */
+  private static flattenFieldStrings(value: unknown, out: string[] = []): string[] {
+    if (typeof value === 'string') out.push(value);
+    else if (Array.isArray(value)) for (const v of value) SterlingTools.flattenFieldStrings(v, out);
+    else if (value && typeof value === 'object') for (const v of Object.values(value)) SterlingTools.flattenFieldStrings(v, out);
+    return out;
+  }
+
+  private static clipExcerpt(text: string, max = 160): string {
+    return text.length > max ? `${text.slice(0, max)}…` : text;
+  }
+
+  /**
+   * knowledge_supersede — atomic replacement of a ruling record (decision /
+   * anti_pattern / research_finding), riding the existing store.supersede()
+   * transaction (new row + CAS retire of the old row, no second supersession
+   * path). Distinct from knowledge_update (a fix-forward DELTA within one
+   * lineage — the caller passes only what changed) and knowledge_retire (a
+   * no-new-row duplicate tombstone): `fields` here is a COMPLETE create-shaped
+   * body of the same type, because this is a REPLACEMENT, not a patch.
+   *
+   * ORPHAN DETECTION (ADDENDUM 08-14-2045): the measured incident was a
+   * decision recording three separable rulings, superseded by a record that
+   * only restated one of them — the other two silently stopped being served.
+   * When the old record's primary text enumerates 2+ ruling units (numbered or
+   * bulleted), each unit must have substantive lexical coverage in the new
+   * fields or the write is REFUSED, naming the orphaned excerpts and both
+   * remedies. `orphans_acknowledged: true` proceeds anyway and the response
+   * discloses which candidates were accepted. Fewer than 2 units is ordinary
+   * single-ruling supersession — no check.
+   *
+   * Every refusal below runs before store.supersede is ever called, so a
+   * refused call leaves the store untouched.
+   */
+  knowledgeSupersede(oldId: string, fields: Record<string, unknown>, orphansAcknowledged?: boolean): { superseded: string; id: string; type: string; slug?: string; orphan_candidates?: string[]; warnings: string[] } {
+    const old = this.resolveRecordId(oldId, 'knowledge_supersede');
+    if (old.type === 'todo') {
+      throw new Error(
+        `knowledge_supersede: '${oldId}' is a todo — those leave through board_remove / maintenance_remove (done = removed, P4), not supersession.`
+      );
+    }
+    if (old.type === 'feature_article' || old.type === 'reference_material') {
+      throw new Error(
+        `knowledge_supersede: '${oldId}' is a ${old.type} — those evolve in place via knowledge_update (fix-forward, same lineage), or for a genuine ` +
+          `duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`
+      );
+    }
+    if (!SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
+      throw new Error(
+        `knowledge_supersede: '${old.type}' records are not supported — allowed: ${SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(', ')}.`
+      );
+    }
+    if (old.status === 'superseded') {
+      throw new Error(`knowledge_supersede: '${oldId}' is already superseded — resolve its chain to the live head first (knowledge_get discloses the terminus).`);
+    }
+
+    this.refuseServerOwnedFields(fields, 'knowledge_supersede');
+    const type = old.type;
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
+
+    // Slug continuity (decision de1a7329): fields with no slug inherit the old
+    // record's slug so the concept handle survives the replacement — the old
+    // record itself still owns that slug at this point (it is still active),
+    // so its own id is excluded from the collision check.
+    const explicitSlug = (body as { slug?: string }).slug;
+    let slug: string | undefined;
+    if (explicitSlug !== undefined) {
+      const clash = this.store.recordsBySlug(explicitSlug).filter((r) => r.id !== old.id);
+      if (clash.length) {
+        throw new Error(
+          `knowledge_supersede: a record with slug '${explicitSlug}' already exists ('${clash[0].id}') — one handle resolves to one record. ` +
+            `Choose a distinct slug, or omit it to inherit '${(old as unknown as { slug?: string }).slug ?? ''}'.`
+        );
+      }
+      slug = explicitSlug;
+    } else {
+      slug = (old as unknown as { slug?: string }).slug;
+      // F4 review finding: an old record with NO slug (e.g. a pre-slug legacy
+      // row) used to leave the new head slugless too — the same auto-mint
+      // path knowledgeCreate takes for a slugless new record applies here,
+      // so a replacement of a legacy record gains the stable handle it never
+      // had, exactly as if it were freshly created.
+      if (slug === undefined) {
+        const headline = ((body as { title?: string; question?: string }).title ?? (body as { question?: string }).question ?? '') as string;
+        slug = this.mintSlug(headline);
+      }
+    }
+
+    const ts = this.now();
+    const candidate: Record<string, unknown> = {
+      id: this.newId(),
+      type,
+      created_at: ts,
+      updated_at: ts,
+      author: (body.author as string) ?? 'conductor',
+      status: 'active',
+      superseded_by: null,
+      links: body.links ?? [],
+      scope: (body.scope as string) ?? 'project',
+      stack_tags: body.stack_tags ?? [],
+      ...body,
+      ...(slug !== undefined ? { slug } : {}),
+    };
+    this.refuseUnknownFields(type, candidate, 'knowledge_supersede');
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    // Cited-id resolution warnings (board fc053051, F3 review finding: every
+    // other write path emits these — knowledge_supersede was the one gap).
+    // Computed on `parsed` (post-schema, pre-store) so a scan sees exactly
+    // what is about to be written, same as knowledgeCreate (tools.ts:688).
+    const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
+
+    // Orphan detection — deterministic, no model call (P3), scoped to the
+    // measured defect shape (enumerated multi-ruling records).
+    const units = SterlingTools.rulingSourceFields(old).flatMap((f) => SterlingTools.segmentRulingUnits(f));
+    let orphanCandidates: string[] = [];
+    if (units.length >= 2) {
+      const fieldsWords = SterlingTools.contentWords(SterlingTools.flattenFieldStrings(fields).join(' '));
+      const uncovered = units.filter((u) => {
+        const unitWords = SterlingTools.contentWords(u);
+        if (unitWords.size === 0) return false;
+        let shared = 0;
+        for (const w of unitWords) if (fieldsWords.has(w)) shared++;
+        return shared / unitWords.size < SterlingTools.ORPHAN_COVERAGE_THRESHOLD;
+      });
+      if (uncovered.length > 0) {
+        if (orphansAcknowledged !== true) {
+          throw new Error(
+            `knowledge_supersede: '${oldId}' enumerates ${units.length} ruling units and the replacement fields leave ${uncovered.length} of them ` +
+              `without substantive coverage — a whole-record supersession would silently drop the surviving ruling(s), the exact failure this check ` +
+              `exists to catch. Orphaned:\n` +
+              uncovered.map((u) => `  - "${SterlingTools.clipExcerpt(u)}"`).join('\n') +
+              `\nExtend fields to carry the surviving ruling(s) forward, or re-call with orphans_acknowledged:true to proceed and accept the loss.`
+          );
+        }
+        orphanCandidates = uncovered.map((u) => SterlingTools.clipExcerpt(u));
+      }
+    }
+
+    const chain = new Set<string>([old.id]);
+    for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
+      if (link.rel === 'supersedes') chain.add(link.target_id);
+    }
+    const updated = this.store.supersede(old.id, parsed);
+    this.repointPromotionReview(chain, updated.id, ts);
+
+    return {
+      superseded: old.id,
+      id: updated.id,
+      type: updated.type,
+      slug: (updated as unknown as { slug?: string }).slug,
+      ...(orphanCandidates.length > 0 ? { orphan_candidates: orphanCandidates } : {}),
+      warnings: citationWarnings,
+    };
   }
 
   // -- run protocol (§5.2, §10) -------------------------------------------------

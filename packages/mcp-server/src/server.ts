@@ -106,6 +106,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_supersede',
+    {
+      description:
+        'Atomically REPLACE a ruling record (decision / anti_pattern / research_finding only) with a NEW one: creates the replacement from `fields` (a COMPLETE create-shaped body, not a delta) and marks old_id superseded → the new id, in ONE transaction. Distinct from knowledge_update (a fix-forward DELTA within one lineage — pass only what changed) and knowledge_retire (a no-new-row duplicate tombstone, no replacement content). old_id resolves via the same uuid/slug/8-char-prefix ladder as knowledge_get. fields with no slug inherit the old record\'s slug so the concept handle survives; an explicit fields.slug is checked for collision like any other. ORPHAN DETECTION: when the old record\'s text enumerates 2+ numbered/bulleted rulings, a replacement that leaves any of them without substantive lexical coverage is REFUSED — naming the orphaned excerpts and both remedies (extend fields to carry the ruling forward, or re-call with orphans_acknowledged:true, which proceeds and discloses the accepted candidates). Fewer than 2 enumerated units never triggers the check. todo/feature_article/reference_material old_ids are refused, naming their real exit paths (board_remove/maintenance_remove, or knowledge_update/knowledge_retire respectively). Every refusal leaves the store untouched.',
+      inputSchema: strict({ old_id: z.string(), fields: passthrough, orphans_acknowledged: z.boolean().optional() }),
+    },
+    ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged))
+  );
+
+  server.registerTool(
     'knowledge_update',
     {
       description:
