@@ -31,6 +31,8 @@ import {
   renderDecisionPointers,
   DECISION_POINTER_CAP,
   renderPayload,
+  isDelivered,
+  markDelivered,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -97,9 +99,9 @@ try {
   // article re-arms nothing (the article is in context); a new owning record
   // always delivers (scope-growth re-arm). Hazards and decisions share the one
   // ledger — their ids are ids like any other.
-  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
-  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  const freshOwners = owners.filter((r) => !isDelivered(guard, r));
+  const freshHazards = hazards.filter((r) => !isDelivered(guard, r));
+  const freshDecisions = decisions.filter((r) => !isDelivered(guard, r));
   // The frontier signal stays once per file per session (grill answer: solve,
   // not accept), but it is now the payload HEADER rather than a separate
   // emission that returned early. That early return was why a hazard in UNOWNED
@@ -168,7 +170,7 @@ try {
   } else {
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
   }
-  guard.records.push(...fresh.map((r) => r.id));
+  markDelivered(guard, fresh);
   if (frontierFresh) guard.frontier_files.push(rel);
   writeGuard(gPath, guard);
   allow();

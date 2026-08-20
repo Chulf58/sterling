@@ -7,6 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h19-clear-session.mjs
 import { rmSync, existsSync as existsSync2 } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -4876,9 +4877,18 @@ import { join as join2, dirname as dirname2 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
+function pendingPath(cwd) {
+  return join2(deliveryDir(cwd), "pending.json");
+}
 
 // scripts/hooks/h19-clear-session.mjs
 var input = readStdin();
 var dir = deliveryDir(input.cwd);
-if (existsSync2(dir)) rmSync(dir, { recursive: true, force: true });
+var rotationNotePath = join3(input.cwd, ".sterling", "transient", "rotation-note.json");
+if (existsSync2(rotationNotePath)) {
+  const p = pendingPath(input.cwd);
+  if (existsSync2(p)) rmSync(p, { force: true });
+} else if (existsSync2(dir)) {
+  rmSync(dir, { recursive: true, force: true });
+}
 allow();

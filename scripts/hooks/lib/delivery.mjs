@@ -82,7 +82,36 @@ export function pendingPath(cwd) {
  *  real delivery on a later Read of it — a pointer would then COST knowledge
  *  instead of adding it. Pointers dedupe per FILE; articles dedupe per RECORD. */
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+}
+
+/** The lineage key for a record: its slug when it has one (feature_article,
+ *  reference_material — stable across a knowledge_update supersede, which
+ *  mints a NEW id for the SAME slug), else its id (decision/anti_pattern have
+ *  no slug, so id-churn IS lineage-churn for them — a genuinely different
+ *  record, not a reconcile of the same one). */
+export function lineageKey(record) {
+  return record?.slug ?? record?.id;
+}
+
+/** Delivered if EITHER the exact id was guarded (today's behavior, still
+ *  correct for slug-less types) OR the record's lineage was already delivered
+ *  under a since-superseded id (board 5a807e68 — an edited record must not
+ *  re-deliver as "fresh"). */
+export function isDelivered(guard, record) {
+  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+}
+
+/** Mark a batch of records delivered: both the exact id (today's key, kept for
+ *  slug-less types and as a fast id-based check) and the lineage key (so a
+ *  later supersede of the same slug is recognised as already-seen), each
+ *  deduped against what is already guarded. */
+export function markDelivered(guard, records) {
+  for (const r of records) {
+    if (!guard.records.includes(r.id)) guard.records.push(r.id);
+    const key = lineageKey(r);
+    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+  }
 }
 
 export function readGuard(path) {

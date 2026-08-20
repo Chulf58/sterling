@@ -66,6 +66,8 @@ import {
   hasRecordCentralityHit,
   recordCentralityHits,
   HAZARD_CAP,
+  isDelivered,
+  markDelivered,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -158,7 +160,7 @@ try {
   // reverse holds too (what H20 delivers, H19 will not repeat).
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
-  const fresh = scored.filter((x) => !guard.records.includes(x.record.id));
+  const fresh = scored.filter((x) => !isDelivered(guard, x.record));
   if (!fresh.length) allow();
 
   const hazards = fresh.filter((x) => x.record.type === 'anti_pattern').slice(0, HAZARD_CAP);
@@ -241,8 +243,8 @@ try {
   // as cappedHazards: an article capped out of the payload was never actually
   // read by the recipient, so it stays eligible for a later dispatch instead
   // of being silently lost for the rest of the session.
-  const shownArticleIds = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record.id);
-  guard.records.push(...hazards.map((x) => x.record.id), ...decisions.map((x) => x.record.id), ...shownArticleIds);
+  const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
+  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles]);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {

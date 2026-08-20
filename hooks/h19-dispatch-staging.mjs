@@ -6306,7 +6306,7 @@ function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
 }
 function readGuard(path) {
   try {

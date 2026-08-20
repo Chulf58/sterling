@@ -6059,7 +6059,20 @@ function pendingPath(cwd) {
   return join2(deliveryDir(cwd), "pending.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+}
+function lineageKey(record) {
+  return record?.slug ?? record?.id;
+}
+function isDelivered(guard, record) {
+  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+}
+function markDelivered(guard, records) {
+  for (const r of records) {
+    if (!guard.records.includes(r.id)) guard.records.push(r.id);
+    const key = lineageKey(r);
+    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+  }
 }
 function readGuard(path) {
   try {
@@ -6195,9 +6208,9 @@ try {
   const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
-  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
-  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  const freshOwners = owners.filter((r) => !isDelivered(guard, r));
+  const freshHazards = hazards.filter((r) => !isDelivered(guard, r));
+  const freshDecisions = decisions.filter((r) => !isDelivered(guard, r));
   const bare = owners.length === 0;
   const unowned = bare && !(gitIgnored([rel], input.cwd)?.has(rel) ?? false);
   const frontierFresh = unowned && !guard.frontier_files.includes(rel);
@@ -6220,7 +6233,7 @@ try {
   } else {
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
   }
-  guard.records.push(...fresh.map((r) => r.id));
+  markDelivered(guard, fresh);
   if (frontierFresh) guard.frontier_files.push(rel);
   writeGuard(gPath, guard);
   allow();

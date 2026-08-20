@@ -6272,7 +6272,20 @@ function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+}
+function lineageKey(record) {
+  return record?.slug ?? record?.id;
+}
+function isDelivered(guard, record) {
+  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+}
+function markDelivered(guard, records) {
+  for (const r of records) {
+    if (!guard.records.includes(r.id)) guard.records.push(r.id);
+    const key = lineageKey(r);
+    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+  }
 }
 function readGuard(path) {
   try {
@@ -6375,7 +6388,7 @@ try {
   if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
-  const fresh = scored.filter((x) => !guard.records.includes(x.record.id));
+  const fresh = scored.filter((x) => !isDelivered(guard, x.record));
   if (!fresh.length) allow();
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
   const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
@@ -6413,8 +6426,8 @@ try {
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join("\n\n") }
     })
   );
-  const shownArticleIds = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record.id);
-  guard.records.push(...hazards.map((x) => x.record.id), ...decisions.map((x) => x.record.id), ...shownArticleIds);
+  const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
+  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles]);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
