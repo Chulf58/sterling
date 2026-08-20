@@ -50,7 +50,6 @@ try {
 } catch (e) {
   deny(`H15: store access denied — .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`);
 }
-if (allowScripts.some((s) => command.includes(s))) allow();
 
 // Split on shell control operators so each fragment is judged independently
 // (AC3). Quote-aware so an operator character inside a quoted argument (a SQL
@@ -90,8 +89,13 @@ function splitFragments(cmd) {
       const m = cmd.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
       const delim = m ? (m[1] ?? m[2] ?? m[3]) : null;
       if (delim) {
+        // The delimiter is untrusted command text: escape regex metachars
+        // before interpolating it into `new RegExp` (a delimiter like "A(B"
+        // otherwise throws, which — uncaught — exits non-2 and silently
+        // VOIDS this blocking gate; see the outer try/catch below).
+        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const rest = cmd.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${delim}(?=\\n|$)`));
+        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
         const span = end ? end.index + end[0].length : rest.length;
         current += rest.slice(0, span);
         i += span - 1;
@@ -130,23 +134,106 @@ function splitFragments(cmd) {
   return parts.map((p) => p.trim()).filter(Boolean);
 }
 
-// Verbs known to mutate their target arguments (rm/mv/cp/tee/truncate/… —
-// "sed -i" is handled separately since sed is only mutating with -i).
-const MUTATING_VERBS = new Set([
-  'rm', 'mv', 'cp', 'tee', 'truncate', 'dd', 'chmod', 'chown',
-  'rsync', 'ln', 'unlink', 'patch', 'shred', 'install', 'mkfifo',
-]);
+// Blanket "mutating verbs" set is DEAD CODE: every verb it named (rm, mv, cp,
+// tee, truncate, dd, chmod, chown, rsync, ln, unlink, patch, shred, install,
+// mkfifo, …) is already absent from READONLY_VERBS below, so the default-deny
+// "unknown verb mentioning the store: err CLOSED" branch already denies every
+// one of them without a separate list to maintain in sync. Intent preserved
+// here rather than in a set: those verbs mutate their target and must never
+// be added to READONLY_VERBS.
 
-// Verbs known to be read-only against whatever path they are given.
+// Verbs known to be read-only against whatever path they are given,
+// UNCONDITIONALLY. `git` and `find` are deliberately NOT here — both are only
+// CONDITIONALLY read-only (see classifyGit/classifyFind below); folding them
+// into this blanket set is exactly the hole an independent review found (a
+// git checkout/clean/restore or a find -delete previously passed as "git"/
+// "find" being on this list, with no sub-verb/flag check at all).
 const READONLY_VERBS = new Set([
-  'git', 'grep', 'egrep', 'fgrep', 'zgrep', 'rgrep',
-  'ls', 'cat', 'head', 'tail', 'wc', 'find', 'awk',
+  'grep', 'egrep', 'fgrep', 'zgrep', 'rgrep',
+  'ls', 'cat', 'head', 'tail', 'wc', 'awk',
   'diff', 'file', 'stat', 'less', 'more', 'tree', 'du', 'od', 'xxd', 'hexdump',
 ]);
+
+// git sub-verbs that only inspect state.
+const GIT_READONLY_SUBVERBS = new Set([
+  'log', 'show', 'diff', 'grep', 'ls-files', 'branch', 'cat-file', 'status', 'rev-parse',
+]);
+
+// git sub-verbs that rewrite/delete working-tree files — always a write when
+// the fragment names a store path, regardless of quoting.
+const GIT_WRITE_SUBVERBS = new Set(['checkout', 'restore', 'clean', 'rm', 'stash']);
+
+function classifyGit(trimmed) {
+  const m = trimmed.match(/^git\s+(\S+)/i);
+  const subverb = m ? m[1].toLowerCase() : '';
+  if (GIT_READONLY_SUBVERBS.has(subverb)) return false;
+  if (GIT_WRITE_SUBVERBS.has(subverb)) return true;
+  // An unrecognized sub-verb (commit, add, push, merge, …) is a write ONLY
+  // when it carries the store path as a genuine (unquoted) argument — a
+  // store mention inside quoted prose (e.g. a commit message body) is not an
+  // out-of-band write against the store; err CLOSED only on a real argument.
+  return STORE_MENTION_RE.test(unquotedText(trimmed));
+}
+
+// find is only read-only WITHOUT a flag that lets it act on matches directly;
+// -delete/-exec/-execdir/-ok/-fdelete all mutate the store in place.
+const FIND_MUTATING_FLAGS_RE = /(^|\s)-(delete|fdelete|execdir|exec|ok)\b/;
+
+function classifyFind(trimmed) {
+  return FIND_MUTATING_FLAGS_RE.test(trimmed); // write only when a mutating flag is present
+}
 
 function firstWord(fragment) {
   const m = fragment.match(/^\s*(\S+)/);
   return m ? m[1].toLowerCase() : '';
+}
+
+// Concatenation of a fragment's UNQUOTED, NON-HEREDOC-BODY characters only —
+// a single- or double-quoted span (a commit message, a SQL string) AND a
+// heredoc body (`git commit -F - <<EOF` … `EOF`) are DATA, not shell syntax
+// or a genuine path argument, and must never be read as either.
+function unquotedText(str) {
+  let out = '';
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (c === '"' && str[i - 1] !== '\\') inDouble = false;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (c === '<' && str[i + 1] === '<') {
+      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
+      const delim = m ? (m[1] ?? m[2] ?? m[3]) : null;
+      if (delim) {
+        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rest = str.slice(i);
+        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
+        const span = end ? end.index + end[0].length : rest.length;
+        i += span - 1; // skip the whole heredoc (marker + body + terminator) — DATA
+        continue;
+      }
+    }
+    out += c;
+  }
+  return out;
+}
+
+// A '>' inside quotes is prose/data, not a shell redirection.
+function hasUnquotedRedirect(str) {
+  return unquotedText(str).includes('>');
 }
 
 // Classify a single fragment: { write: boolean, fragment }. A fragment that
@@ -160,7 +247,9 @@ function classifyFragment(fragment) {
 
   // (a) output redirection alongside a store mention in the same fragment —
   // treat as targeting the store; redirection is a write regardless of verb.
-  if (/>/.test(trimmed)) return { write: true, fragment: trimmed };
+  // Only an UNQUOTED '>' counts — one inside quotes is prose/data, not a
+  // shell redirect.
+  if (hasUnquotedRedirect(trimmed)) return { write: true, fragment: trimmed };
 
   const verb = firstWord(trimmed);
 
@@ -170,7 +259,9 @@ function classifyFragment(fragment) {
     return { write: false, fragment: trimmed };
   }
 
-  if (MUTATING_VERBS.has(verb)) return { write: true, fragment: trimmed };
+  if (verb === 'git') return { write: classifyGit(trimmed), fragment: trimmed };
+  if (verb === 'find') return { write: classifyFind(trimmed), fragment: trimmed };
+
   if (READONLY_VERBS.has(verb)) return { write: false, fragment: trimmed };
 
   // Unknown verb mentioning the store: err CLOSED (in doubt, deny).
@@ -178,12 +269,25 @@ function classifyFragment(fragment) {
 }
 
 let offending = null;
-for (const frag of splitFragments(command)) {
-  const result = classifyFragment(frag);
-  if (result.write) {
-    offending = result.fragment;
-    break;
+try {
+  for (const frag of splitFragments(command)) {
+    // The sanctioned-script escape is judged PER FRAGMENT (AC-E): a sanctioned
+    // script elsewhere in a compound command must never launder a writing
+    // fragment alongside it (`node scripts/x.mjs && rm .sterling/…` still
+    // denies, naming the rm fragment).
+    if (allowScripts.some((s) => frag.includes(s))) continue;
+    const result = classifyFragment(frag);
+    if (result.write) {
+      offending = result.fragment;
+      break;
+    }
   }
+} catch (e) {
+  // This gate BLOCKS by exit code; an uncaught throw here would exit non-2,
+  // which the platform treats as non-blocking — a silently VOIDED gate (the
+  // F5 fail-open class, anti_pattern e13f0fb5). Any unexpected internal error
+  // during evaluation must deny, not disappear.
+  deny(`H15: internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`);
 }
 if (!offending) allow();
 

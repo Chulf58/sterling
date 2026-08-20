@@ -25,6 +25,24 @@
 //        regardless of verb (DB access is the MCP tool surface's job, never
 //        raw shell); only non-db store files (config.json, transient/) gain
 //        the new read-only allowance.
+//
+// Independent review addendum (allow-surface holes: verbs trusted as
+// unconditionally read-only that are only CONDITIONALLY so — `sed` already
+// gets a -i check, these did not):
+//  AC-A — `find` with -delete/-exec mutates and must be denied; plain `find`
+//         (no mutating flag) stays allowed.
+//  AC-B — git verbs that rewrite the working tree (`checkout --`, `clean`,
+//         `restore`) must be denied on store paths; read-only git (`log`,
+//         `diff`) stays allowed.
+//  AC-C — regression: the find/git tightening must not claw back the
+//         already-pinned plain-read allow / redirect deny.
+//  AC-D — a heredoc delimiter containing a regex metacharacter must not
+//         crash the gate into a silent allow for a command that redirects
+//         into the store; nor may fixing that crash over-deny an unrelated
+//         read-only heredoc merely because its delimiter has a metacharacter.
+//  AC-E — the sanctioned-script escape is judged per fragment: a sanctioned
+//         script name elsewhere in a compound command must not launder a
+//         writing fragment alongside it.
 
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -295,6 +313,198 @@ test('AC3: a multiline batch with a genuinely writing line is denied naming that
     const r = runHook(cmd, dir);
     assert.equal(r.code, 2, 'the writing line denies the batch');
     assert.match(r.stderr, /rm \.sterling\/config\.json/, 'the denial names the offending line, not the batch');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- AC-A: `find` with -delete/-exec mutates ---------------------------
+// `find` is only CONDITIONALLY read-only: plain `find` reports paths, but
+// `-delete` and `-exec ... {} \;`/`-execdir` let it mutate the store directly.
+// The gate already special-cases `sed -i`; `find` needs the same treatment.
+
+test('AC-A: `find .sterling -name "*.json" -delete` is denied — -delete mutates the store', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('find .sterling -name "*.json" -delete', dir);
+    assert.equal(r.code, 2, 'find with -delete removes store files and must be denied');
+    assert.match(
+      r.stderr,
+      /find \.sterling -name "\*\.json" -delete/,
+      'the deny message names the specific find fragment carrying -delete'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-A: plain `find .sterling -name "*.json"` (no -delete/-exec) stays allowed', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('find .sterling -name "*.json"', dir);
+    assert.equal(r.code, 0, 'find with no mutating flag only lists paths and must pass');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- AC-B: git verbs that rewrite the working tree ---------------------------
+// `git` is only CONDITIONALLY read-only: `log`/`diff`/`show`/`status` merely
+// inspect, but `checkout --`, `clean`, and `restore` overwrite or delete
+// working-tree files — including store files — exactly like a direct write.
+
+test('AC-B: `git checkout -- .sterling/config.json` is denied — checkout rewrites the working tree', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git checkout -- .sterling/config.json', dir);
+    assert.equal(r.code, 2, 'git checkout of a store path overwrites it from another revision and must be denied');
+    assert.match(
+      r.stderr,
+      /git checkout -- \.sterling\/config\.json/,
+      'the deny message names the specific checkout fragment'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-B: `git clean -fd .sterling` is denied — clean deletes untracked store files', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git clean -fd .sterling', dir);
+    assert.equal(r.code, 2, 'git clean deletes files under the named path and must be denied');
+    assert.match(
+      r.stderr,
+      /git clean -fd \.sterling/,
+      'the deny message names the specific clean fragment'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-B: `git restore .sterling/config.json` is denied — restore overwrites the working-tree file', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git restore .sterling/config.json', dir);
+    assert.equal(r.code, 2, 'git restore rewrites the store file from the index/another commit and must be denied');
+    assert.match(
+      r.stderr,
+      /git restore \.sterling\/config\.json/,
+      'the deny message names the specific restore fragment'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-B: `git log --oneline -- .sterling/config.json` stays allowed (read-only git verb, existing pin)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git log --oneline -- .sterling/config.json', dir);
+    assert.equal(r.code, 0, 'git log only inspects history and must stay allowed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-B: `git diff -- .sterling/config.json` stays allowed (read-only git verb)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git diff -- .sterling/config.json', dir);
+    assert.equal(r.code, 0, 'git diff only inspects a change and must stay allowed');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- AC-C: regression — the tightening must not overshoot ---------------------------
+// The new find/git verb-conditional checks must not claw back the plain-read
+// and redirect-deny behavior AC1/AC2 already pinned.
+
+test('AC-C (regression): a plain read of a non-db store file still stays allowed', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('cat .sterling/config.json', dir);
+    assert.equal(r.code, 0, 'a mere read of config.json must still pass after the find/git tightening');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-C (regression): redirection into config.json still stays denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('echo x > .sterling/config.json', dir);
+    assert.equal(r.code, 2, 'shell redirection into a store file must still be denied after the find/git tightening');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- AC-D: heredoc delimiters with regex metacharacters ---------------------------
+// A heredoc delimiter is taken from the command text and used to find where
+// the heredoc body ends. If that delimiter is interpolated into a RegExp
+// without escaping, a delimiter containing a regex metacharacter ("(", ".",
+// etc.) throws — and an uncaught throw must never degrade into a silent
+// allow (exit 0/other) for a command that actually redirects into the store.
+// Symmetrically, the fix must not over-correct into denying every heredoc
+// with a metacharacter delimiter regardless of what the command actually does.
+
+test('AC-D: a heredoc redirect into config.json with a regex-metacharacter delimiter is denied, not silently allowed by a parse crash', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const cmd = 'cat > .sterling/config.json <<"A(B"\nhello\nA(B';
+    const r = runHook(cmd, dir);
+    assert.notEqual(r.code, null, 'the gate must not crash/void on a metacharacter delimiter — a crash is not a decision');
+    assert.equal(r.code, 2, 'the command redirects into the store and must be denied even though the heredoc delimiter contains a regex metacharacter');
+    assert.match(
+      r.stderr,
+      /cat > \.sterling\/config\.json/,
+      'the deny message names the specific redirecting fragment'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-D: a read-only heredoc command with an unrelated regex-metacharacter delimiter stays allowed', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const cmd = 'git commit -F - <<"E.F"\nsome commit message\nE.F';
+    const r = runHook(cmd, dir);
+    assert.notEqual(r.code, null, 'the gate must not crash on a metacharacter delimiter');
+    assert.equal(r.code, 0, 'the command never touches the store — a metacharacter delimiter must not trigger an over-broad fail-closed deny');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- AC-E: the sanctioned-script escape is per-fragment ---------------------------
+// A sanctioned script name (e.g. scripts/dispose-run.mjs) appearing anywhere
+// in the command text must not blanket-allow the whole command — each
+// fragment of a compound command is judged on its own.
+
+test('AC-E: `node scripts/dispose-run.mjs && rm .sterling/config.json` is denied naming the rm fragment', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('node scripts/dispose-run.mjs && rm .sterling/config.json', dir);
+    assert.equal(r.code, 2, 'a sanctioned script fragment must not launder a writing fragment elsewhere in the same compound command');
+    assert.match(
+      r.stderr,
+      /rm \.sterling\/config\.json/,
+      'the deny message names the specific writing fragment, not the sanctioned one'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-E: plain `node scripts/dispose-run.mjs` alone stays allowed (regression pin)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('node scripts/dispose-run.mjs', dir);
+    assert.equal(r.code, 0, 'the sanctioned script alone, with no writing fragment, must still pass');
   } finally {
     cleanup();
   }

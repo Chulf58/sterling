@@ -4896,7 +4896,6 @@ try {
 } catch (e) {
   deny(`H15: store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`);
 }
-if (allowScripts.some((s) => command.includes(s))) allow();
 function splitFragments(cmd) {
   const parts = [];
   let current = "";
@@ -4928,8 +4927,9 @@ function splitFragments(cmd) {
       const m = cmd.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
       const delim = m ? m[1] ?? m[2] ?? m[3] : null;
       if (delim) {
+        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         const rest = cmd.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${delim}(?=\\n|$)`));
+        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
         const span = end ? end.index + end[0].length : rest.length;
         current += rest.slice(0, span);
         i += span - 1;
@@ -4963,25 +4963,7 @@ function splitFragments(cmd) {
   parts.push(current);
   return parts.map((p) => p.trim()).filter(Boolean);
 }
-var MUTATING_VERBS = /* @__PURE__ */ new Set([
-  "rm",
-  "mv",
-  "cp",
-  "tee",
-  "truncate",
-  "dd",
-  "chmod",
-  "chown",
-  "rsync",
-  "ln",
-  "unlink",
-  "patch",
-  "shred",
-  "install",
-  "mkfifo"
-]);
 var READONLY_VERBS = /* @__PURE__ */ new Set([
-  "git",
   "grep",
   "egrep",
   "fgrep",
@@ -4992,7 +4974,6 @@ var READONLY_VERBS = /* @__PURE__ */ new Set([
   "head",
   "tail",
   "wc",
-  "find",
   "awk",
   "diff",
   "file",
@@ -5005,31 +4986,101 @@ var READONLY_VERBS = /* @__PURE__ */ new Set([
   "xxd",
   "hexdump"
 ]);
+var GIT_READONLY_SUBVERBS = /* @__PURE__ */ new Set([
+  "log",
+  "show",
+  "diff",
+  "grep",
+  "ls-files",
+  "branch",
+  "cat-file",
+  "status",
+  "rev-parse"
+]);
+var GIT_WRITE_SUBVERBS = /* @__PURE__ */ new Set(["checkout", "restore", "clean", "rm", "stash"]);
+function classifyGit(trimmed) {
+  const m = trimmed.match(/^git\s+(\S+)/i);
+  const subverb = m ? m[1].toLowerCase() : "";
+  if (GIT_READONLY_SUBVERBS.has(subverb)) return false;
+  if (GIT_WRITE_SUBVERBS.has(subverb)) return true;
+  return STORE_MENTION_RE.test(unquotedText(trimmed));
+}
+var FIND_MUTATING_FLAGS_RE = /(^|\s)-(delete|fdelete|execdir|exec|ok)\b/;
+function classifyFind(trimmed) {
+  return FIND_MUTATING_FLAGS_RE.test(trimmed);
+}
 function firstWord(fragment) {
   const m = fragment.match(/^\s*(\S+)/);
   return m ? m[1].toLowerCase() : "";
+}
+function unquotedText(str) {
+  let out = "";
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (c === '"' && str[i - 1] !== "\\") inDouble = false;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (c === "<" && str[i + 1] === "<") {
+      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
+      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
+      if (delim) {
+        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const rest = str.slice(i);
+        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
+        const span = end ? end.index + end[0].length : rest.length;
+        i += span - 1;
+        continue;
+      }
+    }
+    out += c;
+  }
+  return out;
+}
+function hasUnquotedRedirect(str) {
+  return unquotedText(str).includes(">");
 }
 function classifyFragment(fragment) {
   const trimmed = fragment.trim();
   if (!trimmed || !STORE_MENTION_RE.test(trimmed)) return { write: false, fragment: trimmed };
   if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed };
-  if (/>/.test(trimmed)) return { write: true, fragment: trimmed };
+  if (hasUnquotedRedirect(trimmed)) return { write: true, fragment: trimmed };
   const verb = firstWord(trimmed);
   if (verb === "sed") {
     if (/(^|\s)-\w*i\w*(\s|=|$)/.test(trimmed)) return { write: true, fragment: trimmed };
     return { write: false, fragment: trimmed };
   }
-  if (MUTATING_VERBS.has(verb)) return { write: true, fragment: trimmed };
+  if (verb === "git") return { write: classifyGit(trimmed), fragment: trimmed };
+  if (verb === "find") return { write: classifyFind(trimmed), fragment: trimmed };
   if (READONLY_VERBS.has(verb)) return { write: false, fragment: trimmed };
   return { write: true, fragment: trimmed };
 }
 var offending = null;
-for (const frag of splitFragments(command)) {
-  const result = classifyFragment(frag);
-  if (result.write) {
-    offending = result.fragment;
-    break;
+try {
+  for (const frag of splitFragments(command)) {
+    if (allowScripts.some((s) => frag.includes(s))) continue;
+    const result = classifyFragment(frag);
+    if (result.write) {
+      offending = result.fragment;
+      break;
+    }
   }
+} catch (e) {
+  deny(`H15: internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`);
 }
 if (!offending) allow();
 deny(
