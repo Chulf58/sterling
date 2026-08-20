@@ -631,6 +631,16 @@ export interface FieldShape {
   type: string;
   /** Present only for closed sets — the whole point of asking. */
   enum_values?: string[];
+  /**
+   * Present only when this field's top-level type is an array-of-objects
+   * (e.g. files[]'s `{path, role}[]`, current_ac[]'s `{ac_id, text,
+   * verifiable_at}[]`) — the element object's OWN sub-fields, one level deep,
+   * with their own type + enum_values (board db0e2799). Without this, a
+   * nested enum (e.g. current_ac[].verifiable_at) was invisible in
+   * knowledge_schema and only discoverable by having a write on that
+   * sub-field rejected.
+   */
+  element_fields?: FieldShape[];
 }
 
 /**
@@ -639,7 +649,7 @@ export interface FieldShape {
  * degrades to 'unknown' rather than throwing, because a SCHEMA READ must never
  * be why a call fails.
  */
-function describeZod(node: unknown, depth = 0): { type: string; enum_values?: string[] } {
+function describeZod(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[] } {
   if (!node || typeof node !== 'object' || depth > 6) return { type: 'unknown' };
   const def = (node as { _def?: Record<string, unknown> })._def;
   const name = def?.typeName as string | undefined;
@@ -665,7 +675,12 @@ function describeZod(node: unknown, depth = 0): { type: string; enum_values?: st
       return { type: `literal ${JSON.stringify(def?.value)}` };
     case 'ZodArray': {
       const inner = describeZod(def?.type, depth + 1);
-      return { type: `${inner.type}[]`, ...(inner.enum_values ? { enum_values: inner.enum_values } : {}) };
+      const elementFields = describeElementFields(def?.type, depth + 1);
+      return {
+        type: `${inner.type}[]`,
+        ...(inner.enum_values ? { enum_values: inner.enum_values } : {}),
+        ...(elementFields ? { element_fields: elementFields } : {}),
+      };
     }
     case 'ZodObject': {
       const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
@@ -697,6 +712,40 @@ function describeZod(node: unknown, depth = 0): { type: string; enum_values?: st
 }
 
 /**
+ * An array field's ELEMENT sub-fields, one level deep, when the element is an
+ * object (board db0e2799) — e.g. files[]'s {path, role}, current_ac[]'s
+ * {ac_id, text, verifiable_at}. Only unwraps the same optional/nullable/
+ * default/effects wrappers describeZod already unwraps (never recurses INTO
+ * a nested array-of-objects-within-an-object — one level is what the reported
+ * gap needed). Returns undefined for a non-object array element (e.g.
+ * string[]), so `element_fields` is omitted entirely rather than reported
+ * empty.
+ */
+function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefined {
+  if (!node || typeof node !== 'object' || depth > 6) return undefined;
+  const def = (node as { _def?: Record<string, unknown> })._def;
+  const name = def?.typeName as string | undefined;
+  switch (name) {
+    case 'ZodObject': {
+      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
+      return Object.entries(shape).map(([fieldName, fieldNode]) => {
+        const described = describeZod(fieldNode, depth + 1);
+        const required = !(fieldNode as { isOptional?: () => boolean }).isOptional?.();
+        return { name: fieldName, required, type: described.type, ...(described.enum_values ? { enum_values: described.enum_values } : {}) };
+      });
+    }
+    case 'ZodOptional':
+    case 'ZodNullable':
+    case 'ZodDefault':
+      return describeElementFields(def?.innerType, depth + 1);
+    case 'ZodEffects':
+      return describeElementFields(def?.schema, depth + 1);
+    default:
+      return undefined;
+  }
+}
+
+/**
  * The shape of a registered record type, DERIVED from its own zod schema
  * (board 7acfbe48 / feedback §2.7).
  *
@@ -722,7 +771,13 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
   const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
     const described = describeZod(node);
     const required = !(node as { isOptional?: () => boolean }).isOptional?.();
-    return { name, required, type: described.type, ...(described.enum_values ? { enum_values: described.enum_values } : {}) };
+    return {
+      name,
+      required,
+      type: described.type,
+      ...(described.enum_values ? { enum_values: described.enum_values } : {}),
+      ...(described.element_fields ? { element_fields: described.element_fields } : {}),
+    };
   });
   return { type, fields };
 }

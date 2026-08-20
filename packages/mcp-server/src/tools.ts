@@ -101,8 +101,18 @@ export interface BoardFilter {
  * knowledge base, that is defeating one". 'full' stays the DEFAULT so no
  * existing caller changes behaviour; the cheap read is opt-in, and the capped
  * note advertises it so it is discoverable at the moment it is needed.
+ *
+ * 'count'  — knowledge_query only (board fa19524d). A capped window can never
+ *            establish absence — "does the store hold X?" is unanswerable once
+ *            more records match than the cap shows. 'count' answers that
+ *            question directly: the TRUE total for the filter (reusing the
+ *            store's uncapped, rank-blind count()), no record bodies, and
+ *            capped:false always — a count is defined as never-capped, it does
+ *            not enumerate. When multiple types are queried, a per-type
+ *            breakdown rides alongside the total (see by_type on
+ *            KnowledgeQueryResult).
  */
-export type Projection = 'full' | 'digest';
+export type Projection = 'full' | 'digest' | 'count';
 
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
@@ -136,6 +146,10 @@ export interface KnowledgeQueryResult {
    */
   answerability: 'ready' | 'verify_targets' | 'insufficient';
   records: Record<string, unknown>[];
+  /** projection:'count' only, and only when multiple `types` were queried: the
+   *  same uncapped, rank-blind count() split per queried type, alongside the
+   *  combined `matched_filter` total (board fa19524d, AC2). */
+  by_type?: Record<string, number>;
 }
 
 /** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
@@ -1058,7 +1072,17 @@ export class SterlingTools {
     // including the oversize check (board 8390f8fa): the write's result carries
     // a warning on the SAME channel knowledge_update uses.
     const record = this.knowledgeUpdate(old.id, { [field]: next });
-    return { record, warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)] };
+    // Cited-id scan (board fc053051 extension): only the newly APPENDED
+    // entries — never the array's pre-existing elements, which were already
+    // scanned (or not) on whatever write introduced them.
+    return {
+      record,
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
+        ...this.articleOversizeWarnings(record),
+        ...this.citedIdWarnings(JSON.stringify(entries)),
+      ],
+    };
   }
 
   /**
@@ -1150,7 +1174,14 @@ export class SterlingTools {
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
-        warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record), ...this.articleOversizeWarnings(record)],
+        // Cited-id scan (board fc053051 extension): the REPLACE text only —
+        // never `find`, never the rest of the record, which was already
+        // scanned (or not) on whatever write introduced it.
+        warnings: [
+          ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
+          ...this.articleOversizeWarnings(record),
+          ...this.citedIdWarnings(replace),
+        ],
       };
     }
     this.refuseServerOwnedFields({ [field]: replace }, 'knowledge_update');
@@ -1182,7 +1213,15 @@ export class SterlingTools {
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
-      warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)],
+      // Cited-id scan (board fc053051 extension): the REPLACE text only —
+      // never `find`, never the rest of the record (scope guarantee: an edit
+      // must not warn about a pre-existing citation elsewhere in the record
+      // just because that record happens to get written again).
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
+        ...this.articleOversizeWarnings(record),
+        ...this.citedIdWarnings(replace),
+      ],
     };
   }
 
@@ -1312,6 +1351,11 @@ export class SterlingTools {
       }
     }
     warnings.push(...this.articleOversizeWarnings(record));
+    // Cited-id scan (board fc053051 extension): only the WRITTEN partial
+    // fields — `body`, the caller's own overrides — never the untouched rest
+    // of the merged record, which was already scanned (or not) on whatever
+    // write introduced it.
+    warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
     return { record, warnings };
   }
 
@@ -1345,6 +1389,26 @@ export class SterlingTools {
 
   knowledgeQueryResult(opts: QueryOptions & { projection?: Projection }): KnowledgeQueryResult {
     const { projection = 'full', ...filter } = opts;
+    // projection:'count' never enumerates — no records fetch, no cap, no rank.
+    // The store's uncapped count() IS the whole answer (board fa19524d): a
+    // capped window can never establish absence, so a count sidesteps the
+    // question of "how many can I see" entirely by never taking a window.
+    if (projection === 'count') {
+      const matchedFilter = this.store.count(filter);
+      const byType =
+        (filter.types?.length ?? 0) > 1
+          ? Object.fromEntries((filter.types as string[]).map((t) => [t, this.store.count({ ...filter, types: [t] })]))
+          : undefined;
+      return {
+        matched_filter: matchedFilter,
+        returned: 0,
+        cap: filter.cap ?? DEFAULT_QUERY_CAP,
+        capped: false,
+        answerability: matchedFilter === 0 ? 'insufficient' : 'ready',
+        records: [],
+        ...(byType ? { by_type: byType } : {}),
+      };
+    }
     const records = this.knowledgeQuery(filter);
     const cap = filter.cap ?? DEFAULT_QUERY_CAP;
     // count() shares query()'s base filter but is rank-BLIND (rank_terms is a
@@ -1597,9 +1661,20 @@ export class SterlingTools {
    * tombstones included (decision de1a7329: a superseded record is a
    * legitimate citation).
    */
+  // Separator class widened (board fc053051 extension) to tolerate the
+  // spellings already seen in review feedback and in this store's own prose:
+  // a plain space, an opening paren, a colon ("decision: 19b506ce"), and a
+  // backtick ("decision `19b506ce`") — alongside the original space/paren.
+  // The id capture is widened from EXACTLY 8 hex chars to 8-40, because a
+  // dash-less citation longer than 8 (e.g. a 12- or 16-char prefix) used to
+  // be clipped at 8 chars and then fail the trailing \b boundary check
+  // (still a hex digit, not a boundary) — so it silently matched nothing. A
+  // real uuid's first segment is exactly 8 hex chars before its own dash, so
+  // the greedy {8,40} run still stops there and the optional dashed
+  // remainder below picks up the rest unchanged.
   private static readonly CITATION_TRIGGER = ['knowledge_get', ...Object.keys(RECORD_TYPES)].join('|');
   private static readonly CITATION_RE = new RegExp(
-    `\\b(?:${SterlingTools.CITATION_TRIGGER})\\b[\\s(]*([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?)\\b`,
+    `\\b(?:${SterlingTools.CITATION_TRIGGER})\\b[\\s(:\`]*([0-9a-fA-F]{8,40}(?:-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?)\\b`,
     'g'
   );
 
@@ -2187,9 +2262,28 @@ export class SterlingTools {
    * a user item by design, naming board_remove as the conductor's path so the
    * refusal teaches rather than merely blocks.
    */
-  maintenanceRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
+  maintenanceRemove(
+    id: string
+  ): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[]; already_drained?: boolean } {
     const record = this.store.get(id);
-    if (!record) throw this.removedItemError('maintenance_remove', id);
+    if (!record) {
+      // IDEMPOTENT ALREADY-DRAINED (board 83478fc6, extending 97d773ef): a
+      // drain-log trace naming a SYSTEM item (system_reason set, per the store's
+      // `record.system_reason ?? ''` write) means this id was a maintenance-queue
+      // item that is already gone — auto-drained by a knowledge_update
+      // re-baseline (decision 8ecd435f) or closed a moment earlier by a
+      // concurrent librarian call. That is the caller's desired end state, not a
+      // failure, so it SUCCEEDS idempotently instead of throwing. A trace with no
+      // system_reason (a user item) or no trace at all still falls through to the
+      // loud refusal below — collapsing either into "already drained" would let
+      // a genuine typo, or a request against the human's own board, silently
+      // read as success.
+      const trace = this.store.drainLogEntry(id);
+      if (trace && trace.system_reason) {
+        return { removed: id, already_drained: true };
+      }
+      throw this.removedItemError('maintenance_remove', id);
+    }
     if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
     const source = (record as unknown as { source?: string }).source;
     if (source !== 'system') {

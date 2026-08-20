@@ -73,7 +73,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         rank_terms: z.array(z.string()).optional(),
         include_unconfirmed: z.boolean().optional(),
         cap: z.number().int().positive().optional(),
-        projection: z.enum(['full', 'digest']).optional(),
+        projection: z.enum(['full', 'digest', 'count']).optional(),
       }),
     },
     (opts) => json(tools.knowledgeQueryResult(opts))

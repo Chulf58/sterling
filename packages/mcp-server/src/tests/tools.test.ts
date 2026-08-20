@@ -2573,11 +2573,11 @@ test("removes distinguish 'already removed' from 'never existed' via the drain-l
       feature_link: article.id,
     });
     tools.knowledgeUpdate(article.id, { state: 'active' }); // auto-drains the item
-    assert.throws(
-      () => tools.maintenanceRemove(item.id),
-      /ALREADY REMOVED at .*reconcile_needed.*Nothing further to do/s,
-      'the routine already-auto-drained case is self-explaining'
-    );
+    // Superseded pin (board 83478fc6, 2026-08-20): the already-drained case is
+    // the DESIRED state, so it succeeds idempotently with already_drained:true
+    // instead of throwing — a drain that finds its work done is not a failure.
+    const already = tools.maintenanceRemove(item.id) as { already_drained?: boolean; removed?: string };
+    assert.equal(already.already_drained, true, 'already-auto-drained succeeds idempotently, marked');
     // a genuinely wrong id: no trace, and the message hedges on the capped log
     assert.throws(
       () => tools.boardRemove(randomUUID()),
