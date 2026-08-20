@@ -6046,7 +6046,7 @@ function pendingPath(cwd) {
   return join2(deliveryDir(cwd), "pending.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
 }
 function readGuard(path) {
   try {
