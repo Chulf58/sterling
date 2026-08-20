@@ -41,6 +41,13 @@ export interface CreateResult {
   deduped?: boolean;
   /** The existing item's text was refreshed because this attempt said something different. */
   text_updated?: boolean;
+  /**
+   * Cited-id resolution warnings (board fc053051): one entry per id-shaped
+   * citation in the written text that resolves to NO record in the mounted
+   * fan, at any status. Always present — `[]` when every citation resolved
+   * or none were found. Never gates the write (AC5): the record still lands.
+   */
+  warnings: string[];
 }
 
 export interface BoardFilter {
@@ -645,6 +652,12 @@ export class SterlingTools {
     // re-baseline. A duplicate returns the EXISTING item rather than throwing:
     // producers are mechanisms reporting a fact, and a fact reported twice is
     // not an error.
+    // Cited-id resolution warnings (board fc053051): scanned from the same
+    // text the FTS extractor already derives for this type, so no new
+    // per-type field list is invented here. Computed on `parsed` (post-schema,
+    // pre-store) so a scan sees exactly what is about to be written.
+    const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
+
     const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
     if (isSystemTodo) {
       const res = this.store.enqueueSystemTodo(candidate);
@@ -654,11 +667,12 @@ export class SterlingTools {
         check_skipped: skipped,
         ...(res.deduped ? { deduped: true } : {}),
         ...(res.text_updated ? { text_updated: true } : {}),
+        warnings: citationWarnings,
       };
     }
     const record = this.store.create(candidate);
     this.surfacePromotionCandidate(record, type);
-    return { record, check_skipped: skipped };
+    return { record, check_skipped: skipped, warnings: citationWarnings };
   }
 
   /**
@@ -1551,6 +1565,50 @@ export class SterlingTools {
     // a torn store, not a miss — say which it is rather than reporting "no record".
     if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
     return record;
+  }
+
+  /**
+   * Cited-id resolution warnings (board fc053051 — the phantom-id propagation
+   * defect: a fabricated decision id was cited by three agents across three
+   * sessions because nothing verified that record ids quoted INSIDE written
+   * text actually resolve).
+   *
+   * Matches a citation-shaped token — a full uuid, or an 8-plus-hex-char
+   * prefix — immediately following `knowledge_get` or a record-type word, the
+   * convention already used throughout this store's own prose (e.g.
+   * "(knowledge_get 19b506ce-…)", "decision de1a7329"). Deliberately
+   * conservative: a hex-looking word with no adjacent trigger word never
+   * matches, so false negatives are preferred over false positives.
+   *
+   * Resolution reuses recordIdIndex() — the same cheap, no-body-fetch read
+   * knowledge_get's own prefix resolution uses — so ANY status resolves,
+   * tombstones included (decision de1a7329: a superseded record is a
+   * legitimate citation).
+   */
+  private static readonly CITATION_TRIGGER = ['knowledge_get', ...Object.keys(RECORD_TYPES)].join('|');
+  private static readonly CITATION_RE = new RegExp(
+    `\\b(?:${SterlingTools.CITATION_TRIGGER})\\b[\\s(]*([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?)\\b`,
+    'g'
+  );
+
+  private citedIdWarnings(text: string): string[] {
+    if (!text) return [];
+    const index = this.store.recordIdIndex();
+    const seen = new Set<string>();
+    const warnings: string[] = [];
+    for (const match of text.matchAll(SterlingTools.CITATION_RE)) {
+      const cited = match[1];
+      const lower = cited.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      const resolves = index.some((r) => r.id.toLowerCase().startsWith(lower));
+      if (!resolves) {
+        warnings.push(
+          `cited id '${cited}' does not resolve to any record in the project store or any mounted domain, at any status — check for a fabricated or mistyped citation`
+        );
+      }
+    }
+    return warnings;
   }
 
   /** Versioned change (§10): new version + supersede prior. Never mutates in place. */
