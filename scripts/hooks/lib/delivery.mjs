@@ -244,6 +244,41 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
   return blocks;
 }
 
+/** How many feature_article pointers render per dispatch (H20 subject-axis
+ *  delivery, board 62806222 follow-up / consuming-project retro
+ *  2026-08-17-2111). Tighter than DECISION_POINTER_CAP: a pointer is the
+ *  cheapest unit this mechanism renders (one line, no body at all — see
+ *  renderArticlePointers below), but the dispatch payload as a whole must
+ *  still stay small (P1), so the cap is deliberately small and the overflow
+ *  is DISCLOSED rather than silently dropped, matching renderHazards/
+ *  renderDecisionPointers' own cap-and-disclose shape. */
+export const ARTICLE_POINTER_CAP = 3;
+
+/** feature_articles matching a dispatch's SUBJECT, as POINTER lines ONLY —
+ *  slug, title, and a knowledge_get reference to the full record. NEVER the
+ *  article's what_it_does/intended_behavior prose: unlike renderArticle
+ *  (file-touch delivery, where the article IS the owning knowledge for a
+ *  path the reader is about to edit), a subject match here is weaker
+ *  evidence of relevance — the same reasoning that keeps decisions and
+ *  hazards capped tighter on this channel than on H19's file-touch channel
+ *  (see the MAX_DECISIONS comment in h20-mechanism-axis.mjs). The reader
+ *  decides whether to spend a knowledge_get, not have the body pushed at
+ *  them. */
+export function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
+  const shown = articles.slice(0, cap);
+  const lines = [
+    `▸ ARTICLES matching this prompt's SUBJECT (${articles.length}) — pointers only, follow knowledge_get before assuming the answer:`,
+  ];
+  for (const a of shown) {
+    lines.push(`  → '${a.slug}': ${clip(a.title, 140)} (knowledge_get ${a.id})`);
+  }
+  if (articles.length > shown.length) {
+    const widen = remedy ?? `knowledge_query types:["feature_article"] cap:${articles.length}`;
+    lines.push(`  … ${articles.length - shown.length} more matched but NOT shown (cap ${cap}) — ${widen} for the full set`);
+  }
+  return lines.join('\n');
+}
+
 /** How many decision pointers render before the rest are disclosed as dropped. */
 export const DECISION_POINTER_CAP = 8;
 

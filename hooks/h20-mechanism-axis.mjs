@@ -6303,6 +6303,21 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
+var ARTICLE_POINTER_CAP = 3;
+function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
+  const shown = articles.slice(0, cap);
+  const lines = [
+    `\u25B8 ARTICLES matching this prompt's SUBJECT (${articles.length}) \u2014 pointers only, follow knowledge_get before assuming the answer:`
+  ];
+  for (const a of shown) {
+    lines.push(`  \u2192 '${a.slug}': ${clip(a.title, 140)} (knowledge_get ${a.id})`);
+  }
+  if (articles.length > shown.length) {
+    const widen = remedy ?? `knowledge_query types:["feature_article"] cap:${articles.length}`;
+    lines.push(`  \u2026 ${articles.length - shown.length} more matched but NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  }
+  return lines.join("\n");
+}
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
@@ -6326,6 +6341,11 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
 // scripts/hooks/h20-mechanism-axis.mjs
 var MAX_DECISIONS = 5;
 var NARROW_CLIP = 700;
+var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
+function isQuestionShapedPrompt(text) {
+  const t = String(text ?? "");
+  return t.includes("?") && QUESTION_WORDS_RE.test(t);
+}
 var input = readStdin();
 var outgoing = outgoingProposalText(input.tool_input);
 if (!outgoing) allow();
@@ -6337,7 +6357,8 @@ try {
   if (terms.length < AXIS_MIN_HITS) allow();
   const candidates = [
     ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
+    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 })
   ];
   if (!candidates.length) allow();
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
@@ -6348,15 +6369,16 @@ try {
   if (!fresh.length) allow();
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
   const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
-  if (!hazards.length && !decisions.length) allow();
+  const articles = fresh.filter((x) => x.record.type === "feature_article");
+  if (!hazards.length && !decisions.length && !articles.length) allow();
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
   const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
   const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-  const blocks = [
-    header,
+  const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+  const hazardDecisionBlocks = [
     ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
       remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
     }),
@@ -6366,12 +6388,23 @@ try {
       })
     ] : []
   ];
+  const articleBlocks = articles.length ? [
+    renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
+      remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
+    })
+  ] : [];
+  const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
+  const blocks = [
+    header,
+    ...promptIsQuestionShaped ? [...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...articleBlocks]
+  ];
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join("\n\n") }
     })
   );
-  guard.records.push(...hazards.map((x) => x.record.id), ...decisions.map((x) => x.record.id));
+  const shownArticleIds = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record.id);
+  guard.records.push(...hazards.map((x) => x.record.id), ...decisions.map((x) => x.record.id), ...shownArticleIds);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
