@@ -4868,6 +4868,7 @@ function loadConfig(cwd) {
 
 // scripts/hooks/h21-delegation-live.mjs
 var input = readStdin();
+if (!input.cwd) input.cwd = process.cwd();
 if (input.agent_id) process.exit(0);
 var transientDir = join2(input.cwd, ".sterling", "transient");
 var articleWritesPath = join2(transientDir, "article-writes.json");
@@ -4891,19 +4892,52 @@ function safeConfig() {
     return parseConfig({});
   }
 }
+function sizeThresholds() {
+  let dw = {};
+  try {
+    dw = loadConfig(input.cwd)?.delegation_watch ?? {};
+  } catch {
+    dw = {};
+  }
+  const writeThreshold = Number.isFinite(dw.write_bytes_advise) ? dw.write_bytes_advise : 2e3;
+  const sessionThreshold = Number.isFinite(dw.session_bytes_advise) ? dw.session_bytes_advise : 8e3;
+  return { writeThreshold, sessionThreshold };
+}
+function toolInputBytes(toolInput) {
+  try {
+    return JSON.stringify(toolInput ?? {}).length;
+  } catch {
+    return 0;
+  }
+}
 function emit(ctx) {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: ctx } }));
+}
+var EXEMPT_READ_EXTS = /* @__PURE__ */ new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+function fileExt(p) {
+  const m = /\.([A-Za-z0-9]+)$/.exec(String(p ?? ""));
+  return m ? m[1].toLowerCase() : "";
 }
 var ARTICLE_WRITE_RE = /^(mcp__sterling__|mcp__plugin_sterling_sterling__)(knowledge_update|knowledge_append|knowledge_edit)$/;
 var toolName = input.tool_name ?? "";
 try {
   if (ARTICLE_WRITE_RE.test(toolName)) {
     const prior = readJsonSafe(articleWritesPath, null);
-    const count = prior && prior.session_id === input.session_id && Number.isFinite(prior.count) ? prior.count + 1 : 1;
-    writeJson(articleWritesPath, { session_id: input.session_id, count });
-    emit(
-      `H21 article-write watch: this is hand-run article write #${count} this session (decision dac3d2c6 \u2014 article application is librarian-shaped). Hand-run writes are for the three named exceptions only: (1) a small authored create, (2) a write needing live adjudication, (3) a single small-record touch. Bulkier article reconciles should batch through the librarian dispatch instead \u2014 it runs on a cheaper model in parallel, and the conductor's context window is the session's scarcest and most expensive resource.`
-    );
+    const validPrior = prior && prior.session_id === input.session_id && Number.isFinite(prior.count) && Number.isFinite(prior.bytes);
+    const count = validPrior ? prior.count + 1 : 1;
+    const priorBytes = validPrior ? prior.bytes : 0;
+    const writeBytes = toolInputBytes(input.tool_input);
+    const sessionBytes = priorBytes + writeBytes;
+    writeJson(articleWritesPath, { session_id: input.session_id, count, bytes: sessionBytes });
+    const { writeThreshold, sessionThreshold } = sizeThresholds();
+    const overWrite = writeBytes > writeThreshold;
+    const overSession = sessionBytes > sessionThreshold;
+    if (overWrite || overSession) {
+      const sizeReason = overWrite ? `this write is ${writeBytes} bytes, over the per-write advisory threshold (write_bytes_advise=${writeThreshold} bytes)` : `this session's cumulative hand-run write bytes just crossed the session advisory threshold (session_bytes_advise=${sessionThreshold} bytes, now ${sessionBytes} bytes)`;
+      emit(
+        `H21 article-write watch: ${sizeReason} \u2014 hand-run article write #${count} this session (decision dac3d2c6 \u2014 article application is librarian-shaped). Hand-run writes are for the three named exceptions only: (1) a small authored create, (2) a write needing live adjudication, (3) a single small-record touch. Bulkier article reconciles should batch through the librarian dispatch instead \u2014 it runs on a cheaper model in parallel, and the conductor's context window is the session's scarcest and most expensive resource.`
+      );
+    }
     process.exit(0);
   }
   if (toolName === "Task" || toolName === "Agent") {
@@ -4918,7 +4952,7 @@ try {
     }
     if (toolName === "Read") {
       const fp = input.tool_input?.file_path;
-      if (fp && !streak.read_paths.includes(fp)) streak.read_paths.push(fp);
+      if (fp && !EXEMPT_READ_EXTS.has(fileExt(fp)) && !streak.read_paths.includes(fp)) streak.read_paths.push(fp);
     } else {
       streak.searches += 1;
     }
