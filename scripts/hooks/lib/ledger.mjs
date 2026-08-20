@@ -14,7 +14,7 @@
 // window with the bytes unchanged — the old per-prompt clear never covered
 // this either) and source=startup|clear (a new session has read nothing, so a
 // dead session's hashed entries must not vouch for it).
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 
@@ -24,15 +24,39 @@ export function ledgerPath(cwd, runId, agentId) {
   return join(cwd, '.sterling', 'transient', 'conductor-reads.json');
 }
 
+// SELF-HEALING (caught live 2026-08-20): two concurrent PostToolUse:Read hook
+// processes raced this file's read-modify-write on a DrvFs mount and tore it —
+// a valid array followed by fragment bytes. An unguarded JSON.parse then threw
+// inside H3's evidence check on EVERY Edit, bricking the agent repo-wide, and
+// appendRead died on the same throw before it could ever overwrite the tear.
+// The ledger is re-derivable evidence (worst case: H3 asks for a re-Read), so
+// the degrade is salvage-the-leading-array, else empty — never a crash. Entries
+// are flat objects, so the array's first ']' is its closing bracket.
 export function readLedger(path) {
-  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : [];
+  if (!existsSync(path)) return [];
+  const raw = readFileSync(path, 'utf8');
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    try {
+      const salvaged = JSON.parse(raw.slice(0, raw.indexOf(']') + 1));
+      return Array.isArray(salvaged) ? salvaged : [];
+    } catch {
+      return [];
+    }
+  }
 }
 
 export function appendRead(path, entry) {
   const entries = readLedger(path);
   entries.push(entry);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(entries));
+  // tmp+rename: a concurrent writer can still lose an entry (last rename wins,
+  // costing one re-Read), but no interleaving can tear the file itself.
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(entries));
+  renameSync(tmp, path);
 }
 
 export function hasRead(path, repoRelPath) {

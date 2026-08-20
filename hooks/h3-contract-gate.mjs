@@ -6079,7 +6079,7 @@ function repoRel(toolPath2, cwd2) {
 }
 
 // scripts/hooks/lib/ledger.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join as join2, dirname as dirname3 } from "node:path";
 function ledgerPath(cwd2, runId, agentId) {
@@ -6088,7 +6088,19 @@ function ledgerPath(cwd2, runId, agentId) {
   return join2(cwd2, ".sterling", "transient", "conductor-reads.json");
 }
 function readLedger(path) {
-  return existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
+  if (!existsSync3(path)) return [];
+  const raw = readFileSync2(path, "utf8");
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    try {
+      const salvaged = JSON.parse(raw.slice(0, raw.indexOf("]") + 1));
+      return Array.isArray(salvaged) ? salvaged : [];
+    } catch {
+      return [];
+    }
+  }
 }
 function fileHash(absPath) {
   try {
