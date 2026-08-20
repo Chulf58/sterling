@@ -377,12 +377,16 @@ try {
             .filter((e) => e?.kind === 'capture_pending' && e?.detail)
             .map((e) => e.detail)
             .at(-1);
+          // "any capture_owed open" gates more than the choke's exact-key match
+          // (its file_keys vary with the residue's paths) — kept deliberately;
+          // only the write itself routes through enqueueSystemTodo (decision
+          // 194f43e4).
           const open = store
             .query({ types: ['todo'], cap: 1000 })
             .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
           if (!open) {
             const now = new Date().toISOString();
-            store.create({
+            store.enqueueSystemTodo({
               id: randomUUID(),
               type: 'todo',
               created_at: now,

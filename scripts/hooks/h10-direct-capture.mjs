@@ -514,11 +514,14 @@ try {
       writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
       releaseWithPressure(); // registers deliberately NOT cleared — see above
     }
+    // "any capture_owed open" gates more than the choke's exact-key match (its
+    // file_keys vary with activePaths) — kept deliberately; only the write
+    // itself routes through enqueueSystemTodo (decision 194f43e4).
     const openPending = store
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
     if (!openPending) {
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',
         created_at: now,
@@ -637,11 +640,13 @@ try {
 
   // Second pass: still owed — queue items and let the session end (P1: don't trap the human).
   if (hasCaptureDuty && !captured) {
+    // Same "any open" broader gate as the pending-deferral site above; keep it,
+    // route only the write through enqueueSystemTodo.
     const open = store
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
     if (!open) {
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',
         created_at: now,
@@ -662,37 +667,41 @@ try {
     }
   }
   if (articleDemand) {
-    const openArticle = store
+    // Overlap match (not exact-set): this duty's subject can ESCALATE (more
+    // unowned files surface on a later encounter) while remaining the same
+    // open demand, which an exact sorted-file_keys match would treat as a
+    // different key. Find the existing item overlapping the current unowned
+    // set and, when found, re-supply ITS OWN file_keys so the choke's key
+    // matches exactly and only the text (which does carry the escalated
+    // count) updates in place — moving updated_at (AC2) instead of being
+    // silently suppressed with nothing refreshed.
+    const overlapping = store
       .query({ types: ['todo'], cap: 1000 })
-      .some((t) => t.source === 'system' && t.system_reason === 'article_missing' && (t.file_keys ?? []).some((k) => unowned.includes(k)));
-    if (!openArticle) {
-      store.create({
-        id: randomUUID(),
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
-        source: 'system',
-        system_reason: 'article_missing',
-        file_keys: unowned.slice(0, 20),
-      });
-    }
+      .find((t) => t.source === 'system' && t.system_reason === 'article_missing' && (t.file_keys ?? []).some((k) => unowned.includes(k)));
+    store.enqueueSystemTodo({
+      id: randomUUID(),
+      type: 'todo',
+      created_at: now,
+      updated_at: now,
+      author: 'system',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
+      source: 'system',
+      system_reason: 'article_missing',
+      file_keys: overlapping ? overlapping.file_keys : unowned.slice(0, 20),
+    });
   }
   if (!conceptSatisfied) {
-    // One item PER family, deduped on an open item naming the same family — a
-    // family's article is one drain action ('created'), independent per family.
-    const openConcept = store
-      .query({ types: ['todo'], cap: 1000 })
-      .filter((t) => t.source === 'system' && t.system_reason === 'concept_article_missing');
+    // One item PER family. No feature_link/file_keys on this item, so
+    // enqueueSystemTodo's own fallback key (system_reason + exact text) already
+    // dedupes it — the text is deterministic per family, so the old
+    // text.includes() pre-check duplicated exactly what the choke does; removed.
     for (const family of unmetFamilies) {
-      if (openConcept.some((t) => t.text.includes(`'${family}'`))) continue;
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',
         created_at: now,
@@ -710,12 +719,14 @@ try {
     }
   }
   if (hasResearchDuty && !researchSatisfied) {
+    // "any research_owed open" gates more than the choke's exact-key match
+    // (its text carries session-specific query details) — kept deliberately.
     const open = store
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'research_owed');
     if (!open) {
       const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join('; ');
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',
         created_at: now,

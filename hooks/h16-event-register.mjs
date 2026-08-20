@@ -5259,6 +5259,36 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
   }
   /**
+   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id) {
+    const MAX_HOPS = 32;
+    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+    const row = stmt.get(id);
+    if (!row)
+      return null;
+    const visited = /* @__PURE__ */ new Set([row.id]);
+    let current = row;
+    let hops = 0;
+    while (current.status === "superseded" && current.superseded_by) {
+      const next = stmt.get(current.superseded_by);
+      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+        return { id: current.id, status: current.status, hops, truncated: true };
+      }
+      visited.add(next.id);
+      current = next;
+      hops += 1;
+    }
+    return { id: current.id, status: current.status, hops };
+  }
+  /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
    * file-key join) shared by query() and count() — everything EXCEPT the rank
    * (FTS), ordering, and cap. One definition so count() can never drift from

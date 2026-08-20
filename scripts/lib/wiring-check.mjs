@@ -20,34 +20,28 @@ export function runWiringCheck({ adapterModule, cwd, scope, article, store, now 
 
   if (article?.state === 'dormant') {
     // deliberate dormancy: declared + tracked, never silent (§3.2.3).
-    // Dedupe by QUERY, not only the article's wiring_todo_id pointer: the
-    // minted id is never written back to the article, so a dangling pointer
-    // minted a duplicate on every --final rerun (R2 board 6308d805).
-    const tracked = store
-      .query({ types: ['todo'], cap: 1000 })
-      .find((t) => t.source === 'system' && t.system_reason === 'wire_in_dormant' && t.feature_link === article.id);
-    let todoId = tracked?.id ?? article.wiring_todo_id;
-    const exists = todoId && store.get(todoId);
-    if (!exists) {
-      todoId = randomUUID();
-      store.create({
-        id: todoId,
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text: `wire in dormant feature '${article.slug}': ${offenders.map((o) => `${o.file}:${o.name}`).join(', ')}`,
-        source: 'system',
-        system_reason: 'wire_in_dormant',
-        feature_link: article.id,
-      });
-    }
-    return { violations: [], skipped: null, dormant: true, wire_in_dormant_todo: todoId };
+    // Dedupe is enqueueSystemTodo's job now (system_reason + feature_link key,
+    // scanned inside the write transaction) — the old query-then-pointer-
+    // fallback dance existed only to avoid the dangling-pointer duplicate bug
+    // (R2 board 6308d805), which the choke's own query-based scan already
+    // prevents by construction.
+    const { record } = store.enqueueSystemTodo({
+      id: randomUUID(),
+      type: 'todo',
+      created_at: now,
+      updated_at: now,
+      author: 'system',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      text: `wire in dormant feature '${article.slug}': ${offenders.map((o) => `${o.file}:${o.name}`).join(', ')}`,
+      source: 'system',
+      system_reason: 'wire_in_dormant',
+      feature_link: article.id,
+    });
+    return { violations: [], skipped: null, dormant: true, wire_in_dormant_todo: record.id };
   }
 
   return {

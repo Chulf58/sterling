@@ -949,10 +949,16 @@ test('H10 article demand: an open article_missing item with overlapping file key
     assert.equal(stop().code, 0);
     const items = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing');
     assert.equal(items.length, 2, 'overlapping item dedupes; non-overlapping item does not suppress');
+    // Superseded pin (board f30b9263, 2026-08-20): suppress-WITHOUT-refresh let items
+    // go stale while the situation escalated — the surviving item now updates in
+    // place through enqueueSystemTodo (same key + different text → refresh).
+    const refreshed = items.find((t) => t.file_keys?.includes('src/x.mjs'));
     assert.ok(
-      items.every((t) => !t.text.includes('direct-mode work touched')),
-      'no NEW item was enqueued — the overlapping seed suppressed it'
+      refreshed && refreshed.text.includes('direct-mode work touched'),
+      'the overlapping seed is REFRESHED in place — escalation updates the surviving item, never suppresses silently'
     );
+    const unrelated = items.find((t) => t.file_keys?.includes('lib/unrelated.mjs'));
+    assert.equal(unrelated?.text, 'article missing: unrelated territory', 'non-overlapping territory stays untouched');
   } finally {
     cleanup();
   }

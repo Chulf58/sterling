@@ -5292,6 +5292,36 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
   }
   /**
+   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id) {
+    const MAX_HOPS = 32;
+    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+    const row = stmt.get(id);
+    if (!row)
+      return null;
+    const visited = /* @__PURE__ */ new Set([row.id]);
+    let current = row;
+    let hops = 0;
+    while (current.status === "superseded" && current.superseded_by) {
+      const next = stmt.get(current.superseded_by);
+      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+        return { id: current.id, status: current.status, hops, truncated: true };
+      }
+      visited.add(next.id);
+      current = next;
+      hops += 1;
+    }
+    return { id: current.id, status: current.status, hops };
+  }
+  /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
    * file-key join) shared by query() and count() — everything EXCEPT the rank
    * (FTS), ordering, and cap. One definition so count() can never drift from
@@ -6402,7 +6432,7 @@ try {
     }
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,
@@ -6485,7 +6515,7 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
   if (hasCaptureDuty && !captured) {
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,
@@ -6504,31 +6534,27 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     }
   }
   if (articleDemand) {
-    const openArticle = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
-    if (!openArticle) {
-      store.create({
-        id: randomUUID2(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
-        source: "system",
-        system_reason: "article_missing",
-        file_keys: unowned.slice(0, 20)
-      });
-    }
+    const overlapping = store.query({ types: ["todo"], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
+    store.enqueueSystemTodo({
+      id: randomUUID2(),
+      type: "todo",
+      created_at: now,
+      updated_at: now,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
+      source: "system",
+      system_reason: "article_missing",
+      file_keys: overlapping ? overlapping.file_keys : unowned.slice(0, 20)
+    });
   }
   if (!conceptSatisfied) {
-    const openConcept = store.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "concept_article_missing");
     for (const family of unmetFamilies) {
-      if (openConcept.some((t) => t.text.includes(`'${family}'`))) continue;
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,
@@ -6549,7 +6575,7 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "research_owed");
     if (!open) {
       const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join("; ");
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,
