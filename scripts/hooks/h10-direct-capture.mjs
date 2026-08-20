@@ -396,7 +396,14 @@ try {
   // on a landed write or converts to a deduped capture_owed item.
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
-  const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
+  // Touch-noise precision (board 05e298f0): reading an image/binary file is
+  // inspection, not knowledge-producing work — excluded from the CAPTURE
+  // duty's touch set only (never the article-demand `paths` below, which
+  // stays unfiltered per §6 H10's ownership join).
+  const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
+  const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
+    (t) => !IMAGE_BINARY_EXT.test(t.path)
+  );
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
 
