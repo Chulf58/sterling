@@ -14,49 +14,56 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths } from '../lib/agent-distribution.mjs';
 
-const CONVENTIONS = [
-  'Sterling conventions (injected by H1):',
-  '- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don\'t know, checking" and check.',
-  '- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.',
-  '- Canonical naming: one name per concept, from the registries; phase execution, intake, steps — kill synonyms on sight.',
-  // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
-  // reach every project at its next session start with no per-project copy and no
-  // stamp-contract propagation — the same reason the todo/queue routing lines live on
-  // the commands. Stated because the user was otherwise re-declaring them per project.
-  // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
-  // rule read "3-5 active at all times" in a consuming project and the user withdrew it
-  // within a day — "i am afraid that a session will feel force to spend up subagents even
-  // if they see necessary" — and the same concern was raised again here on 2026-07-29:
-  // "i am afraid that the conductor feel force to dispatch subagents without any value,
-  // for the sake of just doing it to keep the claude.md happy". Leading with "up to 5"
-  // reads as a target; leading with the ceiling reads as a limit. Both halves of the
-  // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
-  // because a rule that only pushes one way is the rule that produced the fear.
-  '- Delegation: FIVE concurrent subagents is a CEILING, not a target — there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real — speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. THE CONTEXT WINDOW IS THE PRIMARY VALUE (user-stated 2026-08-10, decision 9042abeb): the conductor typically runs on a premium model, so hand-work costs twice — it fills the session\'s scarcest context AND spends the most expensive tokens, while a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion at a fraction of the price. Weigh dispatch-vs-hand-work in conductor tokens spent on intermediate reading, not just wall-clock. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.',
-  '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind — being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" — it is the conductor reading files by hand that an agent should have read for it.',
-  // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
-  // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
-  // Diagnosis: the rule bound to no event (an always-rule fires never) and the wording's
-  // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
-  '- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS — an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise — adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch — hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent\'s claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor\'s attention spent where it should not be (decision 677f1639).',
-  // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
-  // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
-  // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
-  // results default to a digest receipt), but the dispatch shape stands: drafting a
-  // slice's reconciles still spends conductor attention per write, and the librarian
-  // batches them off the critical path. Drafting stays with the conductor.
-  '- ARTICLE APPLICATION IS DISPATCH-SHAPED: the conductor DRAFTS all reconcile text — the librarian never authors knowledge — then BATCHES the slice\'s drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. (Write echoes default to a slim digest receipt since board 7ddf13a7 — the old ~50KB full-record echo is opt-in via projection:\'full\' — so the dispatch now buys parallelism and attention, not just tokens.) The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor\'s next work — never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates, a write needing live adjudication, or a single small-record touch (decision dac3d2c6).',
-  '- The Workflow tool stays OPT-IN and needs the user\'s explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting — its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.',
-  // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
-  // stops were rejected verbatim ("demands attention all the time"); the three subagent
-  // purposes are the user's own words. Ships here so every project gets it next session.
-  '- CONDUCTOR MODE FLOWS THROUGH SLICE BOUNDARIES: commit each slice at its boundary, reconcile, and CONTINUE to the next unattended — never end the turn to ask "shall I continue?". The user is engaged at exactly two points: the merge-to-main gate, and a genuine blocker (an adjudication only they can make, an ambiguity the store cannot resolve, hard context pressure → rotation). Subagents are intrinsic to the mode, for three things: PARALLEL speed on independent work; subagents DO the work while the conductor REVIEWS; and protecting the conductor\'s context window (decision aac19532).',
-  // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
-  // the rationale lives in the store (decision + the paired-exploration research_finding), and
-  // conventions injected on every session stay short to stay read.
-  '- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring, exploration and mechanical work. NEVER haiku for a spawned agent, and NEVER Fable without the user\'s prior agreement for that specific spawn — and never a silent inherit of the session model.',
-  '- A SUBAGENT RESULT IS EVIDENCE, NOT A VERDICT. Treat every exhaustiveness claim in an agent report ("all N files", "every hook", "ruled out none") as unverified until you have the count yourself — measured 2026-07-29, explorers at two different tiers BOTH asserted "all N" from a partial sweep. One grep -c is cheaper than a conclusion built on one.',
-].join('\n');
+// Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): the
+// delegation bullet below states config.delegation.max_concurrent, never a
+// hardcoded literal — a same-day ruling on this machine (5 → 15) was
+// re-injected as the stale "FIVE" the next session, which is exactly the
+// drift a config-driven number closes. Absent config → shipped default 5.
+function conventions(maxConcurrent) {
+  return [
+    'Sterling conventions (injected by H1):',
+    '- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don\'t know, checking" and check.',
+    '- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.',
+    '- Canonical naming: one name per concept, from the registries; phase execution, intake, steps — kill synonyms on sight.',
+    // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
+    // reach every project at its next session start with no per-project copy and no
+    // stamp-contract propagation — the same reason the todo/queue routing lines live on
+    // the commands. Stated because the user was otherwise re-declaring them per project.
+    // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
+    // rule read "3-5 active at all times" in a consuming project and the user withdrew it
+    // within a day — "i am afraid that a session will feel force to spend up subagents even
+    // if they see necessary" — and the same concern was raised again here on 2026-07-29:
+    // "i am afraid that the conductor feel force to dispatch subagents without any value,
+    // for the sake of just doing it to keep the claude.md happy". Leading with "up to N"
+    // reads as a target; leading with the ceiling reads as a limit. Both halves of the
+    // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
+    // because a rule that only pushes one way is the rule that produced the fear.
+    `- Delegation: ${maxConcurrent} concurrent subagents is a CEILING, not a target — there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real — speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. THE CONTEXT WINDOW IS THE PRIMARY VALUE (user-stated 2026-08-10, decision 9042abeb): the conductor typically runs on a premium model, so hand-work costs twice — it fills the session's scarcest context AND spends the most expensive tokens, while a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion at a fraction of the price. Weigh dispatch-vs-hand-work in conductor tokens spent on intermediate reading, not just wall-clock. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.`,
+    '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind — being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" — it is the conductor reading files by hand that an agent should have read for it.',
+    // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
+    // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
+    // Diagnosis: the rule bound to no event (an always-rule fires never) and the wording's
+    // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
+    '- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS — an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise — adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch — hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent\'s claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor\'s attention spent where it should not be (decision 677f1639).',
+    // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
+    // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
+    // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
+    // results default to a digest receipt), but the dispatch shape stands: drafting a
+    // slice's reconciles still spends conductor attention per write, and the librarian
+    // batches them off the critical path. Drafting stays with the conductor.
+    '- ARTICLE APPLICATION IS DISPATCH-SHAPED: the conductor DRAFTS all reconcile text — the librarian never authors knowledge — then BATCHES the slice\'s drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. (Write echoes default to a slim digest receipt since board 7ddf13a7 — the old ~50KB full-record echo is opt-in via projection:\'full\' — so the dispatch now buys parallelism and attention, not just tokens.) The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor\'s next work — never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates, a write needing live adjudication, or a single small-record touch (decision dac3d2c6).',
+    '- The Workflow tool stays OPT-IN and needs the user\'s explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting — its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.',
+    // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
+    // stops were rejected verbatim ("demands attention all the time"); the three subagent
+    // purposes are the user's own words. Ships here so every project gets it next session.
+    '- CONDUCTOR MODE FLOWS THROUGH SLICE BOUNDARIES: commit each slice at its boundary, reconcile, and CONTINUE to the next unattended — never end the turn to ask "shall I continue?". The user is engaged at exactly two points: the merge-to-main gate, and a genuine blocker (an adjudication only they can make, an ambiguity the store cannot resolve, hard context pressure → rotation). Subagents are intrinsic to the mode, for three things: PARALLEL speed on independent work; subagents DO the work while the conductor REVIEWS; and protecting the conductor\'s context window (decision aac19532).',
+    // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
+    // the rationale lives in the store (decision + the paired-exploration research_finding), and
+    // conventions injected on every session stay short to stay read.
+    '- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring, exploration and mechanical work. NEVER haiku for a spawned agent, and NEVER Fable without the user\'s prior agreement for that specific spawn — and never a silent inherit of the session model.',
+    '- A SUBAGENT RESULT IS EVIDENCE, NOT A VERDICT. Treat every exhaustiveness claim in an agent report ("all N files", "every hook", "ruled out none") as unverified until you have the count yourself — measured 2026-07-29, explorers at two different tiers BOTH asserted "all N" from a partial sweep. One grep -c is cheaper than a conclusion built on one.',
+  ].join('\n');
+}
 
 // swappable art slot (§6 H1): fixed-width ≤40 cols, fits the 35% split pane
 const BANNER_ROWS = [
@@ -430,17 +437,27 @@ let queueReasons = [];
 let drainable = 0;
 let parked = 0;
 try {
-  const todos = store.query({ types: ['todo'], cap: 1000 });
-  const userTodos = todos.filter((t) => t.source === 'user');
-  counts.todos = userTodos.length;
+  // TRUE totals (AC1): store.count() runs the same §3.4 base filter as
+  // query() with no rank/cap applied — it is the count-capable surface, never
+  // a capped read (a fixed query cap, however generous, silently truncates a
+  // queue that outgrows it; the historical instance under-reported 60 against
+  // a true 102). The per-lane/objective breakdown still needs the actual
+  // records (system_reason/objective aren't count()-filterable), so each
+  // query below is capped at its own already-known true total — it can never
+  // truncate, because the cap IS the count.
+  const userTotal = store.count({ types: ['todo'], source: 'user' });
+  counts.todos = userTotal;
+  const userTodos = userTotal > 0 ? store.query({ types: ['todo'], source: 'user', cap: userTotal }) : [];
   // Objective grouping (decision a8d2ce6c): the banner discloses how many of
   // the open tasks are slices of larger objectives, so a sliced board reads
   // as N objectives to the human too — not only in the TUI's grouped view.
   const grouped = userTodos.filter((t) => t.objective);
   counts.groupedTodos = grouped.length;
   counts.objectives = new Set(grouped.map((t) => t.objective)).size;
-  const system = todos.filter((t) => t.source === 'system');
-  counts.maintenance = system.length;
+
+  const systemTotal = store.count({ types: ['todo'], source: 'system' });
+  counts.maintenance = systemTotal;
+  const system = systemTotal > 0 ? store.query({ types: ['todo'], source: 'system', cap: systemTotal }) : [];
   // file_parked closes at branch merge (direct-merge sweeps it), never by
   // draining — counting it toward the deep-queue threshold makes H1 cry wolf
   // about items no drain can touch, and a standing warning about undrainable
@@ -453,9 +470,13 @@ try {
   parked = system.length - drainable;
   // Lane breakdown for the deep-queue signal below: a bare total says "drain",
   // a per-lane split says WHAT is owed, which is what decides how to drain it.
+  // Phrased as "N item(s) in lane <reason>" (not "<reason> ×N"): a lane
+  // legitimately landing on a round number (e.g. 100) must read unambiguously
+  // as a per-lane count, never as evidence of a silent truncation to some
+  // common cap literal.
   const byReason = new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ×${n}`);
+  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`);
 } finally {
   store.close();
 }
@@ -612,9 +633,20 @@ if (process.env.STERLING_NO_BANNER !== '1') {
   process.stderr.write(`${paint(BANNER_ROWS)}\n${versionLine}`);
 }
 
+// Concurrent-subagent ceiling (decision d7a0289f): read from config, never a
+// literal. Guarded like every other H1 config read — a malformed config
+// costs only this number, never the conventions injection (H1 is soft); the
+// fallback is the schema default (5), not a value invented here.
+let maxConcurrent = 5;
+try {
+  maxConcurrent = config?.delegation?.max_concurrent ?? 5;
+} catch {
+  maxConcurrent = 5;
+}
+
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: CONVENTIONS + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventions(maxConcurrent) + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

@@ -106,6 +106,18 @@ export const configSchema = z.object({
       streak_threshold: z.number().int().positive().default(10),
     })
     .default({}),
+  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // surface that states the "N concurrent subagents" ceiling (H1's banner
+  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
+  // hardcoded literal, so a ruling that changes it takes effect everywhere
+  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
+  // way — this tunes only the number, never a floor/quota (decisions
+  // 677f1639/299d853a stand). Absent → shipped default 5.
+  delegation: z
+    .object({
+      max_concurrent: z.number().int().positive().default(5),
+    })
+    .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
