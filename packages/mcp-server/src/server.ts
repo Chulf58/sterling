@@ -349,19 +349,12 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     ({ payload }) => json(tools.runEscalate(payload))
   );
 
-  server.registerTool(
-    'maintenance_enqueue',
-    {
-      description: 'Enqueue a maintenance item (system todo): reconcile_needed | stale_research | deletion_candidate | capture_owed | promotion_review | wire_in_dormant.',
-      inputSchema: strict({
-        reason: z.string(),
-        text: z.string(),
-        file_keys: z.array(z.string()).optional(),
-        feature_link: z.string().optional(),
-      }),
-    },
-    (args) => json(tools.maintenanceEnqueue(args))
-  );
+  // maintenance_enqueue is deliberately NOT wire-registered (decision
+  // 6269b714, todo-stays-one-type…keep): system items are minted only by
+  // registered detection events through the server-internal
+  // tools.maintenanceEnqueue / enqueueSystemTodo choke point. The wire tool
+  // had zero legitimate external callers and was the route by which agents
+  // gamed source/system_reason to hand-park work as store maintenance.
 
   server.registerTool(
     'maintenance_query',

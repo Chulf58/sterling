@@ -48,6 +48,12 @@ export interface CreateResult {
    * or none were found. Never gates the write (AC5): the record still lands.
    */
   warnings: string[];
+  /**
+   * SAME-SUBJECT SURFACING (decision 7e3c66c5): present only for ruling-type
+   * creates (decision / anti_pattern / research_finding) — other types'
+   * responses stay byte-identical. Advisory only, never gates the write.
+   */
+  same_subject?: SameSubjectEntry[];
 }
 
 export interface BoardFilter {
@@ -170,6 +176,21 @@ export interface KnowledgePreflightResult {
   reason?: 'too_little_vocabulary';
   terms: string[];
   matches: { id: string; type: string; title: string; matched_on: string[]; central: string[] }[];
+}
+
+/**
+ * SAME-SUBJECT SURFACING ON WRITE (decision 7e3c66c5): one digest entry per
+ * OTHER active record the preflight axis engine judges to govern the same
+ * subject as a record just written. Mirrors knowledgePreflight's own
+ * per-candidate shape (id/type/title/matched_on) plus `slug`, since a ruling
+ * record (unlike an arbitrary preflight candidate) always carries one.
+ */
+export interface SameSubjectEntry {
+  id: string;
+  slug?: string;
+  type: string;
+  title: string;
+  matched_on: string[];
 }
 
 export interface ToolDeps {
@@ -710,7 +731,15 @@ export class SterlingTools {
     }
     const record = this.store.create(candidate);
     this.surfacePromotionCandidate(record, type);
-    return { record, check_skipped: skipped, warnings: citationWarnings };
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
+    // types — other types' create responses stay byte-identical. Computed
+    // AFTER the store write (AC6: disclosure never blocks or gates), on the
+    // registered FTS extractor's text (same source citedIdWarnings already
+    // used above), excluding only the record just minted.
+    const sameSubject = SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(type)
+      ? this.sameSubjectDigest(registered ? registered.fts(parsed) : '', new Set([record.id]))
+      : undefined;
+    return { record, check_skipped: skipped, warnings: citationWarnings, ...(sameSubject ? { same_subject: sameSubject } : {}) };
   }
 
   /**
@@ -1082,8 +1111,10 @@ export class SterlingTools {
     const next = [...((current as unknown[]) ?? []), ...entries];
     // Straight through the ONE update path — every guarantee above rides along,
     // including the oversize check (board 8390f8fa): the write's result carries
-    // a warning on the SAME channel knowledge_update uses.
-    const record = this.knowledgeUpdate(old.id, { [field]: next });
+    // a warning on the SAME channel knowledge_update uses. same_subject (ruling
+    // types only) is split off rather than left inside `record` — see
+    // splitSameSubject.
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }));
     // Cited-id scan (board fc053051 extension): only the newly APPENDED
     // entries — never the array's pre-existing elements, which were already
     // scanned (or not) on whatever write introduced them.
@@ -1182,7 +1213,9 @@ export class SterlingTools {
       }
       const nextEl = { ...el, [sub]: cur.replace(find, replace) };
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
-      const record = this.knowledgeUpdate(old.id, { [base]: nextArr });
+      // same_subject (ruling types only) is split off rather than left
+      // inside `record` — see splitSameSubject.
+      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }));
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
@@ -1221,7 +1254,9 @@ export class SterlingTools {
       );
     }
     const next = current.replace(find, replace);
-    const record = this.knowledgeUpdate(old.id, { [field]: next });
+    // same_subject (ruling types only) is split off rather than left inside
+    // `record` — see splitSameSubject.
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }));
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
@@ -1348,9 +1383,15 @@ export class SterlingTools {
    * would be ceremony on the common case (P1) and would train callers to pass
    * fields they had no reason to touch — which is its own drift.
    */
-  knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[] } {
+  knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[] } {
     const before = this.store.get(id);
-    const record = this.knowledgeUpdate(id, body);
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5, HIGH review finding): lift
+    // same_subject OUT of the flattened record and onto its own envelope
+    // sibling — mirroring knowledge_create/knowledge_supersede — BEFORE this
+    // wraps it as `record`. Left inside, the digest write-projection
+    // (writeProjected -> digestRecord's field whitelist) silently drops it,
+    // and projection:'full' would echo it back as a fake record field.
+    const { record, same_subject } = this.splitSameSubject(this.knowledgeUpdate(id, body));
     const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
     if (before?.type === 'feature_article' && 'what_it_does' in body) {
       const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
@@ -1368,7 +1409,7 @@ export class SterlingTools {
     // of the merged record, which was already scanned (or not) on whatever
     // write introduced it.
     warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
-    return { record, warnings };
+    return { record, warnings, ...(same_subject ? { same_subject } : {}) };
   }
 
   /**
@@ -1473,33 +1514,98 @@ export class SterlingTools {
     if (terms.length < AXIS_MIN_HITS) {
       return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matches: [] };
     }
+    const matches = this.axisCandidateMatches(text, terms).map(({ record, hits }) => ({
+      id: record.id,
+      type: record.type,
+      // research_finding carries no title — its question IS the identity;
+      // an article's slug beats its long title as the handle.
+      title: SterlingTools.axisRecordTitle(record),
+      matched_on: hits,
+      central: recordCentralityHits(record, text),
+    }));
+    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
+  }
+
+  /**
+   * The candidate-matching CORE shared by knowledgePreflight and same-subject
+   * surfacing on write (decision 7e3c66c5) — the four preflight axis floors
+   * (extractAxisTerms already run by the caller -> store.query the four
+   * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
+   * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
+   * Callers differ only in what they do with the (record, hits) pairs and in
+   * which candidates they exclude — never in how a candidate qualifies.
+   */
+  private axisCandidateMatches(text: string, terms: string[]): { record: DurableRecord; hits: string[] }[] {
+    // rank_terms is schema-bound to <=64 chars (store's §3.4 QueryOptions
+    // parse) — extractAxisTerms has no upper bound (only AXIS_MIN_TERM_LEN, a
+    // floor), so a long unbroken run of the same character in authored
+    // content (e.g. a filler/placeholder body) mints a term that store.query
+    // would refuse outright. This is the query-building step only — filtered
+    // terms still surface on knowledgePreflight's own `terms` field unchanged.
+    const queryTerms = terms.filter((t) => t.length <= 64);
+    // Every extracted term exceeded 64 chars: rank_terms would be [], and
+    // store.query's empty-rank_terms path is a MECHANICAL RECENCY FALLBACK
+    // (40 newest per type) — the wrong candidate semantics for axis matching
+    // (a candidate must share vocabulary with `text`, not merely be recent)
+    // and a wasted 4-type query for a result that filters to nothing once
+    // axisHits runs against the (long, filtered-out-of-the-query) terms.
+    if (queryTerms.length === 0) return [];
     const candidates = [
-      ...this.store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
-      ...this.store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
-      ...this.store.query({ types: ['feature_article'], rank_terms: terms, cap: 40 }),
-      ...this.store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
+      ...this.store.query({ types: ['anti_pattern'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['decision'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['feature_article'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['research_finding'], rank_terms: queryTerms, cap: 40 }),
     ];
-    const matches = candidates
+    return candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))
       .filter(
         ({ record, hits }) =>
           hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(record, text)
       )
-      .sort((a, b) => b.hits.length - a.hits.length)
+      .sort((a, b) => b.hits.length - a.hits.length);
+  }
+
+  /** research_finding carries no title — its question IS the identity; an
+   *  article's slug beats its long title as the handle. Shared by
+   *  knowledgePreflight and sameSubjectDigest so the fallback chain is
+   *  defined once. */
+  private static axisRecordTitle(record: DurableRecord): string {
+    return (
+      (record as unknown as { title?: string }).title ??
+      (record as unknown as { question?: string }).question ??
+      (record as unknown as { slug?: string }).slug ??
+      ''
+    );
+  }
+
+  /** Disclosure cap (decision 7e3c66c5, AC7): same_subject is a hint at what
+   *  else governs this subject, never an unbounded inventory. */
+  private static readonly SAME_SUBJECT_CAP = 5;
+
+  /**
+   * SAME-SUBJECT SURFACING ON WRITE (decision 7e3c66c5): reuses
+   * axisCandidateMatches unchanged, sourced from the WRITTEN record's own text
+   * (the registered FTS extractor's output — the same text the citation scan
+   * uses) rather than an outgoing dispatch prompt, and excludes a
+   * caller-supplied set of ids (the write's own lineage: on update, the prior
+   * version and every ancestor; on supersede, the old record and its chain;
+   * on create, just the new id) rather than nothing. Advisory only: the
+   * caller decides whether/where to attach the result, this never throws and
+   * never influences the write itself.
+   */
+  private sameSubjectDigest(text: string, excludeIds: Set<string>): SameSubjectEntry[] {
+    const terms = extractAxisTerms(text, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) return [];
+    return this.axisCandidateMatches(text, terms)
+      .filter(({ record }) => !excludeIds.has(record.id))
+      .slice(0, SterlingTools.SAME_SUBJECT_CAP)
       .map(({ record, hits }) => ({
         id: record.id,
+        slug: (record as unknown as { slug?: string }).slug,
         type: record.type,
-        // research_finding carries no title — its question IS the identity;
-        // an article's slug beats its long title as the handle.
-        title:
-          (record as unknown as { title?: string }).title ??
-          (record as unknown as { question?: string }).question ??
-          (record as unknown as { slug?: string }).slug ??
-          '',
+        title: SterlingTools.axisRecordTitle(record),
         matched_on: hits,
-        central: recordCentralityHits(record, text),
       }));
-    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
   }
 
   /**
@@ -1763,8 +1869,25 @@ export class SterlingTools {
     return warnings;
   }
 
+  /**
+   * knowledgeUpdate's return is the new record FLATTENED, with same_subject
+   * spliced in as an extra property for ruling types — convenient for a
+   * direct caller reading `.status` and `.same_subject` off one object, but
+   * poison for anything that re-wraps the return as `record`: the field
+   * would either vanish under the digest write-projection's field whitelist
+   * (finding: knowledge_update's disclosure never reached MCP callers while
+   * create/supersede, which emit it as a proper envelope sibling, survived)
+   * or, on projection:'full', round-trip as a FAKE record field. Every
+   * internal re-wrapper (knowledgeAppend, knowledgeEdit, knowledgeUpdateResult)
+   * splits it off here first and puts it on its own envelope instead.
+   */
+  private splitSameSubject(rec: DurableRecord & { same_subject?: SameSubjectEntry[] }): { record: DurableRecord; same_subject?: SameSubjectEntry[] } {
+    const { same_subject, ...record } = rec;
+    return { record: record as DurableRecord, same_subject };
+  }
+
   /** Versioned change (§10): new version + supersede prior. Never mutates in place. */
-  knowledgeUpdate(id: string, body: Record<string, unknown>): DurableRecord {
+  knowledgeUpdate(id: string, body: Record<string, unknown>): DurableRecord & { same_subject?: SameSubjectEntry[] } {
     const old = this.resolveRecordId(id, 'knowledge_update');
     this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
@@ -1837,6 +1960,21 @@ export class SterlingTools {
       }
     }
     this.repointPromotionReview(chain, updated.id, ts);
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
+    // types — other types' update responses stay byte-identical. Excludes
+    // the update's own lineage: `chain` (the prior version plus every
+    // ancestor it already carries a 'supersedes' link to — the exact set
+    // repointPromotionReview reuses above) plus the new record's own id, so
+    // the disclosure never names the write's own prior self or its own new
+    // self. Sourced from the registered FTS extractor's text over the
+    // MERGED record about to be persisted.
+    if (SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
+      const registered = RECORD_TYPES[old.type as keyof typeof RECORD_TYPES];
+      const excludeIds = new Set(chain);
+      excludeIds.add(updated.id);
+      const sameSubject = this.sameSubjectDigest(registered ? registered.fts(next) : '', excludeIds);
+      return { ...updated, same_subject: sameSubject };
+    }
     return updated;
   }
 
@@ -2546,7 +2684,7 @@ export class SterlingTools {
    * Every refusal below runs before store.supersede is ever called, so a
    * refused call leaves the store untouched.
    */
-  knowledgeSupersede(oldId: string, fields: Record<string, unknown>, orphansAcknowledged?: boolean): { superseded: string; id: string; type: string; slug?: string; orphan_candidates?: string[]; warnings: string[] } {
+  knowledgeSupersede(oldId: string, fields: Record<string, unknown>, orphansAcknowledged?: boolean): { superseded: string; id: string; type: string; slug?: string; orphan_candidates?: string[]; warnings: string[]; same_subject: SameSubjectEntry[] } {
     const old = this.resolveRecordId(oldId, 'knowledge_supersede');
     if (old.type === 'todo') {
       throw new Error(
@@ -2658,6 +2796,15 @@ export class SterlingTools {
     const updated = this.store.supersede(old.id, parsed);
     this.repointPromotionReview(chain, updated.id, ts);
 
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5): knowledge_supersede only
+    // ever operates on the three ruling types (SUPERSEDE_ALLOWED_TYPES,
+    // enforced above), so this always applies here. Excludes the old,
+    // just-superseded record and its own supersede chain, plus the new
+    // record's own id — never the write's own lineage.
+    const sameSubjectExclude = new Set(chain);
+    sameSubjectExclude.add(updated.id);
+    const sameSubject = this.sameSubjectDigest(registered ? registered.fts(parsed) : '', sameSubjectExclude);
+
     return {
       superseded: old.id,
       id: updated.id,
@@ -2665,6 +2812,7 @@ export class SterlingTools {
       slug: (updated as unknown as { slug?: string }).slug,
       ...(orphanCandidates.length > 0 ? { orphan_candidates: orphanCandidates } : {}),
       warnings: citationWarnings,
+      same_subject: sameSubject,
     };
   }
 

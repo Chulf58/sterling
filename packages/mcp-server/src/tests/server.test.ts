@@ -59,7 +59,8 @@ const SERVED_TOOLS = [
   'run_escalate',
   'agent_exit',
   'run_signal',
-  'maintenance_enqueue',
+  // maintenance_enqueue deliberately unregistered — decision 6269b714:
+  // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',
   // board_remove scoped to the queue, so the librarian can close what it drains
   // (board afeae7d9).
