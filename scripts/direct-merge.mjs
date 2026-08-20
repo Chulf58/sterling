@@ -14,13 +14,14 @@ import { join } from 'node:path';
 import { arg, fail, openProject } from './lib/project.mjs';
 import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
+import { matchesGlob } from '@sterling/schemas';
 
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
 // A run owns the working tree and merges through the §8.1 gate, which runs
 // disposal + promotion first — never route a run merge through here (P5).
-const { store } = openProject(target);
+const { store, config } = openProject(target);
 const active = store.getRun();
 const openTodos = store.query({ types: ['todo'], cap: 1000 });
 store.close();
@@ -86,7 +87,10 @@ if (dirtyLines.length > 0) {
 // Gate precondition (merge.md): every affected article reconciled. Open
 // reconcile_needed debt on files this branch changed refuses the merge — the
 // §8.2 mirror of dispose-run's article_unreconciled refusal (decision 9df61181).
-const diff = spawnSync('git', ['diff', '--name-only', '--end-of-options', `${into}...${branch}`], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+// -c core.quotePath=false (r-review F3, applied here too for consistency): without
+// it, non-ASCII filenames arrive C-quoted and defeat matchesGlob's plain-string glob
+// comparisons further down.
+const diff = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--name-only', '--end-of-options', `${into}...${branch}`], { cwd: target, encoding: 'utf8', timeout: 60_000 });
 if (diff.status !== 0) fail(`direct-merge: git diff ${into}...${branch} failed: ${(diff.stderr || '').trim()}`);
 const changed = new Set(diff.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
 const debt = openTodos.filter(
@@ -98,6 +102,77 @@ if (debt.length > 0) {
       debt.map((t) => `  - ${t.id}  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n') +
       '\nknowledge_update the owning article (the update auto-drains its item), then rerun.'
   );
+}
+
+// REVIEW-RECEIPT MERGE GATE (board d3752b2e): the §8.2 mirror of the reconcile
+// refusal just above (decision 9df61181) — a second pre-merge debt check, same
+// battery slot. A CODE-TOUCHING commit (its diff hits >=1 path matching the
+// project's registered toolchain path_globs, read from .sterling/config.json —
+// never hardcoded, so a project without a `**/*.ts`-style adapter never gates
+// on paths it never declared) must carry a `Reviewed-By-Agent` git trailer; a
+// docs-only commit is exempt. Missing receipts refuse the merge before any
+// merge action, naming each offending commit and both remedies. --waive-reviews
+// "<reason>" lets the merge proceed but must never do so silently (P5) — every
+// waived commit is named, with the reason, in the output.
+const commitsRaw = spawnSync('git', ['log', '--format=%H', `${into}..${branch}`], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+if (commitsRaw.status !== 0) fail(`direct-merge: git log ${into}..${branch} failed: ${(commitsRaw.stderr || '').trim()}`);
+const branchCommits = commitsRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+const pathGlobs = (config.toolchains ?? []).flatMap((t) => t.path_globs ?? []);
+const unreviewed = [];
+for (const sha of branchCommits) {
+  // Multi-parent (merge) commits emit NOTHING from a plain `diff-tree --name-only`
+  // (r-review F1) — the default diff-tree suppresses merge diffs entirely, so a
+  // merge commit whose conflict resolution touched code classified as docs-only.
+  // Detect the parent count and, for a merge, diff with `--cc` (condensed combined
+  // diff): it lists exactly the paths that differ from EVERY parent, i.e. the
+  // hand-written resolution content — a clean auto-merge (identical to at least
+  // one parent's side) stays exempt, which is correct: no new content was written.
+  const parentsRaw = spawnSync('git', ['rev-parse', `${sha}^@`], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  if (parentsRaw.status !== 0) fail(`direct-merge: git rev-parse ${sha}^@ failed: ${(parentsRaw.stderr || '').trim()}`);
+  const isMerge = parentsRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean).length > 1;
+  const diffTreeArgs = isMerge
+    ? ['-c', 'core.quotePath=false', 'diff-tree', '--cc', '--no-commit-id', '--name-only', '-r', sha]
+    : ['-c', 'core.quotePath=false', 'diff-tree', '--no-commit-id', '--name-only', '-r', sha];
+  const filesRaw = spawnSync('git', diffTreeArgs, { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  if (filesRaw.status !== 0) fail(`direct-merge: git diff-tree ${sha} failed: ${(filesRaw.stderr || '').trim()}`);
+  const files = filesRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  const codeTouching = files.some((f) => pathGlobs.some((g) => matchesGlob(f, g)));
+  if (!codeTouching) continue;
+  const trailerRaw = spawnSync(
+    'git',
+    ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', sha],
+    { cwd: target, encoding: 'utf8', timeout: 30_000 }
+  );
+  // A trailer with an EMPTY value is treated as ABSENT, deliberately (r-review F2,
+  // adjudicated by the conductor): a receipt naming nobody is not a receipt. `.trim()`
+  // on an empty/whitespace-only value falls through to the unreviewed list below.
+  if ((trailerRaw.stdout ?? '').trim()) continue; // receipt present
+  const short = spawnSync('git', ['rev-parse', '--short', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
+  const subject = spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
+  unreviewed.push({ sha, short, subject });
+}
+if (unreviewed.length > 0) {
+  const waivePresent = process.argv.includes('--waive-reviews');
+  const waiveReason = arg('--waive-reviews');
+  if (waivePresent) {
+    // r-review F2: a present-but-empty reason is refused with an explicit message,
+    // never the generic missing-receipt refusal below — the flag was invoked, so
+    // the operator gets told what is actually wrong with the invocation.
+    if (!waiveReason || !waiveReason.trim()) {
+      fail(`direct-merge: --waive-reviews requires a non-empty reason`);
+    }
+    console.error(
+      `direct-merge: --waive-reviews WAIVED the review-receipt gate for ${unreviewed.length} code-touching commit(s) — reason: ${waiveReason}\n` +
+        unreviewed.map((c) => `  - ${c.short}  ${c.subject}`).join('\n')
+    );
+  } else {
+    fail(
+      `direct-merge: ${unreviewed.length} code-touching commit(s) on this branch are missing a 'Reviewed-By-Agent' review-receipt trailer — reconcile before merging:\n` +
+        unreviewed.map((c) => `  - ${c.short}  ${c.subject}`).join('\n') +
+        `\nRemedy: amend the commit(s) to record a 'Reviewed-By-Agent: <reviewer>' trailer, then rerun.\n` +
+        `Or, to proceed anyway: rerun with --waive-reviews "<reason>" (never silent — the waiver is echoed at merge time).`
+    );
+  }
 }
 
 // VERSION MOVES WITH THE MERGE (decision be9168e8 + user directive 2026-08-05
