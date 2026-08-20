@@ -5,6 +5,9 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h14-bash-allowlist.mjs
+import { relative, resolve as resolve2, sep } from "node:path";
+
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -4882,10 +4885,30 @@ try {
   const helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
   const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
+  const READONLY_GIT_PATTERNS = [/^git log$/, /^git show \S+ --stat$/, /^git diff --name-only$/, /^git branch --list$/];
+  const isReadOnlyGit = READONLY_GIT_PATTERNS.some((re) => re.test(command));
   const strictQuote = command.match(/^(["'])([^\s"']*)\1(?=\s|$)/);
   const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
   const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + " "));
-  const allowed = matchesPrefix(command) || strictUnquoted !== null && matchesPrefix(strictUnquoted) || isFsHelper || isReadOnlySearch;
+  const matchedPrefixOf = (candidate) => runCommandPrefixes.find((p) => candidate === p || candidate.startsWith(p + " "));
+  const pathArgEscapesRoot = (tok) => {
+    if (tok.startsWith("-")) return false;
+    const quoted = tok.match(/^(["'])([^\s"']*)\1$/);
+    const clean = quoted ? quoted[2] : tok;
+    if (!clean) return false;
+    const rel = relative(input.cwd, resolve2(input.cwd, clean));
+    return rel === ".." || rel.startsWith(".." + sep);
+  };
+  const prefixMatchEscapes = (candidate) => {
+    const prefix = matchedPrefixOf(candidate);
+    if (!prefix) return false;
+    const remainder = candidate.slice(prefix.length).trim();
+    if (!remainder) return false;
+    return remainder.split(/\s+/).filter(Boolean).some(pathArgEscapesRoot);
+  };
+  const runCommandMatch = matchesPrefix(command) ? command : strictUnquoted !== null && matchesPrefix(strictUnquoted) ? strictUnquoted : null;
+  const runCommandAllowed = runCommandMatch !== null && !prefixMatchEscapes(runCommandMatch);
+  const allowed = runCommandAllowed || isFsHelper || isReadOnlySearch || isReadOnlyGit;
   if (!allowed) {
     const looseQuote = command.match(/^(["'])([^"']*)\1/);
     const looseUnquoted = looseQuote ? looseQuote[2] + command.slice(looseQuote[0].length) : null;
@@ -4893,7 +4916,7 @@ try {
     const quotingIsTheCause = !!matchedPrefix && /\s/.test(looseQuote[2]);
     const prefixHasSpace = quotingIsTheCause && matchedPrefix.includes(" ");
     deny(
-      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTED FORM IS GENUINELY UNMATCHABLE: quoting the whole command as ONE token cannot match the allowlist (a single-word quoted first token \u2014 e.g. a quoted exe path \u2014 is already accepted; a multi-word quoted span is not, so it cannot smuggle a prefix past this gate). Re-run it unquoted: '${looseUnquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), and standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
+      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTED FORM IS GENUINELY UNMATCHABLE: quoting the whole command as ONE token cannot match the allowlist (a single-word quoted first token \u2014 e.g. a quoted exe path \u2014 is already accepted; a multi-word quoted span is not, so it cannot smuggle a prefix past this gate). Re-run it unquoted: '${looseUnquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied), and read-only git: git log, git show <ref> --stat, git diff --name-only, git branch --list. All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();

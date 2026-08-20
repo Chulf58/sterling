@@ -29,6 +29,7 @@
 // arbitrary path; find/sed/awk stay denied. Containment lives elsewhere — H3
 // (write contract), H5 (frozen tests), H17 (bash write sweep) — and in Sterling
 // running agents that are already trusted to write code.
+import { relative, resolve, sep } from 'node:path';
 import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
 
 const input = readStdin();
@@ -71,6 +72,16 @@ try {
   // Grep/Glob served again.
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
 
+  // Read-only git verb allowance (board 4c7b84d3, AC3): VERB-SHAPED, never
+  // "git anything" — each pattern is an EXACT shape (a ref token is the only
+  // free variable), so a lookalike ('git logger') or an unlisted verb ('git
+  // stash') never matches, and mutating verbs (commit/push/checkout/rebase/
+  // reset/status) stay denied exactly as before. Chaining/redirection off an
+  // allowed verb is already caught by the control-operator gate above this
+  // point, so it never reaches this check at all.
+  const READONLY_GIT_PATTERNS = [/^git log$/, /^git show \S+ --stat$/, /^git diff --name-only$/, /^git branch --list$/];
+  const isReadOnlyGit = READONLY_GIT_PATTERNS.some((re) => re.test(command));
+
   // Quote-strip the FIRST whitespace-separated token, for MATCH PURPOSES ONLY
   // (board f49466f5, decision 398adceb): the executed command, the operator
   // gate above, and the fs-helper quoted-path branch are all untouched — this
@@ -89,9 +100,38 @@ try {
   const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
 
   const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + ' '));
+  const matchedPrefixOf = (candidate) => runCommandPrefixes.find((p) => candidate === p || candidate.startsWith(p + ' '));
 
-  const allowed =
-    matchesPrefix(command) || (strictUnquoted !== null && matchesPrefix(strictUnquoted)) || isFsHelper || isReadOnlySearch;
+  // AC2 boundary (board 4c7b84d3): cwd robustness must never become a
+  // path-scope bypass. readStdin() already normalizes input.cwd to the
+  // project root (never the raw shell cwd), so that root is the ONE
+  // resolution base regardless of which subdirectory the platform actually
+  // invoked the hook from. For a candidate that matches a declared run-command
+  // prefix, resolve every remaining non-flag argument against that root; a
+  // command whose argument climbs (via '../') to a path outside the root is
+  // denied even though its textual prefix matches — a genuinely different
+  // command (AC1 boundary) is unaffected because it never reaches this check.
+  const pathArgEscapesRoot = (tok) => {
+    if (tok.startsWith('-')) return false; // a flag, not a path
+    const quoted = tok.match(/^(["'])([^\s"']*)\1$/);
+    const clean = quoted ? quoted[2] : tok;
+    if (!clean) return false;
+    const rel = relative(input.cwd, resolve(input.cwd, clean));
+    return rel === '..' || rel.startsWith('..' + sep);
+  };
+  const prefixMatchEscapes = (candidate) => {
+    const prefix = matchedPrefixOf(candidate);
+    if (!prefix) return false;
+    const remainder = candidate.slice(prefix.length).trim();
+    if (!remainder) return false;
+    return remainder.split(/\s+/).filter(Boolean).some(pathArgEscapesRoot);
+  };
+
+  const runCommandMatch =
+    matchesPrefix(command) ? command : strictUnquoted !== null && matchesPrefix(strictUnquoted) ? strictUnquoted : null;
+  const runCommandAllowed = runCommandMatch !== null && !prefixMatchEscapes(runCommandMatch);
+
+  const allowed = runCommandAllowed || isFsHelper || isReadOnlySearch || isReadOnlyGit;
 
   if (!allowed) {
     // QUOTING DIAGNOSTIC (reported from a consuming project 2026-07-30, decision
@@ -129,7 +169,7 @@ try {
                 : ''
             }`
           : ''
-      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), and standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
+      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied), and read-only git: git log, git show <ref> --stat, git diff --name-only, git branch --list. All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();
