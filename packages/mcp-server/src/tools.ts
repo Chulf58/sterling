@@ -264,9 +264,14 @@ export class SterlingTools {
 
   /**
    * A file absent from the working tree may still be ALIVE on another git ref —
-   * parked on an unmerged branch rather than deleted (board 1d6a721a). Returns
-   * the first ref that holds it, or undefined if it exists nowhere (in which
-   * case the deletion reading is correct, and now trustworthy).
+   * parked on an unmerged branch rather than deleted (board 1d6a721a), OR still
+   * present on base because the deletion hasn't reached base yet (board
+   * 07baa42b). ANCESTRY-AWARE (board 07baa42b): a missing file is PARKED iff
+   * (a) it still exists on the BASE branch, or (b) it exists on a branch that
+   * is NOT YET merged into base. A blob surviving ONLY on branches that are
+   * fully-merged ancestors of base does NOT park — the deletion reading (base
+   * no longer has it, and no unmerged work holds it either) applies instead.
+   * Returns the first qualifying ref that holds it, or undefined if none does.
    *
    * ONLY CALLED ON THE ALREADY-RARE MISSING-FILE PATH, never on the hot read
    * path: shelling out per owned file per query would be a real regression, and
@@ -276,7 +281,19 @@ export class SterlingTools {
    *
    * HEAD is probed FIRST and separately: a file present in HEAD but not on disk
    * is the commonest shape (someone deleted it without committing), and catching
-   * it in one call avoids walking the branch list at all.
+   * it in one call avoids walking the branch list at all. HEAD is case (a)/(b)
+   * territory regardless — it is checked for blob presence exactly as before,
+   * with no ancestry filtering (it's the branch currently checked out, not a
+   * candidate to filter against base).
+   *
+   * BASE resolution: `git symbolic-ref --short refs/remotes/origin/HEAD`
+   * (origin/ prefix stripped), else a local `main`, else `master`. If none of
+   * those resolve, ancestry cannot be judged — fall back to today's behaviour
+   * (no ancestry filtering) rather than throw or suppress. The base branch
+   * itself is checked by blob presence (case (a)); every other local branch is
+   * skipped when `git merge-base --is-ancestor <branch> <base>` exits 0 (fully
+   * merged — case not satisfied), and checked by blob presence otherwise
+   * (case (b), unmerged work).
    *
    * Every git failure is swallowed to undefined, which degrades to today's
    * behaviour — a deletion item. That direction is deliberate: a missing git, a
@@ -285,26 +302,50 @@ export class SterlingTools {
    * lane is the one that gets acted on.
    */
   private parkedOnRef(rel: string, treeRoot: string): string | undefined {
-    const has = (ref: string): boolean => {
+    const run = (args: string[]) => {
       try {
-        return spawnSync('git', ['-C', treeRoot, 'cat-file', '-e', `${ref}:${rel}`], { encoding: 'utf8', windowsHide: true }).status === 0;
+        return spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
       } catch {
-        return false;
+        return undefined;
       }
+    };
+    const has = (ref: string): boolean => run(['cat-file', '-e', `${ref}:${rel}`])?.status === 0;
+    const resolveBase = (): string | undefined => {
+      const symbolic = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      if (symbolic?.status === 0 && typeof symbolic.stdout === 'string') {
+        const name = symbolic.stdout.trim();
+        if (name) return name.startsWith('origin/') ? name.slice('origin/'.length) : name;
+      }
+      const mainCheck = run(['show-ref', '--verify', '--quiet', 'refs/heads/main']);
+      if (mainCheck?.status === 0) return 'main';
+      const masterCheck = run(['show-ref', '--verify', '--quiet', 'refs/heads/master']);
+      if (masterCheck?.status === 0) return 'master';
+      return undefined;
+    };
+    const isMergedIntoBase = (branch: string, base: string): boolean => {
+      const r = run(['merge-base', '--is-ancestor', branch, base]);
+      return r?.status === 0;
     };
     try {
       if (has('HEAD')) return 'HEAD';
-      const refs = spawnSync('git', ['-C', treeRoot, 'for-each-ref', '--format=%(refname:short)', 'refs/heads'], {
-        encoding: 'utf8',
-        windowsHide: true,
-      });
-      if (refs.status !== 0 || typeof refs.stdout !== 'string') return undefined;
+      const refs = run(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return undefined;
       const branches = refs.stdout
         .split('\n')
         .map((s) => s.trim())
         .filter(Boolean)
         .slice(0, PARKED_REF_PROBE_CAP);
-      for (const b of branches) if (has(b)) return b;
+      const base = resolveBase();
+      if (base === undefined) {
+        for (const b of branches) if (has(b)) return b;
+        return undefined;
+      }
+      for (const b of branches) {
+        if (!has(b)) continue;
+        if (b === base) return b; // case (a): base itself still has it
+        if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
+        return b; // case (b): unmerged branch still holds it
+      }
       return undefined;
     } catch {
       return undefined;
