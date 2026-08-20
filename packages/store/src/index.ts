@@ -233,6 +233,10 @@ export type ToolStore = Pick<
   // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
   // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
   | 'recordsBySlug'
+  // knowledge_get's terminus disclosure (decision de1a7329) — the pinned
+  // record stays version-pinned; this is the only way the tool layer learns
+  // where a superseded record's chain currently ends.
+  | 'resolveTerminus'
   | 'supersede'
   | 'updateTodo'
   | 'retireInFavorOf'
@@ -508,6 +512,39 @@ export class SterlingStore {
       )
       .all(slug) as { body: string }[];
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body) as DurableRecord));
+  }
+
+  /**
+   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id: string): { id: string; status: string; hops: number; truncated?: boolean } | null {
+    const MAX_HOPS = 32;
+    const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
+    const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
+    if (!row) return null;
+
+    const visited = new Set<string>([row.id]);
+    let current = row;
+    let hops = 0;
+    while (current.status === 'superseded' && current.superseded_by) {
+      const next = stmt.get(current.superseded_by) as
+        | { id: string; status: string; superseded_by: string | null }
+        | undefined;
+      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+        return { id: current.id, status: current.status, hops, truncated: true };
+      }
+      visited.add(next.id);
+      current = next;
+      hops += 1;
+    }
+    return { id: current.id, status: current.status, hops };
   }
 
   /**

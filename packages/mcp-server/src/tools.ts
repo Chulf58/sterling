@@ -1452,7 +1452,16 @@ export class SterlingTools {
    * wrapper over it.
    */
   knowledgeGet(id: string): DurableRecord {
-    return this.resolveRecordId(id, 'knowledge_get');
+    const record = this.resolveRecordId(id, 'knowledge_get');
+    // Additive terminus disclosure (decision de1a7329): the pinned record's own
+    // fields are never touched — a live record gets no `terminus` key at all,
+    // never a null/undefined one (AC6). Only a superseded record gains it,
+    // sourced from store.resolveTerminus so the disclosed end is the true chain
+    // end, not the one-hop superseded_by (AC7).
+    if (record.status !== 'superseded') return record;
+    const terminus = this.store.resolveTerminus(record.id);
+    if (!terminus) return record;
+    return { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
   }
 
   /**

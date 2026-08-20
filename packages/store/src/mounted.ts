@@ -182,6 +182,17 @@ export class MountedStores {
     return this.all().flatMap((s) => s.recordsBySlug(slug));
   }
 
+  /** Cross-store terminus resolution (decision de1a7329): a record lives in
+   *  exactly one store (same reasoning as get()), so this tries each mounted
+   *  store project-first and returns the first hit. */
+  resolveTerminus(id: string): ReturnType<SterlingStore['resolveTerminus']> {
+    for (const s of this.all()) {
+      const r = s.resolveTerminus(id);
+      if (r) return r;
+    }
+    return null;
+  }
+
   // -- record mutations: route to the store that HOLDS the record --------------
   // A record's scope decided where it lives at create time; a later change has to
   // land in that same store, so these route by where the id actually is — never
