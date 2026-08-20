@@ -4651,6 +4651,16 @@ var configSchema = external_exports.object({
     // threshold injects ONE moment-3 advisory per streak episode.
     streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
+  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // surface that states the "N concurrent subagents" ceiling (H1's banner
+  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
+  // hardcoded literal, so a ruling that changes it takes effect everywhere
+  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
+  // way — this tunes only the number, never a floor/quota (decisions
+  // 677f1639/299d853a stand). Absent → shipped default 5.
+  delegation: external_exports.object({
+    max_concurrent: external_exports.number().int().positive().default(5)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -4913,6 +4923,18 @@ function splitFragments(cmd) {
       inDouble = true;
       current += c;
       continue;
+    }
+    if (c === "<" && cmd[i + 1] === "<") {
+      const m = cmd.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
+      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
+      if (delim) {
+        const rest = cmd.slice(i);
+        const end = rest.match(new RegExp(`\\n\\s*${delim}(?=\\n|$)`));
+        const span = end ? end.index + end[0].length : rest.length;
+        current += rest.slice(0, span);
+        i += span - 1;
+        continue;
+      }
     }
     if (c === "\n" || c === "\r") {
       parts.push(current);

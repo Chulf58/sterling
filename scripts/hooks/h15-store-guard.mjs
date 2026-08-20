@@ -82,6 +82,22 @@ function splitFragments(cmd) {
       current += c;
       continue;
     }
+    // A heredoc body is DATA, not commands: on an unquoted '<<DELIM', consume
+    // everything through the terminator line into the SAME fragment, so a body
+    // line mentioning the store is judged as part of its command (a git commit
+    // message), never as a fragment whose first word is prose.
+    if (c === '<' && cmd[i + 1] === '<') {
+      const m = cmd.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
+      const delim = m ? (m[1] ?? m[2] ?? m[3]) : null;
+      if (delim) {
+        const rest = cmd.slice(i);
+        const end = rest.match(new RegExp(`\\n\\s*${delim}(?=\\n|$)`));
+        const span = end ? end.index + end[0].length : rest.length;
+        current += rest.slice(0, span);
+        i += span - 1;
+        continue;
+      }
+    }
     // Unquoted newlines separate commands exactly like ';' — caught live
     // 2026-08-20 minutes after this gate shipped: a multiline commit batch was
     // judged as ONE fragment whose first word was 'set', denying the whole

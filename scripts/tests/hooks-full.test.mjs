@@ -181,8 +181,10 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     const deep = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
     const ctx = deep.hookSpecificOutput.additionalContext;
     assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 drainable items/);
-    assert.match(ctx, /reconcile_needed ×3/, 'the lane split says WHAT is owed, not just how much');
-    assert.match(ctx, /article_missing ×2/);
+    // Lane phrasing changed with board 18a22b56: "N item(s) in lane <reason>" —
+    // the "×N" form collided with h1-accuracy's truncation-artifact guard.
+    assert.match(ctx, /3 items in lane reconcile_needed/, 'the lane split says WHAT is owed, not just how much');
+    assert.match(ctx, /2 items in lane article_missing/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
     assert.match(ctx, /Anti-speculation/, 'the conventions injection is unaffected');
