@@ -108,7 +108,11 @@ function sizeThresholds() {
 
 /** The only byte-denominated signal available to a PreToolUse hook for a
  *  knowledge_update/append/edit call: the serialized size of its tool_input
- *  (documented fixture assumption, scripts/tests/h21-precision.test.mjs). */
+ *  (documented fixture assumption, scripts/tests/h21-precision.test.mjs).
+ *  NOTE: `.length` on a JS string counts UTF-16 code units, not bytes — for
+ *  the ASCII-heavy payloads this hook watches the two are equal in practice,
+ *  but this is an accepted approximation, not a true byte count (review
+ *  finding, H21 session-crossing fix). */
 function toolInputBytes(toolInput) {
   try {
     return JSON.stringify(toolInput ?? {}).length;
@@ -140,14 +144,27 @@ try {
       prior && prior.session_id === input.session_id && Number.isFinite(prior.count) && Number.isFinite(prior.bytes);
     const count = validPrior ? prior.count + 1 : 1;
     const priorBytes = validPrior ? prior.bytes : 0;
+    // Session-crossing nagged flag (review finding, mirrors the streak arm's
+    // own one-shot `nagged`): once the cumulative tally has already crossed
+    // session_bytes_advise and advised, it must never re-advise on that
+    // ground alone — a naive "cumulative > threshold" recheck would fire on
+    // every subsequent write for the rest of the session. Per-write advisories
+    // (overWrite) stay fully independent and keep firing regardless.
+    const priorNagged = validPrior && prior.nagged === true;
     const writeBytes = toolInputBytes(input.tool_input);
     const sessionBytes = priorBytes + writeBytes;
-    writeJson(articleWritesPath, { session_id: input.session_id, count, bytes: sessionBytes });
 
     const { writeThreshold, sessionThreshold } = sizeThresholds();
     const overWrite = writeBytes > writeThreshold;
-    const overSession = sessionBytes > sessionThreshold;
-    if (overWrite || overSession) {
+    // Crossing detection: priorBytes <= threshold && newBytes > threshold is
+    // implied by "not already nagged" + "now over" (bytes only ever grow), so
+    // priorNagged doubles as the crossing marker without a separate priorBytes
+    // comparison.
+    const crossesSession = !priorNagged && sessionBytes > sessionThreshold;
+    const nagged = priorNagged || crossesSession;
+    writeJson(articleWritesPath, { session_id: input.session_id, count, bytes: sessionBytes, nagged });
+
+    if (overWrite || crossesSession) {
       const sizeReason = overWrite
         ? `this write is ${writeBytes} bytes, over the per-write advisory threshold (write_bytes_advise=${writeThreshold} bytes)`
         : `this session's cumulative hand-run write bytes just crossed the session advisory threshold (session_bytes_advise=${sessionThreshold} bytes, now ${sessionBytes} bytes)`;

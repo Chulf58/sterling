@@ -4936,13 +4936,15 @@ try {
     const validPrior = prior && prior.session_id === input.session_id && Number.isFinite(prior.count) && Number.isFinite(prior.bytes);
     const count = validPrior ? prior.count + 1 : 1;
     const priorBytes = validPrior ? prior.bytes : 0;
+    const priorNagged = validPrior && prior.nagged === true;
     const writeBytes = toolInputBytes(input.tool_input);
     const sessionBytes = priorBytes + writeBytes;
-    writeJson(articleWritesPath, { session_id: input.session_id, count, bytes: sessionBytes });
     const { writeThreshold, sessionThreshold } = sizeThresholds();
     const overWrite = writeBytes > writeThreshold;
-    const overSession = sessionBytes > sessionThreshold;
-    if (overWrite || overSession) {
+    const crossesSession = !priorNagged && sessionBytes > sessionThreshold;
+    const nagged = priorNagged || crossesSession;
+    writeJson(articleWritesPath, { session_id: input.session_id, count, bytes: sessionBytes, nagged });
+    if (overWrite || crossesSession) {
       const sizeReason = overWrite ? `this write is ${writeBytes} bytes, over the per-write advisory threshold (write_bytes_advise=${writeThreshold} bytes)` : `this session's cumulative hand-run write bytes just crossed the session advisory threshold (session_bytes_advise=${sessionThreshold} bytes, now ${sessionBytes} bytes)`;
       emit(
         `H21 article-write watch: ${sizeReason} \u2014 hand-run article write #${count} this session (decision dac3d2c6 \u2014 article application is librarian-shaped). Hand-run writes are for the three named exceptions only: (1) a small authored create, (2) a write needing live adjudication, (3) a single small-record touch. Bulkier article reconciles should batch through the librarian dispatch instead \u2014 it runs on a cheaper model in parallel, and the conductor's context window is the session's scarcest and most expensive resource.`

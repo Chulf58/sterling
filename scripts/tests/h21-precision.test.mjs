@@ -309,3 +309,54 @@ test('AC4: a corrupt/non-numeric delegation_watch size config fails open — fal
     cleanup();
   }
 });
+
+// --------------------------- AC-X: session-crossing advisory fires exactly once (nagged flag) ---------------------------
+
+test('AC-X: once the session has crossed session_bytes_advise, a subsequent SMALL write stays silent, while a large write still advises on its own per-write trigger', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // 4 writes @ 1700B stay under both the per-write (2000) and session (8000)
+    // thresholds: running totals 1700, 3400, 5100, 6800.
+    for (let i = 0; i < 4; i++) {
+      const r = runHook(sizedUpdate(1700), dir);
+      assert.equal(
+        additionalContextOf(r),
+        null,
+        `write #${i + 1} (running total ${1700 * (i + 1)}B) must stay silent — under 2000B per-write and under 8000B cumulative`
+      );
+    }
+
+    // write #5 (running total 8500B) crosses session_bytes_advise (8000) and
+    // must advise exactly once, on this crossing write.
+    const crossing = runHook(sizedUpdate(1700), dir);
+    const crossCtx = additionalContextOf(crossing);
+    assert.ok(crossCtx, 'write #5 (running total 8500B) crosses session_bytes_advise (8000) and must advise');
+    assert.match(crossCtx, /byte/i, 'the crossing advisory is framed by cumulative size');
+
+    // write #6: SMALL (300B, well under write_bytes_advise 2000). The running
+    // total is now 8800B — still over session_bytes_advise if re-checked naively
+    // — but the session-crossing advisory fires ONCE, on the crossing write
+    // only (mirroring the streak arm's own nagged flag). This write must be
+    // silent.
+    const smallAfterCross = runHook(sizedUpdate(300), dir);
+    assert.equal(
+      additionalContextOf(smallAfterCross),
+      null,
+      'write #6 (300B, under write_bytes_advise, AFTER the session threshold already crossed and advised once) must stay silent — a naive "cumulative > threshold every call" implementation would re-fire here since the running total (8800B) still exceeds session_bytes_advise; the session-crossing advisory is a one-time (nagged) event, not a sticky condition'
+    );
+
+    // write #7: LARGE (2500B, over write_bytes_advise 2000). This must still
+    // advise — on its OWN independent per-write trigger — proving the fix
+    // narrows the one-time session-crossing nag without neutering the
+    // per-write arm (AC3's regression guarantee holds even post-crossing).
+    const largeAfterCross = runHook(sizedUpdate(2500), dir);
+    const largeCtx = additionalContextOf(largeAfterCross);
+    assert.ok(
+      largeCtx,
+      'write #7 (2500B, over write_bytes_advise) must still advise on its own per-write trigger even though the session-crossing nag already fired and write #6 was correctly silent'
+    );
+    assert.match(largeCtx, /byte/i, 'the per-write advisory is still framed by size');
+  } finally {
+    cleanup();
+  }
+});
