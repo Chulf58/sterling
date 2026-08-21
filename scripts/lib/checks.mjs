@@ -246,7 +246,7 @@ export const CITED_RECORD_WORDS = [
  *  would fail on every completed item, which is why a naive scan reports dozens of
  *  false violations. Run ids (r-xxxx) and git shas are not id-shaped and need no
  *  exclusion. */
-export const UNCITED_RECORD_WORDS = ['board', 'todo', 'todos', 'maintenance'];
+export const UNCITED_RECORD_WORDS = ['board', 'boards', 'todo', 'todos', 'maintenance'];
 
 // An id citation is an 8+ hex-char token within a short window after a record-type
 // word — a WINDOW rather than strict adjacency because real citations put a slug
