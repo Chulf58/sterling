@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { openProject } from './lib/project.mjs';
+import { inFlightAdvisory } from './lib/dispatch-register.mjs';
 
 // Target defaults to the plugin/repo root (npm run check); an explicit dir arg
 // lets the test — or a consuming project — point it elsewhere.
@@ -50,6 +51,13 @@ if (!existsSync(storePath)) {
 }
 
 const { store, config } = openProject(root);
+
+// Wave-settle disclosure (board 54c451b4): with writers in flight, "the store's
+// newest record" is a moving target — say so before anyone trusts a regenerated
+// projection as settled. Advisory only; the verdict below is unchanged.
+const advisory = inFlightAdvisory(root, 'writers may still be landing, so a projection regenerated now may capture a mid-wave store state.');
+if (advisory) console.log(`projection freshness: ${advisory}`);
+
 let failed = false;
 try {
   for (const proj of PROJECTIONS) {

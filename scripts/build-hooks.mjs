@@ -6,10 +6,16 @@ import { build } from 'esbuild';
 import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { inFlightAdvisory } from './lib/dispatch-register.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const srcDir = join(here, 'hooks');
+
+// Wave-settle disclosure (board 54c451b4): a mid-wave bundle rebuild can race a
+// coder's in-flight source edit (the 6ef262fc shape). Advisory only — never a gate.
+const advisory = inFlightAdvisory(root, 'a bundle rebuilt now may race an in-flight edit of scripts/hooks sources.');
+if (advisory) console.log(`build-hooks: ${advisory}`);
 
 const entries = readdirSync(srcDir).filter((f) => f.startsWith('h') && f.endsWith('.mjs'));
 for (const entry of entries) {
