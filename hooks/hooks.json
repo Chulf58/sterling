@@ -66,7 +66,8 @@
         "matcher": "Read",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-reads-ledger.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" }
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
         ]
       },
       {
@@ -83,7 +84,10 @@
       },
       {
         "matcher": "Bash|PowerShell",
-        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" }]
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
+        ]
       }
     ],
     "Stop": [
