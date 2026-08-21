@@ -336,6 +336,47 @@ test('knownFieldsFor: research_finding gains file_keys; reference_material still
   assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)');
 });
 
+test('evidence_basis + measured_by: optional on the three ruling types, enum closed, distinct from anti_pattern.basis (board 1d02b6b4)', () => {
+  const dec = validateRecord({
+    ...envelope('decision'),
+    title: 't',
+    statement: 's',
+    alternatives_rejected: [],
+    rationale: 'r',
+    evidence_basis: 'measured',
+    measured_by: 'grep -c "registerTool" packages/mcp-server/src/server.ts',
+  }) as unknown as { evidence_basis: string; measured_by: string };
+  assert.equal(dec.evidence_basis, 'measured');
+  assert.match(dec.measured_by, /grep -c/);
+  const ap = validateRecord({
+    ...envelope('anti_pattern'),
+    title: 't',
+    trigger: 'tr',
+    guidance: 'g',
+    wrong_way: 'w',
+    right_way: 'ri',
+    source_evidence: 'e',
+    evidence_basis: 'inferred',
+  }) as unknown as { evidence_basis: string; basis: string };
+  assert.equal(ap.evidence_basis, 'inferred');
+  assert.equal(ap.basis, 'codebase', 'the pre-existing basis enum (where knowledge came from) is untouched and defaults as before');
+  validateRecord({
+    ...envelope('research_finding'),
+    question: 'q',
+    answer: 'a',
+    source_urls: [],
+    source_date: '2026-08-21',
+    capture_date: '2026-08-21',
+    evidence_basis: 'measured',
+    measured_by: 'claude -p probe session',
+  });
+  assert.throws(
+    () => validateRecord({ ...envelope('decision'), title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', evidence_basis: 'guessed' }),
+    /invalid/i,
+    'the enum is closed — measured|inferred only'
+  );
+});
+
 test('attestation: human-inspection ruling round-trips; verdict enum closed; immutable like a decision; file_keys joins the path economy (board 259a455f)', () => {
   const rec = validateRecord({
     ...envelope('attestation'),

@@ -4160,7 +4160,18 @@ var decisionSchema = base.extend({
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
   rationale: external_exports.string().min(1),
-  file_keys: external_exports.array(repoPath).optional()
+  file_keys: external_exports.array(repoPath).optional(),
+  // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+  // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+  // the record's load-bearing claims were measured or inferred (a false
+  // anti-pattern once lived 8 minutes because nothing marked it inferred);
+  // measured_by names the command/instrument that produced a measured claim,
+  // so a quoted number can be re-derived instead of trusted. Named
+  // evidence_basis because anti_pattern already carries an unrelated `basis`
+  // enum (codebase|platform|external). Instrument-staleness re-test machinery
+  // is DEFERRED — see the decision's rejected alternatives.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
@@ -4232,7 +4243,12 @@ var antiPatternSchema = base.extend({
   source_evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional(),
   severity: external_exports.enum(["info", "warn", "block"]).optional(),
-  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase")
+  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
+  // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+  // measured|inferred, distinct from this type's pre-existing `basis`
+  // (where the knowledge CAME FROM, not how it was established).
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
@@ -4249,7 +4265,11 @@ var researchFindingSchema = base.extend({
   // seam, a library's behavior in one adapter) join the file-key economy the
   // same way decision/anti_pattern/todo do; many findings are fileless
   // (platform behavior, pricing) so this stays optional, never required.
-  file_keys: external_exports.array(repoPath).optional()
+  file_keys: external_exports.array(repoPath).optional(),
+  // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+  // is measured (measured_by = the probe), a docs-read finding is inferred.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var modelsCatalogSchema = external_exports.object({
   entries: external_exports.array(external_exports.object({

@@ -26,6 +26,17 @@ export const decisionSchema = base
     alternatives_rejected: z.array(z.object({ option: z.string(), reason: z.string() })),
     rationale: z.string().min(1),
     file_keys: z.array(repoPath).optional(),
+    // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+    // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+    // the record's load-bearing claims were measured or inferred (a false
+    // anti-pattern once lived 8 minutes because nothing marked it inferred);
+    // measured_by names the command/instrument that produced a measured claim,
+    // so a quoted number can be re-derived instead of trusted. Named
+    // evidence_basis because anti_pattern already carries an unrelated `basis`
+    // enum (codebase|platform|external). Instrument-staleness re-test machinery
+    // is DEFERRED — see the decision's rejected alternatives.
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -111,6 +122,11 @@ export const antiPatternSchema = base
     file_keys: z.array(repoPath).optional(),
     severity: z.enum(['info', 'warn', 'block']).optional(),
     basis: z.enum(['codebase', 'platform', 'external']).default('codebase'),
+    // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+    // measured|inferred, distinct from this type's pre-existing `basis`
+    // (where the knowledge CAME FROM, not how it was established).
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -133,6 +149,10 @@ export const researchFindingSchema = base
     // same way decision/anti_pattern/todo do; many findings are fileless
     // (platform behavior, pricing) so this stays optional, never required.
     file_keys: z.array(repoPath).optional(),
+    // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+    // is measured (measured_by = the probe), a docs-read finding is inferred.
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
   })
   .superRefine(refineSupersession);
 
