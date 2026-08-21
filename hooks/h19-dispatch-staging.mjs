@@ -5017,6 +5017,17 @@ var configSchema = external_exports.object({
   delivery: external_exports.object({
     injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
     payload_char_cap: external_exports.number().int().positive().default(2400)
+  }).default({}),
+  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
+  // whether the automatic consult moments (design/review/gate second opinions via
+  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
+  // additive advisory-block pattern of delegation_watch — a project without the
+  // Codex CLI installed still parses and defaults to true; the TUI System tab
+  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
+  // — this field never stands in for that absence, only for a deliberate OFF.
+  sparring_partner: external_exports.object({
+    enabled: external_exports.boolean().default(true)
   }).default({})
 });
 

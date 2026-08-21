@@ -581,3 +581,205 @@ test('P5 snapshot script: refreshes over an existing snapshot — a second run r
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
+// =============================================================================
+// Part C (sparring-partner slice 1) — codex MCP-server wiring through init's
+// plugin-repo branch (decision cd019e0b, concept slug
+// sparring-partner-partnership-shape). Spec only, per the dispatch — init.mjs's
+// implementation body was NOT read to author these.
+//
+// Two testability seams:
+//   STERLING_CODEX_PROBE — unset/'' = real probe; 'ok' = force probe success;
+//     'absent' = force failure reason 'binary-absent'; 'not-logged-in' = force
+//     failure reason 'not-logged-in'; any other value = init fails loud.
+//   STERLING_PLUGIN_ROOT_MATCH — a target equal to this value is treated as
+//     the plugin repo for the two branch-selection comparisons (MCP-config
+//     generation + plugin-repo-only .gitignore entries); every other
+//     pluginRoot-derived path (templates, dist, hooks) stays real. Pointing it
+//     at the fixture --target lets the plugin-repo ensure logic run safely
+//     against a disposable temp dir instead of this actual working tree.
+//
+// Env vars below are passed ONLY through the init() helper's extraEnv (merged
+// into the spawned child's own environment) — never assigned onto this test
+// process's own process.env — so each case's env is scoped to its own
+// spawnSync call and nothing needs unsetting between cases.
+// =============================================================================
+
+test('sparring-partner case 1: plugin-repo branch + codex probe OK generates BOTH sterling and codex mcpServers entries', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'ok' });
+    assert.equal(r.code, 0, r.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp.json');
+    assert.ok(existsSync(mcpPath), 'plugin-repo MCP config generated when target matches STERLING_PLUGIN_ROOT_MATCH');
+    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(mcp.mcpServers && mcp.mcpServers.sterling, 'sterling entry present alongside codex');
+    assert.deepEqual(mcp.mcpServers.codex, { command: 'codex', args: ['mcp-server'] }, 'codex entry matches the declared CODEX_MCP_ENTRY exactly — no extra fields, no altered command/args');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('sparring-partner case 2: codex probe forced absent ⇒ no codex entry; skip line reported; init still completes its other artifacts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'absent' });
+    assert.equal(r.code, 0, r.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp.json');
+    assert.ok(existsSync(mcpPath), 'plugin-repo MCP config still generated despite the codex skip');
+    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(!('codex' in mcp.mcpServers), 'no codex key added when the probe is forced to report binary-absent');
+    assert.ok(mcp.mcpServers.sterling, 'sterling entry still present');
+    const report = r.stdout + r.stderr;
+    assert.match(report, /^codex mcp: skipped — .+/m, 'report carries an actionable "codex mcp: skipped — " line (not a bare prefix)');
+    assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init still completes its other artifacts around the codex skip');
+    assert.match(r.stdout, /^\.sterling\/config\.json\s+created\b/m, 'init still completes its other artifacts around the codex skip');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('sparring-partner case 3: codex probe forced not-logged-in ⇒ no codex entry; skip line reported; init still completes its other artifacts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'not-logged-in' });
+    assert.equal(r.code, 0, r.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp.json');
+    assert.ok(existsSync(mcpPath), 'plugin-repo MCP config still generated despite the codex skip');
+    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(!('codex' in mcp.mcpServers), 'no codex key added when the probe is forced to report not-logged-in');
+    assert.ok(mcp.mcpServers.sterling, 'sterling entry still present');
+    const report = r.stdout + r.stderr;
+    assert.match(report, /^codex mcp: skipped — .+/m, 'report carries an actionable "codex mcp: skipped — " line (not a bare prefix)');
+    assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init still completes its other artifacts around the codex skip');
+    assert.match(r.stdout, /^\.sterling\/config\.json\s+created\b/m, 'init still completes its other artifacts around the codex skip');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('sparring-partner cases 2+3 together: the binary-absent and not-logged-in skip lines are distinguishable from each other', () => {
+  const dirAbsent = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  const dirLogin = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    const rAbsent = init(dirAbsent, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dirAbsent, STERLING_CODEX_PROBE: 'absent' });
+    const rLogin = init(dirLogin, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dirLogin, STERLING_CODEX_PROBE: 'not-logged-in' });
+    assert.equal(rAbsent.code, 0, rAbsent.stderr);
+    assert.equal(rLogin.code, 0, rLogin.stderr);
+    const prefix = 'codex mcp: skipped — ';
+    const lineAbsent = (rAbsent.stdout + rAbsent.stderr).match(/^codex mcp: skipped — .+/m);
+    const lineLogin = (rLogin.stdout + rLogin.stderr).match(/^codex mcp: skipped — .+/m);
+    assert.ok(lineAbsent, 'binary-absent case reports a skip line');
+    assert.ok(lineLogin, 'not-logged-in case reports a skip line');
+    assert.notEqual(lineAbsent[0], lineLogin[0], 'the two failure reasons produce distinguishable skip lines, not one generic message');
+    assert.ok(lineAbsent[0].length > prefix.length, 'binary-absent skip line carries content beyond the bare prefix (actionable)');
+    assert.ok(lineLogin[0].length > prefix.length, 'not-logged-in skip line carries content beyond the bare prefix (actionable)');
+  } finally {
+    rmSync(dirAbsent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dirLogin, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('sparring-partner case 4: an unchanged re-run reports the plugin MCP config as matches (idempotent)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    const env = { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'ok' };
+    const first = init(dir, FRESH_FLAGS, env);
+    assert.equal(first.code, 0, first.stderr);
+    const before = readFileSync(join(dir, '.claude-plugin', 'sterling-mcp.json'), 'utf8');
+
+    const rerun = init(dir, [], env); // flagless — declarations read back from the recorded config; same env
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(rerun.stdout, /^\.claude-plugin\/sterling-mcp\.json\s+matches\b/m, 'unchanged plugin MCP config reports matches, not created/refreshed, on a repeat run');
+    assert.equal(readFileSync(join(dir, '.claude-plugin', 'sterling-mcp.json'), 'utf8'), before, 'byte-identical on the matching re-run');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('sparring-partner case 5: an unrecognized STERLING_CODEX_PROBE value fails init loud, never silently proceeding', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'garbage' });
+    assert.notEqual(r.code, 0, 'an unrecognized probe override value must fail init (nonzero exit), never proceed as if unset');
+    assert.ok((r.stderr ?? '').length > 0, 'the loud failure is accompanied by a diagnostic on stderr, not a silent nonzero');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// =============================================================================
+// Review addendum (mechanical blind spot 1, spec-only — init.mjs's implementation
+// was NOT read to author these): UPGRADE PATH for an existing sterling-only
+// plugin MCP config (.claude-plugin/sterling-mcp.json).
+//
+// SPEC: a project that already has a sterling-only plugin MCP config (e.g.
+// written by an earlier init that ran before codex became probe-able, or by a
+// run where the probe was absent at the time) gets a MANAGED REFRESH on a later
+// run where the probe now succeeds — the file gains a codex entry alongside the
+// unchanged sterling entry, reported as 'refreshed' (matching the existing
+// 'refreshed' vocabulary used for the universal-domain managed-add case above),
+// never 'created' (the file already existed) and never 'differs' (this is a
+// managed field the ensure logic owns, not a hand edit). The never-overwrite
+// guard still holds: if the existing sterling entry was hand-modified, the
+// managed refresh must decline to touch the file at all and report 'differs'.
+// =============================================================================
+
+test('sparring-partner case 6: managed refresh — a pre-existing sterling-only plugin MCP config gains a codex entry once the probe later succeeds; sterling entry unchanged; reported "refreshed" naming codex', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    // Step 1: build the fixture — a sterling-only plugin MCP config, as an
+    // earlier run (probe forced absent) would have produced.
+    const first = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'absent' });
+    assert.equal(first.code, 0, first.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp.json');
+    const before = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(before.mcpServers && before.mcpServers.sterling, 'precondition: sterling-only config exists after the absent-probe fresh init');
+    assert.ok(!('codex' in before.mcpServers), 'precondition: no codex entry yet');
+
+    // Step 2: re-run flagless (declarations read back from the recorded config),
+    // now with the probe forced to succeed — this is the managed refresh.
+    const rerun = init(dir, [], { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'ok' });
+    assert.equal(rerun.code, 0, rerun.stderr);
+
+    const after = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.deepEqual(after.mcpServers.sterling, before.mcpServers.sterling, 'sterling entry unchanged by the managed refresh');
+    assert.deepEqual(after.mcpServers.codex, { command: 'codex', args: ['mcp-server'] }, 'codex entry added, matching CODEX_MCP_ENTRY exactly');
+
+    const line = rerun.stdout.match(/^\.claude-plugin\/sterling-mcp\.json\s+.+$/m);
+    assert.ok(line, 'a report line exists for the plugin MCP config on the managed-refresh re-run');
+    assert.match(line[0], /\brefreshed\b/, "the report line says 'refreshed'");
+    assert.ok(!/\bdiffers\b/.test(line[0]), "the report line does NOT say 'differs' on a managed refresh");
+    assert.ok(!/\bcreated\b/.test(line[0]), "the report line does NOT say 'created' — the file already existed");
+    assert.match(line[0], /codex/i, 'the refresh detail names codex');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('sparring-partner case 7: never-overwrite guard holds through the codex managed refresh — a hand-edited sterling entry blocks the write; file untouched byte-for-byte, reported "differs"', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
+  try {
+    const first = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'absent' });
+    assert.equal(first.code, 0, first.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp.json');
+
+    // hand-edit the existing sterling entry (simulating a local tuning)
+    const handEdited = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    handEdited.mcpServers.sterling.args = [...handEdited.mcpServers.sterling.args, '--hand-tuned-flag'];
+    writeFileSync(mcpPath, JSON.stringify(handEdited, null, 2));
+    const beforeBytes = readFileSync(mcpPath, 'utf8');
+
+    // re-run with the probe now succeeding — the managed refresh must decline
+    const rerun = init(dir, [], { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'ok' });
+    assert.equal(rerun.code, 0, rerun.stderr);
+
+    assert.equal(readFileSync(mcpPath, 'utf8'), beforeBytes, 'never-overwrite: a hand-edited sterling entry blocks the managed codex refresh — file untouched byte-for-byte');
+    const line = rerun.stdout.match(/^\.claude-plugin\/sterling-mcp\.json\s+.+$/m);
+    assert.ok(line, 'a report line exists for the plugin MCP config on the guarded re-run');
+    assert.match(line[0], /\bdiffers\b/, "the report line says 'differs' when the sterling entry was hand-edited — never-overwrite holds");
+    assert.ok(!/\brefreshed\b/.test(line[0]), "the report line does NOT say 'refreshed' when blocked by the never-overwrite guard");
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
