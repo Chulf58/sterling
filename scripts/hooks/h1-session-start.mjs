@@ -338,6 +338,20 @@ try {
   // fail-open — a failed delete costs deferral precision, never the injection
 }
 
+// CONDUCTOR-ATTESTED ENFORCEMENT STAMP (decision h17-enforcement-stamp-
+// conductor-attested-dirt, 6e132e19): deleted UNCONDITIONALLY — every source,
+// resume included, mirroring the dispatch register above. It carries no
+// capture debt of its own (never a residue register, never a capture_owed
+// trigger) and it is only ever correct for the bundle bytes it attested at
+// stamp time: a new session's conductor re-attests deliberately via
+// scripts/enforcement-stamp.mjs, which is cheap to re-run (P4). Fail-open like
+// every H1 read.
+try {
+  rmSync(join(input.cwd, '.sterling', 'transient', 'enforcement-stamp.json'), { force: true });
+} catch {
+  // fail-open — a failed delete costs re-attestation precision, never the injection
+}
+
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
 // (touches / session-events / capture-nagged) are cleared by H10's terminal Stop
 // paths — but a session that dies without one (kill, deny-then-close, or the

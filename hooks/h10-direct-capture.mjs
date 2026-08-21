@@ -6608,10 +6608,16 @@ Files: ${JSON.stringify(deferredPaths.slice(0, 20))}.`
   }
   let unmetFamilies = [];
   if (hasConceptDuty) {
+    const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
+    const sessionAts = sessionEvents.map((e) => e.at).filter((a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a))).sort();
+    const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
     const articles = store.query({ types: ["feature_article"], cap: 1e3, include_unconfirmed: true });
-    unmetFamilies = [...conceptFamilies.entries()].filter(
-      ([family, since]) => !articles.some((a) => a.concept_family === family && (a.created_at >= since || a.updated_at >= since))
-    ).map(([family]) => family);
+    unmetFamilies = [...conceptFamilies.entries()].filter(([family, since]) => {
+      const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
+      return !articles.some(
+        (a) => a.concept_family === family && (a.created_at >= windowStart || a.updated_at >= windowStart)
+      );
+    }).map(([family]) => family);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
   let unowned = paths.filter(

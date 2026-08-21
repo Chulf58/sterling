@@ -134,6 +134,48 @@ function parsePorcelainZ(out) {
   return entries;
 }
 
+// Decision h17-enforcement-stamp-conductor-attested-dirt (6e132e19): a
+// CONDUCTOR-written stamp (.sterling/transient/enforcement-stamp.json, written
+// by scripts/enforcement-stamp.mjs — never by an agent, which cannot self-
+// attest its own tamper) lists each dirty enforcement path with the sha256 of
+// its bytes at stamp time. When EVERY path in `preExistingRels` is listed with
+// a hash matching its CURRENT bytes, the pre-existing dirt is conductor-
+// attested work-in-flight rather than an unverifiable defect. FAIL-CLOSED:
+// any error reading/parsing the stamp, any unlisted path, or any hash mismatch
+// yields no exemption — never partial credit for a subset that DID match.
+function verifyStampAttestation(cwd, preExistingRels) {
+  try {
+    const stampPath = join(cwd, '.sterling', 'transient', 'enforcement-stamp.json');
+    if (!existsSync(stampPath)) return { attested: false, stampPresent: false, failedPath: null };
+    const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
+    if (!Array.isArray(stamp)) return { attested: false, stampPresent: true, failedPath: null };
+    const byPath = new Map();
+    for (const entry of stamp) {
+      if (entry && typeof entry.path === 'string') byPath.set(entry.path, entry);
+    }
+    for (const rel of preExistingRels) {
+      const entry = byPath.get(rel);
+      if (!entry) return { attested: false, stampPresent: true, failedPath: rel };
+      const abs = join(cwd, rel);
+      // FIX L1 (upgrade-polish, 2026-08-21): a stamped DELETION attests iff the
+      // path is STILL absent — the path reappearing is not the attested state,
+      // so no exemption (fail-closed, no partial credit).
+      if (entry.deleted === true) {
+        if (existsSync(abs)) return { attested: false, stampPresent: true, failedPath: rel };
+        continue;
+      }
+      if (typeof entry.sha256 !== 'string') return { attested: false, stampPresent: true, failedPath: rel };
+      if (!existsSync(abs)) return { attested: false, stampPresent: true, failedPath: rel };
+      const current = createHash('sha256').update(readFileSync(abs)).digest('hex');
+      if (current !== entry.sha256) return { attested: false, stampPresent: true, failedPath: rel };
+    }
+    return { attested: true, stampPresent: true, failedPath: null };
+  } catch {
+    // Fail-closed (P5): an unreadable/corrupt stamp exempts nothing.
+    return { attested: false, stampPresent: true, failedPath: null };
+  }
+}
+
 // Restore a tracked path: in HEAD → git checkout (modified/deleted/rename-origin);
 // not in HEAD → new/untracked/added → remove (file or `?? dir/`).
 function restoreTracked(cwd, relRaw) {
@@ -340,6 +382,25 @@ try {
     }
   }
 
+  // Decision h17-enforcement-stamp-conductor-attested-dirt (6e132e19): before
+  // firing the enforcement-surface-dirty denial for the PRE-EXISTING set, give
+  // a conductor-written stamp its one sanctioned exemption chance. Attested in
+  // full → the pre-existing dirt is conductor-work-in-flight, not an
+  // unverifiable defect; drop it from `preExisting` entirely so it composes no
+  // denial. Anything short of full attestation (unlisted path, hash mismatch,
+  // missing/corrupt stamp) changes nothing — the existing denial fires exactly
+  // as before, optionally naming which path failed attestation when a stamp
+  // was present but did not fully cover the dirt.
+  let stampFailedPath = null;
+  if (preExisting.length) {
+    const verdict = verifyStampAttestation(cwd, preExisting);
+    if (verdict.attested) {
+      preExisting.length = 0;
+    } else if (verdict.stampPresent) {
+      stampFailedPath = verdict.failedPath;
+    }
+  }
+
   if (violations.length || preExisting.length) {
     const parts = [];
     if (violations.length) {
@@ -363,7 +424,8 @@ try {
           'H17',
           `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
             `Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside ` +
-            `(the conductor's own work, e.g. a mid-run bundle rebuild).`,
+            `(the conductor's own work, e.g. a mid-run bundle rebuild).` +
+            (stampFailedPath ? ` A conductor-attested stamp exists but does not attest '${stampFailedPath}' — no exemption.` : ''),
           { agentId: input.agent_id }
         )
       );

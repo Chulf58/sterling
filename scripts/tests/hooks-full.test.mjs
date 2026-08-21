@@ -2203,6 +2203,131 @@ test('H10 concept duty (SOP half): concept-designed.mjs appends the event, and t
   assert.match(skill, /concept_article_missing/, 'the drain SOP must name the concept_article_missing lane');
 });
 
+// ---- FIX A (upgrade-polish, 2026-08-21): H10 concept duty SESSION-WINDOW start ----
+// Spec: the demand is satisfied by a family article whose created_at/updated_at is
+// at-or-after the SESSION WINDOW START, defined as the MINIMUM of (this family's
+// earliest concept_designed event `at`) and (the earliest `at` across ALL
+// session-register events of ANY kind this session) — not merely "at-or-after the
+// concept_designed registration itself". The legitimate write-the-article-THEN-
+// register flow (seconds apart) must satisfy the duty even when the article lands
+// before the concept_designed event but after some earlier same-session event; a
+// family article predating the WHOLE session must still demand it.
+//
+// EXPECTED FAILURE TODAY (test 1 only — see its own note): H10 currently accepts
+// an article only when it is at-or-after the concept_designed event's OWN `at`.
+// Tests 2 and 3 below pin boundaries that already hold under the CURRENT (buggy)
+// implementation too — they are regression guards for the fix, not red assertions;
+// disclosed rather than dressed up as red.
+
+test('H10 concept duty (session-window fix) (1): an article created between an EARLIER session event and the concept_designed registration satisfies the duty', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const EARLY_AT = '2026-06-10T09:00:00.000Z'; // earliest event of the WHOLE session
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z'; // the concept_designed registration itself
+    const ARTICLE_AT = '2026-06-10T10:00:00.000Z'; // BEFORE the registration, AFTER the earlier event
+    // an unrelated no_capture declaration covering nothing — present only to set
+    // the session's earliest-event floor earlier than the concept registration
+    writeSessionEvents(dir, [ncEvent('unrelated early note', EARLY_AT), cEvent('weapons', CONCEPT_AT)]);
+    conceptArticle(store, 'weapons', ARTICLE_AT);
+
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    // EXPECTED FAILURE TODAY: this fires — actual code 2 (nag), expected 0. The
+    // current implementation compares ARTICLE_AT only against CONCEPT_AT (10:00 <
+    // 12:00 → unmet); the fixed session-window floor is EARLY_AT (09:00), against
+    // which 10:00 satisfies.
+    assert.equal(r.code, 0, 'the article lands after the SESSION WINDOW START (the earlier event), even though it precedes the concept_designed registration itself');
+    assert.equal(owed(store, 'concept_article_missing').length, 0, 'nothing owed — the duty was satisfied, not deferred');
+    assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared on the satisfied path');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 concept duty (session-window fix) (2): a family article predating EVERY session event still demands its concept article', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const STALE_ARTICLE_AT = '2026-06-01T00:00:00.000Z'; // long before the session
+    const EARLY_AT = '2026-06-10T09:00:00.000Z';
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z';
+    writeSessionEvents(dir, [ncEvent('unrelated early note', EARLY_AT), cEvent('weapons', CONCEPT_AT)]);
+    conceptArticle(store, 'weapons', STALE_ARTICLE_AT);
+
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    const nag = stop();
+    assert.equal(nag.code, 2, 'a stale, untouched family article — predating even the earliest session event — never satisfies the duty');
+    assert.match(nag.stderr, /weapons/);
+    const release = stop();
+    assert.equal(release.code, 0, 'second stop releases');
+    assert.equal(owed(store, 'concept_article_missing').filter((t) => t.text.includes("'weapons'")).length, 1, 'the owed item still lands');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 concept duty (session-window fix) (3): the register-first flow (article created after the concept_designed event) still satisfies, even with other earlier session events present', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const EARLY_AT = '2026-06-10T09:00:00.000Z';
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z';
+    const ARTICLE_AT = '2026-06-10T13:00:00.000Z'; // after the registration
+    writeSessionEvents(dir, [aEvent('explorer', EARLY_AT), cEvent('weapons', CONCEPT_AT)]);
+    conceptArticle(store, 'weapons', ARTICLE_AT);
+
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'register-then-write still satisfies, unaffected by the session-window widening');
+    assert.equal(owed(store, 'concept_article_missing').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---- FIX A PIN (upgrade-polish review round, 2026-08-21): malformed `at` must
+// not widen the session-window floor. A naive fix that folds EVERY session-event
+// `at` into the MIN() without validating it first is exposed by a malformed value
+// (e.g. '0' or 'n/a') that a bare `new Date(x).getTime()` — or a `|| 0` epoch
+// fallback on a NaN parse — would otherwise drag arbitrarily far back, wide
+// enough to satisfy even a family article that predates every VALID session
+// timestamp. The malformed event must be excluded from the floor computation
+// entirely, leaving the floor at the earliest VALID timestamp — against which a
+// genuinely stale article still fails to satisfy the duty (armed-duty shape:
+// nag once, release on the second Stop, one owed item lands). This is additive
+// to FIX A tests (1)-(3) above and does not modify them.
+test("H10 concept duty (session-window fix) malformed-`at` guard: a session-register event with a malformed `at` ('0' / 'n/a') must not drag the window floor back far enough to satisfy an article that predates every VALID session timestamp — the duty still nags", () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const STALE_ARTICLE_AT = '2026-06-01T00:00:00.000Z'; // predates every VALID session timestamp below
+    const EARLY_AT = '2026-06-10T09:00:00.000Z'; // earliest VALID event this session
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z';
+    writeSessionEvents(dir, [
+      { kind: 'agent_dispatch', detail: 'explorer', at: '0' }, // malformed — must be excluded from the floor
+      { kind: 'no_capture', detail: 'unrelated malformed note', at: 'n/a' }, // malformed, different kind — same guard
+      ncEvent('a genuinely early valid note', EARLY_AT),
+      cEvent('weapons', CONCEPT_AT),
+    ]);
+    conceptArticle(store, 'weapons', STALE_ARTICLE_AT);
+
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    const nag = stop();
+    // EXPECTED FAILURE MODE this pins against: if the floor computation folds
+    // the malformed timestamps in unguarded (NaN poisoning the MIN, or a `|| 0`
+    // epoch fallback), the floor collapses to something at-or-before
+    // STALE_ARTICLE_AT and the duty would wrongly report satisfied (code 0).
+    // Correct behavior excludes the malformed entries, leaves the floor at
+    // EARLY_AT, and the stale article still fails to satisfy it.
+    assert.equal(nag.code, 2, 'a malformed session-event timestamp must not widen the window back far enough to satisfy a stale article — the duty still nags');
+    assert.match(nag.stderr, /weapons/, 'the nag names the unmet family verbatim');
+    const release = stop();
+    assert.equal(release.code, 0, "second stop releases, per the suite's armed-duty shape");
+    assert.equal(owed(store, 'concept_article_missing').filter((t) => t.text.includes("'weapons'")).length, 1, 'the owed item still lands');
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- H17 (bash write sweep — coder-frontmatter registration + bundled) ---------------------------
 test('H17 is registered on the coder frontmatter Pre AND Post ToolUse Bash matchers (matcher-coverage; H11 silent-dead lesson)', () => {
   const coder = readFileSync(join(root, 'agent-templates', 'coder.md'), 'utf8');

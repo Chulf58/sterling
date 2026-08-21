@@ -6331,6 +6331,34 @@ function parsePorcelainZ(out) {
   }
   return entries;
 }
+function verifyStampAttestation(cwd2, preExistingRels) {
+  try {
+    const stampPath = join2(cwd2, ".sterling", "transient", "enforcement-stamp.json");
+    if (!existsSync3(stampPath)) return { attested: false, stampPresent: false, failedPath: null };
+    const stamp = JSON.parse(readFileSync2(stampPath, "utf8"));
+    if (!Array.isArray(stamp)) return { attested: false, stampPresent: true, failedPath: null };
+    const byPath = /* @__PURE__ */ new Map();
+    for (const entry of stamp) {
+      if (entry && typeof entry.path === "string") byPath.set(entry.path, entry);
+    }
+    for (const rel of preExistingRels) {
+      const entry = byPath.get(rel);
+      if (!entry) return { attested: false, stampPresent: true, failedPath: rel };
+      const abs = join2(cwd2, rel);
+      if (entry.deleted === true) {
+        if (existsSync3(abs)) return { attested: false, stampPresent: true, failedPath: rel };
+        continue;
+      }
+      if (typeof entry.sha256 !== "string") return { attested: false, stampPresent: true, failedPath: rel };
+      if (!existsSync3(abs)) return { attested: false, stampPresent: true, failedPath: rel };
+      const current = createHash("sha256").update(readFileSync2(abs)).digest("hex");
+      if (current !== entry.sha256) return { attested: false, stampPresent: true, failedPath: rel };
+    }
+    return { attested: true, stampPresent: true, failedPath: null };
+  } catch {
+    return { attested: false, stampPresent: true, failedPath: null };
+  }
+}
 function restoreTracked(cwd2, relRaw) {
   const rel = relRaw.replace(/\/+$/, "");
   const inHead = spawnSync("git", ["-C", cwd2, "cat-file", "-e", "HEAD:" + rel], { encoding: "utf8" }).status === 0;
@@ -6477,6 +6505,15 @@ try {
       violations.push(rel);
     }
   }
+  let stampFailedPath = null;
+  if (preExisting.length) {
+    const verdict = verifyStampAttestation(cwd, preExisting);
+    if (verdict.attested) {
+      preExisting.length = 0;
+    } else if (verdict.stampPresent) {
+      stampFailedPath = verdict.failedPath;
+    }
+  }
   if (violations.length || preExisting.length) {
     const parts = [];
     if (violations.length) {
@@ -6488,7 +6525,7 @@ try {
       parts.push(
         environmentDefectDenial(
           "H17",
-          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).`,
+          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + (stampFailedPath ? ` A conductor-attested stamp exists but does not attest '${stampFailedPath}' \u2014 no exemption.` : ""),
           { agentId: input.agent_id }
         )
       );

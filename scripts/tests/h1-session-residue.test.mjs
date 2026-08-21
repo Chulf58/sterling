@@ -535,6 +535,41 @@ test('AC6: other transient files (pressure-nagged.json, conductor-pressure.json)
   }
 });
 
+// ---- FIX C (upgrade-polish, 2026-08-21; decision h17-enforcement-stamp-conductor-
+// attested-dirt, knowledge_get 6e132e19-0da1-47c2-9fa5-710bc7365014): the
+// conductor-attested enforcement stamp (.sterling/transient/enforcement-stamp.json,
+// written by scripts/enforcement-stamp.mjs) is transient, P4 lifecycle-bound state
+// scoped to ONE session — H1 deletes it at SessionStart. It is NOT one of the
+// three residue registers above: it carries no capture debt of its own, so its
+// deletion must never mint a capture_owed item or the RESIDUE_PHRASE mention.
+//
+// SPEC POINT THE EXISTING FIXTURES CANNOT RESOLVE (disclosed, not improvised):
+// the three residue registers deliberately leave source='resume'/'compact'
+// COMPLETELY untouched (AC2 above), while the governing decision states the
+// stamp is deleted "at SessionStart" unqualified by source. Whether the stamp
+// follows the residue registers' resume/compact exemption, or is deleted
+// unconditionally on every SessionStart source, is not pinned by the brief
+// handed to this test-writer. The test below asserts only the UNAMBIGUOUS case
+// (source='startup', where every plausible reading agrees the stamp is deleted)
+// and leaves resume/compact deliberately untested rather than encoding a guess.
+const STAMP = ['.sterling', 'transient', 'enforcement-stamp.json'];
+
+test('FIX C: H1 deletes the conductor-attested enforcement stamp at SessionStart (startup), minting no residue debt from it', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeReg(dir, STAMP, [{ path: 'hooks/x.mjs', sha256: 'deadbeef', at: T1 }]);
+    const r = h1(dir, 'startup');
+    assert.equal(r.code, 0, r.stderr);
+    // EXPECTED FAILURE TODAY: H1 has no knowledge of this file yet, so it
+    // survives — this assertion fires (actual true, expected false).
+    assert.equal(regExists(dir, STAMP), false, 'the stamp is deleted on startup (P4 lifecycle)');
+    assert.doesNotMatch(additionalContext(r) ?? '', RESIDUE_PHRASE, 'the stamp is not a residue register — no capture debt is minted from it');
+    assert.equal(captureOwedItems(store).length, 0, 'deleting the stamp mints nothing');
+  } finally {
+    cleanup();
+  }
+});
+
 test('AC1a boundary: touched paths in file_keys are deduped and capped at 20', () => {
   // dedup: 5 unique paths, each touched twice — no cap involved
   const dedup = makeProject();

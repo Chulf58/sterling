@@ -588,17 +588,38 @@ try {
   }
 
   // Concept duty satisfaction (decision 7208729b): per FAMILY, a feature_article
-  // carrying concept_family === family created/updated since that family's
-  // earliest concept_designed event. General capture does NOT satisfy it — only
-  // the family's concept article does (mirrors the article-demand semantics).
+  // carrying concept_family === family created/updated since the SESSION WINDOW
+  // START for that family — min(that family's earliest concept_designed event
+  // `at`, the earliest valid `at` across ALL session-register events of any
+  // kind this session). This lets the legitimate write-article-THEN-register
+  // flow satisfy in either order: an article written any time within the
+  // session window (from the session's earliest event onward) satisfies, even
+  // when it lands before its own family's concept_designed registration; an
+  // article predating the WHOLE session still demands. General capture does
+  // NOT satisfy it — only the family's concept article does (mirrors the
+  // article-demand semantics).
   let unmetFamilies = [];
   if (hasConceptDuty) {
+    // FIX L2 (upgrade-polish review, 2026-08-21): a non-ISO `at` sorts
+    // lexically below every real timestamp and would drag windowStart
+    // arbitrarily back. Date.parse alone is NOT the right validity test —
+    // V8 parses '0' as year 2000 (finite!) while the string '0' still sorts
+    // below every ISO stamp — so validity here is ISO SHAPE (the only form
+    // the register's writers emit) plus parseability.
+    const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
+    const sessionAts = sessionEvents
+      .map((e) => e.at)
+      .filter((a) => typeof a === 'string' && ISO_AT.test(a) && Number.isFinite(Date.parse(a)))
+      .sort();
+    const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
     const articles = store.query({ types: ['feature_article'], cap: 1000, include_unconfirmed: true });
     unmetFamilies = [...conceptFamilies.entries()]
-      .filter(
-        ([family, since]) =>
-          !articles.some((a) => a.concept_family === family && (a.created_at >= since || a.updated_at >= since))
-      )
+      .filter(([family, since]) => {
+        const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
+        return !articles.some(
+          (a) => a.concept_family === family && (a.created_at >= windowStart || a.updated_at >= windowStart)
+        );
+      })
       .map(([family]) => family);
   }
   const conceptSatisfied = unmetFamilies.length === 0;

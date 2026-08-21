@@ -2995,39 +2995,77 @@ export class SterlingTools {
    * item's file_keys written since the item was born. An empty list means the
    * close rides the operator's word, and the receipt says so out loud.
    */
-  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string } | { check_skipped: SkippedCheck[] } {
+  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
+    const since = item.created_at;
+    const evidenceTypes = ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'reference_material'];
+    // FIX M1 (upgrade-polish review, 2026-08-21): the id-citation arm below needs
+    // no file identity at all — concept_article_missing / research_owed / plain
+    // tasks routinely carry no file_keys, and those are exactly the items most
+    // wronged by an early return that skipped BOTH arms. Only the file_keys arm
+    // is conditional on fileKeys being non-empty; the id-citation arm always runs.
+    let fileKeyMatches: DurableRecord[] = [];
+    const checkSkipped: SkippedCheck[] = [];
     if (fileKeys.length === 0) {
-      // No file identity to join on — the check cannot run, and says so
-      // (P5: a skipped check is loud, never a silent no-op).
+      // No file identity to join on for THIS arm only — it cannot run, and says
+      // so (P5: a skipped check is loud, never a silent no-op).
       const skipped = { check: 'board-remove-artifact-binding', reason: 'no_file_keys' };
       this.store.recordCheckSkipped(skipped.check, skipped.reason, this.activeRunId(), this.now());
-      return { check_skipped: [skipped] };
+      checkSkipped.push(skipped);
+    } else {
+      // Scan WIDE, filter by since, THEN trim the receipt (review finding 12,
+      // 2026-08-09 — the same pre-cap/post-cap ordering hazard as audit finding
+      // 33/43): the store orders by file-key-overlap count first and updated_at
+      // only as a tiebreak, so a small cap on a well-documented area fills with
+      // old high-overlap records and pushes the one NEW artifact out — and this
+      // receipt would then accuse the operator of drift that never happened.
+      // 200 is a bounded scan, not a guarantee; past it the disclosure errs
+      // toward the scanned window and never blocks either way.
+      fileKeyMatches = this.store
+        .query({ types: evidenceTypes, file_keys: fileKeys, cap: 200 })
+        .filter((r) => r.created_at >= since || r.updated_at >= since);
     }
-    const since = item.created_at;
-    // Scan WIDE, filter by since, THEN trim the receipt (review finding 12,
-    // 2026-08-09 — the same pre-cap/post-cap ordering hazard as audit finding
-    // 33/43): the store orders by file-key-overlap count first and updated_at
-    // only as a tiebreak, so a small cap on a well-documented area fills with
-    // old high-overlap records and pushes the one NEW artifact out — and this
-    // receipt would then accuse the operator of drift that never happened.
-    // 200 is a bounded scan, not a guarantee; past it the disclosure errs
-    // toward the scanned window and never blocks either way.
-    const evidence = this.store
-      .query({
-        types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'reference_material'],
-        file_keys: fileKeys,
-        cap: 200,
-      })
-      .filter((r) => r.created_at >= since || r.updated_at >= since)
-      .slice(0, 25)
-      .map((r) => digestRecord(r as unknown as Record<string, unknown>));
+    // FIX B (upgrade-polish, 2026-08-21): a durable record can fulfil this item
+    // WITHOUT ever touching its file_keys — e.g. a decision that closes the
+    // item by citing its own id (the citation convention: decisions write
+    // 'board <prefix8>', or occasionally the full uuid). Scan wide over the
+    // same record surface (no store schema or new index — a linear scan is
+    // cheap at this scale) and keep only records written at-or-after the item
+    // was created, so a coincidental same-prefix record predating the item
+    // never counts as its fulfilling write.
+    const prefix = item.id.slice(0, 8);
+    const citesItem = (r: DurableRecord): boolean => {
+      const body = JSON.stringify(r);
+      return body.includes(item.id) || body.includes(prefix);
+    };
+    // 200 is the SAME bounded scan as the file_keys arm above — the id-citation
+    // window covers only the 200 most-recently-updated records of the evidence
+    // types, never the whole store; past it the disclosure errs toward the
+    // scanned window and never blocks either way.
+    const idMatches = this.store
+      .query({ types: evidenceTypes, cap: 200 })
+      .filter((r) => (r.created_at >= since || r.updated_at >= since) && citesItem(r));
+    // Dedupe across the two arms by record id — file_keys order first, then any
+    // id-citation matches not already covered.
+    const seen = new Set<string>();
+    const combined: DurableRecord[] = [];
+    for (const r of [...fileKeyMatches, ...idMatches]) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      combined.push(r);
+    }
+    const evidence = combined.slice(0, 25).map((r) => digestRecord(r as unknown as Record<string, unknown>));
     return {
       artifact_evidence: evidence,
+      ...(checkSkipped.length > 0 ? { check_skipped: checkSkipped } : {}),
       ...(evidence.length === 0
         ? {
+            // FIX M2 (upgrade-polish review, 2026-08-21): disclose the id arm's
+            // window honestly — it is a bounded scan of the 200 most-recently-
+            // updated records of the evidence types, not an exhaustive search of
+            // everything ever written citing this id.
             note:
-              `no fulfilling artifact-write found touching this item's file_keys since it was created — removed on the operator's word. ` +
+              `no fulfilling artifact-write found — nothing touching this item's file_keys, and nothing citing its id among the 200 most-recently-updated evidence records, since it was created — removed on the operator's word. ` +
               `If work fulfilled this item, its capture is missing (that is drift, not a formality).`,
           }
         : {}),

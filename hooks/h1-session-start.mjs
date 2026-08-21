@@ -6484,6 +6484,10 @@ try {
   }
 } catch {
 }
+try {
+  rmSync(join4(input.cwd, ".sterling", "transient", "enforcement-stamp.json"), { force: true });
+} catch {
+}
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {

@@ -1056,6 +1056,136 @@ test('removal evidence survives the store cap: old high-overlap records cannot p
   }
 });
 
+// ---------------------------------------------------------------------------
+// FIX B (upgrade-polish, 2026-08-21): board_remove artifact_evidence ALSO scans
+// durable-record BODY TEXT for a citation of the board item's own id — the full
+// uuid or its first-8-char citation prefix (the same prefix convention pinned by
+// AC6 in cited-id-warnings.test.ts) — written at-or-after the item's created_at.
+// The existing file_keys arm is unchanged; the "no fulfilling artifact-write"
+// note appears only when BOTH arms are empty.
+//
+// EXPECTED FAILURE TODAY: test (1) fires — boardRemove currently scans only
+// file_keys overlap, so a decision citing the item's id/prefix but never
+// touching its file_keys is invisible to artifact_evidence: actual
+// closed.artifact_evidence.length === 0, expected 1. Tests (2) and (3) already
+// hold under the CURRENT implementation too (an unrelated-id citation was never
+// evidence, and there is no id-scanning arm yet to be fooled by a pre-dated
+// coincidence) — they are boundary/regression guards for the fix, disclosed
+// rather than presented as red.
+// ---------------------------------------------------------------------------
+
+test("board_remove artifact_evidence FIX B (1): a decision citing the item's 8-char id prefix counts as evidence even when it never touches file_keys", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const item = (tools.boardAdd({ text: 'fix the doc', source: 'user', file_keys: ['docs/x.md'] }) as { record: { id: string } }).record;
+    const prefix = item.id.slice(0, 8);
+    tools.knowledgeCreate('decision', {
+      title: 'settled by direct fix',
+      statement: `Closes board ${prefix} by writing the doc fix directly, off any tracked file_keys.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const closed = tools.boardRemove(item.id);
+    assert.equal(closed.artifact_evidence?.length, 1, 'the id-citing decision is visible as evidence even though it never touched file_keys');
+    assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
+    assert.equal(closed.note, undefined, "no operator's-word note when id-citation evidence exists");
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_remove artifact_evidence FIX B (2): a decision citing an UNRELATED id, off file_keys, leaves evidence empty (unchanged)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const item = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
+    tools.knowledgeCreate('decision', {
+      title: 'an unrelated ruling',
+      statement: `Follows decision ${randomUUID()} for an unrelated matter.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const closed = tools.boardRemove(item.id);
+    assert.deepEqual(closed.artifact_evidence, [], 'citing a different id, off file_keys, is not evidence');
+    assert.match(closed.note ?? '', /operator's word/, 'the no-fulfilling-write note still fires — unchanged behavior');
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_remove artifact_evidence FIX B (3): a record CREATED BEFORE the item, coincidentally containing its future 8-char prefix, is excluded', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-evidence-predate-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  let t = '2026-06-10T12:00:00.000Z';
+  const tools = new SterlingTools({ store, now: () => t });
+  try {
+    // learn the item's id/prefix at a LATE clock, then rewind the clock so the
+    // decision below is created BEFORE the item ever existed
+    t = '2026-06-12T12:00:00.000Z';
+    const item = (tools.boardAdd({ text: 'fix the widget', source: 'user', file_keys: ['src/widget.ts'] }) as { record: { id: string } }).record;
+    const prefix = item.id.slice(0, 8);
+
+    t = '2026-06-10T12:00:00.000Z'; // strictly before item.created_at
+    tools.knowledgeCreate('decision', {
+      title: 'an older, unrelated ruling',
+      statement: `Mentions board ${prefix} in passing, long before that item ever existed.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+
+    t = '2026-06-13T12:00:00.000Z';
+    const closed = tools.boardRemove(item.id);
+    assert.deepEqual(closed.artifact_evidence, [], 'a same-prefix record predating the item is never its fulfilling write');
+    assert.match(closed.note ?? '', /operator's word/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FIX B PINS (upgrade-polish review round, 2026-08-21) — additive, written
+// against the FIX B spec above (id/8-char-prefix citation as a second evidence
+// arm, independent of file_keys). The fixer lands in parallel; postures noted
+// per test.
+// ---------------------------------------------------------------------------
+
+test("board_remove artifact_evidence FIX B (4): a board item with NO file_keys still gets id-citation evidence — the id-scan arm runs independently of the file_keys arm (EXPECTED RED today: today a keyless item only ever reports check_skipped/no_file_keys, with no id-scanning arm to find this decision)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const item = (tools.boardAdd({ text: 'free-floating idea', source: 'user' }) as { record: { id: string } }).record;
+    const prefix = item.id.slice(0, 8);
+    tools.knowledgeCreate('decision', {
+      title: 'settled the free-floating idea',
+      statement: `Closes board ${prefix} directly; there is no tracked file for this one.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const closed = tools.boardRemove(item.id);
+    assert.equal(closed.artifact_evidence?.length, 1, 'a keyless item still surfaces id-citation evidence even though the file_keys arm cannot run');
+    assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
+    assert.equal(closed.note, undefined, "no operator's-word note when id-citation evidence exists");
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_remove artifact_evidence FIX B (5): the no-evidence note discloses the id-citation scan is a BOUNDED window, not an exhaustive search over every record ever written (EXPECTED RED today: the current note names only the operator\'s-word binding, with no window/recency disclosure)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
+    const abandoned = tools.boardRemove(bare.id);
+    assert.deepEqual(abandoned.artifact_evidence, [], 'no fulfilling write exists for either arm');
+    assert.match(abandoned.note ?? '', /operator's word/, 'the pre-existing note still fires (unchanged)');
+    assert.match(
+      abandoned.note ?? '',
+      /200|most.recently|window/i,
+      'the note discloses the id-citation scan is a bounded window (e.g. a recency cap), never letting "no evidence found" read as an exhaustive proof of absence — pin disclosure exists, not exact prose'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED naming the match — the author merges via knowledge_update or stores with dedup_override', () => {
   const { tools, cleanup } = harness();
   try {
