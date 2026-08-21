@@ -612,3 +612,270 @@ test('resolves: an item named in resolves is closed by the split; an unnamed sib
     cleanup();
   }
 });
+
+// ===========================================================================
+// STRENGTHENING — appended post-implementation. knowledgeSplit now exists;
+// these pin review-adjudicated `resolves` gating and the two-wrapper
+// (knowledgeSplit / knowledgeSplitResult) oversize re-measure, plus two
+// pre-write validation edges (default dependency back-linking, empty
+// move_files). Every refusal here reuses the file's own
+// assertParentUntouched/assertNoSlug/articleCount store-unchanged idiom
+// verbatim. No implementation file (tools.ts, server.ts, packages/schemas)
+// was read for this addendum — the 60000-char oversize default and the
+// `resolves`/`maintenanceEnqueue{reason,text,file_keys}`/`maintenanceQuery
+// {system_reason,cap}` shapes are taken from this file's own frozen fixture
+// (lines 583-614 above) and from packages/mcp-server/src/tests/tools.test.ts
+// (a sibling TEST file, not implementation), per the dispatch's own
+// instruction to mirror the frozen resolves test's article_oversize seeding.
+//
+// EXPECTED FAILURE SHAPE if a pinned behavior does NOT hold (green is
+// expected on current code since knowledgeSplit/knowledgeSplitResult are
+// implemented; per-test failure shape noted above each test):
+//   1) assert.throws would report "Missing expected exception" (the split
+//      succeeded when a promotion_review-named resolves should refuse it).
+//   2) assert.throws would report "Missing expected exception" (the split
+//      succeeded when an unrelated resolves target should refuse it).
+//   3) the split call itself would throw (success path breaks) OR the
+//      `!open.some(...)` assertion would fail because the marker-matched
+//      item was left open instead of closed.
+//   4) either `Array.isArray(result.warnings)` fails (wrapper does not
+//      expose a warnings array) or the `.some(/article_oversize_chars
+//      threshold/)` assertion fails (a still-huge parent is not re-flagged
+//      immediately after the split), or no open article_oversize item names
+//      the parent afterward.
+//   5) either `parentDeps.relied_by.includes(childSlug)` fails (parent's own
+//      surviving version was not back-linked to its new child) or
+//      `childDeps.relies_on.includes(parentSlug)` fails.
+//   6) assert.throws would report "Missing expected exception" (a child
+//      with move_files: [] was accepted) — or the message-shape asserts
+//      fail if it refuses for the wrong reason without naming the slug/file
+//      requirement.
+// ===========================================================================
+
+// The server also registers a `knowledgeSplitResult` wrapper (the Result
+// convention used throughout this codebase for knowledgeUpdateResult /
+// knowledgeAppend / knowledgeEdit — each returns `{ ...record shape,
+// warnings }`). It is not declared on SterlingTools' TS type either — same
+// cast-through-`unknown` precedent as `SplitCapable`/`split()` above.
+interface SplitResultCapable {
+  knowledgeSplitResult(input: Loose): unknown;
+}
+function splitResult(tools: SterlingTools, input: Loose): Loose {
+  return (tools as unknown as SplitResultCapable).knowledgeSplitResult(input) as Loose;
+}
+
+test('refusal: resolves naming a promotion_review item is refused — a human gate never drains through a split, nothing written', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const parent = mkParentArticle(tools, 'compaction-parent-promo');
+    const before = articleCount(tools);
+    const reviewItem = tools.maintenanceEnqueue({
+      reason: 'promotion_review',
+      text: `promotion review pending for 'compaction-parent-promo'`,
+      file_keys: ['src/parent/b.ts'],
+    });
+
+    assert.throws(
+      () =>
+        split(tools, {
+          id: parent.id,
+          children: [{ slug: 'child-promo', title: 'x', what_it_does: 'x', intended_behavior: 'x', move_files: ['src/parent/b.ts'], move_ac_ids: [] }],
+          parent_what_it_does: 'x',
+          resolves: [reviewItem.record.id],
+        }),
+      /promotion_review/i,
+      'a promotion_review item named in resolves must be refused by name — a human gate never drains through a split'
+    );
+    assert.equal(articleCount(tools), before, 'nothing written');
+    assertParentUntouched(tools, parent);
+    assertNoSlug(tools, 'child-promo');
+    const open = tools.maintenanceQuery({ cap: 1000 });
+    assert.ok(
+      open.some((t) => (t as unknown as { id: string }).id === reviewItem.record.id),
+      'the promotion_review item stays open, untouched by the refused split'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('refusal: resolves naming an unrelated system item (different record, no oversize marker for THIS parent) is refused, nothing written', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const parent = mkParentArticle(tools, 'compaction-parent-unrelated');
+    const otherArticle = tools.knowledgeCreate('feature_article', {
+      slug: 'unrelated-other-article',
+      title: 'other',
+      what_it_does: 'x',
+      intended_behavior: 'y',
+      files: [{ path: 'src/other/z.ts', role: 'impl' }],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    }).record as unknown as Loose;
+    const unrelatedItem = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed',
+      text: `record ${otherArticle.id as string} needs reconciliation, unrelated to compaction-parent-unrelated`,
+      file_keys: ['src/other/z.ts'],
+    });
+    const before = articleCount(tools);
+
+    assert.throws(
+      () =>
+        split(tools, {
+          id: parent.id,
+          children: [{ slug: 'child-unrelated-resolves', title: 'x', what_it_does: 'x', intended_behavior: 'x', move_files: ['src/parent/b.ts'], move_ac_ids: [] }],
+          parent_what_it_does: 'x',
+          resolves: [unrelatedItem.record.id],
+        }),
+      Error,
+      'resolves naming an item unrelated to this parent (different feature_link, no oversize marker for this parent) must be refused'
+    );
+    assert.equal(articleCount(tools), before, 'nothing written');
+    assertParentUntouched(tools, parent);
+    assertNoSlug(tools, 'child-unrelated-resolves');
+    const open = tools.maintenanceQuery({ cap: 1000 });
+    assert.ok(
+      open.some((t) => (t as unknown as { id: string }).id === unrelatedItem.record.id),
+      'the unrelated item stays open, untouched by the refused split'
+    );
+    assert.equal((tools.knowledgeGet(otherArticle.id as string) as unknown as Loose).status, 'active', 'the unrelated article is untouched');
+  } finally {
+    cleanup();
+  }
+});
+
+test('resolves: an article_oversize item whose text begins with the oversize marker for THIS parent closes on a successful split (the motivating case)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const parent = mkParentArticle(tools, 'compaction-parent-marker');
+    const markerItem = tools.maintenanceEnqueue({
+      reason: 'article_oversize',
+      text: `article 'compaction-parent-marker' exceeds the article_oversize_chars threshold — split it or trim it`,
+      file_keys: ['src/parent/b.ts'],
+    });
+
+    const raw = split(tools, {
+      id: parent.id,
+      children: [{ slug: 'compaction-child-marker', title: 'x', what_it_does: 'x', intended_behavior: 'x', move_files: ['src/parent/b.ts'], move_ac_ids: ['AC2'] }],
+      parent_what_it_does: 'parent body after the split, well under threshold',
+      resolves: [markerItem.record.id],
+    });
+    assert.ok((raw as unknown as { parent: { id: string } }).parent.id, 'the split succeeded (the motivating oversize-split case)');
+
+    const open = tools.maintenanceQuery({ cap: 1000 });
+    assert.ok(
+      !open.some((t) => (t as unknown as { id: string }).id === markerItem.record.id),
+      'the article_oversize item naming this parent by its oversize marker is closed by the successful split'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('oversize re-measure: a split whose parent_what_it_does remains huge re-flags article_oversize via knowledgeSplitResult — warns and leaves an open item naming the parent', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const parent = mkParentArticle(tools);
+    // Fixture's store config is the default (harness() takes no config
+    // override) — article_oversize_chars defaults to 60000 (per dispatch);
+    // this prose stays well over that after trimming.
+    const stillHugeProse = 'y'.repeat(61000);
+
+    const raw = splitResult(tools, {
+      id: parent.id,
+      children: [
+        {
+          slug: 'compaction-child-oversize',
+          title: 'child',
+          what_it_does: 'child body',
+          intended_behavior: 'child behavior',
+          move_files: ['src/parent/b.ts'],
+          move_ac_ids: ['AC2'],
+        },
+      ],
+      parent_what_it_does: stillHugeProse,
+    });
+    const result = raw as unknown as { parent: { id: string }; children: { id: string; slug: string }[]; warnings: string[] };
+
+    assert.ok(Array.isArray(result.warnings), 'knowledgeSplitResult returns a warnings array');
+    assert.ok(
+      result.warnings.some((w) => /article_oversize_chars threshold/.test(w)),
+      'the still-huge parent re-flags oversize immediately after the split, on the same warnings channel as knowledge_update/append/edit'
+    );
+
+    const items = tools.maintenanceQuery({ cap: 1000, system_reason: 'article_oversize' });
+    assert.ok(
+      items.some((t) => (t as unknown as { text: string }).text.includes("'compaction-parent'")),
+      'an open article_oversize item exists naming the parent after the split'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('symmetric dependencies: a default-dependencies split back-links the parent — the surviving parent version relied_by contains the child slug, and the child relies_on contains the parent slug', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const parent = mkParentArticle(tools, 'compaction-parent-symdeps');
+
+    const raw = split(tools, {
+      id: parent.id,
+      children: [
+        {
+          slug: 'compaction-child-symdeps',
+          title: 'child',
+          what_it_does: 'child body',
+          intended_behavior: 'child behavior',
+          move_files: ['src/parent/b.ts'],
+          move_ac_ids: ['AC2'],
+        },
+      ],
+      parent_what_it_does: 'parent body after split, symmetric-dependency check',
+    });
+    const result = raw as unknown as { parent: { id: string }; children: { id: string; slug: string }[] };
+
+    const newParent = tools.knowledgeGet(result.parent.id) as unknown as Loose;
+    const parentDeps = newParent.dependencies as { relies_on: string[]; relied_by: string[] };
+    assert.ok(
+      parentDeps.relied_by.includes('compaction-child-symdeps'),
+      'the surviving parent version records the new child as a dependent (relied_by) — the default split back-links both directions, not just child-to-parent'
+    );
+
+    const child = tools.knowledgeGet(result.children[0].id) as unknown as Loose;
+    const childDeps = child.dependencies as { relies_on: string[]; relied_by: string[] };
+    assert.ok(
+      childDeps.relies_on.includes('compaction-parent-symdeps'),
+      'the child records relies_on the parent slug by default'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('refusal: a child with move_files: [] is refused pre-write, naming the child slug and requiring a child to own at least one file', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const parent = mkParentArticle(tools);
+    const before = articleCount(tools);
+
+    assert.throws(
+      () =>
+        split(tools, {
+          id: parent.id,
+          children: [{ slug: 'child-no-files', title: 'x', what_it_does: 'x', intended_behavior: 'x', move_files: [], move_ac_ids: ['AC2'] }],
+          parent_what_it_does: 'x',
+        }),
+      /(?=.*child-no-files)(?=.*(?:at least one|must own|non-empty|own.*file))/is,
+      'an empty-move_files child must be refused, naming the child slug and stating a child must own at least one file'
+    );
+    assert.equal(articleCount(tools), before, 'nothing written');
+    assertParentUntouched(tools, parent);
+    assertNoSlug(tools, 'child-no-files');
+  } finally {
+    cleanup();
+  }
+});

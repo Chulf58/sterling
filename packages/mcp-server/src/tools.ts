@@ -244,6 +244,28 @@ const PLANNED_CREDIBLE_BYTES = 2000;
  */
 export class UnresolvedIdentifierError extends Error {}
 
+/**
+ * knowledgeSplit's input shape, extracted so knowledgeSplitResult (the
+ * MCP-facing wrapper, mirroring knowledgeUpdateResult) can share it without
+ * a second hand-copied literal.
+ */
+export interface KnowledgeSplitInput {
+  id: string;
+  children: {
+    slug: string;
+    title: string;
+    what_it_does: string;
+    intended_behavior: string;
+    move_files: string[];
+    move_ac_ids: string[];
+    dependencies?: { relies_on: string[]; relied_by: string[] };
+  }[];
+  parent_what_it_does: string;
+  parent_intended_behavior?: string;
+  reason?: string;
+  resolves?: string[];
+}
+
 export class SterlingTools {
   private store: ToolStore;
   private config: SterlingConfig;
@@ -1389,7 +1411,7 @@ export class SterlingTools {
     // 86216751's refreshes-in-place contract. The slug is the one handle
     // stable across versions AND files[] changes; the closing quote in the
     // marker keeps a slug from prefix-matching a longer sibling.
-    const marker = `article '${a.slug}'`;
+    const marker = this.articleOversizeMarker(a.slug);
     const open = this.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }) as unknown as { id: string; text?: string }[];
     const existing = open.find((t) => (t.text ?? '').startsWith(marker));
     if (existing) {
@@ -2056,6 +2078,19 @@ export class SterlingTools {
   }
 
   /**
+   * The article_oversize dedup marker articleOversizeWarnings mints/matches
+   * for a slug (decision article-oversize-dedups-on-the-slug-at-its-minting-
+   * site, 19b506ce-5c12-46d5-afa1-5a32170bab8d). Extracted so every caller
+   * that needs to recognize "is this item the oversize item for THIS article"
+   * — articleOversizeWarnings itself and validateResolveClaim's split
+   * semantics below — derives the prefix from the ONE place that owns the
+   * text format, never a hand-copied literal.
+   */
+  private articleOversizeMarker(slug: string): string {
+    return `article '${slug}'`;
+  }
+
+  /**
    * Validate ONE `resolves` claim BEFORE any write lands (decision
    * 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373 — replaces the
    * implicit chain-based auto-drain of decision 8ecd435f). The named id must:
@@ -2066,8 +2101,18 @@ export class SterlingTools {
    * supersedes chain (this id or an ancestor). Any miss throws, naming the
    * offending id and the reason, so a write that lands is a write whose
    * claims were checked — no version minted, no item removed on a refusal.
+   *
+   * `options.splitMarker`, set ONLY by knowledge_split (decision
+   * compaction-tooling-windowed-read-plus-split), widens the lane/match rules
+   * without a second copy of this function: promotion_review stays refused
+   * UNCONDITIONALLY either way (P1 — a human gate, same wording both paths);
+   * every OTHER lane closes when the item's feature_link lands in the
+   * supersede chain passed in OR its text starts with the article-oversize
+   * marker for the split's parent slug — the item a split most naturally
+   * discharges (article_oversize) predates the split and carries neither a
+   * matching feature_link nor a restriction to knowledgeUpdate's two lanes.
    */
-  private validateResolveClaim(id: string, chain: Set<string>): DurableRecord {
+  private validateResolveClaim(id: string, chain: Set<string>, options?: { splitMarker: string }): DurableRecord {
     const record = this.store.get(id);
     if (!record) {
       // Distinguish "never existed" from "already removed" the same way
@@ -2083,19 +2128,27 @@ export class SterlingTools {
       }
       throw new Error(`resolves: names '${id}', which does not exist as a maintenance item; nothing was written.`);
     }
-    const it = record as unknown as { type: string; source?: string; system_reason?: string; feature_link?: string };
+    const it = record as unknown as { type: string; source?: string; system_reason?: string; feature_link?: string; text?: string };
     if (it.type !== 'todo' || it.source !== 'system') {
       throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
     }
-    if (it.system_reason !== 'reconcile_needed' && it.system_reason !== 'refresh_reference') {
+    const isSplit = options !== undefined;
+    const laneAllowed = isSplit
+      ? it.system_reason !== 'promotion_review'
+      : it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference';
+    if (!laneAllowed) {
       throw new Error(
         `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only reconcile_needed and refresh_reference items ` +
           `close via resolves; every other lane, including promotion_review, closes only through its own mechanism. Nothing was written.`
       );
     }
-    if (it.feature_link === undefined || !chain.has(it.feature_link)) {
+    const inChain = it.feature_link !== undefined && chain.has(it.feature_link);
+    const marksThisArticle = isSplit && (it.text ?? '').startsWith(options!.splitMarker);
+    if (!inChain && !marksThisArticle) {
       throw new Error(
-        `resolves: names '${id}', whose feature_link does not match this record or any of its supersedes-chain ancestors; nothing was written.`
+        isSplit
+          ? `resolves: names '${id}', whose feature_link does not match this split's parent (or its supersedes-chain ancestors), and whose text does not match the article-oversize marker for the parent's slug; nothing was written.`
+          : `resolves: names '${id}', whose feature_link does not match this record or any of its supersedes-chain ancestors; nothing was written.`
       );
     }
     return record;
@@ -2234,48 +2287,24 @@ export class SterlingTools {
   }
 
   /**
-   * knowledge_split's OWN resolves validation (decision
-   * compaction-tooling-windowed-read-plus-split): unlike knowledgeUpdate's
-   * validateResolveClaim, this is deliberately NOT lane-restricted to
-   * reconcile_needed/refresh_reference and does not require a feature_link
-   * into the record's supersede chain — the item a split most naturally
-   * closes is the article_oversize item that MOTIVATED it, which carries
-   * neither. The named id must exist as an OPEN system maintenance-queue
-   * item; any other type or an already-drained id is refused by name, the
-   * same shape validateResolveClaim's own refusals use.
-   */
-  private validateSplitResolveClaim(id: string): DurableRecord {
-    const record = this.store.get(id);
-    if (!record) {
-      const trace = this.store.drainLogEntry(id);
-      if (trace) {
-        throw new Error(
-          `resolves: names '${id}', which is not OPEN — it was already removed` +
-            (trace.drained_at ? ` at ${trace.drained_at}` : '') +
-            ` (per the drain log). A closed item cannot be re-claimed; nothing was written.`
-        );
-      }
-      throw new Error(`resolves: names '${id}', which does not exist as a maintenance item; nothing was written.`);
-    }
-    const it = record as unknown as { type: string; source?: string };
-    if (it.type !== 'todo' || it.source !== 'system') {
-      throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
-    }
-    return record;
-  }
-
-  /**
    * knowledge_split (decision compaction-tooling-windowed-read-plus-split,
    * board 136091d2) mechanically enforces the split invariants decision
-   * 8b87efcb established BY HAND for the hooks-suite split: prose moved
-   * VERBATIM (files[]/current_ac[]/live_test_refs entries are relocated, not
-   * rewritten), ac_ids INHERITED never renumbered, live_test_refs RE-POINTED
-   * (an entry follows its ac_id to whichever side — parent or child — now
-   * owns it), the parent SURVIVES under its ORIGINAL slug (a split is
-   * additive children plus a parent trim, never a retire-and-replace), and
-   * FILE COVERAGE stays TOTAL — every path the parent owned before the split
-   * lands on exactly the parent or one child afterward, never both, never
-   * neither.
+   * 8b87efcb established BY HAND for the hooks-suite split. The MECHANICAL
+   * guarantees — the ones this function actually enforces, in code — are:
+   * files[]/current_ac[]/live_test_refs ENTRIES are relocated VERBATIM (moved
+   * as the identical object, never rewritten), ac_ids are INHERITED never
+   * renumbered, live_test_refs is RE-POINTED (an entry follows its ac_id to
+   * whichever side — parent or child — now owns it), the parent SURVIVES
+   * under its ORIGINAL slug (a split is additive children plus a parent
+   * trim, never a retire-and-replace), and FILE COVERAGE stays TOTAL — every
+   * path the parent owned before the split lands on exactly the parent or
+   * one child afterward, never both, never neither. "VERBATIM" describes
+   * ONLY that entry relocation and these structural invariants — it does
+   * NOT extend to the narrative prose (each child's what_it_does/
+   * intended_behavior, parent_what_it_does/parent_intended_behavior): that
+   * text is caller-authored free-form content, and its fidelity to what the
+   * pre-split parent actually said remains conductor discipline, the same as
+   * any other knowledge_update/knowledge_create body.
    *
    * ALL validation — parent type/status, per-child move_files/move_ac_ids
    * ownership, cross-child claim collisions, child slug collisions (reusing
@@ -2284,34 +2313,26 @@ export class SterlingTools {
    * refused: that shape is retire-and-replace, rejected by decision
    * 8b87efcb's own alternatives) — runs BEFORE any write, so a call mixing a
    * valid and an invalid child refuses the WHOLE thing, never creates the
-   * valid one first.
+   * valid one first. One shape is validated only INSIDE knowledgeCreate,
+   * post-write rather than pre-write, because it is knowledgeCreate's own
+   * schema that owns it, not a knowledge_split-specific rule: a child whose
+   * move_files/move_ac_ids/dependencies would make the created record itself
+   * schema-invalid fails there, inside the same transaction, and rolls back
+   * exactly like any other mid-split failure — safe, just not pre-empted.
    *
    * The children-plus-parent write then lands in ONE store transaction
    * (store.withTransaction) so a mid-split failure leaves the store
    * byte-for-byte untouched — nothing rides on process-level try/catch
    * cleanup. `resolves` closes named open maintenance items via
-   * validateSplitResolveClaim above (deliberately broader than
-   * knowledgeUpdate's own lane-restricted resolves, since the item a split
-   * most naturally discharges — article_oversize — is outside that lane);
-   * an item left unnamed stays open, exactly the explicit-claim posture
-   * decision 68988832 established.
+   * validateResolveClaim's split semantics (options.splitMarker) — broader
+   * than knowledgeUpdate's own lane-restricted resolves, since the item a
+   * split most naturally discharges (article_oversize) is outside that
+   * lane: promotion_review still refuses unconditionally (P1), every other
+   * lane closes on a chain-matching feature_link OR the article-oversize
+   * marker for this parent's slug. An item left unnamed stays open, exactly
+   * the explicit-claim posture decision 68988832 established.
    */
-  knowledgeSplit(input: {
-    id: string;
-    children: {
-      slug: string;
-      title: string;
-      what_it_does: string;
-      intended_behavior: string;
-      move_files: string[];
-      move_ac_ids: string[];
-      dependencies?: { relies_on: string[]; relied_by: string[] };
-    }[];
-    parent_what_it_does: string;
-    parent_intended_behavior?: string;
-    reason?: string;
-    resolves?: string[];
-  }): { parent: { id: string; slug: string; version: number }; children: { id: string; slug: string }[] } {
+  knowledgeSplit(input: KnowledgeSplitInput): { parent: { id: string; slug: string; version: number }; children: { id: string; slug: string }[] } {
     const { id, children, parent_what_it_does, parent_intended_behavior, reason, resolves } = input;
 
     if (!Array.isArray(children) || children.length === 0) {
@@ -2335,6 +2356,7 @@ export class SterlingTools {
       files: { path: string; role: string; unverified?: boolean }[];
       current_ac: { ac_id: string; text: string; verifiable_at: string }[];
       live_test_refs: { ac_id: string; test_paths: string[] }[];
+      dependencies?: { relies_on: string[]; relied_by: string[] };
     };
 
     // Child slugs pairwise distinct within this call, and none colliding with
@@ -2390,6 +2412,19 @@ export class SterlingTools {
       }
     }
 
+    // A child owning zero files is refused — it would be invisible to
+    // path-scoped delivery (same invariant class as the parent's
+    // retain-at-least-one floor). Checked AFTER the ownership/double-claim
+    // loop so a child whose real offense is a bad ac_id is refused by that
+    // name first; the wire schema (.min(1)) refuses the shape outright.
+    for (const child of children) {
+      if (!child.move_files?.length) {
+        throw new Error(
+          `knowledge_split: child '${child.slug}' names no move_files — a child article must own at least one file; nothing was written.`
+        );
+      }
+    }
+
     // Full donation refused (decision 8b87efcb's own rejected alternatives:
     // that shape is retire-and-replace, not a split) — the parent must retain
     // at least one owned file.
@@ -2400,8 +2435,8 @@ export class SterlingTools {
     }
 
     // resolves: validated (broader than knowledgeUpdate's own lane-restricted
-    // check — see validateSplitResolveClaim) BEFORE any write, same
-    // duplicate-claim refusal knowledgeUpdate itself applies.
+    // check — see validateResolveClaim's options.splitMarker) BEFORE any
+    // write, same duplicate-claim refusal knowledgeUpdate itself applies.
     if (resolves) {
       const seen = new Set<string>();
       for (const rid of resolves) {
@@ -2411,12 +2446,29 @@ export class SterlingTools {
         seen.add(rid);
       }
     }
-    const resolveClaims = (resolves ?? []).map((rid) => this.validateSplitResolveClaim(rid));
+    const parentChain = this.supersedeChain(parent);
+    const splitMarker = this.articleOversizeMarker(parentRec.slug);
+    const resolveClaims = (resolves ?? []).map((rid) => this.validateResolveClaim(rid, parentChain, { splitMarker }));
 
     const ts = this.now();
     const childSlugs = children.map((c) => c.slug).join(', ');
     const childResults: { id: string; slug: string }[] = [];
     let parentResult!: DurableRecord;
+
+    // SYMMETRIC DEPENDENCY EDGE (skeptic finding 2, knowledge_get 2334f653):
+    // relied_by is derived at READ time from the union of every OTHER
+    // article's relies_on, so leaving the parent's STORED relied_by
+    // untouched would read back as relied_by_stored_stale the instant a
+    // reader compares it — right after the split that created the mismatch.
+    // Only a child whose relies_on actually names the parent (the default —
+    // dependencies ?? {relies_on: [parentRec.slug], ...} — earns the parent
+    // a back-edge; a caller who passed EXPLICIT dependencies without the
+    // parent gets no fabricated edge. Existing stored entries are preserved
+    // and deduped, never dropped.
+    const reliedByAdditions = children
+      .filter((child) => (child.dependencies?.relies_on ?? [parentRec.slug]).includes(parentRec.slug))
+      .map((child) => child.slug);
+    const parentReliedBy = Array.from(new Set([...(parentRec.dependencies?.relied_by ?? []), ...reliedByAdditions]));
 
     this.store.withTransaction(() => {
       for (const child of children) {
@@ -2450,11 +2502,13 @@ export class SterlingTools {
         current_ac: remainingAc,
         live_test_refs: remainingRefs,
         history: [...parentRec.history, splitEvent],
+        dependencies: { relies_on: parentRec.dependencies?.relies_on ?? [], relied_by: parentReliedBy },
       });
 
       // Explicit-claim closure (decision 68988832's posture, broadened per
-      // validateSplitResolveClaim above): drained INSIDE the same transaction
-      // so a claim only lands alongside a split that actually landed.
+      // validateResolveClaim's split semantics above): drained INSIDE the
+      // same transaction so a claim only lands alongside a split that
+      // actually landed.
       for (const claim of resolveClaims) {
         this.store.remove(claim.id, ts);
       }
@@ -2468,6 +2522,34 @@ export class SterlingTools {
       },
       children: childResults,
     };
+  }
+
+  /**
+   * knowledge_split's MCP-facing wrapper (review finding B): every other
+   * write surface re-measures oversize via its own *Result wrapper
+   * (knowledgeUpdateResult, above) after the version lands — knowledgeSplit
+   * itself was measured by NOTHING, so a split that trimmed the parent too
+   * little, or handed a child too much, silently skipped the article_oversize
+   * lane every other write is held to. Wraps knowledgeSplit — which stays
+   * exactly as the frozen split suite calls and asserts it, no warnings
+   * expected there — and appends an ADDITIVE `warnings` sibling, the same
+   * shape knowledgeUpdateResult already returns, covering the trimmed parent
+   * AND every newly-created child.
+   */
+  knowledgeSplitResult(input: KnowledgeSplitInput): {
+    parent: { id: string; slug: string; version: number };
+    children: { id: string; slug: string }[];
+    warnings: string[];
+  } {
+    const result = this.knowledgeSplit(input);
+    const warnings: string[] = [];
+    const parentRecord = this.store.get(result.parent.id);
+    if (parentRecord) warnings.push(...this.articleOversizeWarnings(parentRecord));
+    for (const child of result.children) {
+      const childRecord = this.store.get(child.id);
+      if (childRecord) warnings.push(...this.articleOversizeWarnings(childRecord));
+    }
+    return { ...result, warnings };
   }
 
   /**

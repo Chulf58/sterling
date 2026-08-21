@@ -98,7 +98,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_split',
     {
       description:
-        'Split a feature_article: move a subset of its files[]/current_ac[]/live_test_refs entries into one or more NEW child articles, mechanically enforcing the invariants decision 8b87efcb established by hand for the hooks-suite split (decision compaction-tooling-windowed-read-plus-split) — prose moved VERBATIM, ac_ids INHERITED never renumbered, live_test_refs RE-POINTED to whichever side now owns the ac_id, the parent SURVIVES under its ORIGINAL slug (superseded to version+1, never replaced), and FILE COVERAGE stays TOTAL (every parent-owned path lands on exactly the parent or one child). Every child move_files path must be owned by the parent and claimed by at most one child; same for move_ac_ids; child slugs must be pairwise distinct and not collide with an existing feature_article; the parent must retain at least one file (moving all of them is refused — that shape is retire-and-replace, not a split). ALL validation runs before any write, and the whole split (every child plus the parent supersession) lands in ONE transaction, so a mid-split failure leaves the store untouched. resolves closes named open maintenance items exactly like knowledge_update\'s explicit-claim contract; an unnamed item stays open. Returns {parent:{id,slug,version}, children:[{id,slug}]}.',
+        'Split a feature_article: move a subset of its files[]/current_ac[]/live_test_refs entries into one or more NEW child articles, mechanically enforcing the invariants decision 8b87efcb established by hand for the hooks-suite split (decision compaction-tooling-windowed-read-plus-split) — prose moved VERBATIM, ac_ids INHERITED never renumbered, live_test_refs RE-POINTED to whichever side now owns the ac_id, the parent SURVIVES under its ORIGINAL slug (superseded to version+1, never replaced), and FILE COVERAGE stays TOTAL (every parent-owned path lands on exactly the parent or one child). Every child move_files path must be owned by the parent and claimed by at most one child; same for move_ac_ids; child slugs must be pairwise distinct and not collide with an existing feature_article; the parent must retain at least one file (moving all of them is refused — that shape is retire-and-replace, not a split). ALL validation runs before any write, and the whole split (every child plus the parent supersession) lands in ONE transaction, so a mid-split failure leaves the store untouched. resolves closes named open maintenance items exactly like knowledge_update\'s explicit-claim contract; an unnamed item stays open. Returns {parent:{id,slug,version}, children:[{id,slug}], warnings:[]} — warnings never gate the write, and report a still-oversize parent or an oversize-born child needing its own further split, the same article_oversize mechanism knowledge_update carries.',
       inputSchema: strict({
         id: z.string(),
         children: z
@@ -108,7 +108,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
               title: z.string().min(1),
               what_it_does: z.string().min(1),
               intended_behavior: z.string().min(1),
-              move_files: z.array(z.string()),
+              move_files: z.array(z.string()).min(1),
               move_ac_ids: z.array(z.string()),
               dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }).optional(),
             }).strict()
@@ -124,7 +124,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       }),
     },
     ({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }) =>
-      json(tools.knowledgeSplit({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }))
+      json(tools.knowledgeSplitResult({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }))
   );
 
   server.registerTool(
