@@ -4784,6 +4784,15 @@ var configSchema = external_exports.object({
     // threshold injects ONE moment-3 advisory per streak episode.
     streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
+  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: external_exports.object({
+    stale_minutes: external_exports.number().int().positive().default(60)
+  }).default({}),
   // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
@@ -6360,8 +6369,9 @@ try {
         spendGaugeMarker();
         parts.push(gaugePart());
       }
-      if (parts.length) deny(parts.join("\n\n"));
+      if (parts.length) deny([...disclosureParts, ...parts].join("\n\n"));
     }
+    if (disclosureParts.length) process.stdout.write(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }));
     allow();
   };
   let touches = [];
@@ -6377,16 +6387,70 @@ try {
   } catch {
     sessionEvents = [];
   }
+  const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
+    (p) => existsSync4(join2(input.cwd, p))
+  );
+  let dispatchEntries = [];
+  try {
+    const registerPath = join2(input.cwd, ".sterling", "transient", "dispatch-register.json");
+    if (existsSync4(registerPath)) {
+      const raw = JSON.parse(readFileSync2(registerPath, "utf8"));
+      if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
+    }
+  } catch {
+    dispatchEntries = [];
+  }
+  const staleMinutes = config.dispatch_register.stale_minutes;
+  const nowMs = Date.parse(now);
+  const ageMs = (e) => {
+    const t = Date.parse(e.at ?? "");
+    return Number.isNaN(t) ? Infinity : nowMs - t;
+  };
+  const isLive = (e) => {
+    const a = ageMs(e);
+    return a >= 0 && a < staleMinutes * 6e4;
+  };
+  const liveDispatches = dispatchEntries.filter(isLive);
+  const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+  const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
+  const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
+  const deferredOwners = /* @__PURE__ */ new Map();
+  for (const e of liveDispatches) {
+    for (const f of Array.isArray(e.files) ? e.files : []) {
+      const k = joinKey(f);
+      if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Set());
+      deferredOwners.get(k).add(e.agent_id);
+    }
+  }
+  const isDeferred = (p) => deferredOwners.has(joinKey(p));
+  const deferredPaths = touchedExisting.filter(isDeferred);
+  const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
+  const disclosureParts = [];
+  if (deferredPaths.length) {
+    disclosureParts.push(
+      `H10 fan-out deferral: ${deferredPaths.length} touched file(s) are owned by ${deferredAgents.length} LIVE dispatch(es) [${deferredAgents.join(", ")}] \u2014 their capture and ownership duties are DEFERRED, and the session registers were deliberately NOT cleared, so each duty re-arms at the first Stop after its dispatch lands (decision ec9eacaa).
+Files: ${JSON.stringify(deferredPaths.slice(0, 20))}.`
+    );
+  }
+  const touchedKeys = new Set(touchedExisting.map(joinKey));
+  const staleBiting = staleDispatches.filter((e) => (Array.isArray(e.files) ? e.files : []).some((f) => touchedKeys.has(f)));
+  if (staleBiting.length) {
+    disclosureParts.push(
+      `H10 dispatch register: ${staleBiting.length} entry/entries owning a file touched this session are STALE (older than ${staleMinutes}m) and therefore DEFER NOTHING \u2014 agent(s) [${staleBiting.map((e) => e.agent_id).join(", ")}]. A SubagentStop that never fired (killed or aborted subagent) leaves the entry behind; every duty below holds in full. H1 sweeps the register at the next session start.`
+    );
+  }
   const clearRegisters = () => {
-    rmSync(touchesPath, { force: true });
-    rmSync(eventsPath, { force: true });
+    if (!deferredPaths.length) {
+      rmSync(touchesPath, { force: true });
+      rmSync(eventsPath, { force: true });
+    }
     rmSync(nagMarker, { force: true });
   };
   if (!touches.length && !sessionEvents.length) {
     clearRegisters();
     releaseWithPressure();
   }
-  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
+  const paths = touchedExisting.filter((p) => !isDeferred(p));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
   const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
   const researchEvents = sessionEvents.filter(
@@ -6404,7 +6468,7 @@ try {
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
-    (t) => !IMAGE_BINARY_EXT.test(t.path)
+    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path)
   );
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
@@ -6500,7 +6564,7 @@ Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${J
   }
   if (!input.stop_hook_active && !existsSync4(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
-    const parts = [];
+    const parts = [...disclosureParts];
     const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
     if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;

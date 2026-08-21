@@ -297,6 +297,11 @@ try {
    * advisory joins the SAME standalone deny when due (one block per Stop, P1);
    * stop_hook_active suppresses without spending, so a suppressed advisory can still
    * fire on a later Stop of the same session.
+   *
+   * Fan-out deferral/staleness disclosures (decision ec9eacaa) ride this release
+   * whichever way it goes: prefixed to the block when one is due, and otherwise
+   * emitted as a systemMessage on the exit-0 release — a deferral is a fact to
+   * disclose, never a reason to block (P5).
    */
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
@@ -317,8 +322,10 @@ try {
         spendGaugeMarker();
         parts.push(gaugePart());
       }
-      if (parts.length) deny(parts.join('\n\n'));
+      // Disclosures never CAUSE a block — they only ride one that is already due.
+      if (parts.length) deny([...disclosureParts, ...parts].join('\n\n'));
     }
+    if (disclosureParts.length) process.stdout.write(JSON.stringify({ systemMessage: disclosureParts.join('\n\n') }));
     allow();
   };
 
@@ -340,10 +347,128 @@ try {
     sessionEvents = [];
   }
 
+  // FAN-OUT-AWARE DUTY DEFERRAL (decision ec9eacaa; register maintained by H22
+  // on SubagentStart/SubagentStop). A live dispatch OWNS the files it is
+  // mid-writing: demanding their capture or their owning article at the
+  // conductor's Stop reads agent work-in-progress as conductor negligence
+  // (board 570832d4 — the same capture_pending minted three times in one hour).
+  // An entry is LIVE iff it belongs to THIS session and its age is under
+  // config.dispatch_register.stale_minutes; a STALE entry defers nothing and
+  // says so loudly (P5): SubagentStop was never probed for killed/aborted
+  // subagents (research_finding 20b44518), so the TTL is what stops an orphan
+  // entry deferring a duty forever. Absent/malformed register degrades to empty
+  // — byte-identical to the behavior before this block existed (the same
+  // posture session-events.json takes above).
+  // §6 H10 existence filter, hoisted here because both partitions need it: only
+  // files that STILL EXIST drive a duty — a file created and then deleted within
+  // the session (e.g. a throwaway) leaves a stale H7 touch entry but needs no
+  // owner and no capture. (raw rm leaves the H7 entry stale; fs-remove does not —
+  // that asymmetry is the gap this guards.)
+  // The Array.isArray guard keeps this hoist behavior-neutral: an object-shaped
+  // touches.json used to reach the entry gate (and release cleanly) before any
+  // .map() ran, and it still does.
+  const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter((p) =>
+    existsSync(join(input.cwd, p))
+  );
+  let dispatchEntries = [];
+  try {
+    const registerPath = join(input.cwd, '.sterling', 'transient', 'dispatch-register.json');
+    if (existsSync(registerPath)) {
+      const raw = JSON.parse(readFileSync(registerPath, 'utf8'));
+      if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
+    }
+  } catch {
+    dispatchEntries = [];
+  }
+  // ONE source of truth for the threshold: the zod default (60) lives in
+  // config.dispatch_register, so a missing field is a real defect that fails
+  // loud into the catch below rather than silently reverting policy to a second
+  // literal maintained here.
+  const staleMinutes = config.dispatch_register.stale_minutes;
+  const nowMs = Date.parse(now);
+  // An unparseable `at` counts as STALE, never live: deferral suppresses a duty,
+  // so it is only ever granted on a fact we can actually read.
+  const ageMs = (e) => {
+    const t = Date.parse(e.at ?? '');
+    return Number.isNaN(t) ? Infinity : nowMs - t;
+  };
+  // A NEGATIVE age (clock skew, or an `at` stamped in the future) is stale, not
+  // live — otherwise the TTL never expires for that entry and it defers forever.
+  const isLive = (e) => {
+    const a = ageMs(e);
+    return a >= 0 && a < staleMinutes * 60_000;
+  };
+  const liveDispatches = dispatchEntries.filter(isLive);
+  const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+  // Worktree subagents record their touches under
+  // .claude/worktrees/<name>/<repo-relative path> (anti_pattern b3972717) while
+  // the dispatch prompt names the plain repo-relative path — an exact-string
+  // join would therefore miss the heaviest fan-out shape there is. The prefix is
+  // stripped for COMPARISON ONLY: touches.json keeps exactly what H7 wrote.
+  const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
+  const joinKey = (p) => String(p ?? '').replace(WORKTREE_PREFIX_RE, '');
+  const deferredOwners = new Map(); // repo-relative path -> Set(owning agent_id)
+  for (const e of liveDispatches) {
+    for (const f of Array.isArray(e.files) ? e.files : []) {
+      // Keyed through joinKey on BOTH sides: dispatch prose can itself name a
+      // worktree-prefixed path, which H22 stores verbatim (review LOW, 2026-08-21).
+      const k = joinKey(f);
+      if (!deferredOwners.has(k)) deferredOwners.set(k, new Set());
+      deferredOwners.get(k).add(e.agent_id);
+    }
+  }
+  const isDeferred = (p) => deferredOwners.has(joinKey(p));
+  const deferredPaths = touchedExisting.filter(isDeferred);
+  const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
+  // Disclosure, not a demand: rides whatever release/deny the duties below
+  // produce. Deliberately avoids the article-demand and capture-nag wording —
+  // a deferred duty is not owed to the conductor right now.
+  const disclosureParts = [];
+  if (deferredPaths.length) {
+    disclosureParts.push(
+      `H10 fan-out deferral: ${deferredPaths.length} touched file(s) are owned by ${deferredAgents.length} LIVE dispatch(es) ` +
+        `[${deferredAgents.join(', ')}] — their capture and ownership duties are DEFERRED, and the session registers were ` +
+        `deliberately NOT cleared, so each duty re-arms at the first Stop after its dispatch lands (decision ec9eacaa).\n` +
+        `Files: ${JSON.stringify(deferredPaths.slice(0, 20))}.`
+    );
+  }
+  // Only a stale entry that WOULD HAVE DEFERRED something is worth saying: one
+  // owning a file nobody touched changes no outcome, and disclosing it would
+  // repeat byte-identically on every Stop for the rest of the session — the
+  // board cac61a95 noise shape (P1).
+  const touchedKeys = new Set(touchedExisting.map(joinKey));
+  const staleBiting = staleDispatches.filter((e) => (Array.isArray(e.files) ? e.files : []).some((f) => touchedKeys.has(f)));
+  if (staleBiting.length) {
+    disclosureParts.push(
+      `H10 dispatch register: ${staleBiting.length} entry/entries owning a file touched this session are STALE (older than ` +
+        `${staleMinutes}m) and therefore DEFER NOTHING — agent(s) [${staleBiting.map((e) => e.agent_id).join(', ')}]. A SubagentStop that never fired ` +
+        `(killed or aborted subagent) leaves the entry behind; every duty below holds in full. H1 sweeps the register at the ` +
+        `next session start.`
+    );
+  }
+
   // Clear all three transient registers together (P4 — every terminal path).
+  // FAN-OUT DEFERRAL EXCEPTION (decision ec9eacaa, on the capture_pending
+  // precedent bd594c03): while a live dispatch owns any touched file this
+  // release is NOT terminal — clearing would delete the very touch entries
+  // whose duty has to re-arm once the dispatch lands. The debt cannot
+  // evaporate: the entry leaves via H22's SubagentStop, goes stale on the TTL,
+  // or is swept into queue debt by H1's session-boundary residue pass.
+  //
+  // The exception covers the two WORK registers ONLY — the NAG MARKER clears on
+  // every release exactly as it did before the deferral existed. Preserving it
+  // would permanently spend the once-per-session inline-demand stage: every
+  // later genuine duty (a new unowned file, a new concept design — none of them
+  // deferred) would land silently as queue debt, and a capture_pending declared
+  // afterwards would see the stale marker and mint capture_owed on its FIRST
+  // pending Stop, destroying the grace bd594c03 deliberately built. Repeat nags
+  // while a deferral is live are bounded by enqueueSystemTodo's dedup — noise is
+  // acceptable, silence is not.
   const clearRegisters = () => {
-    rmSync(touchesPath, { force: true });
-    rmSync(eventsPath, { force: true });
+    if (!deferredPaths.length) {
+      rmSync(touchesPath, { force: true });
+      rmSync(eventsPath, { force: true });
+    }
     rmSync(nagMarker, { force: true });
   };
 
@@ -353,11 +478,10 @@ try {
     releaseWithPressure();
   }
 
-  // §6 H10: only files that STILL EXIST drive a demand — a file created and then
-  // deleted within the session (e.g. a throwaway) leaves a stale H7 touch entry
-  // but needs no owner and no capture. (raw rm leaves the H7 entry stale;
-  // fs-remove does — that asymmetry is the gap this guards.)
-  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
+  // Article-demand input set: existing touched files MINUS the ones a live
+  // dispatch owns (the existence filter itself is applied above, where the
+  // deferral partition needs it too).
+  const paths = touchedExisting.filter((p) => !isDeferred(p));
 
   // Classify session events.
   const debugEvents = sessionEvents.filter((e) => e.kind === 'debug_scope');
@@ -401,8 +525,12 @@ try {
   // duty's touch set only (never the article-demand `paths` below, which
   // stays unfiltered per §6 H10's ownership join).
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
+  // A file a LIVE dispatch owns leaves the capture trigger set too (decision
+  // ec9eacaa) — dropped here rather than at activePaths so it cannot backdate
+  // `earliest` either, which would anchor the captured-set window to work whose
+  // duty is not owed yet.
   const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
-    (t) => !IMAGE_BINARY_EXT.test(t.path)
+    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path)
   );
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
@@ -562,7 +690,9 @@ try {
 
   if (!input.stop_hook_active && !existsSync(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
-    const parts = [];
+    // Any fan-out deferral/staleness leads the block: the demands that follow are
+    // exactly the ones the deferral did NOT cover (decision ec9eacaa).
+    const parts = [...disclosureParts];
 
     // The conductor's shell cwd is the TARGET project, where scripts/no-capture.mjs
     // does not exist — it lives in the plugin clone. The platform sets

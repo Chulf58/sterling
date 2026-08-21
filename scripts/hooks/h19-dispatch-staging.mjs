@@ -21,9 +21,11 @@
 // Never a gate (AC7 precedent): internal failure degrades to no output, exit 1
 // non-blocking (P5) — dispatch staging is an aid layered on top of the file-
 // touch delivery, never a second place that can deny a spawn.
-import { existsSync } from 'node:fs';
 import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel } from './lib/common.mjs';
-import { readTail } from './lib/transcript.mjs';
+// Prompt recovery + path extraction moved to lib/dispatch-prompt.mjs when H22's
+// dispatch register became a second consumer — one mechanism, imported never
+// reimplemented (decision f5638a84). Behavior here is unchanged.
+import { lastDispatchPrompts, extractPathCandidates } from './lib/dispatch-prompt.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
@@ -47,53 +49,6 @@ import {
 // Subject-channel decision ceiling — mirrors H20's MAX_DECISIONS: a keyword
 // match is weaker evidence than a file_keys join, so it earns less attention.
 const SUBJECT_MAX_DECISIONS = 5;
-
-// Path-candidate extraction from free-form prompt prose. No shared extractor
-// exists yet in this codebase for this shape (grepped: absent) — the nearest
-// analog, a bash-command path extractor, does not exist either; this is a
-// standalone extractor for prompt TEXT rather than a single shell command.
-// Deliberately permissive: a false positive costs one extra store lookup that
-// finds nothing; a false negative costs the staging this hook exists to
-// provide. Directory segments exclude '.' (so URLs and prose like
-// "claude.com/docs" rarely qualify); the filename segment allows '.' for
-// multi-dot names (e.g. 'h19-delivery.test.mjs'); the trailing extension group
-// is what stops the match before sentence punctuation ('…delivery.mjs.' keeps
-// only 'delivery.mjs').
-const PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-
-function extractPathCandidates(text) {
-  const found = String(text ?? '').match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
-}
-
-/** The union of every Task/Agent tool_use block's `prompt` in the LAST
- *  assistant message (scanned from the tail) that carries at least one such
- *  block. Returns [] on anything short of a clean read: missing transcript,
- *  no assistant entries, malformed JSON — staging degrades to silence rather
- *  than a throw a caller must special-case. */
-function lastDispatchPrompts(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return [];
-  const tail = readTail(transcriptPath);
-  if (tail === null) return [];
-  const lines = tail.split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue; // first line of the tail window may be truncated
-    }
-    if (entry.type !== 'assistant') continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    const blocks = content.filter((b) => b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent'));
-    if (!blocks.length) continue; // this assistant turn dispatched nothing — keep scanning backward
-    return blocks.map((b) => b.input?.prompt).filter((p) => typeof p === 'string');
-  }
-  return [];
-}
 
 const input = readStdin();
 

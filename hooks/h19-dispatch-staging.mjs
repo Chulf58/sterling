@@ -5,9 +5,6 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h19-dispatch-staging.mjs
-import { existsSync as existsSync5 } from "node:fs";
-
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
@@ -4765,6 +4762,15 @@ var configSchema = external_exports.object({
     // threshold injects ONE moment-3 advisory per streak episode.
     streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
+  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: external_exports.object({
+    stale_minutes: external_exports.number().int().positive().default(60)
+  }).default({}),
   // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
@@ -6302,6 +6308,9 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/dispatch-prompt.mjs
+import { existsSync as existsSync4 } from "node:fs";
+
 // scripts/hooks/lib/transcript.mjs
 import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
@@ -6319,8 +6328,38 @@ function readTail(path, bytes = TAIL_BYTES) {
   }
 }
 
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+function lastDispatchPrompts(transcriptPath) {
+  if (!transcriptPath || !existsSync4(transcriptPath)) return [];
+  const tail = readTail(transcriptPath);
+  if (tail === null) return [];
+  const lines = tail.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type !== "assistant") continue;
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+    const blocks = content.filter((b) => b?.type === "tool_use" && (b.name === "Task" || b.name === "Agent"));
+    if (!blocks.length) continue;
+    return blocks.map((b) => b.input?.prompt).filter((p) => typeof p === "string");
+  }
+  return [];
+}
+
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync4, rmSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync } from "node:fs";
 import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
@@ -6333,7 +6372,7 @@ function emptyGuard() {
 }
 function readGuard(path) {
   try {
-    if (!existsSync4(path)) return emptyGuard();
+    if (!existsSync5(path)) return emptyGuard();
     return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
@@ -6432,34 +6471,6 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
 
 // scripts/hooks/h19-dispatch-staging.mjs
 var SUBJECT_MAX_DECISIONS = 5;
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-function extractPathCandidates(text) {
-  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
-}
-function lastDispatchPrompts(transcriptPath) {
-  if (!transcriptPath || !existsSync5(transcriptPath)) return [];
-  const tail = readTail(transcriptPath);
-  if (tail === null) return [];
-  const lines = tail.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (entry.type !== "assistant") continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    const blocks = content.filter((b) => b?.type === "tool_use" && (b.name === "Task" || b.name === "Agent"));
-    if (!blocks.length) continue;
-    return blocks.map((b) => b.input?.prompt).filter((p) => typeof p === "string");
-  }
-  return [];
-}
 var input = readStdin();
 try {
   const store = openStore(input.cwd);

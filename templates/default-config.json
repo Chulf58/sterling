@@ -63,6 +63,9 @@
     "min_hand_work": 15,
     "max_dispatches": 0
   },
+  "dispatch_register": {
+    "stale_minutes": 60
+  },
   "maintenance_queue": {
     "deep_threshold": 15
   },

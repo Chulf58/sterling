@@ -4763,6 +4763,15 @@ var configSchema = external_exports.object({
     // threshold injects ONE moment-3 advisory per streak episode.
     streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
+  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: external_exports.object({
+    stale_minutes: external_exports.number().int().positive().default(60)
+  }).default({}),
   // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a

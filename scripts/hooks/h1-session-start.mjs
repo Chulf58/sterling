@@ -319,6 +319,25 @@ try {
   // fail-open — a failed clear costs freshness, never the conventions injection
 }
 
+// IN-FLIGHT DISPATCH REGISTER (decision ec9eacaa): deleted UNCONDITIONALLY —
+// every source, resume included. Unlike H10's other three registers there is no
+// debt to verify and no source to gate on: an entry names a subagent process
+// that cannot survive a session boundary, so at ANY SessionStart every entry is
+// dead by definition (P4). Leaving one would defer a real duty on behalf of an
+// agent that no longer exists, which is exactly the silent duty hole the
+// staleness TTL exists to bound. Fail-open like every H1 read.
+try {
+  const transientDir = join(input.cwd, '.sterling', 'transient');
+  rmSync(join(transientDir, 'dispatch-register.json'), { force: true });
+  // Orphaned atomic-write staging files (a crash between write and rename in
+  // H22) die at the same boundary (P4; review LOW, 2026-08-21).
+  for (const f of readdirSync(transientDir)) {
+    if (f.startsWith('dispatch-register.json.tmp-')) rmSync(join(transientDir, f), { force: true });
+  }
+} catch {
+  // fail-open — a failed delete costs deferral precision, never the injection
+}
+
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
 // (touches / session-events / capture-nagged) are cleared by H10's terminal Stop
 // paths — but a session that dies without one (kill, deny-then-close, or the
