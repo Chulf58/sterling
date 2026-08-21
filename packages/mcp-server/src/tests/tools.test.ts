@@ -2544,6 +2544,35 @@ test('article_oversize measures the NON-history body: fat history alone never fl
 // where an id stays pinned to one version.
 // ---------------------------------------------------------------------------
 
+test('attestation slugs: an explicit slug colliding with a live record is refused (review finding on board 259a455f — one accidental write must not brick slug addressing); no headline means nothing auto-mints', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: dec } = tools.knowledgeCreate('decision', {
+      title: 'A ruling holding the handle',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const slug = (dec as unknown as { slug?: string }).slug!;
+    const att = {
+      artifact_key: 'part-0042',
+      verdict: 'approved',
+      inspector: 'cuj',
+      inspected_at: '2026-08-21',
+    };
+    assert.throws(
+      () => tools.knowledgeCreate('attestation', { ...att, slug }),
+      /already exists — one handle resolves to one record/,
+      'the cross-type collision refusal covers attestation'
+    );
+    assert.equal(tools.knowledgeGet(slug).id, dec.id, 'the pre-existing record still resolves by slug — nothing was bricked');
+    const { record: clean } = tools.knowledgeCreate('attestation', att);
+    assert.equal((clean as unknown as { slug?: string }).slug, undefined, 'no title/question headline — slug stays absent, never minted');
+  } finally {
+    cleanup();
+  }
+});
+
 test('stable handle: a decision auto-mints a slug from its title, knowledge_get resolves it, and the slug follows supersession to the HEAD', () => {
   const { tools, cleanup } = harness();
   try {
