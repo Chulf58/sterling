@@ -37,6 +37,12 @@ export interface UiState {
    *  swap or a catalog/roster failure is VISIBLE (not lost to the alternate
    *  screen). Cleared on the next navigation / tab switch / selector open. */
   notice?: string;
+  /** System tab, sparring-partner model row (board a0714d0b, slice 2): free-text
+   *  edit-in-progress buffer for sparring_partner.model. Absent → the plain
+   *  value is shown; present (even '') → every printable key/BACKSPACE feeds
+   *  it, ENTER commits (empty commits as "unset"), ESCAPE cancels. Mirrors the
+   *  Knowledge tab's always-visible-field idiom, scoped to one row. */
+  sparringModelEdit?: string;
 }
 
 /** The System-tab inline selector (run r-f9a7). `key` is the config.models key
@@ -81,10 +87,31 @@ export interface CatalogStatusView {
   staleDate: string | null;
   entries: CatalogEntry[];
 }
+/** Sparring-partner config (board a0714d0b, article sparring-partner interaction
+ *  h/i): the TUI-editable slice of config.sparring_partner. model absent/empty
+ *  = Codex CLI default. */
+export interface SparringPartnerView {
+  enabled: boolean;
+  model?: string;
+}
 export interface AgentRosterSnapshot {
   agents: RosterAgent[];
   configModels: Record<string, { model: string; effort: string }>;
   catalog: CatalogStatusView;
+  /** config.sparring_partner, read at the same activation-only cadence as the
+   *  rest of the snapshot. Additive-optional (decision 34d61f60's idiom, as
+   *  cited for the roster? param itself): absent → defaults applied where
+   *  rendered, so the phase-4 fixtures that predate this field keep compiling
+   *  and passing unchanged. */
+  sparringPartner?: SparringPartnerView;
+  /** Machine-probe fact (article interaction h, P5): whether THIS machine's
+   *  plugin manifest (.claude-plugin/sterling-mcp.json) carries a codex mcp
+   *  server entry. Presence = wired. Computed once at activation, never the
+   *  1 Hz loop — a probe, not a live poll. Distinct from sparringPartner.enabled
+   *  (a deliberate per-project choice): this is a per-machine capability fact
+   *  that flipping the toggle must never hide. Additive-optional, same reason
+   *  as sparringPartner above. */
+  codexWired?: boolean;
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -104,12 +131,21 @@ export interface SystemRow {
 export interface SystemTabView {
   rows: SystemRow[];
   banner: string[];
+  /** Sparring-partner rows (board a0714d0b, slice 2): a SEPARATE list from
+   *  `rows` — `rows` stays exactly one entry per config.models key (the
+   *  phase-4 frozen contract), so the toggle + model rows never join it.
+   *  Two rows, ids 'sys:sparring_enabled' / 'sys:sparring_model', in that
+   *  order; hidden while a config.models picker (ui.selector) is open, same
+   *  focus rule as the roster rows. */
+  sparringRows: SystemRow[];
 }
 
 const EMPTY_ROSTER: AgentRosterSnapshot = {
   agents: [],
   configModels: {},
   catalog: { present: false, stale: false, staleDate: null, entries: [] },
+  sparringPartner: { enabled: true },
+  codexWired: false,
 };
 
 /** Pure scalar drift check: true iff the installed value differs from config. */
@@ -222,7 +258,20 @@ export interface ModelSwapEffect {
   agents: string[];
   decisionTitle: string;
 }
-export type Effect = SelectEffect | QuitEffect | ModelSwapEffect;
+/** System tab, sparring-partner toggle row (board a0714d0b): flips
+ *  config.sparring_partner.enabled. Advisory-only (article interaction a) — the
+ *  toggle only silences the automatic consult moments, it never gates. */
+export interface SparringToggleEffect {
+  type: 'sparring_toggle';
+  enabled: boolean;
+}
+/** System tab, sparring-partner model row: commits the free-text edit. An empty
+ *  value clears the field back to unset (CLI default). */
+export interface SparringModelEffect {
+  type: 'sparring_model';
+  model: string;
+}
+export type Effect = SelectEffect | QuitEffect | ModelSwapEffect | SparringToggleEffect | SparringModelEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' }
@@ -464,7 +513,11 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   // or a catalog/roster failure is visible above the roster, not lost.
   const catBanner = catalogBanner(snap.catalog, width);
   const banner = ui.notice ? [clip(`⚠ ${ui.notice}`), ...catBanner] : catBanner;
-  return { rows: shown, banner };
+  // Sparring-partner rows sit AFTER the config.models keys in cursor order
+  // (cursorBase = keys.length); hidden while a config.models picker focuses the
+  // view, same rule as the roster rows above.
+  const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
+  return { rows: shown, banner, sparringRows };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -473,6 +526,51 @@ function catalogBanner(catalog: CatalogStatusView, width: number): string[] {
   if (!catalog.present) return [clip('catalog: none found')];
   if (catalog.stale) return [clip(`catalog stale (as of ${catalog.staleDate ?? '?'})`)];
   return [clip('catalog: current')];
+}
+
+/**
+ * Sparring-partner rows (board a0714d0b, slice 2 — article sparring-partner
+ * interactions h/i): two rows appended after the config.models roster —
+ * `cursorBase` is the toggle row's cursor index (cursorBase+1 = the model
+ * row), so cursor addressing composes with the existing sysKeys.length scheme
+ * in reduce() without touching it.
+ *
+ * TOGGLE ROW: shows ON/OFF from sparringPartner.enabled. When codexWired is
+ * false, ALWAYS appends '(not wired on this machine)' — a machine-capability
+ * fact distinct from the deliberate per-project enabled/disabled choice
+ * (article interaction h, P5): flipping the toggle changes ON/OFF but never
+ * hides this marker, so a machine missing Codex never reads as a silently
+ * successful "on".
+ *
+ * MODEL ROW: shows sparringPartner.model, or '(CLI default)' when unset. While
+ * ui.sparringModelEdit is defined AND this row is under the cursor, the row
+ * shows the live edit buffer with a caret instead of the committed value.
+ */
+function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorBase: number): SystemRow[] {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const sparringPartner = snap.sparringPartner ?? { enabled: true };
+  const codexWired = snap.codexWired ?? false;
+  const toggleSelected = ui.cursor === cursorBase;
+  const modelSelected = ui.cursor === cursorBase + 1;
+  const toggleMarker = toggleSelected ? '› ' : '  ';
+  const modelMarker = modelSelected ? '› ' : '  ';
+  const onOff = sparringPartner.enabled ? 'ON' : 'OFF';
+  const wiredSuffix = codexWired ? '' : '  (not wired on this machine)';
+  const toggleRow: SystemRow = {
+    id: 'sys:sparring_enabled',
+    lines: [{ text: clip(`${toggleMarker}Sparring partner: ${onOff}${wiredSuffix}`), kind: 'title', selected: toggleSelected }],
+  };
+  const editing = ui.sparringModelEdit !== undefined && modelSelected;
+  const modelText = editing
+    ? `${ui.sparringModelEdit}▌`
+    : sparringPartner.model && sparringPartner.model.length
+      ? sparringPartner.model
+      : '(CLI default)';
+  const modelRow: SystemRow = {
+    id: 'sys:sparring_model',
+    lines: [{ text: clip(`${modelMarker}Model: ${modelText}`), kind: 'title', selected: modelSelected }],
+  };
+  return [toggleRow, modelRow];
 }
 
 /** Bridge the pure System projection into a DashboardState the renderer draws:
@@ -496,6 +594,17 @@ function systemDashboardState(
     screenRow += 1;
   }
   for (const sr of view.rows) {
+    const lines: RowLine[] = sr.lines.map((l) => ({
+      text: l.text,
+      kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
+    }));
+    rows.push({ id: sr.id, type: 'system', selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
+    screenRow += lines.length;
+  }
+  // sparring-partner rows (board a0714d0b): drawn after the config.models
+  // roster, same row shape — a SEPARATE list from view.rows (phase-4 frozen
+  // contract), never merged into it.
+  for (const sr of view.sparringRows) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
@@ -670,7 +779,8 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
   const effects: Effect[] = [];
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined });
+  // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined, sparringModelEdit: undefined });
 
   // the queue tab has a fixed layout; only the card tabs scroll
   const scrollable = ui.tab !== QUEUE_TAB;
@@ -680,8 +790,10 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
   // move the selection by `delta` and keep it inside the scroll window so the
   // viewport follows the cursor. An unbounded viewport or a non-scrolling tab
   // just moves the cursor (scroll stays 0) — the prior behaviour.
-  const moveCursor = (delta: number): UiState => {
-    const cursor = clamp(ui.cursor + delta);
+  /** Move the cursor to `cursor` and scroll the selected row into view — shared
+   *  by the generic tabs and the System tab's sparring rows (which sit past the
+   *  config.models keys and would otherwise leave the edit caret below the fold). */
+  const revealAt = (cursor: number): UiState => {
     if (!scrollable || !Number.isFinite(maxBodyLines)) return { ...ui, cursor };
     const st = buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
@@ -696,6 +808,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     }
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
+  const moveCursor = (delta: number): UiState => revealAt(clamp(ui.cursor + delta));
 
   const toggle = (id: string): string[] =>
     ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
@@ -732,25 +845,51 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // tab-switch / quit keys fall through to the generic handler below.
       if (ui.tab === SYSTEM_TAB && roster) {
         const sysKeys = Object.keys(roster.configModels);
-        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length - 1)));
+        // + 2: the sparring-partner toggle row (index sysKeys.length) and its
+        // model row (sysKeys.length + 1), appended after the config.models
+        // roster (board a0714d0b) — cursor addressing composes over both.
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 2 - 1)));
         const sel = ui.selector;
+        const editing = ui.sparringModelEdit !== undefined;
         switch (event.name) {
           case 'UP':
             if (sel) return { ui: { ...ui, selector: { ...sel, highlight: Math.max(0, sel.highlight - 1) } }, effects };
-            return { ui: { ...ui, cursor: sysClamp(ui.cursor - 1) }, effects };
+            if (editing) return { ui, effects }; // arrow keys are no-ops while typing the model field
+            return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
           case 'DOWN': {
             if (sel) {
               const n = sel.stage === 'model' ? roster.catalog.entries.length : effortOptions(sel.key).length;
               return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
             }
-            return { ui: { ...ui, cursor: sysClamp(ui.cursor + 1) }, effects };
+            if (editing) return { ui, effects };
+            return { ui: revealAt(sysClamp(ui.cursor + 1)), effects };
           }
           case 'ESCAPE':
             if (sel) return { ui: { ...ui, selector: undefined }, effects };
+            if (editing) return { ui: { ...ui, sparringModelEdit: undefined }, effects };
+            return { ui, effects };
+          case 'BACKSPACE':
+            if (editing) return { ui: { ...ui, sparringModelEdit: (ui.sparringModelEdit ?? '').slice(0, -1) }, effects };
             return { ui, effects };
           case 'ENTER':
           case 'SPACE': {
             const cursor = sysClamp(ui.cursor);
+            if (editing) {
+              // commit the free-text model edit — empty clears back to unset
+              // (CLI default). No ^claude- floor here: the model is a FREE
+              // string, codex validates server-side with a loud 400.
+              effects.push({ type: 'sparring_model', model: (ui.sparringModelEdit ?? '').trim() });
+              return { ui: { ...ui, sparringModelEdit: undefined, notice: undefined }, effects };
+            }
+            if (cursor === sysKeys.length) {
+              // sparring-partner toggle row: an immediate flip, no picker
+              effects.push({ type: 'sparring_toggle', enabled: !(roster.sparringPartner?.enabled ?? true) });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            }
+            if (cursor === sysKeys.length + 1) {
+              // sparring-partner model row: open the free-text edit
+              return { ui: { ...ui, cursor, sparringModelEdit: roster.sparringPartner?.model ?? '', notice: undefined }, effects };
+            }
             const key = sysKeys[cursor];
             if (!key) return { ui, effects };
             if (!sel) {
@@ -827,6 +966,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     case 'char': {
       const ch = event.ch;
       if (ch.length !== 1) return { ui, effects };
+      // System tab, sparring-partner model row: while the free-text edit is
+      // open EVERY printable key (space, digits, 'q' included) feeds the
+      // buffer — mirrors the Knowledge tab's always-visible search field.
+      // Checked FIRST so the space→ENTER routing below never fires mid-edit.
+      if (ui.tab === SYSTEM_TAB && ui.sparringModelEdit !== undefined) {
+        return { ui: { ...ui, sparringModelEdit: ui.sparringModelEdit + ch }, effects };
+      }
       // the Knowledge tab is an always-visible search field: EVERY printable key
       // feeds the query — 'q' and digits included (they are not hotkeys here).
       if (ui.tab === KNOWLEDGE_TAB) {

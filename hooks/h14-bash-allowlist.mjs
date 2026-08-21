@@ -4904,7 +4904,13 @@ var configSchema = external_exports.object({
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
-    enabled: external_exports.boolean().default(true)
+    enabled: external_exports.boolean().default(true),
+    // TUI System-tab model selector (article sparring-partner interaction i,
+    // board a0714d0b): the model argument sent on every consult. Absent/empty
+    // = the Codex CLI's own default. Deliberately a FREE string, no enum —
+    // codex validates model names server-side with a loud 400, so a client-
+    // side allowlist would only drift from what the CLI actually accepts.
+    model: external_exports.string().optional()
   }).default({})
 });
 

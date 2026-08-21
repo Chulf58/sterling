@@ -350,6 +350,12 @@ export const configSchema = z.object({
   sparring_partner: z
     .object({
       enabled: z.boolean().default(true),
+      // TUI System-tab model selector (article sparring-partner interaction i,
+      // board a0714d0b): the model argument sent on every consult. Absent/empty
+      // = the Codex CLI's own default. Deliberately a FREE string, no enum —
+      // codex validates model names server-side with a loud 400, so a client-
+      // side allowlist would only drift from what the CLI actually accepts.
+      model: z.string().optional(),
     })
     .default({}),
 });

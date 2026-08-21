@@ -307,3 +307,40 @@ test('templates/default-config.json still parses and carries sparring_partner en
   assert.ok(shipped.sparring_partner, 'parseConfig always supplies a sparring_partner block, shipped config or not');
   assert.equal(shipped.sparring_partner?.enabled, true, 'the shipped/defaulted sparring_partner.enabled is true');
 });
+
+// ------------------- sparring_partner.model (slice 2, article 'sparring-partner' interaction i /
+// decision cd019e0b point 8: the System-tab model selector; optional, empty/absent = CLI default) -------------------
+
+// model is a NEW field on the EXISTING sparring_partner block — additive-optional,
+// a sibling of `enabled` above which this addition must leave untouched. Accessed
+// through a cast for the same reason as the block itself: the assertions below fail
+// cleanly (not the package build) until parseConfig grows the field.
+type CfgWithSparringPartnerModel = { sparring_partner?: { enabled?: boolean; model?: string } };
+
+test('sparring_partner.model: absent from input parses to undefined — no CLI-default value is invented at parse time', () => {
+  const empty = parseConfig({}) as unknown as CfgWithSparringPartnerModel;
+  assert.ok(empty.sparring_partner, 'parseConfig defaults must add a sparring_partner block');
+  assert.equal(empty.sparring_partner?.model, undefined, 'model is undefined when absent — "use the CLI default" is a display convention, never a stored value');
+  assert.equal(empty.sparring_partner?.enabled, true, 'the existing enabled default is untouched by the new sibling field');
+});
+
+test('sparring_partner.model: an explicit string round-trips verbatim, alongside the untouched enabled default', () => {
+  const withModel = parseConfig({ sparring_partner: { model: 'gpt-5.6' } }) as unknown as CfgWithSparringPartnerModel;
+  assert.equal(withModel.sparring_partner?.model, 'gpt-5.6', 'an explicit model string survives parsing verbatim');
+  assert.equal(withModel.sparring_partner?.enabled, true, 'enabled still defaults to true when only model is supplied');
+});
+
+test('sparring_partner.model: a non-string value is refused loud', () => {
+  assert.throws(
+    () => parseConfig({ sparring_partner: { model: 42 } }),
+    /invalid/i,
+    'sparring_partner.model must be a string — a non-string value fails loud'
+  );
+});
+
+test('templates/default-config.json still parses with sparring_partner.model omitted (ships no pinned model — the CLI default applies until set via the System tab)', () => {
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithSparringPartnerModel;
+  assert.ok(shipped.sparring_partner, 'the shipped default-config carries a sparring_partner block');
+  assert.equal(shipped.sparring_partner?.model, undefined, 'the shipped config ships no model value');
+  assert.equal(shipped.sparring_partner?.enabled, true, 'the shipped enabled default is untouched by the new sibling field');
+});
