@@ -58,11 +58,12 @@ const SEVERITY_LABEL = { block: 'BLOCK', warn: 'WARN', info: 'INFO' };
 
 function lineFor(r) {
   const clipped = clipTitle(r.title);
+  const idPart = r.slug ? `\`${r.slug}\` · \`${r.id}\`` : `\`${r.id}\``;
   if (r.type === 'anti_pattern') {
     const sev = SEVERITY_LABEL[r.severity ?? 'warn'] ?? 'WARN';
-    return `- [${sev}] ${clipped} (\`${r.id}\`)`;
+    return `- [${sev}] ${clipped} (${idPart})`;
   }
-  return `- ${clipped} (\`${r.id}\`)`;
+  return `- ${clipped} (${idPart})`;
 }
 
 const sections = componentKeys.map((key) => {

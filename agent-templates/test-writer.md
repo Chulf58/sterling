@@ -51,6 +51,7 @@ Exactly the required-inputs manifest above. The interface slice is your contract
 3. Tests must be able to fail on their assertions before the implementation exists (the red check enforces this): import only declared interfaces or existing scaffolds; a crash-red proves nothing.
 4. Determinism: no timing races, no network, no environment dependence beyond the declared toolchain.
 5. Honor conventions from the staged decisions slice (naming, file layout for tests).
+6. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

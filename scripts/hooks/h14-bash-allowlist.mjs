@@ -29,7 +29,8 @@
 // arbitrary path; find/sed/awk stay denied. Containment lives elsewhere — H3
 // (write contract), H5 (frozen tests), H17 (bash write sweep) — and in Sterling
 // running agents that are already trusted to write code.
-import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
+import { relative, resolve, sep } from 'node:path';
+import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 
 const input = readStdin();
 
@@ -42,7 +43,7 @@ const input = readStdin();
 try {
   const config = loadConfig(input.cwd);
   if (!config?.toolchains?.length) {
-    deny('H14: no toolchains in .sterling/config.json — the Bash allowlist cannot resolve run commands; failing closed (P5)');
+    deny(environmentDefectDenial('H14', 'No toolchains in .sterling/config.json — the Bash allowlist cannot resolve run commands; failing closed (P5).'));
   }
 
   const command = String(input.tool_input?.command ?? '').trim();
@@ -56,7 +57,18 @@ try {
     deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
   }
 
+  // A run-gate invocation joins the declared run_commands prefixes (decision
+  // 98549344, slug toolchain-success-predicates-run-gate, board babf3a9e): it
+  // is the sanctioned success-predicate runner, not a per-project declared
+  // command, so it is allowlisted here directly rather than baked into any
+  // project's config.toolchains[].run_commands. Matched by REGEX, not a
+  // literal prefix (G4 review finding, same decision): the literal
+  // 'node scripts/run-gate.mjs' never matches a CONSUMING project's
+  // invocation ('node /path/to/clone/scripts/run-gate.mjs export'), so
+  // isRunGateInvocation below recognizes it regardless of what precedes
+  // 'scripts/run-gate.mjs'.
   const runCommandPrefixes = config.toolchains.flatMap((tc) => Object.values(tc.run_commands ?? {}));
+  const RUN_GATE_RE = /^node\s+(?:\S*[\/\\])?scripts\/run-gate\.mjs(?:\s|$)/;
   const firstArg = command.match(/^node\s+(?:"([^"]+)"|(\S+))/);
   const helperArg = firstArg ? (firstArg[1] ?? firstArg[2]) : undefined;
   const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, '/'));
@@ -70,6 +82,16 @@ try {
   // (-exec / e / system() execute). RETIRE this allowance when a probe shows
   // Grep/Glob served again.
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
+
+  // Read-only git verb allowance (board 4c7b84d3, AC3): VERB-SHAPED, never
+  // "git anything" — each pattern is an EXACT shape (a ref token is the only
+  // free variable), so a lookalike ('git logger') or an unlisted verb ('git
+  // stash') never matches, and mutating verbs (commit/push/checkout/rebase/
+  // reset/status) stay denied exactly as before. Chaining/redirection off an
+  // allowed verb is already caught by the control-operator gate above this
+  // point, so it never reaches this check at all.
+  const READONLY_GIT_PATTERNS = [/^git log$/, /^git show \S+ --stat$/, /^git diff --name-only$/, /^git branch --list$/];
+  const isReadOnlyGit = READONLY_GIT_PATTERNS.some((re) => re.test(command));
 
   // Quote-strip the FIRST whitespace-separated token, for MATCH PURPOSES ONLY
   // (board f49466f5, decision 398adceb): the executed command, the operator
@@ -89,9 +111,91 @@ try {
   const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
 
   const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + ' '));
+  const matchedPrefixOf = (candidate) => runCommandPrefixes.find((p) => candidate === p || candidate.startsWith(p + ' '));
 
-  const allowed =
-    matchesPrefix(command) || (strictUnquoted !== null && matchesPrefix(strictUnquoted)) || isFsHelper || isReadOnlySearch;
+  // AC2 boundary (board 4c7b84d3): cwd robustness must never become a
+  // path-scope bypass. readStdin() already normalizes input.cwd to the
+  // project root (never the raw shell cwd), so that root is the ONE
+  // resolution base regardless of which subdirectory the platform actually
+  // invoked the hook from. For a candidate that matches a declared run-command
+  // prefix, resolve every remaining non-flag argument against that root; a
+  // command whose argument climbs (via '../') to a path outside the root is
+  // denied even though its textual prefix matches — a genuinely different
+  // command (AC1 boundary) is unaffected because it never reaches this check.
+  // Quote-aware tokenizer for the REMAINDER only (never the executed command
+  // itself, never the operator gate above) — a quoted span, however it
+  // contains whitespace, is ONE token with its quote characters stripped, so a
+  // traversal path riding inside "../../x y/evil.mjs" is boundary-checked as
+  // the single path it is instead of being shredded on the interior space
+  // (board 4c7b84d3 follow-up, AC-Z). No escape-sequence handling: this only
+  // needs to reunite a quoted span, not fully emulate shell quoting.
+  const tokenizeRemainder = (str) => {
+    const tokens = [];
+    let cur = '';
+    let quote = null;
+    let any = false;
+    for (const ch of str) {
+      if (quote) {
+        if (ch === quote) quote = null;
+        else cur += ch;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        any = true;
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        if (any) tokens.push(cur);
+        cur = '';
+        any = false;
+        continue;
+      }
+      cur += ch;
+      any = true;
+    }
+    if (any) tokens.push(cur);
+    return tokens;
+  };
+
+  const valueEscapesRoot = (clean) => {
+    if (!clean) return false;
+    const rel = relative(input.cwd, resolve(input.cwd, clean));
+    return rel === '..' || rel.startsWith('..' + sep);
+  };
+  // A flag token ('-x', '--import=path') is skipped for BARE flags (no path
+  // value to check) but a '--flag=value' token's value is boundary-checked
+  // the same as a bare positional path argument (board 4c7b84d3 follow-up,
+  // AC-Y) — an escaping path does not stop being a path for riding inside a
+  // flag's '=value' half.
+  const pathArgEscapesRoot = (tok) => {
+    if (tok.startsWith('-')) {
+      const eq = tok.indexOf('=');
+      if (eq === -1) return false; // a bare flag, no value to check
+      return valueEscapesRoot(tok.slice(eq + 1));
+    }
+    return valueEscapesRoot(tok);
+  };
+  const prefixMatchEscapes = (candidate) => {
+    const prefix = matchedPrefixOf(candidate);
+    if (!prefix) return false;
+    const remainder = candidate.slice(prefix.length).trim();
+    if (!remainder) return false;
+    return tokenizeRemainder(remainder).some(pathArgEscapesRoot);
+  };
+
+  const runCommandMatch =
+    matchesPrefix(command) ? command : strictUnquoted !== null && matchesPrefix(strictUnquoted) ? strictUnquoted : null;
+  const runCommandAllowed = runCommandMatch !== null && !prefixMatchEscapes(runCommandMatch);
+
+  // Path-agnostic run-gate allowance (G4, decision 98549344 / slug
+  // toolchain-success-predicates-run-gate): mirrors how matchesPrefix is
+  // consulted above — the same command / strictUnquoted candidates — but
+  // against RUN_GATE_RE instead of a literal prefix, so a consuming
+  // project's absolute clone path still matches.
+  const isRunGateInvocation = RUN_GATE_RE.test(command) || (strictUnquoted !== null && RUN_GATE_RE.test(strictUnquoted));
+
+  const allowed = runCommandAllowed || isFsHelper || isReadOnlySearch || isReadOnlyGit || isRunGateInvocation;
 
   if (!allowed) {
     // QUOTING DIAGNOSTIC (reported from a consuming project 2026-07-30, decision
@@ -129,10 +233,10 @@ try {
                 : ''
             }`
           : ''
-      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), and standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied). All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
+      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, 'node …/scripts/run-gate.mjs …' (any path prefix), the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied), and read-only git: git log, git show <ref> --stat, git diff --name-only, git branch --list. All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();
 } catch (e) {
-  deny(`H14: allowlist evaluation failed (${(e && e.message) || e}) — failing closed (P5)`);
+  deny(environmentDefectDenial('H14', `Allowlist evaluation failed (${(e && e.message) || e}) — failing closed (P5).`));
 }

@@ -181,8 +181,10 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     const deep = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
     const ctx = deep.hookSpecificOutput.additionalContext;
     assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 drainable items/);
-    assert.match(ctx, /reconcile_needed ×3/, 'the lane split says WHAT is owed, not just how much');
-    assert.match(ctx, /article_missing ×2/);
+    // Lane phrasing changed with board 18a22b56: "N item(s) in lane <reason>" —
+    // the "×N" form collided with h1-accuracy's truncation-artifact guard.
+    assert.match(ctx, /3 items in lane reconcile_needed/, 'the lane split says WHAT is owed, not just how much');
+    assert.match(ctx, /2 items in lane article_missing/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
     assert.match(ctx, /Anti-speculation/, 'the conventions injection is unaffected');
@@ -949,10 +951,16 @@ test('H10 article demand: an open article_missing item with overlapping file key
     assert.equal(stop().code, 0);
     const items = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing');
     assert.equal(items.length, 2, 'overlapping item dedupes; non-overlapping item does not suppress');
+    // Superseded pin (board f30b9263, 2026-08-20): suppress-WITHOUT-refresh let items
+    // go stale while the situation escalated — the surviving item now updates in
+    // place through enqueueSystemTodo (same key + different text → refresh).
+    const refreshed = items.find((t) => t.file_keys?.includes('src/x.mjs'));
     assert.ok(
-      items.every((t) => !t.text.includes('direct-mode work touched')),
-      'no NEW item was enqueued — the overlapping seed suppressed it'
+      refreshed && refreshed.text.includes('direct-mode work touched'),
+      'the overlapping seed is REFRESHED in place — escalation updates the surviving item, never suppresses silently'
     );
+    const unrelated = items.find((t) => t.file_keys?.includes('lib/unrelated.mjs'));
+    assert.equal(unrelated?.text, 'article missing: unrelated territory', 'non-overlapping territory stays untouched');
   } finally {
     cleanup();
   }
@@ -1011,7 +1019,8 @@ test('H15 store guard: shell references to the store are denied naming the §10 
     const nodeWrite = run(`node -e "import('.../store/dist/index.js').then(s => new s.SterlingStore('.sterling/sterling.db'))"`);
     assert.equal(nodeWrite.code, 2, 'ad-hoc node script against the store is denied');
     assert.match(nodeWrite.stderr, /§10 MCP tool surface/);
-    assert.match(nodeWrite.stderr, /maintenance_enqueue/, 'the deny message teaches the full write surface');
+    assert.doesNotMatch(nodeWrite.stderr, /maintenance_enqueue/, 'the retired wire tool is no longer taught (decision 6269b714)');
+    assert.match(nodeWrite.stderr, /board_remove/, 'the deny message teaches the live write surface');
     assert.match(nodeWrite.stderr, /RESTART THE SESSION/);
 
     assert.equal(run('sqlite3 .sterling/sterling.db "SELECT * FROM records"').code, 2, 'reads are denied too — use knowledge_query');
@@ -1030,15 +1039,13 @@ test('H15 store guard: shell references to the store are denied naming the §10 
     assert.equal(run('npm test').code, 0, 'unrelated commands untouched');
     assert.equal(run('git status').code, 0);
 
-    // PROSE trips the gate too, and the denial now SAYS so (decision a8bec43f).
-    // Hit live by a `git commit -F -` whose heredoc message described store work:
-    // nothing is accessed, the deny is still correct by the gate's rule, and the
-    // old wording ('shell access is denied') misdiagnosed exactly that case.
+    // Superseded pin (decision 0b4d3c8c, user-decided 2026-08-20): the gate now
+    // judges per fragment and per VERB, so a read-only git command whose prose
+    // merely MENTIONS the store is allowed — the old deny-any-mention breadth
+    // (a8bec43f's wording fix rode on it) blocked legitimate read-only work.
     const prose = run('git commit -F - <<EOF\nchore: teach the .sterling guard to explain itself\nEOF');
-    assert.equal(prose.code, 2, 'the matcher is NOT narrowed — prose still denies, the allow surface is unchanged');
-    assert.match(prose.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the discriminator is named, not just the rule');
-    assert.match(prose.stderr, /git commit -F <file>/, 'and the remedy is spelled out');
-    assert.match(nodeWrite.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the line is unconditional — no prose-detection heuristic to get wrong');
+    assert.equal(prose.code, 0, 'a read-only git command mentioning the store in prose is no longer denied (0b4d3c8c)');
+    assert.match(nodeWrite.stderr, /rm|fragment|\.sterling/, 'a write denial names what it matched, not just the rule');
 
     // malformed config: the gate FAILS CLOSED on the protected branch (review finding)
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
@@ -1786,6 +1793,68 @@ test('H10 no-capture duty: an old declaration does not retroactively cover a LAT
   }
 });
 
+test('H10 test-repair evidence: a test_repair event later than the touch of its named path satisfies the capture duty PER PATH; an unrelated path stays armed', () => {
+  const satisfied = makeProject();
+  try {
+    writeTouchesAt(satisfied.dir, [{ path: 'tests/foo.test.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(satisfied.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — fixture asserted an unsatisfiable oracle', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(satisfied.dir, { hook_event_name: 'Stop' }), satisfied.dir);
+    assert.equal(r.code, 0, 'a test_repair event later than the touch of its named path satisfies the capture duty');
+    assert.equal(owed(satisfied.store, 'capture_owed').length, 0, 'nothing owed — the repair evidence IS the capture');
+  } finally {
+    satisfied.cleanup();
+  }
+  const unrelated = makeProject();
+  try {
+    writeTouchesAt(unrelated.dir, [{ path: 'src/other.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(unrelated.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — fixture asserted an unsatisfiable oracle', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(unrelated.dir, { hook_event_name: 'Stop' }), unrelated.dir);
+    assert.equal(r.code, 2, 'a test_repair event covers ONLY its named path — an unrelated touch stays armed');
+  } finally {
+    unrelated.cleanup();
+  }
+  const rearmed = makeProject();
+  try {
+    writeTouchesAt(rearmed.dir, [{ path: 'tests/foo.test.mjs', at: LATE_EVENT_AT }]);
+    writeSessionEvents(rearmed.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — fixture asserted an unsatisfiable oracle', at: R_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(rearmed.dir, { hook_event_name: 'Stop' }), rearmed.dir);
+    assert.equal(r.code, 2, 'a touch AFTER the repair event re-arms the duty — evidence cannot cover future work');
+  } finally {
+    rearmed.cleanup();
+  }
+});
+
+test('H10 test-repair evidence: coverage is EXACT-PATH — a longer sibling path or evidence text naming the path never covers it', () => {
+  const sibling = makeProject();
+  try {
+    writeTouchesAt(sibling.dir, [{ path: 'tests/foo.test.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(sibling.dir, [
+      { kind: 'test_repair', detail: 'x-tests/foo.test.mjs — repaired the OTHER suite', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(sibling.dir, { hook_event_name: 'Stop' }), sibling.dir);
+    assert.equal(r.code, 2, 'a repair of a longer sibling path never covers the shorter touch');
+  } finally {
+    sibling.cleanup();
+  }
+  const evidenceLeak = makeProject();
+  try {
+    writeTouchesAt(evidenceLeak.dir, [{ path: 'src/gate.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(evidenceLeak.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — the assertion about src/gate.mjs was wrong', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(evidenceLeak.dir, { hook_event_name: 'Stop' }), evidenceLeak.dir);
+    assert.equal(r.code, 2, 'free-text evidence naming a path never discharges that path\'s duty');
+  } finally {
+    evidenceLeak.cleanup();
+  }
+});
+
 // ---- capture-pending deferral (board 1af5d630: the truthful middle state) ----
 // capture_pending declares the capture EXISTS and its write is in flight on a
 // named target. Unlike no_capture it covers LATER work too — wave work keeps
@@ -2132,6 +2201,131 @@ test('H10 concept duty (SOP half): concept-designed.mjs appends the event, and t
   }
   const skill = readFileSync(join(root, 'skills', 'drain', 'SKILL.md'), 'utf8');
   assert.match(skill, /concept_article_missing/, 'the drain SOP must name the concept_article_missing lane');
+});
+
+// ---- FIX A (upgrade-polish, 2026-08-21): H10 concept duty SESSION-WINDOW start ----
+// Spec: the demand is satisfied by a family article whose created_at/updated_at is
+// at-or-after the SESSION WINDOW START, defined as the MINIMUM of (this family's
+// earliest concept_designed event `at`) and (the earliest `at` across ALL
+// session-register events of ANY kind this session) — not merely "at-or-after the
+// concept_designed registration itself". The legitimate write-the-article-THEN-
+// register flow (seconds apart) must satisfy the duty even when the article lands
+// before the concept_designed event but after some earlier same-session event; a
+// family article predating the WHOLE session must still demand it.
+//
+// EXPECTED FAILURE TODAY (test 1 only — see its own note): H10 currently accepts
+// an article only when it is at-or-after the concept_designed event's OWN `at`.
+// Tests 2 and 3 below pin boundaries that already hold under the CURRENT (buggy)
+// implementation too — they are regression guards for the fix, not red assertions;
+// disclosed rather than dressed up as red.
+
+test('H10 concept duty (session-window fix) (1): an article created between an EARLIER session event and the concept_designed registration satisfies the duty', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const EARLY_AT = '2026-06-10T09:00:00.000Z'; // earliest event of the WHOLE session
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z'; // the concept_designed registration itself
+    const ARTICLE_AT = '2026-06-10T10:00:00.000Z'; // BEFORE the registration, AFTER the earlier event
+    // an unrelated no_capture declaration covering nothing — present only to set
+    // the session's earliest-event floor earlier than the concept registration
+    writeSessionEvents(dir, [ncEvent('unrelated early note', EARLY_AT), cEvent('weapons', CONCEPT_AT)]);
+    conceptArticle(store, 'weapons', ARTICLE_AT);
+
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    // EXPECTED FAILURE TODAY: this fires — actual code 2 (nag), expected 0. The
+    // current implementation compares ARTICLE_AT only against CONCEPT_AT (10:00 <
+    // 12:00 → unmet); the fixed session-window floor is EARLY_AT (09:00), against
+    // which 10:00 satisfies.
+    assert.equal(r.code, 0, 'the article lands after the SESSION WINDOW START (the earlier event), even though it precedes the concept_designed registration itself');
+    assert.equal(owed(store, 'concept_article_missing').length, 0, 'nothing owed — the duty was satisfied, not deferred');
+    assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared on the satisfied path');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 concept duty (session-window fix) (2): a family article predating EVERY session event still demands its concept article', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const STALE_ARTICLE_AT = '2026-06-01T00:00:00.000Z'; // long before the session
+    const EARLY_AT = '2026-06-10T09:00:00.000Z';
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z';
+    writeSessionEvents(dir, [ncEvent('unrelated early note', EARLY_AT), cEvent('weapons', CONCEPT_AT)]);
+    conceptArticle(store, 'weapons', STALE_ARTICLE_AT);
+
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    const nag = stop();
+    assert.equal(nag.code, 2, 'a stale, untouched family article — predating even the earliest session event — never satisfies the duty');
+    assert.match(nag.stderr, /weapons/);
+    const release = stop();
+    assert.equal(release.code, 0, 'second stop releases');
+    assert.equal(owed(store, 'concept_article_missing').filter((t) => t.text.includes("'weapons'")).length, 1, 'the owed item still lands');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 concept duty (session-window fix) (3): the register-first flow (article created after the concept_designed event) still satisfies, even with other earlier session events present', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const EARLY_AT = '2026-06-10T09:00:00.000Z';
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z';
+    const ARTICLE_AT = '2026-06-10T13:00:00.000Z'; // after the registration
+    writeSessionEvents(dir, [aEvent('explorer', EARLY_AT), cEvent('weapons', CONCEPT_AT)]);
+    conceptArticle(store, 'weapons', ARTICLE_AT);
+
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'register-then-write still satisfies, unaffected by the session-window widening');
+    assert.equal(owed(store, 'concept_article_missing').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---- FIX A PIN (upgrade-polish review round, 2026-08-21): malformed `at` must
+// not widen the session-window floor. A naive fix that folds EVERY session-event
+// `at` into the MIN() without validating it first is exposed by a malformed value
+// (e.g. '0' or 'n/a') that a bare `new Date(x).getTime()` — or a `|| 0` epoch
+// fallback on a NaN parse — would otherwise drag arbitrarily far back, wide
+// enough to satisfy even a family article that predates every VALID session
+// timestamp. The malformed event must be excluded from the floor computation
+// entirely, leaving the floor at the earliest VALID timestamp — against which a
+// genuinely stale article still fails to satisfy the duty (armed-duty shape:
+// nag once, release on the second Stop, one owed item lands). This is additive
+// to FIX A tests (1)-(3) above and does not modify them.
+test("H10 concept duty (session-window fix) malformed-`at` guard: a session-register event with a malformed `at` ('0' / 'n/a') must not drag the window floor back far enough to satisfy an article that predates every VALID session timestamp — the duty still nags", () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const STALE_ARTICLE_AT = '2026-06-01T00:00:00.000Z'; // predates every VALID session timestamp below
+    const EARLY_AT = '2026-06-10T09:00:00.000Z'; // earliest VALID event this session
+    const CONCEPT_AT = '2026-06-10T12:00:00.000Z';
+    writeSessionEvents(dir, [
+      { kind: 'agent_dispatch', detail: 'explorer', at: '0' }, // malformed — must be excluded from the floor
+      { kind: 'no_capture', detail: 'unrelated malformed note', at: 'n/a' }, // malformed, different kind — same guard
+      ncEvent('a genuinely early valid note', EARLY_AT),
+      cEvent('weapons', CONCEPT_AT),
+    ]);
+    conceptArticle(store, 'weapons', STALE_ARTICLE_AT);
+
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    const nag = stop();
+    // EXPECTED FAILURE MODE this pins against: if the floor computation folds
+    // the malformed timestamps in unguarded (NaN poisoning the MIN, or a `|| 0`
+    // epoch fallback), the floor collapses to something at-or-before
+    // STALE_ARTICLE_AT and the duty would wrongly report satisfied (code 0).
+    // Correct behavior excludes the malformed entries, leaves the floor at
+    // EARLY_AT, and the stale article still fails to satisfy it.
+    assert.equal(nag.code, 2, 'a malformed session-event timestamp must not widen the window back far enough to satisfy a stale article — the duty still nags');
+    assert.match(nag.stderr, /weapons/, 'the nag names the unmet family verbatim');
+    const release = stop();
+    assert.equal(release.code, 0, "second stop releases, per the suite's armed-duty shape");
+    assert.equal(owed(store, 'concept_article_missing').filter((t) => t.text.includes("'weapons'")).length, 1, 'the owed item still lands');
+  } finally {
+    cleanup();
+  }
 });
 
 // --------------------------- H17 (bash write sweep — coder-frontmatter registration + bundled) ---------------------------

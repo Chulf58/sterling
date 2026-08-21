@@ -470,6 +470,10 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
     let r = edit(join(dir, 'src', 'feature.ts'));
     assert.equal(r.code, 2);
     assert.match(r.stderr, /read-evidence/);
+    // Separation pin (board c7b81456 review): an ordinary misconduct denial
+    // must never carry the environment-defect marker — a mis-wrap here would
+    // teach agents to exit blocked on their own fixable conduct.
+    assert.doesNotMatch(r.stderr, /ENVIRONMENT DEFECT/);
     // NAME THE LEDGER AND ITS WINDOW. ledgerPath resolves three different files, so
     // one sentence used to cover "never read it", "read it in an earlier prompt
     // turn" and "a different agent read it" — and the conductor case reads as a
@@ -587,8 +591,32 @@ test('H3: fails closed without a Sterling store (P5)', () => {
     const r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'x.ts') } }), dir);
     assert.equal(r.code, 2);
     assert.match(r.stderr, /failing closed/);
+    assert.match(r.stderr, /ENVIRONMENT DEFECT/);
+    assert.match(r.stderr, /exit `blocked`/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H3: a TORN read-evidence ledger denies as an ENVIRONMENT DEFECT, not ordinary misconduct (board c7b81456)', () => {
+  const { dir, cleanup } = makeProject({ withRun: true });
+  try {
+    const lp = join(dir, '.sterling', 'runs', 'r-1', 'reads', 'agent-a1.json');
+    mkdirSync(dirname(lp), { recursive: true });
+    writeFileSync(lp, '{not json at all'); // torn: present, non-empty, unparseable
+    const r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'feature.ts') }, agent_id: 'a1' }), dir);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /ENVIRONMENT DEFECT/);
+    assert.match(r.stderr, /TORN/);
+    assert.match(r.stderr, /not your conduct/i);
+    // Self-healing state: the denial instructs the ONE repairing action (a
+    // re-Read rebuilds the ledger from salvage) instead of do-not-retry, and
+    // escalates to blocked only if the denial repeats (review F1, c7b81456).
+    assert.match(r.stderr, /Read the target file now/);
+    assert.match(r.stderr, /repairs the torn ledger/);
+    assert.match(r.stderr, /exit `blocked`/);
+  } finally {
+    cleanup();
   }
 });
 
@@ -635,6 +663,41 @@ test('H5: a corrupt config denies (fail closed), never a voided frozen-test gate
     assert.match(r.stderr, /failing closed/);
   } finally {
     rmSync(corrupt, { recursive: true, force: true });
+  }
+});
+
+// Visible-repair half of decision frozen-test-repair-signatures-plus-visible-repair
+// (knowledge_get 7a4c3fb6-dc23-4c2f-9369-d2592132f408; board a06e4a1c): H5's denial
+// dropped a precondition it never actually checks ('during the fix loop' implies a
+// run/phase state the hook never inspects) and never named the one route that IS
+// sanctioned — conductor hand-repair with evidence recorded via test_repair (H5
+// binds coder/debugger frontmatter only; the conductor is exempt by construction
+// and was never denied by this hook in the first place). NOTE for conductor
+// adjudication: the PRE-EXISTING test above ('H5: denies test-path edits per
+// adapter test globs...', this file, asserts only /frozen/ and /tests-invalid/)
+// does not pin 'during the fix loop' verbatim, so it does not conflict with this
+// new assertion set — but it also does not yet assert the NEW required content
+// (b)/(d) below, so it will need strengthening once the message ships to stop
+// under-specifying the denial's fixed shape.
+test('H5 denial (visible-repair, decision 7a4c3fb6): names test paths as frozen for pipeline agents, never claims a fix-loop precondition, keeps the tests-invalid route, and names the conductor test_repair route', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const edit = (p) => runHook('h5-frozen-tests.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: p } }), dir);
+    const r = edit(join(dir, 'tests', 'feature.spec.ts'));
+    assert.equal(r.code, 2);
+    // (a) still names the freeze
+    assert.match(r.stderr, /frozen/);
+    // (b) states the WHO — frozen for pipeline agents — not an unchecked run-state claim
+    assert.match(r.stderr, /pipeline agent/i, 'denial names test paths as frozen for pipeline agents');
+    assert.doesNotMatch(r.stderr, /during the fix loop/, "the hook never checks run/phase state, so it must not claim this precondition");
+    // (c) keeps the tests-invalid escape hatch
+    assert.match(r.stderr, /tests-invalid/, 'keeps pointing at the typed escape hatch');
+    assert.match(r.stderr, /evidence/i, '"exit tests-invalid with evidence" guidance survives');
+    // (d) names the sanctioned repair route explicitly
+    assert.match(r.stderr, /conductor/i, 'names the conductor as the one who repairs');
+    assert.match(r.stderr, /test_repair|test-repair/, 'names the test_repair evidence route by name');
+  } finally {
+    cleanup();
   }
 });
 
@@ -1451,6 +1514,289 @@ test('H17: a missing attribution record fails CLOSED — never silently unattrib
     assert.equal(r.code, 2, 'unverifiable attribution denies rather than guessing');
     assert.match(r.stderr, /attribution record/);
     assert.match(r.stderr, /failing closed/);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FIX C (upgrade-polish, 2026-08-21; decision h17-enforcement-stamp-conductor-
+// attested-dirt, knowledge_get 6e132e19-0da1-47c2-9fa5-710bc7365014): a
+// CONDUCTOR-run stamp (scripts/enforcement-stamp.mjs, NOT yet written) records,
+// for each currently-dirty hooks/*.mjs / hooks/hooks.json path, the sha256 of its
+// bytes at stamp time. When EVERY dirty enforcement path is listed in the stamp
+// with a hash matching its CURRENT bytes, H17's enforcement-dirty denial does not
+// fire and the command proceeds through H17's normal write-sweep; any unlisted
+// dirty path, any hash mismatch, or no stamp at all falls back to the existing
+// (unchanged) denial.
+//
+// EXPECTED FAILURE TODAY: H17 has no notion of a stamp file yet — every "must now
+// ALLOW" assertion below fires against the current always-deny-while-dirty
+// behavior (actual code 2, expected 0). The "must still DENY" tests are boundary/
+// regression guards: they already hold today (there is no stamp mechanism to
+// exempt anything yet), and must keep holding once the exemption exists.
+// ---------------------------------------------------------------------------
+
+function runStampCli(dir) {
+  return spawnSync(process.execPath, [join(root, 'scripts', 'enforcement-stamp.mjs')], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+}
+
+test('enforcement-stamp.mjs: refuses (nonzero) with "nothing to attest" when hooks/ is clean', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const r = runStampCli(dir);
+    // EXPECTED FAILURE TODAY: the script does not exist — spawnSync reports a
+    // launch/module-not-found failure, which is itself nonzero, so THIS particular
+    // assertion may pass by accident; the message assertion below is the one that
+    // actually pins post-fix behavior and fails today (no matching text is produced).
+    assert.notEqual(r.status, 0, 'a clean tree has nothing to attest — the CLI must not exit 0');
+    assert.match((r.stderr || '') + (r.stdout || ''), /nothing to attest/i, 'names why it refused');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json')), false, 'no stamp is written on a clean tree');
+  } finally {
+    cleanup();
+  }
+});
+
+test('enforcement-stamp.mjs: stamps every dirty hooks/ path with the sha256 of its CURRENT bytes, and a re-run overwrites rather than merges', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// first dirty content\n');
+    let r = runStampCli(dir);
+    assert.equal(r.status, 0, `stamp CLI must succeed while hooks/ is dirty: ${r.stderr}`);
+    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
+    let stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
+    assert.equal(stamp.length, 1);
+    assert.equal(stamp[0].path, 'hooks/h3-contract-gate.mjs');
+    assert.equal(stamp[0].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
+    assert.ok(typeof stamp[0].at === 'string' && stamp[0].at.length > 0);
+
+    // further drift + a second dirty path: re-running OVERWRITES with the fresh
+    // set, never appends the stale entry alongside the new ones
+    writeFileSync(bundle, '// SECOND, different dirty content\n');
+    const hooksJson = join(dir, 'hooks', 'hooks.json');
+    writeFileSync(hooksJson, JSON.stringify({ hooks: { PreToolUse: [] }, TAMPERED: true }));
+    r = runStampCli(dir);
+    assert.equal(r.status, 0, r.stderr);
+    stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
+    assert.equal(stamp.length, 2, 'the fresh stamp lists both currently-dirty paths, not appended to the first, single-entry stamp');
+    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e.sha256]));
+    assert.equal(byPath['hooks/h3-contract-gate.mjs'], createHash('sha256').update(readFileSync(bundle)).digest('hex'), "the NEW bytes are hashed, not the first stamp's stale hash");
+    assert.equal(byPath['hooks/hooks.json'], createHash('sha256').update(readFileSync(hooksJson)).digest('hex'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix: a stamp matching every dirty hooks/ path\'s CURRENT bytes lets the command proceed (allow)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
+    assert.equal(runStampCli(dir).status, 0, 'stamping while dirty must succeed');
+
+    h17(dir, 'PreToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 0, `a matching conductor-attested stamp must let the command proceed through H17's normal write-sweep — ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix: the normal write-sweep still catches a tamper made DURING the command even with a matching stamp for the pre-existing dirt', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
+    assert.equal(runStampCli(dir).status, 0);
+
+    h17(dir, 'PreToolUse', A1);
+    // the agent's own command ALSO tampers an out-of-contract source file — the
+    // stamp exempts only the pre-attested hooks/ dirt, never widens the sweep.
+    writeFileSync(join(dir, 'src', 'other.ts'), 'export const other = 999; // tampered\n');
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'the stamp narrows the enforcement-dirty exemption; it never widens the normal write-sweep');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix: a dirty path MISSING from the stamp still denies (unchanged)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    const hooksJson = join(dir, 'hooks', 'hooks.json');
+    writeFileSync(bundle, '// dirty #1\n');
+    assert.equal(runStampCli(dir).status, 0, 'stamps only the currently-dirty path — hooks.json is still clean here');
+
+    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true })); // dirtied AFTER the stamp — never attested
+
+    h17(dir, 'PreToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'one dirty path unlisted in the stamp falls back to the existing denial');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix: bytes drifted since stamping still denies (a stamped-but-stale hash never attests the CURRENT bytes)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// stamped bytes\n');
+    assert.equal(runStampCli(dir).status, 0);
+
+    writeFileSync(bundle, '// bytes drifted AFTER stamping — e.g. a harness rebuild\n');
+
+    h17(dir, 'PreToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'a hash mismatch between the stamp and the CURRENT bytes falls back to the existing denial');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix: no stamp at all → the pre-existing enforcement-dirty denial fires exactly as before', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json')), false, 'no stamp was ever written');
+
+    h17(dir, 'PreToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'without a stamp, the pre-existing dirt still denies exactly as before the fix');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// H17/enforcement-stamp PIN strengthening (upgrade-polish review round,
+// 2026-08-21) — additive, written against the FIX C spec above. The fixer
+// lands in parallel; postures are noted per test.
+// ---------------------------------------------------------------------------
+
+test('H17 stamp fix: a CORRUPT stamp file (invalid JSON) gives NO exemption — denies exactly as with no stamp (regression guard: already holds pre-fix, since no exemption mechanism exists yet to be fooled)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
+    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
+    mkdirSync(dirname(stampPath), { recursive: true });
+    writeFileSync(stampPath, '{ not json at all');
+
+    h17(dir, 'PreToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'a corrupt (unparseable) stamp file must not exempt the dirty hooks path — denies exactly as with no stamp at all');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix: a NON-ARRAY stamp file (a JSON object) gives NO exemption — denies exactly as with no stamp (regression guard, same reasoning as the corrupt-JSON case)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
+    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
+    mkdirSync(dirname(stampPath), { recursive: true });
+    writeFileSync(stampPath, JSON.stringify({ path: 'hooks/h3-contract-gate.mjs', sha256: 'deadbeef' }));
+
+    h17(dir, 'PreToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'a stamp file that is a JSON OBJECT, not an array, must not exempt anything — denies exactly as with no stamp at all');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix: a stamp entry with deleted:true is honored iff the path is ABSENT — allow while deleted, deny once the path exists again (EXPECTED RED today: no stamp-exemption mechanism exists yet, so the first assertion below fires — actual code 2, expected 0; the second assertion already holds pre-fix)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    // dirty-then-deleted: the conductor deletes a tracked bundled hook (e.g. a
+    // hooks rebuild dropping a stale file) — git status shows it as deleted
+    // (tracked, dirty), the enforcement-dirty condition without any bytes to hash.
+    rmSync(bundle, { force: true });
+    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
+    mkdirSync(dirname(stampPath), { recursive: true });
+    writeFileSync(stampPath, JSON.stringify([{ path: 'hooks/h3-contract-gate.mjs', deleted: true, at: NOW }]));
+
+    h17(dir, 'PreToolUse', A1);
+    let r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 0, `a deleted:true stamp entry for a path that is currently ABSENT must hold the exemption — ${r.stderr}`);
+
+    // the path exists again — the deleted:true attestation no longer matches
+    // reality, so it must fall back to the ordinary enforcement-dirty denial.
+    writeFileSync(bundle, '// recreated after the deletion was stamped\n');
+    h17(dir, 'PreToolUse', A1);
+    r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 2, 'a deleted:true stamp entry does not exempt a path that exists again');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 stamp fix (widened CLI, EXPECTED RED today — see FIX C decision 6e132e19): a pre-existing dirty NON-hooks brief-scope violation, stamped by the widened CLI, no longer defeats the exemption', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    // pre-existing dirt: an out-of-contract TRACKED source file (mirrors AC3(a)'s
+    // brief-scope violation shape — src/other.ts sits outside blast_radius,
+    // incidental_scope and out_of_scope, so scopeCheck denies it as "outside the
+    // brief"), already dirty BEFORE any Bash call this turn — not tampered
+    // during the command, attested up front by the conductor.
+    const other = join(dir, 'src', 'other.ts');
+    const origOther = readFileSync(other, 'utf8');
+    const dirtied = origOther + '\n// pre-existing dirt, attested by the conductor\n';
+    writeFileSync(other, dirtied);
+
+    // the widened CLI stamps the currently-dirty tracked path too, not only hooks/**
+    assert.equal(runStampCli(dir).status, 0, 'stamp CLI must succeed while a non-hooks tracked path is dirty');
+    const stamp = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json'), 'utf8'));
+    assert.ok(stamp.some((e) => e.path === 'src/other.ts'), 'the widened CLI stamps the non-hooks dirty path too (precondition for this test to mean anything)');
+
+    h17(dir, 'PreToolUse', A1);
+    // the agent's own command introduces no NEW tamper — the only dirt present
+    // is the pre-existing, now-stamped src/other.ts
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.equal(r.code, 0, `a matching conductor-attested stamp for a non-hooks brief-scope violation must let the command proceed — ${r.stderr}`);
+    assert.equal(readFileSync(other, 'utf8'), dirtied, 'the stamped pre-existing dirt is left untouched, not reverted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('enforcement-stamp.mjs (widened, EXPECTED RED today): stamps a dirty non-hooks TRACKED file alongside hooks/**, and expands an untracked directory into its contained files rather than one dir-shaped entry', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
+    writeFileSync(bundle, '// dirty hooks bundle\n');
+    const other = join(dir, 'src', 'other.ts');
+    const dirtiedOther = readFileSync(other, 'utf8') + '\n// dirty tracked src file, non-hooks\n';
+    writeFileSync(other, dirtiedOther);
+    // an untracked directory with two files — must expand to per-file entries,
+    // not a single directory-shaped entry (mirrors AC3(c)'s `?? dir/` collapse handling)
+    const evilDir = join(dir, 'src', 'evildir');
+    mkdirSync(evilDir, { recursive: true });
+    writeFileSync(join(evilDir, 'a.ts'), 'export const a = 1;\n');
+    writeFileSync(join(evilDir, 'b.ts'), 'export const b = 1;\n');
+
+    const r = runStampCli(dir);
+    assert.equal(r.status, 0, `stamp CLI must succeed with hooks + non-hooks dirt: ${r.stderr}`);
+    const stamp = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json'), 'utf8'));
+    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e]));
+
+    assert.ok(byPath['hooks/h3-contract-gate.mjs']?.sha256, 'the hooks bundle is still stamped with its sha256 (unchanged)');
+    assert.equal(byPath['hooks/h3-contract-gate.mjs'].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
+
+    assert.ok(byPath['src/other.ts']?.sha256, 'the widened CLI now also stamps a dirty non-hooks tracked file');
+    assert.equal(byPath['src/other.ts'].sha256, createHash('sha256').update(readFileSync(other)).digest('hex'));
+
+    assert.ok(byPath['src/evildir/a.ts']?.sha256, 'an untracked directory expands to its contained files, not a single dir entry');
+    assert.ok(byPath['src/evildir/b.ts']?.sha256);
+    assert.equal(byPath['src/evildir/a.ts'].sha256, createHash('sha256').update(readFileSync(join(evilDir, 'a.ts'))).digest('hex'));
+    assert.ok(!stamp.some((e) => e.path === 'src/evildir' || e.path === 'src/evildir/'), 'no directory-shaped entry is written, only expanded per-file entries');
   } finally {
     cleanup();
   }

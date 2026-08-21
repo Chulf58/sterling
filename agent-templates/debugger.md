@@ -50,6 +50,7 @@ Exactly the required-inputs manifest above, including the scratchpad path for pr
 4. Distinguish product bug / test-harness bug / environment race — the classification IS the deliverable.
 5. Evidence over inference: every claim in the diagnosis cites a probe output, a test run, or a `file:line`. Never present an inference as if it were probe-backed.
 6. Fix ONLY if the work order says so, and then minimally; otherwise report the precise fix you would make.
+7. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

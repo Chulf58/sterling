@@ -775,7 +775,7 @@ test('bash delivery: an owned path named in a command enqueues a POINTER, not th
     assert.equal(q.length, 1, 'it went to the proven UserPromptSubmit surface instead');
     assert.equal(q[0].kind, 'bash_pointers');
     assert.match(q[0].payload, /STERLING KNOWLEDGE POINTERS \(H19\)/);
-    assert.match(q[0].payload, /src\/a\.mjs — article 'owner' \(active\) · knowledge_get /);
+    assert.match(q[0].payload, /src\/a\.mjs — article 'owner \[owner\]' \(active\) · knowledge_get /, 'title and slug both render (title === slug in this fixture)');
     assert.doesNotMatch(q[0].payload, /does the owner thing/, 'the article BODY is never in a pointer payload');
   } finally {
     cleanup();

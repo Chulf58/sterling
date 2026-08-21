@@ -17,7 +17,9 @@
 // Pipeline: during an active run, agents with an agent_id got prep's
 // knowledge_pack — H19 stays silent for them (AC6, no double-delivery); the
 // conductor's own inline touches still deliver.
-import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel } from './lib/common.mjs';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
+import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
 import {
   guardPath,
   pendingPath,
@@ -30,7 +32,10 @@ import {
   cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
+  renderLineSuspects,
   renderPayload,
+  isDelivered,
+  markDelivered,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -97,26 +102,25 @@ try {
   // article re-arms nothing (the article is in context); a new owning record
   // always delivers (scope-growth re-arm). Hazards and decisions share the one
   // ledger — their ids are ids like any other.
-  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
-  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  const freshOwners = owners.filter((r) => !isDelivered(guard, r));
+  const freshHazards = hazards.filter((r) => !isDelivered(guard, r));
+  const freshDecisions = decisions.filter((r) => !isDelivered(guard, r));
   // The frontier signal stays once per file per session (grill answer: solve,
   // not accept), but it is now the payload HEADER rather than a separate
   // emission that returned early. That early return was why a hazard in UNOWNED
   // territory — the reporting project's exact case — was swallowed.
-  const unowned = owners.length === 0;
+  // A gitignored path is never governed territory (board 1de3653b): no article
+  // will ever own it and H10 will not demand one, so the frontier signal — whose
+  // whole message is "H10 will demand an article here" — would be false on it.
+  // gitIgnored's null (git cannot answer) degrades TOWARD signaling: unowned
+  // stands, exactly the pre-feature behavior. Checked only on unowned paths so
+  // the owned-territory fast path spawns nothing.
+  const bare = owners.length === 0;
+  const unowned = bare && !(gitIgnored([rel], input.cwd)?.has(rel) ?? false);
   const frontierFresh = unowned && !guard.frontier_files.includes(rel);
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
 
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  // Hazards LEAD: "do not do this here" outranks the description of what the
-  // territory is, and the reader may stop after the first block.
-  const blocks = [
-    ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
-    ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
-    ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
-  ];
-  const payload = renderPayload(rel, blocks, { unowned });
   // GUARD ONLY WHAT WAS ACTUALLY RENDERED (correctness review 2026-07-30). The
   // decision cap means freshDecisions can exceed what the payload shows, and
   // marking the unshown ones delivered is silent loss with no detector: a later
@@ -129,6 +133,58 @@ try {
   // decision cap below (board a470046d slice 1): a hazard capped out of this
   // payload must surface on a later touch, not vanish as 'delivered'.
   const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+
+  // LINE-SUSPECT ADVISORY (board 04ccecb1-a338-4b4e-91f0-c99588c1cdce, warn-only
+  // P1 advisory). `fresh` above already holds exactly the records this touch is
+  // about to render (owners uncapped, hazards/decisions the rendered slice), so
+  // the scan runs over that same set: for each record whose body text cites a
+  // line position in `rel` (`<rel>:42` / `<rel>:10-20`) while the record's own
+  // updated_at PREDATES rel's current mtime, the citation may have rotted under
+  // it. Wrapped so ANY internal failure here (a bad stat — including the file
+  // having moved/vanished since the touch — a malformed record, a regex
+  // surprise) degrades to NO advisory rather than a broken delivery: this can
+  // never be the reason a delivery fails (P5 / AC7 floor is the hook's own,
+  // untouched by this addition).
+  let lineSuspectBlocks = [];
+  try {
+    const mtimeMs = statSync(join(input.cwd, rel)).mtimeMs;
+    const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Negative lookbehind on a path/word character keeps a citation of a
+    // DIFFERENT file that merely ENDS with `rel` (e.g. 'other/src/a.mjs:7'
+    // against rel 'src/a.mjs') from matching as if it named rel itself. The
+    // scan surface is the STRINGIFIED record, where a newline/tab in prose is
+    // the two characters `\` `n` — a line-initial citation would sit behind a
+    // literal `n` (a \w) and be wrongly suppressed, so an escape-sequence
+    // lookbehind explicitly re-admits it (review finding 2026-08-21).
+    const lineTokenRe = new RegExp(`(?:(?<=\\\\[nt])|(?<![\\w./-]))${escapedRel}:\\d+(?:-\\d+)?`, 'g');
+    const suspects = [];
+    for (const record of fresh) {
+      // History is FROZEN PROVENANCE — an old entry legitimately cites lines
+      // as of its own moment, so it never makes a record line-suspect; only
+      // the live body fields are scanned (same decomposition recordSizes uses).
+      const { history: _history, ...liveBody } = record;
+      const tokens = [...new Set(JSON.stringify(liveBody).match(lineTokenRe) ?? [])];
+      if (!tokens.length) continue; // no citation of rel's line position at all
+      const updatedAtMs = Date.parse(record.updated_at ?? '');
+      if (!Number.isFinite(updatedAtMs) || updatedAtMs >= mtimeMs) continue; // fresh — not suspect
+      suspects.push({ record, tokens });
+    }
+    lineSuspectBlocks = renderLineSuspects(suspects, charCap);
+  } catch {
+    // stat failure or any scan error: skip the advisory silently (warn-only).
+  }
+
+  // Hazards LEAD: "do not do this here" outranks the description of what the
+  // territory is, and the reader may stop after the first block. The
+  // line-suspect block, if any, trails everything else — it is a footnote on
+  // knowledge already delivered above, not knowledge in its own right.
+  const blocks = [
+    ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
+    ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
+    ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
+    ...lineSuspectBlocks,
+  ];
+  const payload = renderPayload(rel, blocks, { unowned });
 
   // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
   // makes delivery once-per-session, so writing it before the delivery actually
@@ -161,7 +217,7 @@ try {
   } else {
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
   }
-  guard.records.push(...fresh.map((r) => r.id));
+  markDelivered(guard, fresh);
   if (frontierFresh) guard.frontier_files.push(rel);
   writeGuard(gPath, guard);
   allow();

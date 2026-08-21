@@ -96,6 +96,10 @@ test('citation grammar: the NEAREST preceding record word owns the id', () => {
   assert.deepEqual(collectRecordCitations('H3/H8 fail-closed (audit finding 5/43, board ea2742e0)'), []);
   // excluded words own their ids outright
   assert.deepEqual(collectRecordCitations('R2 board 2e443375 did it'), []);
+  // REGRESSION (live false positive 2026-08-21, h22-dispatch-register.mjs:1):
+  // the PLURAL 'boards' must shield its ids too, or the window leaks back to a
+  // preceding 'decision' and blames a drained board id on it
+  assert.deepEqual(collectRecordCitations('(decision ec9eacaa, boards 54c451b4 / 570832d4)').map((c) => c.id), ['ec9eacaa']);
   // an id on the next line belongs to no word
   assert.deepEqual(collectRecordCitations('decision\n6dfbe675'), []);
   // the two word lists must stay disjoint — a word cannot be both

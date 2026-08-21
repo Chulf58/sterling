@@ -7,6 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h19-clear-session.mjs
 import { rmSync, existsSync as existsSync2 } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -4133,7 +4134,18 @@ var decisionSchema = base.extend({
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
   rationale: external_exports.string().min(1),
-  file_keys: external_exports.array(repoPath).optional()
+  file_keys: external_exports.array(repoPath).optional(),
+  // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+  // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+  // the record's load-bearing claims were measured or inferred (a false
+  // anti-pattern once lived 8 minutes because nothing marked it inferred);
+  // measured_by names the command/instrument that produced a measured claim,
+  // so a quoted number can be re-derived instead of trusted. Named
+  // evidence_basis because anti_pattern already carries an unrelated `basis`
+  // enum (codebase|platform|external). Instrument-staleness re-test machinery
+  // is DEFERRED — see the decision's rejected alternatives.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
@@ -4205,7 +4217,12 @@ var antiPatternSchema = base.extend({
   source_evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional(),
   severity: external_exports.enum(["info", "warn", "block"]).optional(),
-  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase")
+  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
+  // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+  // measured|inferred, distinct from this type's pre-existing `basis`
+  // (where the knowledge CAME FROM, not how it was established).
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
@@ -4217,7 +4234,16 @@ var researchFindingSchema = base.extend({
   source_urls: external_exports.array(external_exports.string()),
   source_date: isoDate,
   capture_date: isoDate,
-  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional()
+  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
+  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // seam, a library's behavior in one adapter) join the file-key economy the
+  // same way decision/anti_pattern/todo do; many findings are fileless
+  // (platform behavior, pricing) so this stays optional, never required.
+  file_keys: external_exports.array(repoPath).optional(),
+  // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+  // is measured (measured_by = the probe), a docs-read finding is inferred.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var modelsCatalogSchema = external_exports.object({
   entries: external_exports.array(external_exports.object({
@@ -4263,6 +4289,32 @@ var disconfirmedHypothesisSchema = base.extend({
   question: external_exports.string().min(1),
   rejected_answer: external_exports.string().min(1),
   evidence: external_exports.string().min(1),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine(refineSupersession);
+var attestationSchema = base.extend({
+  type: external_exports.literal("attestation"),
+  // Optional explicit handle. NEVER auto-minted (no title/question headline
+  // to mint from); an explicit one passes the cross-type collision refusal
+  // like every slug-bearing type (review finding 3, 2026-08-21).
+  slug: external_exports.string().min(1).optional(),
+  // What was inspected — a free-form artifact identity (a part number, a
+  // render name, a document version). Repo files it corresponds to belong in
+  // file_keys, which joins the retrieval economy; artifact_key does not need
+  // to be a path and often is not.
+  artifact_key: external_exports.string().min(1),
+  verdict: external_exports.enum(["approved", "rejected", "needs_rework"]),
+  // Who ruled — a human identity. An agent's judgment is a review finding or
+  // a decision, never an attestation; the type exists precisely to mark the
+  // human-eyes event.
+  inspector: external_exports.string().min(1),
+  // When the inspection HAPPENED — created_at is merely when the record was
+  // written, and ledger entries are routinely written after the fact.
+  inspected_at: isoDate,
+  // Instrument provenance: what the inspection looked at/through (a render
+  // at a commit, a physical sample batch) — the hook for later instrument-
+  // staleness work (board 1d02b6b4's deferred half).
+  instrument: external_exports.string().min(1).optional(),
+  notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
@@ -4484,7 +4536,15 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture", "capture_pending"]),
+  kind: external_exports.enum([
+    "research_tool",
+    "agent_dispatch",
+    "debug_scope",
+    "concept_designed",
+    "no_capture",
+    "capture_pending",
+    "test_repair"
+  ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4567,6 +4627,14 @@ var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
 });
+var successPredicateSchema = external_exports.object({
+  output_regex: external_exports.string().optional(),
+  output_regex_absent: external_exports.string().optional(),
+  artifact: external_exports.object({
+    path: external_exports.string(),
+    min_bytes: external_exports.number().optional()
+  }).strict().optional()
+}).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4574,7 +4642,9 @@ var configSchema = external_exports.object({
     // baked from the adapter at init (§9.1)
     test_globs: external_exports.array(external_exports.string()).optional(),
     run_commands: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional()
+    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional(),
+    // §see comment above: keyed by run_command key, optional, never defaulted to {}
+    success_predicates: external_exports.record(external_exports.string(), successPredicateSchema).optional()
   })).default([]),
   backup_path: external_exports.string().optional(),
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
@@ -4650,6 +4720,25 @@ var configSchema = external_exports.object({
     // threshold injects ONE moment-3 advisory per streak episode.
     streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
+  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: external_exports.object({
+    stale_minutes: external_exports.number().int().positive().default(60)
+  }).default({}),
+  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // surface that states the "N concurrent subagents" ceiling (H1's banner
+  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
+  // hardcoded literal, so a ruling that changes it takes effect everywhere
+  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
+  // way — this tunes only the number, never a floor/quota (decisions
+  // 677f1639/299d853a stand). Absent → shipped default 5.
+  delegation: external_exports.object({
+    max_concurrent: external_exports.number().int().positive().default(5)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -4714,7 +4803,8 @@ var configSchema = external_exports.object({
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps only the newest N (rotation disclosed on
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
   // the write's warnings channel). Nothing is lost: every rotated-away entry
   // remains readable in the retained superseded versions, which the store keeps
   // forever — the supersede chain IS the archive, so no new table or archive
@@ -4725,6 +4815,12 @@ var configSchema = external_exports.object({
   // consumers (promotion/completeness match on RECENT entries' target_id)
   // while bounding the round-trip.
   article_history_max_entries: external_exports.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -4866,9 +4962,18 @@ import { join as join2, dirname as dirname2 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
+function pendingPath(cwd) {
+  return join2(deliveryDir(cwd), "pending.json");
+}
 
 // scripts/hooks/h19-clear-session.mjs
 var input = readStdin();
 var dir = deliveryDir(input.cwd);
-if (existsSync2(dir)) rmSync(dir, { recursive: true, force: true });
+var rotationNotePath = join3(input.cwd, ".sterling", "transient", "rotation-note.json");
+if (existsSync2(rotationNotePath)) {
+  const p = pendingPath(input.cwd);
+  if (existsSync2(p)) rmSync(p, { force: true });
+} else if (existsSync2(dir)) {
+  rmSync(dir, { recursive: true, force: true });
+}
 allow();

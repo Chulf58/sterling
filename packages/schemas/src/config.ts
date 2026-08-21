@@ -11,6 +11,31 @@ const modelEffort = z.object({
   effort: z.enum(['low', 'medium', 'high', 'xhigh']),
 });
 
+// Toolchain success predicates (decision 98549344, slug
+// toolchain-success-predicates-run-gate, board babf3a9e). Lives ALONGSIDE
+// run_commands, keyed by the same run_command key — never nested inside a
+// run_commands string value (that would break H14's Object.values flatMap
+// over run_commands as plain strings). At least one criterion must be
+// declared; an empty {} is refused rather than silently accepted as "nothing
+// to check" (P5).
+const successPredicateSchema = z
+  .object({
+    output_regex: z.string().optional(),
+    output_regex_absent: z.string().optional(),
+    artifact: z
+      .object({
+        path: z.string(),
+        min_bytes: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (v) => v.output_regex !== undefined || v.output_regex_absent !== undefined || v.artifact !== undefined,
+    { message: 'success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)' }
+  );
+
 export const configSchema = z.object({
   toolchains: z
     .array(
@@ -21,6 +46,8 @@ export const configSchema = z.object({
         test_globs: z.array(z.string()).optional(),
         run_commands: z.record(z.string(), z.string()).optional(),
         capabilities: z.record(z.string(), z.boolean()).optional(),
+        // §see comment above: keyed by run_command key, optional, never defaulted to {}
+        success_predicates: z.record(z.string(), successPredicateSchema).optional(),
       })
     )
     .default([]),
@@ -106,6 +133,29 @@ export const configSchema = z.object({
       streak_threshold: z.number().int().positive().default(10),
     })
     .default({}),
+  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: z
+    .object({
+      stale_minutes: z.number().int().positive().default(60),
+    })
+    .default({}),
+  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // surface that states the "N concurrent subagents" ceiling (H1's banner
+  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
+  // hardcoded literal, so a ruling that changes it takes effect everywhere
+  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
+  // way — this tunes only the number, never a floor/quota (decisions
+  // 677f1639/299d853a stand). Absent → shipped default 5.
+  delegation: z
+    .object({
+      max_concurrent: z.number().int().positive().default(5),
+    })
+    .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -182,7 +232,8 @@ export const configSchema = z.object({
   // machine, not architecture.
   article_oversize_chars: z.number().int().positive().default(60000),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps only the newest N (rotation disclosed on
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
   // the write's warnings channel). Nothing is lost: every rotated-away entry
   // remains readable in the retained superseded versions, which the store keeps
   // forever — the supersede chain IS the archive, so no new table or archive
@@ -193,6 +244,12 @@ export const configSchema = z.object({
   // consumers (promotion/completeness match on RECENT entries' target_id)
   // while bounding the round-trip.
   article_history_max_entries: z.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: z.number().int().nonnegative().default(2),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while

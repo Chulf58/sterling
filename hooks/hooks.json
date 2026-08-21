@@ -3,7 +3,15 @@
     "SubagentStart": [
       {
         "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" },
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" }
         ]
       }
     ],
@@ -37,7 +45,10 @@
         "matcher": "Task|Agent",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h8-dispatch-cap.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" }
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h25-dispatch-capability.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h26-dispatch-overlap.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h27-dispatch-signatures.mjs\"" }
         ]
       },
       {
@@ -46,7 +57,10 @@
       },
       {
         "matcher": "Bash|PowerShell",
-        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h15-store-guard.mjs\"" }]
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h15-store-guard.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h24-gate-exit-lint.mjs\"" }
+        ]
       },
       {
         "matcher": "mcp__sterling__knowledge_update|mcp__sterling__knowledge_append|mcp__sterling__knowledge_edit|mcp__plugin_sterling_sterling__knowledge_update|mcp__plugin_sterling_sterling__knowledge_append|mcp__plugin_sterling_sterling__knowledge_edit|Read|Grep|Glob|Task|Agent",
@@ -58,7 +72,8 @@
         "matcher": "Read",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-reads-ledger.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" }
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
         ]
       },
       {
@@ -75,7 +90,10 @@
       },
       {
         "matcher": "Bash|PowerShell",
-        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" }]
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
+        ]
       }
     ],
     "Stop": [

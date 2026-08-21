@@ -206,7 +206,7 @@ const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
     live_test_refs: [],
   }).record;
 
-test('knowledge_update drains the article\'s drift maintenance items (reconcile_needed/refresh_reference) but RE-POINTS an open promotion_review rather than draining it — P4 lifecycle-bind + todo 6202a0f5', () => {
+test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review still RE-POINTS rather than draining (unaffected by this flip), and an unrelated article\'s debt stays untouched (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -219,16 +219,18 @@ test('knowledge_update drains the article\'s drift maintenance items (reconcile_
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'other'`, file_keys: ['src/other.ts'], feature_link: other.id });
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 4);
 
+    // NO resolves named — decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1: a
+    // write is not a claim, so nothing here is discharged by writing alone.
     const updated = tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
 
     const open = tools.maintenanceQuery({ cap: 1000 });
     const has = (reason: string, link: string) =>
       open.some((t) => (t as { system_reason?: string }).system_reason === reason && (t as { feature_link?: string }).feature_link === link);
-    assert.equal(has('reconcile_needed', article.id), false, 'reconcile_needed drained by the reconcile');
-    assert.equal(has('refresh_reference', article.id), false, 'refresh_reference drained by the reconcile');
-    assert.equal(has('promotion_review', article.id), false, 'promotion_review no longer points at the now-superseded id — it must not strand there');
+    assert.equal(has('reconcile_needed', article.id), true, 'reconcile_needed stays OPEN — the old implicit drain is dead');
+    assert.equal(has('refresh_reference', article.id), true, 'refresh_reference stays OPEN — same reason, still owed until claimed');
+    assert.equal(has('promotion_review', article.id), false, 'promotion_review no longer points at the now-superseded id — its re-pointing mechanism is untouched by this flip');
     assert.equal(has('promotion_review', updated.id), true, 'promotion_review re-pointed to the superseding version — same review, same lineage, still owed');
-    assert.equal(open.length, 2, 'still exactly 2 open items: the unrelated other-article debt and the re-pointed review');
+    assert.equal(open.length, 4, 'nothing drained by an unclaimed write: both `thing` items, the re-pointed review, and the unrelated `other` debt all remain');
     assert.equal(has('reconcile_needed', other.id), true, "an unrelated article's debt is untouched");
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).find((t) => t.id === review.record.id)?.id, review.record.id, 'same item id — re-pointed in place, not replaced');
   } finally {
@@ -354,16 +356,18 @@ test('article_oversize: knowledge_append and knowledge_edit carry the same warni
   }
 });
 
-test('knowledge_update drains a drift item whose feature_link points to an ANCESTOR version (supersede-chain match)', () => {
+test('knowledge_update no longer drains a drift item whose feature_link points to an ANCESTOR version on an UNCLAIMED write — the auto-drain-via-chain is gone (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1); explicit ancestor-chain claiming via resolves is pinned in resolves-claim.test.ts', () => {
   const { tools, cleanup } = harness();
   try {
     const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
     const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'v2' });
-    // an item raised against the now-superseded v1 (a flag that lagged a version);
-    // reconciling v2→v3 must still drain it via the supersede chain.
+    // an item raised against the now-superseded v1 (a flag that lagged a version).
+    // OLD CONTRACT (decision 8ecd435f): reconciling v2→v3 alone drained it via
+    // the supersede chain, no claim needed. NEW CONTRACT: a write is not a
+    // claim — it stays open until named via `resolves`.
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'thing'`, file_keys: ['src/thing.ts'], feature_link: v1.id });
     tools.knowledgeUpdate(v2.id, { what_it_does: 'v3' });
-    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 0, 'ancestor-linked drift item drained via the chain');
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 1, 'the ancestor-linked drift item stays OPEN — no implicit drain via the chain anymore');
   } finally {
     cleanup();
   }
@@ -1049,6 +1053,136 @@ test('removal evidence survives the store cap: old high-overlap records cannot p
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FIX B (upgrade-polish, 2026-08-21): board_remove artifact_evidence ALSO scans
+// durable-record BODY TEXT for a citation of the board item's own id — the full
+// uuid or its first-8-char citation prefix (the same prefix convention pinned by
+// AC6 in cited-id-warnings.test.ts) — written at-or-after the item's created_at.
+// The existing file_keys arm is unchanged; the "no fulfilling artifact-write"
+// note appears only when BOTH arms are empty.
+//
+// EXPECTED FAILURE TODAY: test (1) fires — boardRemove currently scans only
+// file_keys overlap, so a decision citing the item's id/prefix but never
+// touching its file_keys is invisible to artifact_evidence: actual
+// closed.artifact_evidence.length === 0, expected 1. Tests (2) and (3) already
+// hold under the CURRENT implementation too (an unrelated-id citation was never
+// evidence, and there is no id-scanning arm yet to be fooled by a pre-dated
+// coincidence) — they are boundary/regression guards for the fix, disclosed
+// rather than presented as red.
+// ---------------------------------------------------------------------------
+
+test("board_remove artifact_evidence FIX B (1): a decision citing the item's 8-char id prefix counts as evidence even when it never touches file_keys", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const item = (tools.boardAdd({ text: 'fix the doc', source: 'user', file_keys: ['docs/x.md'] }) as { record: { id: string } }).record;
+    const prefix = item.id.slice(0, 8);
+    tools.knowledgeCreate('decision', {
+      title: 'settled by direct fix',
+      statement: `Closes board ${prefix} by writing the doc fix directly, off any tracked file_keys.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const closed = tools.boardRemove(item.id);
+    assert.equal(closed.artifact_evidence?.length, 1, 'the id-citing decision is visible as evidence even though it never touched file_keys');
+    assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
+    assert.equal(closed.note, undefined, "no operator's-word note when id-citation evidence exists");
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_remove artifact_evidence FIX B (2): a decision citing an UNRELATED id, off file_keys, leaves evidence empty (unchanged)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const item = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
+    tools.knowledgeCreate('decision', {
+      title: 'an unrelated ruling',
+      statement: `Follows decision ${randomUUID()} for an unrelated matter.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const closed = tools.boardRemove(item.id);
+    assert.deepEqual(closed.artifact_evidence, [], 'citing a different id, off file_keys, is not evidence');
+    assert.match(closed.note ?? '', /operator's word/, 'the no-fulfilling-write note still fires — unchanged behavior');
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_remove artifact_evidence FIX B (3): a record CREATED BEFORE the item, coincidentally containing its future 8-char prefix, is excluded', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-evidence-predate-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  let t = '2026-06-10T12:00:00.000Z';
+  const tools = new SterlingTools({ store, now: () => t });
+  try {
+    // learn the item's id/prefix at a LATE clock, then rewind the clock so the
+    // decision below is created BEFORE the item ever existed
+    t = '2026-06-12T12:00:00.000Z';
+    const item = (tools.boardAdd({ text: 'fix the widget', source: 'user', file_keys: ['src/widget.ts'] }) as { record: { id: string } }).record;
+    const prefix = item.id.slice(0, 8);
+
+    t = '2026-06-10T12:00:00.000Z'; // strictly before item.created_at
+    tools.knowledgeCreate('decision', {
+      title: 'an older, unrelated ruling',
+      statement: `Mentions board ${prefix} in passing, long before that item ever existed.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+
+    t = '2026-06-13T12:00:00.000Z';
+    const closed = tools.boardRemove(item.id);
+    assert.deepEqual(closed.artifact_evidence, [], 'a same-prefix record predating the item is never its fulfilling write');
+    assert.match(closed.note ?? '', /operator's word/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FIX B PINS (upgrade-polish review round, 2026-08-21) — additive, written
+// against the FIX B spec above (id/8-char-prefix citation as a second evidence
+// arm, independent of file_keys). The fixer lands in parallel; postures noted
+// per test.
+// ---------------------------------------------------------------------------
+
+test("board_remove artifact_evidence FIX B (4): a board item with NO file_keys still gets id-citation evidence — the id-scan arm runs independently of the file_keys arm (EXPECTED RED today: today a keyless item only ever reports check_skipped/no_file_keys, with no id-scanning arm to find this decision)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const item = (tools.boardAdd({ text: 'free-floating idea', source: 'user' }) as { record: { id: string } }).record;
+    const prefix = item.id.slice(0, 8);
+    tools.knowledgeCreate('decision', {
+      title: 'settled the free-floating idea',
+      statement: `Closes board ${prefix} directly; there is no tracked file for this one.`,
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const closed = tools.boardRemove(item.id);
+    assert.equal(closed.artifact_evidence?.length, 1, 'a keyless item still surfaces id-citation evidence even though the file_keys arm cannot run');
+    assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
+    assert.equal(closed.note, undefined, "no operator's-word note when id-citation evidence exists");
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_remove artifact_evidence FIX B (5): the no-evidence note discloses the id-citation scan is a BOUNDED window, not an exhaustive search over every record ever written (EXPECTED RED today: the current note names only the operator\'s-word binding, with no window/recency disclosure)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
+    const abandoned = tools.boardRemove(bare.id);
+    assert.deepEqual(abandoned.artifact_evidence, [], 'no fulfilling write exists for either arm');
+    assert.match(abandoned.note ?? '', /operator's word/, 'the pre-existing note still fires (unchanged)');
+    assert.match(
+      abandoned.note ?? '',
+      /200|most.recently|window/i,
+      'the note discloses the id-citation scan is a bounded window (e.g. a recency cap), never letting "no evidence found" read as an exhaustive proof of absence — pin disclosure exists, not exact prose'
+    );
+  } finally {
+    cleanup();
   }
 });
 
@@ -1845,6 +1979,59 @@ test('knowledge_schema reports required vs optional, types and closed enums (§2
   }
 });
 
+test('knowledge_schema(research_finding) reports file_keys as optional; reference_material still does not (decision 8dbbc85d, board b1de6fab)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const rf = tools.knowledgeSchema('research_finding');
+    assert.ok(rf.optional.includes('file_keys'), 'file_keys is reported optional on research_finding');
+    const fk = rf.fields.find((f) => f.name === 'file_keys');
+    assert.ok(fk, 'file_keys is a described field, not just named in the optional list');
+    assert.equal(typeof fk?.type, 'string');
+    assert.notEqual(fk?.type, 'unknown', 'the new field is described, not left undescribed');
+
+    // control: the per-type split still holds — reference_material carries its
+    // path via `location`, not file_keys, and this addition must not blur that
+    // (decision b47889b7, unchanged).
+    const ref = tools.knowledgeSchema('reference_material');
+    assert.ok(!ref.optional.includes('file_keys') && !ref.required.includes('file_keys'), 'reference_material is unaffected by this addition');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_create/knowledge_query: research_finding accepts file_keys, normalizes it, and joins by it — same as decision/anti_pattern (decision 8dbbc85d, board b1de6fab)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record } = tools.knowledgeCreate('research_finding', {
+      question: 'does the platform rate-limit per org or per token?',
+      answer: 'per-org',
+      source_urls: [],
+      source_date: '2026-01-15',
+      capture_date: '2026-06-01',
+      volatility_hint: 'medium',
+      file_keys: ['scripts\\hooks\\x.mjs'],
+    });
+    assert.deepEqual(
+      (record as unknown as { file_keys: string[] }).file_keys,
+      ['scripts/hooks/x.mjs'],
+      'path invariant holds through the tool surface, same as decision/anti_pattern'
+    );
+
+    const hits = tools.knowledgeQuery({ file_keys: ['scripts/hooks/x.mjs'] });
+    assert.equal(hits.length, 1, 'the finding joins by its file_keys');
+    assert.equal((hits[0] as unknown as { id: string }).id, record.id);
+
+    const misses = tools.knowledgeQuery({ file_keys: ['scripts/hooks/other.mjs'] });
+    assert.equal(
+      misses.some((r) => (r as unknown as { id: string }).id === record.id),
+      false,
+      'not returned for a different path'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_schema is derived from the live schema — every registered type answers', () => {
   const { tools, cleanup } = harness();
   try {
@@ -2366,14 +2553,15 @@ test("state_review does NOT double-report a deletion the drift arm already named
 });
 
 // ---------------------------------------------------------------------------
-// Article history rotation (board 0697c6bd): history is bounded at the write
-// boundary — the newest article_history_max_entries survive; older entries are
+// Article history rotation (board 0697c6bd; middle-out since ab87fe24): history
+// is bounded at the write boundary — the genesis entries plus the newest
+// remainder survive (total article_history_max_entries); evicted entries are
 // NOT lost, they remain readable in the retained superseded versions. The
 // oversize detector measures the NON-history body, since a split (its remedy)
 // only ever fixes prose.
 // ---------------------------------------------------------------------------
 
-test('history rotation: knowledge_append past the cap keeps the newest N, warns, and dropped entries survive in the prior version', () => {
+test('history rotation: knowledge_append past the cap keeps genesis + newest, warns, and evicted entries survive in the prior version', () => {
   const { tools, cleanup } = harnessWithConfig({ article_history_max_entries: 3 });
   try {
     const v1 = mkArticle(tools, 'thing', 'src/thing.ts'); // history: ['seed']
@@ -2385,8 +2573,8 @@ test('history rotation: knowledge_append past the cap keeps the newest N, warns,
     const served = appended.record as unknown as { history: { event: string }[] };
     assert.deepEqual(
       served.history.map((h) => h.event),
-      ['e2', 'e3', 'e4'],
-      'newest 3 kept, oldest rotated out'
+      ['seed', 'e2', 'e4'],
+      'middle-out rotation: genesis (seed, e2) survive at the front, newest 1 (e4) at the back, e3 evicted from the middle'
     );
     assert.equal(appended.warnings.length, 1, 'rotation is disclosed, never silent');
     assert.match(appended.warnings[0], /history rotated/, 'names the rotation');
@@ -2435,8 +2623,8 @@ test('history rotation: knowledge_update rotates an over-cap history even when t
     const served = grown.record as unknown as { history: { event: string }[] };
     assert.deepEqual(
       served.history.map((h) => h.event),
-      ['b', 'c'],
-      'a caller-passed over-cap history is rotated too'
+      ['a', 'c'],
+      'middle-out rotation: genesis clamped to max-1=1 (keep a), newest 1 (c); b evicted from the middle'
     );
     assert.ok(grown.warnings.some((w) => /history rotated/.test(w) && /2 of 3/.test(w)), 'update path discloses on the same channel');
 
@@ -2485,6 +2673,35 @@ test('article_oversize measures the NON-history body: fat history alone never fl
 // and because it names the CONCEPT, it follows supersession to the live head
 // where an id stays pinned to one version.
 // ---------------------------------------------------------------------------
+
+test('attestation slugs: an explicit slug colliding with a live record is refused (review finding on board 259a455f — one accidental write must not brick slug addressing); no headline means nothing auto-mints', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: dec } = tools.knowledgeCreate('decision', {
+      title: 'A ruling holding the handle',
+      statement: 's',
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const slug = (dec as unknown as { slug?: string }).slug!;
+    const att = {
+      artifact_key: 'part-0042',
+      verdict: 'approved',
+      inspector: 'cuj',
+      inspected_at: '2026-08-21',
+    };
+    assert.throws(
+      () => tools.knowledgeCreate('attestation', { ...att, slug }),
+      /already exists — one handle resolves to one record/,
+      'the cross-type collision refusal covers attestation'
+    );
+    assert.equal(tools.knowledgeGet(slug).id, dec.id, 'the pre-existing record still resolves by slug — nothing was bricked');
+    const { record: clean } = tools.knowledgeCreate('attestation', att);
+    assert.equal((clean as unknown as { slug?: string }).slug, undefined, 'no title/question headline — slug stays absent, never minted');
+  } finally {
+    cleanup();
+  }
+});
 
 test('stable handle: a decision auto-mints a slug from its title, knowledge_get resolves it, and the slug follows supersession to the HEAD', () => {
   const { tools, cleanup } = harness();
@@ -2563,8 +2780,8 @@ test('stable handle: an EXPLICIT slug that collides with any slug-bearing record
 test("removes distinguish 'already removed' from 'never existed' via the drain-log trace (board 97d773ef)", () => {
   const { tools, cleanup } = harness();
   try {
-    // the ROUTINE path: a reconcile_needed item auto-drained by the article
-    // re-baseline between minting and the remove call.
+    // the ROUTINE path: a reconcile_needed item closed by an explicit resolves
+    // claim on the article write between minting and the remove call.
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'reconcile_needed',
@@ -2572,12 +2789,16 @@ test("removes distinguish 'already removed' from 'never existed' via the drain-l
       file_keys: ['src/thing.ts'],
       feature_link: article.id,
     });
-    tools.knowledgeUpdate(article.id, { state: 'active' }); // auto-drains the item
-    assert.throws(
-      () => tools.maintenanceRemove(item.id),
-      /ALREADY REMOVED at .*reconcile_needed.*Nothing further to do/s,
-      'the routine already-auto-drained case is self-explaining'
-    );
+    // CONDUCTOR HARNESS REPAIR 2026-08-21 (decision 68988832): the implicit
+    // auto-drain this line relied on is retired — the item is closed via the
+    // explicit resolves claim, preserving this test's subject (the drain-log
+    // trace distinguishing 'already removed' from 'never existed').
+    tools.knowledgeUpdate(article.id, { state: 'active' }, [item.id]);
+    // Superseded pin (board 83478fc6, 2026-08-20): the already-drained case is
+    // the DESIRED state, so it succeeds idempotently with already_drained:true
+    // instead of throwing — a drain that finds its work done is not a failure.
+    const already = tools.maintenanceRemove(item.id) as { already_drained?: boolean; removed?: string };
+    assert.equal(already.already_drained, true, 'already-claimed-drained succeeds idempotently, marked');
     // a genuinely wrong id: no trace, and the message hedges on the capped log
     assert.throws(
       () => tools.boardRemove(randomUUID()),

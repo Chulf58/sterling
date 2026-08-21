@@ -4130,7 +4130,18 @@ var decisionSchema = base.extend({
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
   rationale: external_exports.string().min(1),
-  file_keys: external_exports.array(repoPath).optional()
+  file_keys: external_exports.array(repoPath).optional(),
+  // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+  // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+  // the record's load-bearing claims were measured or inferred (a false
+  // anti-pattern once lived 8 minutes because nothing marked it inferred);
+  // measured_by names the command/instrument that produced a measured claim,
+  // so a quoted number can be re-derived instead of trusted. Named
+  // evidence_basis because anti_pattern already carries an unrelated `basis`
+  // enum (codebase|platform|external). Instrument-staleness re-test machinery
+  // is DEFERRED — see the decision's rejected alternatives.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
@@ -4202,7 +4213,12 @@ var antiPatternSchema = base.extend({
   source_evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional(),
   severity: external_exports.enum(["info", "warn", "block"]).optional(),
-  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase")
+  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
+  // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+  // measured|inferred, distinct from this type's pre-existing `basis`
+  // (where the knowledge CAME FROM, not how it was established).
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
@@ -4214,7 +4230,16 @@ var researchFindingSchema = base.extend({
   source_urls: external_exports.array(external_exports.string()),
   source_date: isoDate,
   capture_date: isoDate,
-  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional()
+  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
+  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // seam, a library's behavior in one adapter) join the file-key economy the
+  // same way decision/anti_pattern/todo do; many findings are fileless
+  // (platform behavior, pricing) so this stays optional, never required.
+  file_keys: external_exports.array(repoPath).optional(),
+  // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+  // is measured (measured_by = the probe), a docs-read finding is inferred.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var modelsCatalogSchema = external_exports.object({
   entries: external_exports.array(external_exports.object({
@@ -4260,6 +4285,32 @@ var disconfirmedHypothesisSchema = base.extend({
   question: external_exports.string().min(1),
   rejected_answer: external_exports.string().min(1),
   evidence: external_exports.string().min(1),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine(refineSupersession);
+var attestationSchema = base.extend({
+  type: external_exports.literal("attestation"),
+  // Optional explicit handle. NEVER auto-minted (no title/question headline
+  // to mint from); an explicit one passes the cross-type collision refusal
+  // like every slug-bearing type (review finding 3, 2026-08-21).
+  slug: external_exports.string().min(1).optional(),
+  // What was inspected — a free-form artifact identity (a part number, a
+  // render name, a document version). Repo files it corresponds to belong in
+  // file_keys, which joins the retrieval economy; artifact_key does not need
+  // to be a path and often is not.
+  artifact_key: external_exports.string().min(1),
+  verdict: external_exports.enum(["approved", "rejected", "needs_rework"]),
+  // Who ruled — a human identity. An agent's judgment is a review finding or
+  // a decision, never an attestation; the type exists precisely to mark the
+  // human-eyes event.
+  inspector: external_exports.string().min(1),
+  // When the inspection HAPPENED — created_at is merely when the record was
+  // written, and ledger entries are routinely written after the fact.
+  inspected_at: isoDate,
+  // Instrument provenance: what the inspection looked at/through (a render
+  // at a commit, a physical sample batch) — the hook for later instrument-
+  // staleness work (board 1d02b6b4's deferred half).
+  instrument: external_exports.string().min(1).optional(),
+  notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
@@ -4434,7 +4485,7 @@ var RECORD_TYPES = {
     schema: researchFindingSchema,
     immutable: false,
     fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join("\n"),
-    fileKeys: () => [],
+    fileKeys: (r) => r.file_keys ?? [],
     // No title on this type — the question IS the identity. Both clocks ride
     // along because a finding's currency decides whether it may be used at all.
     digest: { slug: "plain", question: "clip", source_date: "plain", capture_date: "plain" }
@@ -4467,6 +4518,17 @@ var RECORD_TYPES = {
     // The rejected answer is the reusable half — it stops the question being
     // re-asked and re-answered the same wrong way.
     digest: { question: "clip", rejected_answer: "clip" }
+  },
+  attestation: {
+    schema: attestationSchema,
+    // Point-in-time human ruling: supersession is the only change path, exactly
+    // the decision contract (§3.2.1 analog; board 259a455f).
+    immutable: true,
+    fts: (r) => [s(r.slug), s(r.artifact_key), s(r.verdict), s(r.inspector), s(r.notes)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The progress-surface read: artifact + verdict + who + when answer the
+    // ledger question without opening the record.
+    digest: { artifact_key: "plain", verdict: "plain", inspector: "plain", inspected_at: "plain" }
   },
   feature_article: {
     schema: featureArticleSchema,
@@ -4584,7 +4646,15 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture", "capture_pending"]),
+  kind: external_exports.enum([
+    "research_tool",
+    "agent_dispatch",
+    "debug_scope",
+    "concept_designed",
+    "no_capture",
+    "capture_pending",
+    "test_repair"
+  ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4667,6 +4737,14 @@ var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
 });
+var successPredicateSchema = external_exports.object({
+  output_regex: external_exports.string().optional(),
+  output_regex_absent: external_exports.string().optional(),
+  artifact: external_exports.object({
+    path: external_exports.string(),
+    min_bytes: external_exports.number().optional()
+  }).strict().optional()
+}).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4674,7 +4752,9 @@ var configSchema = external_exports.object({
     // baked from the adapter at init (§9.1)
     test_globs: external_exports.array(external_exports.string()).optional(),
     run_commands: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional()
+    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional(),
+    // §see comment above: keyed by run_command key, optional, never defaulted to {}
+    success_predicates: external_exports.record(external_exports.string(), successPredicateSchema).optional()
   })).default([]),
   backup_path: external_exports.string().optional(),
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
@@ -4750,6 +4830,25 @@ var configSchema = external_exports.object({
     // threshold injects ONE moment-3 advisory per streak episode.
     streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
+  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: external_exports.object({
+    stale_minutes: external_exports.number().int().positive().default(60)
+  }).default({}),
+  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // surface that states the "N concurrent subagents" ceiling (H1's banner
+  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
+  // hardcoded literal, so a ruling that changes it takes effect everywhere
+  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
+  // way — this tunes only the number, never a floor/quota (decisions
+  // 677f1639/299d853a stand). Absent → shipped default 5.
+  delegation: external_exports.object({
+    max_concurrent: external_exports.number().int().positive().default(5)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -4814,7 +4913,8 @@ var configSchema = external_exports.object({
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps only the newest N (rotation disclosed on
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
   // the write's warnings channel). Nothing is lost: every rotated-away entry
   // remains readable in the retained superseded versions, which the store keeps
   // forever — the supersede chain IS the archive, so no new table or archive
@@ -4825,6 +4925,12 @@ var configSchema = external_exports.object({
   // consumers (promotion/completeness match on RECENT entries' target_id)
   // while bounding the round-trip.
   article_history_max_entries: external_exports.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -5095,6 +5201,8 @@ ${record.statement ?? ""}`;
     return `${record.slug ?? ""} ${record.concept_family ?? ""}
 ${record.title ?? ""}`;
   if (record.type === "research_finding")
+    return `${record.question ?? ""}`;
+  if (record.type === "disconfirmed_hypothesis")
     return `${record.question ?? ""}`;
   return "";
 }
@@ -5496,6 +5604,52 @@ var SterlingStore = class _SterlingStore {
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+  }
+  /**
+   * Every SUPERSEDED record carrying this exact slug, newest first — the
+   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
+   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
+   * can never shadow a live record: a slug still carried by a non-superseded
+   * row belongs to recordsBySlug, not here. The write surface never calls
+   * this — a dead slug addresses no write handle, fix-forward goes to the
+   * live head via recordsBySlug's own resolution.
+   */
+  supersededRecordsBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC, rowid DESC`).all(slug);
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+  }
+  /**
+   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id) {
+    const MAX_HOPS = 32;
+    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+    const row = stmt.get(id);
+    if (!row)
+      return null;
+    const visited = /* @__PURE__ */ new Set([row.id]);
+    let current = row;
+    let hops = 0;
+    while (current.status === "superseded" && current.superseded_by) {
+      const next = stmt.get(current.superseded_by);
+      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+        return { id: current.id, status: current.status, hops, truncated: true };
+      }
+      visited.add(next.id);
+      current = next;
+      hops += 1;
+    }
+    return { id: current.id, status: current.status, hops };
   }
   /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
@@ -6169,7 +6323,24 @@ var SterlingStore = class _SterlingStore {
     }
     this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(record));
   }
+  /**
+   * REENTRANT — every other write primitive (create, supersede, …) already
+   * calls this internally, so a multi-record tool-layer write (knowledge_split:
+   * N child creates + one parent supersession, decision
+   * compaction-tooling-windowed-read-plus-split) that must land atomically
+   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
+   * nest transactions. `txDepth` makes a NESTED call join the already-open
+   * transaction instead of attempting a second one: only the outermost call
+   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
+   * whole thing exactly once.
+   */
+  txDepth = 0;
   tx(fn) {
+    if (this.txDepth > 0) {
+      fn();
+      return;
+    }
+    this.txDepth++;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       fn();
@@ -6177,7 +6348,25 @@ var SterlingStore = class _SterlingStore {
     } catch (e) {
       this.db.exec("ROLLBACK");
       throw e;
+    } finally {
+      this.txDepth--;
     }
+  }
+  /**
+   * PUBLIC transaction boundary for the tool layer (decision
+   * compaction-tooling-windowed-read-plus-split): the store is the one write
+   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
+   * that must write several records atomically — knowledge_split's N children
+   * plus one parent supersession — gets the transaction FROM the store rather
+   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
+   * every store write primitive called from `fn` joins this same transaction.
+   */
+  withTransaction(fn) {
+    let result;
+    this.tx(() => {
+      result = fn();
+    });
+    return result;
   }
 };
 
@@ -6211,7 +6400,7 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync } from "node:fs";
 import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
@@ -6232,7 +6421,20 @@ function guardPath(cwd, agentId) {
   return join2(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+}
+function lineageKey(record) {
+  return record?.slug ?? record?.id;
+}
+function isDelivered(guard, record) {
+  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+}
+function markDelivered(guard, records) {
+  for (const r of records) {
+    if (!guard.records.includes(r.id)) guard.records.push(r.id);
+    const key = lineageKey(r);
+    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+  }
 }
 function readGuard(path) {
   try {
@@ -6246,7 +6448,9 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   mkdirSync2(dirname3(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(guard));
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(guard));
+  renameSync(tmp, path);
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -6261,7 +6465,7 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map(
     (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
@@ -6273,6 +6477,21 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
+var ARTICLE_POINTER_CAP = 3;
+function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
+  const shown = articles.slice(0, cap);
+  const lines = [
+    `\u25B8 ARTICLES matching this prompt's SUBJECT (${articles.length}) \u2014 pointers only, follow knowledge_get before assuming the answer:`
+  ];
+  for (const a of shown) {
+    lines.push(`  \u2192 '${a.slug}': ${clip(a.title, 140)} (knowledge_get ${a.id})`);
+  }
+  if (articles.length > shown.length) {
+    const widen = remedy ?? `knowledge_query types:["feature_article"] cap:${articles.length}`;
+    lines.push(`  \u2026 ${articles.length - shown.length} more matched but NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  }
+  return lines.join("\n");
+}
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
@@ -6282,7 +6501,7 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
-    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
@@ -6296,6 +6515,11 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
 // scripts/hooks/h20-mechanism-axis.mjs
 var MAX_DECISIONS = 5;
 var NARROW_CLIP = 700;
+var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
+function isQuestionShapedPrompt(text) {
+  const t = String(text ?? "");
+  return t.includes("?") && QUESTION_WORDS_RE.test(t);
+}
 var input = readStdin();
 var outgoing = outgoingProposalText(input.tool_input);
 if (!outgoing) allow();
@@ -6307,26 +6531,37 @@ try {
   if (terms.length < AXIS_MIN_HITS) allow();
   const candidates = [
     ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
+    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 }),
+    // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
+    // question and a disconfirmed_hypothesis an already-refuted trail — the two
+    // types a dispatch about to fan out on that question is about to RE-DERIVE
+    // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
+    // 6,142-file sweep on a question the store answered). Same floors as every
+    // other candidate; axisNarrowText matches their question fields.
+    ...store.query({ types: ["research_finding"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["disconfirmed_hypothesis"], rank_terms: terms, cap: 40 })
   ];
   if (!candidates.length) allow();
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
-  const fresh = scored.filter((x) => !guard.records.includes(x.record.id));
+  const fresh = scored.filter((x) => !isDelivered(guard, x.record));
   if (!fresh.length) allow();
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
   const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
-  if (!hazards.length && !decisions.length) allow();
+  const articles = fresh.filter((x) => x.record.type === "feature_article");
+  const priorAnswers = fresh.filter((x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis");
+  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) allow();
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
   const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
   const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-  const blocks = [
-    header,
+  const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+  const hazardDecisionBlocks = [
     ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
       remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
     }),
@@ -6336,12 +6571,42 @@ try {
       })
     ] : []
   ];
+  const articleBlocks = articles.length ? [
+    renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
+      remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
+    })
+  ] : [];
+  const PRIOR_ANSWER_CAP = 3;
+  const clip2 = (v, n = 160) => {
+    const t = String(v ?? "").replace(/\s+/g, " ").trim();
+    return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
+  };
+  const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
+  const priorBlocks = priorAnswers.length ? [
+    [
+      `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these. knowledge_get before fanning out:`,
+      ...shownPrior.map((x) => {
+        const r = x.record;
+        return r.type === "research_finding" ? `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}` : `  \u2192 REFUTED TRAIL: ${clip2(r.question)} \u2014 rejected: ${clip2(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
+      }),
+      ...priorAnswers.length > PRIOR_ANSWER_CAP ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more \u2014 knowledge_query types:["research_finding","disconfirmed_hypothesis"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",")}] cap:${priorAnswers.length})`] : []
+    ].join("\n")
+  ] : [];
+  const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
+  const blocks = [
+    header,
+    // A prior ANSWER outranks everything on a question-shaped prompt — it is
+    // the direct "don't re-derive" signal; on a change-shaped prompt hazards
+    // still lead (stop the mistake), answers ride with the article pointers.
+    ...promptIsQuestionShaped ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]
+  ];
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join("\n\n") }
     })
   );
-  guard.records.push(...hazards.map((x) => x.record.id), ...decisions.map((x) => x.record.id));
+  const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
+  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {

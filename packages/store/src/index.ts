@@ -233,6 +233,14 @@ export type ToolStore = Pick<
   // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
   // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
   | 'recordsBySlug'
+  // knowledge_get's dead-slug fallthrough ONLY (decision df361a0f) — the
+  // superseded-only counterpart of recordsBySlug, consulted after both
+  // live-slug and id-prefix resolution fail.
+  | 'supersededRecordsBySlug'
+  // knowledge_get's terminus disclosure (decision de1a7329) — the pinned
+  // record stays version-pinned; this is the only way the tool layer learns
+  // where a superseded record's chain currently ends.
+  | 'resolveTerminus'
   | 'supersede'
   | 'updateTodo'
   | 'retireInFavorOf'
@@ -250,6 +258,10 @@ export type ToolStore = Pick<
   | 'appendRunEscalation'
   | 'writeHandoff'
   | 'readHandoffs'
+  // knowledge_split's multi-record write (children + parent supersession)
+  // needs one atomic boundary spanning several store calls (decision
+  // compaction-tooling-windowed-read-plus-split) — see withTransaction above.
+  | 'withTransaction'
 >;
 
 export class SterlingStore {
@@ -508,6 +520,65 @@ export class SterlingStore {
       )
       .all(slug) as { body: string }[];
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body) as DurableRecord));
+  }
+
+  /**
+   * Every SUPERSEDED record carrying this exact slug, newest first — the
+   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
+   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
+   * can never shadow a live record: a slug still carried by a non-superseded
+   * row belongs to recordsBySlug, not here. The write surface never calls
+   * this — a dead slug addresses no write handle, fix-forward goes to the
+   * live head via recordsBySlug's own resolution.
+   */
+  supersededRecordsBySlug(slug: string): DurableRecord[] {
+    // rowid DESC breaks ties within one supersede lineage: a chain built under a
+    // fixed test clock (or any updates landing in the same instant) shares one
+    // updated_at across every carrier, so updated_at alone cannot tell the
+    // newest tombstone from the oldest — insertion order (rowid, monotonic and
+    // never reused) can.
+    const rows = this.db
+      .prepare(
+        `SELECT body FROM records
+          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC, rowid DESC`
+      )
+      .all(slug) as { body: string }[];
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body) as DurableRecord));
+  }
+
+  /**
+   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id: string): { id: string; status: string; hops: number; truncated?: boolean } | null {
+    const MAX_HOPS = 32;
+    const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
+    const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
+    if (!row) return null;
+
+    const visited = new Set<string>([row.id]);
+    let current = row;
+    let hops = 0;
+    while (current.status === 'superseded' && current.superseded_by) {
+      const next = stmt.get(current.superseded_by) as
+        | { id: string; status: string; superseded_by: string | null }
+        | undefined;
+      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+        return { id: current.id, status: current.status, hops, truncated: true };
+      }
+      visited.add(next.id);
+      current = next;
+      hops += 1;
+    }
+    return { id: current.id, status: current.status, hops };
   }
 
   /**
@@ -1362,7 +1433,25 @@ export class SterlingStore {
     );
   }
 
+  /**
+   * REENTRANT — every other write primitive (create, supersede, …) already
+   * calls this internally, so a multi-record tool-layer write (knowledge_split:
+   * N child creates + one parent supersession, decision
+   * compaction-tooling-windowed-read-plus-split) that must land atomically
+   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
+   * nest transactions. `txDepth` makes a NESTED call join the already-open
+   * transaction instead of attempting a second one: only the outermost call
+   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
+   * whole thing exactly once.
+   */
+  private txDepth = 0;
+
   private tx(fn: () => void): void {
+    if (this.txDepth > 0) {
+      fn();
+      return;
+    }
+    this.txDepth++;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       fn();
@@ -1370,6 +1459,25 @@ export class SterlingStore {
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
+    } finally {
+      this.txDepth--;
     }
+  }
+
+  /**
+   * PUBLIC transaction boundary for the tool layer (decision
+   * compaction-tooling-windowed-read-plus-split): the store is the one write
+   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
+   * that must write several records atomically — knowledge_split's N children
+   * plus one parent supersession — gets the transaction FROM the store rather
+   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
+   * every store write primitive called from `fn` joins this same transaction.
+   */
+  withTransaction<T>(fn: () => T): T {
+    let result!: T;
+    this.tx(() => {
+      result = fn();
+    });
+    return result;
   }
 }

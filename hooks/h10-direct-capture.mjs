@@ -7,13 +7,14 @@ var __export = (target, all) => {
 
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 import { readFileSync as readFileSync2, writeFileSync, rmSync, existsSync as existsSync4, mkdirSync as mkdirSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4163,7 +4164,18 @@ var decisionSchema = base.extend({
   statement: external_exports.string().min(1),
   alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
   rationale: external_exports.string().min(1),
-  file_keys: external_exports.array(repoPath).optional()
+  file_keys: external_exports.array(repoPath).optional(),
+  // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+  // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+  // the record's load-bearing claims were measured or inferred (a false
+  // anti-pattern once lived 8 minutes because nothing marked it inferred);
+  // measured_by names the command/instrument that produced a measured claim,
+  // so a quoted number can be re-derived instead of trusted. Named
+  // evidence_basis because anti_pattern already carries an unrelated `basis`
+  // enum (codebase|platform|external). Instrument-staleness re-test machinery
+  // is DEFERRED — see the decision's rejected alternatives.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
@@ -4235,7 +4247,12 @@ var antiPatternSchema = base.extend({
   source_evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional(),
   severity: external_exports.enum(["info", "warn", "block"]).optional(),
-  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase")
+  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
+  // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+  // measured|inferred, distinct from this type's pre-existing `basis`
+  // (where the knowledge CAME FROM, not how it was established).
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var researchFindingSchema = base.extend({
   type: external_exports.literal("research_finding"),
@@ -4247,7 +4264,16 @@ var researchFindingSchema = base.extend({
   source_urls: external_exports.array(external_exports.string()),
   source_date: isoDate,
   capture_date: isoDate,
-  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional()
+  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
+  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // seam, a library's behavior in one adapter) join the file-key economy the
+  // same way decision/anti_pattern/todo do; many findings are fileless
+  // (platform behavior, pricing) so this stays optional, never required.
+  file_keys: external_exports.array(repoPath).optional(),
+  // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+  // is measured (measured_by = the probe), a docs-read finding is inferred.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
 }).superRefine(refineSupersession);
 var modelsCatalogSchema = external_exports.object({
   entries: external_exports.array(external_exports.object({
@@ -4293,6 +4319,32 @@ var disconfirmedHypothesisSchema = base.extend({
   question: external_exports.string().min(1),
   rejected_answer: external_exports.string().min(1),
   evidence: external_exports.string().min(1),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine(refineSupersession);
+var attestationSchema = base.extend({
+  type: external_exports.literal("attestation"),
+  // Optional explicit handle. NEVER auto-minted (no title/question headline
+  // to mint from); an explicit one passes the cross-type collision refusal
+  // like every slug-bearing type (review finding 3, 2026-08-21).
+  slug: external_exports.string().min(1).optional(),
+  // What was inspected — a free-form artifact identity (a part number, a
+  // render name, a document version). Repo files it corresponds to belong in
+  // file_keys, which joins the retrieval economy; artifact_key does not need
+  // to be a path and often is not.
+  artifact_key: external_exports.string().min(1),
+  verdict: external_exports.enum(["approved", "rejected", "needs_rework"]),
+  // Who ruled — a human identity. An agent's judgment is a review finding or
+  // a decision, never an attestation; the type exists precisely to mark the
+  // human-eyes event.
+  inspector: external_exports.string().min(1),
+  // When the inspection HAPPENED — created_at is merely when the record was
+  // written, and ledger entries are routinely written after the fact.
+  inspected_at: isoDate,
+  // Instrument provenance: what the inspection looked at/through (a render
+  // at a commit, a physical sample batch) — the hook for later instrument-
+  // staleness work (board 1d02b6b4's deferred half).
+  instrument: external_exports.string().min(1).optional(),
+  notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
@@ -4467,7 +4519,7 @@ var RECORD_TYPES = {
     schema: researchFindingSchema,
     immutable: false,
     fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join("\n"),
-    fileKeys: () => [],
+    fileKeys: (r) => r.file_keys ?? [],
     // No title on this type — the question IS the identity. Both clocks ride
     // along because a finding's currency decides whether it may be used at all.
     digest: { slug: "plain", question: "clip", source_date: "plain", capture_date: "plain" }
@@ -4500,6 +4552,17 @@ var RECORD_TYPES = {
     // The rejected answer is the reusable half — it stops the question being
     // re-asked and re-answered the same wrong way.
     digest: { question: "clip", rejected_answer: "clip" }
+  },
+  attestation: {
+    schema: attestationSchema,
+    // Point-in-time human ruling: supersession is the only change path, exactly
+    // the decision contract (§3.2.1 analog; board 259a455f).
+    immutable: true,
+    fts: (r) => [s(r.slug), s(r.artifact_key), s(r.verdict), s(r.inspector), s(r.notes)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The progress-surface read: artifact + verdict + who + when answer the
+    // ledger question without opening the record.
+    digest: { artifact_key: "plain", verdict: "plain", inspector: "plain", inspected_at: "plain" }
   },
   feature_article: {
     schema: featureArticleSchema,
@@ -4617,7 +4680,15 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture", "capture_pending"]),
+  kind: external_exports.enum([
+    "research_tool",
+    "agent_dispatch",
+    "debug_scope",
+    "concept_designed",
+    "no_capture",
+    "capture_pending",
+    "test_repair"
+  ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -4700,6 +4771,14 @@ var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
 });
+var successPredicateSchema = external_exports.object({
+  output_regex: external_exports.string().optional(),
+  output_regex_absent: external_exports.string().optional(),
+  artifact: external_exports.object({
+    path: external_exports.string(),
+    min_bytes: external_exports.number().optional()
+  }).strict().optional()
+}).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4707,7 +4786,9 @@ var configSchema = external_exports.object({
     // baked from the adapter at init (§9.1)
     test_globs: external_exports.array(external_exports.string()).optional(),
     run_commands: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional()
+    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional(),
+    // §see comment above: keyed by run_command key, optional, never defaulted to {}
+    success_predicates: external_exports.record(external_exports.string(), successPredicateSchema).optional()
   })).default([]),
   backup_path: external_exports.string().optional(),
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
@@ -4783,6 +4864,25 @@ var configSchema = external_exports.object({
     // threshold injects ONE moment-3 advisory per streak episode.
     streak_threshold: external_exports.number().int().positive().default(10)
   }).default({}),
+  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: external_exports.object({
+    stale_minutes: external_exports.number().int().positive().default(60)
+  }).default({}),
+  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // surface that states the "N concurrent subagents" ceiling (H1's banner
+  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
+  // hardcoded literal, so a ruling that changes it takes effect everywhere
+  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
+  // way — this tunes only the number, never a floor/quota (decisions
+  // 677f1639/299d853a stand). Absent → shipped default 5.
+  delegation: external_exports.object({
+    max_concurrent: external_exports.number().int().positive().default(5)
+  }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
@@ -4847,7 +4947,8 @@ var configSchema = external_exports.object({
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps only the newest N (rotation disclosed on
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
   // the write's warnings channel). Nothing is lost: every rotated-away entry
   // remains readable in the retained superseded versions, which the store keeps
   // forever — the supersede chain IS the archive, so no new table or archive
@@ -4858,6 +4959,12 @@ var configSchema = external_exports.object({
   // consumers (promotion/completeness match on RECENT entries' target_id)
   // while bounding the round-trip.
   article_history_max_entries: external_exports.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
   // Whether THIS project store is the one the repo's shared, store-DERIVED
   // artifacts are produced from. Two exist: record-id citations in tracked source,
   // and the committed architecture.md projection. Both are checked into git while
@@ -5289,6 +5396,52 @@ var SterlingStore = class _SterlingStore {
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
     return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+  }
+  /**
+   * Every SUPERSEDED record carrying this exact slug, newest first — the
+   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
+   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
+   * can never shadow a live record: a slug still carried by a non-superseded
+   * row belongs to recordsBySlug, not here. The write surface never calls
+   * this — a dead slug addresses no write handle, fix-forward goes to the
+   * live head via recordsBySlug's own resolution.
+   */
+  supersededRecordsBySlug(slug) {
+    const rows = this.db.prepare(`SELECT body FROM records
+          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC, rowid DESC`).all(slug);
+    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+  }
+  /**
+   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id) {
+    const MAX_HOPS = 32;
+    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+    const row = stmt.get(id);
+    if (!row)
+      return null;
+    const visited = /* @__PURE__ */ new Set([row.id]);
+    let current = row;
+    let hops = 0;
+    while (current.status === "superseded" && current.superseded_by) {
+      const next = stmt.get(current.superseded_by);
+      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+        return { id: current.id, status: current.status, hops, truncated: true };
+      }
+      visited.add(next.id);
+      current = next;
+      hops += 1;
+    }
+    return { id: current.id, status: current.status, hops };
   }
   /**
    * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
@@ -5962,7 +6115,24 @@ var SterlingStore = class _SterlingStore {
     }
     this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(record));
   }
+  /**
+   * REENTRANT — every other write primitive (create, supersede, …) already
+   * calls this internally, so a multi-record tool-layer write (knowledge_split:
+   * N child creates + one parent supersession, decision
+   * compaction-tooling-windowed-read-plus-split) that must land atomically
+   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
+   * nest transactions. `txDepth` makes a NESTED call join the already-open
+   * transaction instead of attempting a second one: only the outermost call
+   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
+   * whole thing exactly once.
+   */
+  txDepth = 0;
   tx(fn) {
+    if (this.txDepth > 0) {
+      fn();
+      return;
+    }
+    this.txDepth++;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       fn();
@@ -5970,7 +6140,25 @@ var SterlingStore = class _SterlingStore {
     } catch (e) {
       this.db.exec("ROLLBACK");
       throw e;
+    } finally {
+      this.txDepth--;
     }
+  }
+  /**
+   * PUBLIC transaction boundary for the tool layer (decision
+   * compaction-tooling-windowed-read-plus-split): the store is the one write
+   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
+   * that must write several records atomically — knowledge_split's N children
+   * plus one parent supersession — gets the transaction FROM the store rather
+   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
+   * every store write primitive called from `fn` joins this same transaction.
+   */
+  withTransaction(fn) {
+    let result;
+    this.tx(() => {
+      result = fn();
+    });
+    return result;
   }
 };
 
@@ -6005,6 +6193,18 @@ function warnNonBlocking(message) {
 function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
+function gitIgnored(paths, cwd) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return /* @__PURE__ */ new Set();
+  const res = spawnSync("git", ["check-ignore", "-z", "--stdin"], {
+    cwd,
+    input: list.join("\0") + "\0",
+    encoding: "utf8",
+    timeout: 3e4
+  });
+  if (res.status !== 0 && res.status !== 1) return null;
+  return new Set((res.stdout || "").split("\0").filter(Boolean));
 }
 function openStore(cwd) {
   const p = join(cwd, ".sterling", "sterling.db");
@@ -6058,9 +6258,9 @@ function fillPct(usage, windowSize) {
 }
 
 // scripts/lib/test-integrity.mjs
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
-  const r = spawnSync("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync2("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
@@ -6130,7 +6330,7 @@ try {
   const dirtyPaths = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      const st = spawnSync2("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      const st = spawnSync3("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
       if (st.status !== 0) {
         store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
         return 0;
@@ -6284,8 +6484,9 @@ try {
         spendGaugeMarker();
         parts.push(gaugePart());
       }
-      if (parts.length) deny(parts.join("\n\n"));
+      if (parts.length) deny([...disclosureParts, ...parts].join("\n\n"));
     }
+    if (disclosureParts.length) process.stdout.write(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }));
     allow();
   };
   let touches = [];
@@ -6301,16 +6502,70 @@ try {
   } catch {
     sessionEvents = [];
   }
+  const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
+    (p) => existsSync4(join2(input.cwd, p))
+  );
+  let dispatchEntries = [];
+  try {
+    const registerPath = join2(input.cwd, ".sterling", "transient", "dispatch-register.json");
+    if (existsSync4(registerPath)) {
+      const raw = JSON.parse(readFileSync2(registerPath, "utf8"));
+      if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
+    }
+  } catch {
+    dispatchEntries = [];
+  }
+  const staleMinutes = config.dispatch_register.stale_minutes;
+  const nowMs = Date.parse(now);
+  const ageMs = (e) => {
+    const t = Date.parse(e.at ?? "");
+    return Number.isNaN(t) ? Infinity : nowMs - t;
+  };
+  const isLive = (e) => {
+    const a = ageMs(e);
+    return a >= 0 && a < staleMinutes * 6e4;
+  };
+  const liveDispatches = dispatchEntries.filter(isLive);
+  const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+  const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
+  const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
+  const deferredOwners = /* @__PURE__ */ new Map();
+  for (const e of liveDispatches) {
+    for (const f of Array.isArray(e.files) ? e.files : []) {
+      const k = joinKey(f);
+      if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Set());
+      deferredOwners.get(k).add(e.agent_id);
+    }
+  }
+  const isDeferred = (p) => deferredOwners.has(joinKey(p));
+  const deferredPaths = touchedExisting.filter(isDeferred);
+  const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
+  const disclosureParts = [];
+  if (deferredPaths.length) {
+    disclosureParts.push(
+      `H10 fan-out deferral: ${deferredPaths.length} touched file(s) are owned by ${deferredAgents.length} LIVE dispatch(es) [${deferredAgents.join(", ")}] \u2014 their capture and ownership duties are DEFERRED, and the session registers were deliberately NOT cleared, so each duty re-arms at the first Stop after its dispatch lands (decision ec9eacaa).
+Files: ${JSON.stringify(deferredPaths.slice(0, 20))}.`
+    );
+  }
+  const touchedKeys = new Set(touchedExisting.map(joinKey));
+  const staleBiting = staleDispatches.filter((e) => (Array.isArray(e.files) ? e.files : []).some((f) => touchedKeys.has(f)));
+  if (staleBiting.length) {
+    disclosureParts.push(
+      `H10 dispatch register: ${staleBiting.length} entry/entries owning a file touched this session are STALE (older than ${staleMinutes}m) and therefore DEFER NOTHING \u2014 agent(s) [${staleBiting.map((e) => e.agent_id).join(", ")}]. A SubagentStop that never fired (killed or aborted subagent) leaves the entry behind; every duty below holds in full. H1 sweeps the register at the next session start.`
+    );
+  }
   const clearRegisters = () => {
-    rmSync(touchesPath, { force: true });
-    rmSync(eventsPath, { force: true });
+    if (!deferredPaths.length) {
+      rmSync(touchesPath, { force: true });
+      rmSync(eventsPath, { force: true });
+    }
     rmSync(nagMarker, { force: true });
   };
   if (!touches.length && !sessionEvents.length) {
     clearRegisters();
     releaseWithPressure();
   }
-  const paths = [...new Set(touches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
+  const paths = touchedExisting.filter((p) => !isDeferred(p));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
   const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
   const researchEvents = sessionEvents.filter(
@@ -6326,7 +6581,12 @@ try {
   const latestNoCapture = noCaptureEvents.length ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1) : null;
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
-  const activeTouches = latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches;
+  const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && e.at);
+  const coveredByTestRepair = (t) => t.at && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
+  const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
+  const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
+    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t)
+  );
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
@@ -6348,18 +6608,29 @@ try {
   }
   let unmetFamilies = [];
   if (hasConceptDuty) {
+    const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
+    const sessionAts = sessionEvents.map((e) => e.at).filter((a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a))).sort();
+    const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
     const articles = store.query({ types: ["feature_article"], cap: 1e3, include_unconfirmed: true });
-    unmetFamilies = [...conceptFamilies.entries()].filter(
-      ([family, since]) => !articles.some((a) => a.concept_family === family && (a.created_at >= since || a.updated_at >= since))
-    ).map(([family]) => family);
+    unmetFamilies = [...conceptFamilies.entries()].filter(([family, since]) => {
+      const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
+      return !articles.some(
+        (a) => a.concept_family === family && (a.created_at >= windowStart || a.updated_at >= windowStart)
+      );
+    }).map(([family]) => family);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
-  const unowned = paths.filter(
+  let unowned = paths.filter(
     (p) => !store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 25 }).some((r) => !r.working_tree)
   );
+  if (unowned.length) {
+    const ignored = gitIgnored(unowned, input.cwd);
+    if (ignored === null) store.recordCheckSkipped("article-demand-gitignore", "no_git", void 0, now);
+    else unowned = unowned.filter((p) => !ignored.has(p));
+  }
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync2("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+    const head = spawnSync3("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4
@@ -6384,7 +6655,7 @@ try {
     }
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,
@@ -6416,7 +6687,7 @@ Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${J
   }
   if (!input.stop_hook_active && !existsSync4(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
-    const parts = [];
+    const parts = [...disclosureParts];
     const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
     if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;
@@ -6467,7 +6738,7 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
   if (hasCaptureDuty && !captured) {
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,
@@ -6486,31 +6757,27 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     }
   }
   if (articleDemand) {
-    const openArticle = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
-    if (!openArticle) {
-      store.create({
-        id: randomUUID2(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
-        source: "system",
-        system_reason: "article_missing",
-        file_keys: unowned.slice(0, 20)
-      });
-    }
+    const overlapping = store.query({ types: ["todo"], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
+    store.enqueueSystemTodo({
+      id: randomUUID2(),
+      type: "todo",
+      created_at: now,
+      updated_at: now,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
+      source: "system",
+      system_reason: "article_missing",
+      file_keys: overlapping ? overlapping.file_keys : unowned.slice(0, 20)
+    });
   }
   if (!conceptSatisfied) {
-    const openConcept = store.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "concept_article_missing");
     for (const family of unmetFamilies) {
-      if (openConcept.some((t) => t.text.includes(`'${family}'`))) continue;
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,
@@ -6531,7 +6798,7 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "research_owed");
     if (!open) {
       const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join("; ");
-      store.create({
+      store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",
         created_at: now,

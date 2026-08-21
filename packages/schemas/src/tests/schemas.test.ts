@@ -298,9 +298,111 @@ test('full §3.2 record set: anti_pattern, research_finding, reference_material,
   });
 });
 
+test('research_finding: file_keys is OPTIONAL and normalizes at the boundary like every other path field (§3.2, decision 8dbbc85d)', () => {
+  const base = {
+    ...envelope('research_finding'),
+    question: 'does the platform rate-limit per org or per token?',
+    answer: 'per-org',
+    source_urls: ['https://developer.genesys.cloud/x'],
+    source_date: '2026-01-15',
+    capture_date: '2026-06-01',
+    volatility_hint: 'medium',
+  };
+
+  // (3) omitted entirely — still a valid record; no migration for every
+  // research_finding written before this change.
+  const withoutKeys = validateRecord({ ...base }) as unknown as { file_keys?: string[] };
+  assert.ok(!('file_keys' in withoutKeys), 'file_keys absent stays absent — no default, no null placeholder');
+
+  // (2) present, with a Windows-separator path — normalized exactly like
+  // decision/anti_pattern/disconfirmed_hypothesis file_keys above.
+  const withKeys = validateRecord({ ...base, id: randomUUID(), file_keys: ['scripts\\hooks\\x.mjs'] }) as unknown as { file_keys: string[] };
+  assert.deepEqual(withKeys.file_keys, ['scripts/hooks/x.mjs'], 'backslash path normalizes to repo-relative POSIX, the same invariant every other file_keys field gets');
+});
+
+test("registry: research_finding.fileKeys reads its own file_keys field — the decision/anti_pattern/disconfirmed_hypothesis pattern, not reference_material's location-derived one", () => {
+  const fk = RECORD_TYPES.research_finding.fileKeys;
+  assert.deepEqual(fk({ file_keys: ['a.ts', 'b.ts'] }), ['a.ts', 'b.ts'], 'the extractor reads file_keys directly, like decision/anti_pattern/disconfirmed_hypothesis');
+  assert.deepEqual(fk({}), [], 'no file_keys present yields an empty join set, never a throw');
+});
+
+test('knownFieldsFor: research_finding gains file_keys; reference_material still does not (decision b47889b7 unchanged, board b1de6fab)', () => {
+  const rf = knownFieldsFor('research_finding');
+  assert.ok(rf, 'research_finding must resolve its known field set');
+  assert.ok(rf!.has('file_keys'), 'file_keys is now a real field of research_finding');
+
+  const ref = knownFieldsFor('reference_material');
+  assert.ok(ref, 'reference_material must resolve its known field set');
+  assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)');
+});
+
+test('evidence_basis + measured_by: optional on the three ruling types, enum closed, distinct from anti_pattern.basis (board 1d02b6b4)', () => {
+  const dec = validateRecord({
+    ...envelope('decision'),
+    title: 't',
+    statement: 's',
+    alternatives_rejected: [],
+    rationale: 'r',
+    evidence_basis: 'measured',
+    measured_by: 'grep -c "registerTool" packages/mcp-server/src/server.ts',
+  }) as unknown as { evidence_basis: string; measured_by: string };
+  assert.equal(dec.evidence_basis, 'measured');
+  assert.match(dec.measured_by, /grep -c/);
+  const ap = validateRecord({
+    ...envelope('anti_pattern'),
+    title: 't',
+    trigger: 'tr',
+    guidance: 'g',
+    wrong_way: 'w',
+    right_way: 'ri',
+    source_evidence: 'e',
+    evidence_basis: 'inferred',
+  }) as unknown as { evidence_basis: string; basis: string };
+  assert.equal(ap.evidence_basis, 'inferred');
+  assert.equal(ap.basis, 'codebase', 'the pre-existing basis enum (where knowledge came from) is untouched and defaults as before');
+  validateRecord({
+    ...envelope('research_finding'),
+    question: 'q',
+    answer: 'a',
+    source_urls: [],
+    source_date: '2026-08-21',
+    capture_date: '2026-08-21',
+    evidence_basis: 'measured',
+    measured_by: 'claude -p probe session',
+  });
+  assert.throws(
+    () => validateRecord({ ...envelope('decision'), title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', evidence_basis: 'guessed' }),
+    /invalid/i,
+    'the enum is closed — measured|inferred only'
+  );
+});
+
+test('attestation: human-inspection ruling round-trips; verdict enum closed; immutable like a decision; file_keys joins the path economy (board 259a455f)', () => {
+  const rec = validateRecord({
+    ...envelope('attestation'),
+    artifact_key: 'part-0042 rear bracket',
+    verdict: 'approved',
+    inspector: 'cuj',
+    inspected_at: '2026-08-21',
+    instrument: 'render v3 @ commit abc1234',
+    notes: 'weld seam acceptable',
+    file_keys: ['parts\\rear-bracket.step'],
+  }) as unknown as { file_keys: string[] };
+  assert.deepEqual(rec.file_keys, ['parts/rear-bracket.step'], 'paths normalize at the boundary like every path field');
+  assert.throws(
+    () => validateRecord({ ...envelope('attestation'), artifact_key: 'p', verdict: 'looks-fine', inspector: 'cuj', inspected_at: '2026-08-21' }),
+    /invalid/i,
+    'the verdict enum is closed — free-text verdicts are refused'
+  );
+  assert.equal(RECORD_TYPES.attestation.immutable, true, 'supersession is the only change path (decision analog)');
+  assert.deepEqual(RECORD_TYPES.attestation.fileKeys({ file_keys: ['a.ts'] }), ['a.ts']);
+  assert.deepEqual(RECORD_TYPES.attestation.fileKeys({}), [], 'fileless attestation never throws');
+});
+
 test('registry: full record set registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
   assert.deepEqual(Object.keys(RECORD_TYPES).sort(), [
     'anti_pattern',
+    'attestation', // human-inspection ruling (board 259a455f, user-approved 2026-08-21)
     'brief',
     'decision',
     'disconfirmed_hypothesis',
@@ -438,6 +540,40 @@ test('sessionEventSchema: the six register kinds parse; unknown kind + missing f
   assert.throws(() => s.parse({ kind: 'research_tool', at: NOW }), 'detail is required');
   assert.throws(() => s.parse({ kind: 'research_tool', detail: 42, at: NOW }), 'detail must be a string');
   assert.throws(() => s.parse({ kind: 'research_tool', detail: 'x' }), 'at is required');
+});
+
+// ---- test_repair kind (decision frozen-test-repair-signatures-plus-visible-repair
+// 7a4c3fb6-dc23-4c2f-9369-d2592132f408; board a06e4a1c): the visible-repair half —
+// a conductor hand-repair of a frozen test raises a capture duty, and the repair
+// event itself is a sixth session-event kind. Mirrors the no_capture precedent
+// (board 7bbec3bd) directly above: same schema, same round-trip shape, new kind.
+test('sessionEventSchema: test_repair joins the register as the SIXTH kind — detail carries the repaired path + evidence summary', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  // detail carries BOTH the repaired test path and the evidence for why the
+  // test (not the code) was wrong — same free-text-with-required-substance
+  // shape as capture_pending's "<target> — <reason>" convention.
+  const detail = 'tests/feature.spec.ts — assertion pinned the OLD (pre-rename) export name, not the code under test';
+  const repaired = s.parse({ kind: 'test_repair', detail, at: NOW });
+  assert.equal(repaired.kind, 'test_repair');
+  assert.equal(repaired.detail, detail);
+  assert.equal(repaired.at, NOW);
+
+  // kind is now a closed enum of exactly SIX register writers — the five
+  // pre-existing kinds still parse (totality holds after the addition)...
+  assert.equal(s.parse({ kind: 'research_tool', detail: 'x', at: NOW }).kind, 'research_tool');
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'x', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'x', at: NOW }).kind, 'debug_scope');
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'x', at: NOW }).kind, 'concept_designed');
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'x', at: NOW }).kind, 'no_capture');
+  // ...and a kind outside the six is still rejected — the totality boundary moved
+  // from five to six, it did not open.
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the six writers is rejected');
+  assert.throws(() => s.parse({ kind: 'test_repair', at: NOW }), 'detail is required for test_repair too');
+  assert.throws(() => s.parse({ kind: 'test_repair', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'test_repair', detail }), 'at is required for test_repair too');
 });
 
 test('research_owed is a registered SYSTEM_REASONS member draining under "captured"; 1:1 totality holds (AC7, interface slice 4)', () => {

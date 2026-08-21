@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, recordSizes, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -41,6 +41,19 @@ export interface CreateResult {
   deduped?: boolean;
   /** The existing item's text was refreshed because this attempt said something different. */
   text_updated?: boolean;
+  /**
+   * Cited-id resolution warnings (board fc053051): one entry per id-shaped
+   * citation in the written text that resolves to NO record in the mounted
+   * fan, at any status. Always present — `[]` when every citation resolved
+   * or none were found. Never gates the write (AC5): the record still lands.
+   */
+  warnings: string[];
+  /**
+   * SAME-SUBJECT SURFACING (decision 7e3c66c5): present only for ruling-type
+   * creates (decision / anti_pattern / research_finding) — other types'
+   * responses stay byte-identical. Advisory only, never gates the write.
+   */
+  same_subject?: SameSubjectEntry[];
 }
 
 export interface BoardFilter {
@@ -61,6 +74,18 @@ export interface BoardFilter {
    * this adds one more JS predicate to that same pass, not a second table scan.
    */
   contains?: string;
+  /**
+   * Narrow to items owned by ONE feature_article, resolved from its slug
+   * (board e725979c — maintenance_query's feature_slug gap). Resolution is
+   * CHAIN-AWARE: it matches the live article's id AND every ancestor id in
+   * its supersede chain (the same rel:'supersedes' links join knowledgeUpdate's
+   * drift-item auto-drain already walks, decision 8ecd435f) — an item raised
+   * against an earlier version of the article still matches after a later
+   * reconcile superseded it. An unresolvable slug narrows to NOTHING rather
+   * than erroring (no article to own anything), and combines with every other
+   * filter as a genuine AND, applied in the same JS pass as system_reason/contains.
+   */
+  feature_slug?: string;
   cap?: number;
   projection?: Projection;
 }
@@ -82,8 +107,18 @@ export interface BoardFilter {
  * knowledge base, that is defeating one". 'full' stays the DEFAULT so no
  * existing caller changes behaviour; the cheap read is opt-in, and the capped
  * note advertises it so it is discoverable at the moment it is needed.
+ *
+ * 'count'  — knowledge_query only (board fa19524d). A capped window can never
+ *            establish absence — "does the store hold X?" is unanswerable once
+ *            more records match than the cap shows. 'count' answers that
+ *            question directly: the TRUE total for the filter (reusing the
+ *            store's uncapped, rank-blind count()), no record bodies, and
+ *            capped:false always — a count is defined as never-capped, it does
+ *            not enumerate. When multiple types are queried, a per-type
+ *            breakdown rides alongside the total (see by_type on
+ *            KnowledgeQueryResult).
  */
-export type Projection = 'full' | 'digest';
+export type Projection = 'full' | 'digest' | 'count';
 
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
@@ -117,6 +152,10 @@ export interface KnowledgeQueryResult {
    */
   answerability: 'ready' | 'verify_targets' | 'insufficient';
   records: Record<string, unknown>[];
+  /** projection:'count' only, and only when multiple `types` were queried: the
+   *  same uncapped, rank-blind count() split per queried type, alongside the
+   *  combined `matched_filter` total (board fa19524d, AC2). */
+  by_type?: Record<string, number>;
 }
 
 /** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
@@ -137,6 +176,21 @@ export interface KnowledgePreflightResult {
   reason?: 'too_little_vocabulary';
   terms: string[];
   matches: { id: string; type: string; title: string; matched_on: string[]; central: string[] }[];
+}
+
+/**
+ * SAME-SUBJECT SURFACING ON WRITE (decision 7e3c66c5): one digest entry per
+ * OTHER active record the preflight axis engine judges to govern the same
+ * subject as a record just written. Mirrors knowledgePreflight's own
+ * per-candidate shape (id/type/title/matched_on) plus `slug`, since a ruling
+ * record (unlike an arbitrary preflight candidate) always carries one.
+ */
+export interface SameSubjectEntry {
+  id: string;
+  slug?: string;
+  type: string;
+  title: string;
+  matched_on: string[];
 }
 
 export interface ToolDeps {
@@ -178,6 +232,39 @@ const DRIFT_ITEMS_PER_READ = 3;
 // nag about a stub someone scaffolded five minutes ago. A whole file under this
 // is plausibly still a placeholder; several hundred lines is not.
 const PLANNED_CREDIBLE_BYTES = 2000;
+
+/**
+ * Tags resolveRecordId's two genuine MISS throws — too-short-to-resolve and
+ * no-prefix-match — where nothing at all matched the caller's identifier.
+ * knowledge_get's dead-slug fallthrough gates on this tag so it only ever
+ * fires for a true miss; every other resolveRecordId refusal (a slug
+ * collision, an ambiguous prefix, or a torn-store inconsistency) names
+ * records that DID match and must reach the caller unchanged, never be
+ * swallowed in favour of a superseded body (review finding, 2026-08-20).
+ */
+export class UnresolvedIdentifierError extends Error {}
+
+/**
+ * knowledgeSplit's input shape, extracted so knowledgeSplitResult (the
+ * MCP-facing wrapper, mirroring knowledgeUpdateResult) can share it without
+ * a second hand-copied literal.
+ */
+export interface KnowledgeSplitInput {
+  id: string;
+  children: {
+    slug: string;
+    title: string;
+    what_it_does: string;
+    intended_behavior: string;
+    move_files: string[];
+    move_ac_ids: string[];
+    dependencies?: { relies_on: string[]; relied_by: string[] };
+  }[];
+  parent_what_it_does: string;
+  parent_intended_behavior?: string;
+  reason?: string;
+  resolves?: string[];
+}
 
 export class SterlingTools {
   private store: ToolStore;
@@ -264,9 +351,14 @@ export class SterlingTools {
 
   /**
    * A file absent from the working tree may still be ALIVE on another git ref —
-   * parked on an unmerged branch rather than deleted (board 1d6a721a). Returns
-   * the first ref that holds it, or undefined if it exists nowhere (in which
-   * case the deletion reading is correct, and now trustworthy).
+   * parked on an unmerged branch rather than deleted (board 1d6a721a), OR still
+   * present on base because the deletion hasn't reached base yet (board
+   * 07baa42b). ANCESTRY-AWARE (board 07baa42b): a missing file is PARKED iff
+   * (a) it still exists on the BASE branch, or (b) it exists on a branch that
+   * is NOT YET merged into base. A blob surviving ONLY on branches that are
+   * fully-merged ancestors of base does NOT park — the deletion reading (base
+   * no longer has it, and no unmerged work holds it either) applies instead.
+   * Returns the first qualifying ref that holds it, or undefined if none does.
    *
    * ONLY CALLED ON THE ALREADY-RARE MISSING-FILE PATH, never on the hot read
    * path: shelling out per owned file per query would be a real regression, and
@@ -276,7 +368,19 @@ export class SterlingTools {
    *
    * HEAD is probed FIRST and separately: a file present in HEAD but not on disk
    * is the commonest shape (someone deleted it without committing), and catching
-   * it in one call avoids walking the branch list at all.
+   * it in one call avoids walking the branch list at all. HEAD is case (a)/(b)
+   * territory regardless — it is checked for blob presence exactly as before,
+   * with no ancestry filtering (it's the branch currently checked out, not a
+   * candidate to filter against base).
+   *
+   * BASE resolution: `git symbolic-ref --short refs/remotes/origin/HEAD`
+   * (origin/ prefix stripped), else a local `main`, else `master`. If none of
+   * those resolve, ancestry cannot be judged — fall back to today's behaviour
+   * (no ancestry filtering) rather than throw or suppress. The base branch
+   * itself is checked by blob presence (case (a)); every other local branch is
+   * skipped when `git merge-base --is-ancestor <branch> <base>` exits 0 (fully
+   * merged — case not satisfied), and checked by blob presence otherwise
+   * (case (b), unmerged work).
    *
    * Every git failure is swallowed to undefined, which degrades to today's
    * behaviour — a deletion item. That direction is deliberate: a missing git, a
@@ -285,26 +389,50 @@ export class SterlingTools {
    * lane is the one that gets acted on.
    */
   private parkedOnRef(rel: string, treeRoot: string): string | undefined {
-    const has = (ref: string): boolean => {
+    const run = (args: string[]) => {
       try {
-        return spawnSync('git', ['-C', treeRoot, 'cat-file', '-e', `${ref}:${rel}`], { encoding: 'utf8', windowsHide: true }).status === 0;
+        return spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
       } catch {
-        return false;
+        return undefined;
       }
+    };
+    const has = (ref: string): boolean => run(['cat-file', '-e', `${ref}:${rel}`])?.status === 0;
+    const resolveBase = (): string | undefined => {
+      const symbolic = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      if (symbolic?.status === 0 && typeof symbolic.stdout === 'string') {
+        const name = symbolic.stdout.trim();
+        if (name) return name.startsWith('origin/') ? name.slice('origin/'.length) : name;
+      }
+      const mainCheck = run(['show-ref', '--verify', '--quiet', 'refs/heads/main']);
+      if (mainCheck?.status === 0) return 'main';
+      const masterCheck = run(['show-ref', '--verify', '--quiet', 'refs/heads/master']);
+      if (masterCheck?.status === 0) return 'master';
+      return undefined;
+    };
+    const isMergedIntoBase = (branch: string, base: string): boolean => {
+      const r = run(['merge-base', '--is-ancestor', branch, base]);
+      return r?.status === 0;
     };
     try {
       if (has('HEAD')) return 'HEAD';
-      const refs = spawnSync('git', ['-C', treeRoot, 'for-each-ref', '--format=%(refname:short)', 'refs/heads'], {
-        encoding: 'utf8',
-        windowsHide: true,
-      });
-      if (refs.status !== 0 || typeof refs.stdout !== 'string') return undefined;
+      const refs = run(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return undefined;
       const branches = refs.stdout
         .split('\n')
         .map((s) => s.trim())
         .filter(Boolean)
         .slice(0, PARKED_REF_PROBE_CAP);
-      for (const b of branches) if (has(b)) return b;
+      const base = resolveBase();
+      if (base === undefined) {
+        for (const b of branches) if (has(b)) return b;
+        return undefined;
+      }
+      for (const b of branches) {
+        if (!has(b)) continue;
+        if (b === base) return b; // case (a): base itself still has it
+        if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
+        return b; // case (b): unmerged branch still holds it
+      }
       return undefined;
     } catch {
       return undefined;
@@ -399,7 +527,10 @@ export class SterlingTools {
    * want either and pointing at retirement alone would trade a stale denial for an
    * invitation to retire away every error instead of correcting it.
    */
-  private refuseServerOwnedFields(fields: Record<string, unknown>, op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append'): void {
+  private refuseServerOwnedFields(
+    fields: Record<string, unknown>,
+    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede'
+  ): void {
     const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
     const attempted = SERVER_OWNED.filter((k) => k in fields);
     if (attempted.length === 0) return;
@@ -456,6 +587,58 @@ export class SterlingTools {
       fields: described.fields,
       required: described.fields.filter((f) => f.required).map((f) => f.name),
       optional: described.fields.filter((f) => !f.required).map((f) => f.name),
+    };
+  }
+
+  /**
+   * knowledge_stats — size and composition WITHOUT the body (board a382af6b).
+   * Per-id: the shared size decomposition (recordSizes — the same numbers the
+   * article_oversize lane judges) plus composition counts. No-arg: the
+   * store-wide aggregate, so bloat is visible before a knowledge_get chokes on
+   * it. Read-only; the digest size column (size_chars) is the cheap scan and
+   * this is the drill-down.
+   */
+  knowledgeStats(id?: string): Record<string, unknown> {
+    const threshold = this.config.article_oversize_chars;
+    if (id) {
+      const rec = this.resolveRecordId(id, 'knowledge_stats') as unknown as Record<string, unknown>;
+      const sizes = recordSizes(rec);
+      const history = Array.isArray(rec.history) ? (rec.history as unknown[]) : [];
+      const links = Array.isArray(rec.links) ? (rec.links as { rel: string }[]) : [];
+      return {
+        id: rec.id,
+        type: rec.type,
+        ...(rec.slug ? { slug: rec.slug } : {}),
+        ...(rec.title ? { title: rec.title } : {}),
+        ...(rec.version !== undefined ? { version: rec.version } : {}),
+        body_chars: sizes.body_chars,
+        history_chars: sizes.history_chars,
+        total_chars: sizes.body_chars + sizes.history_chars,
+        history_entries: history.length,
+        supersedes_count: links.filter((l) => l.rel === 'supersedes').length,
+        ...(rec.type === 'feature_article' ? { oversize_threshold: threshold, over_threshold: sizes.body_chars > threshold } : {}),
+      };
+    }
+    const by_type: Record<string, { count: number; body_chars: number }> = {};
+    const articles: { slug: string; body_chars: number }[] = [];
+    for (const type of Object.keys(RECORD_TYPES)) {
+      // include_unconfirmed: an aggregate that silently omits derived-unconfirmed
+      // records would under-report a store it claims to size (review LOW, 2026-08-21).
+      const records = this.store.query({ types: [type], cap: 100000, include_unconfirmed: true }) as unknown as Record<string, unknown>[];
+      let chars = 0;
+      for (const r of records) {
+        const s = recordSizes(r);
+        chars += s.body_chars;
+        if (type === 'feature_article') articles.push({ slug: String(r.slug ?? r.id), body_chars: s.body_chars });
+      }
+      by_type[type] = { count: records.length, body_chars: chars };
+    }
+    articles.sort((a, b) => b.body_chars - a.body_chars);
+    return {
+      by_type,
+      total_body_chars: Object.values(by_type).reduce((n, t) => n + t.body_chars, 0),
+      oversize_threshold: threshold,
+      largest_articles: articles.slice(0, 10).map((a) => ({ ...a, over_threshold: a.body_chars > threshold })),
     };
   }
 
@@ -572,7 +755,11 @@ export class SterlingTools {
     // deterministic); an EXPLICIT slug that collides with ANY slug-bearing
     // record is refused loudly — same two-records-one-handle reasoning as the
     // feature_article branch above, across every type knowledge_get resolves.
-    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding') {
+    // attestation joins the EXPLICIT-collision half only (review finding 1,
+    // 2026-08-21): it has no title/question headline, so nothing auto-mints —
+    // but an explicit slug colliding with a live record would brick slug
+    // addressing of that record for every reader (the 1e639f32 incident shape).
+    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding' || type === 'attestation') {
       const explicit = (parsed as { slug?: string }).slug;
       if (explicit) {
         if (this.store.recordsBySlug(explicit).length) {
@@ -583,14 +770,12 @@ export class SterlingTools {
         }
       } else {
         const headline = ((parsed as { title?: string; question?: string }).title ?? (parsed as { question?: string }).question ?? '') as string;
-        const base = SterlingTools.slugify(headline);
-        if (base) {
-          let slug = base;
-          for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+        const minted = this.mintSlug(headline);
+        if (minted) {
           // store.create persists `candidate` (parsed is the dedup-comparison
           // view), so the minted slug must land on BOTH.
-          (parsed as { slug?: string }).slug = slug;
-          candidate.slug = slug;
+          (parsed as { slug?: string }).slug = minted;
+          candidate.slug = minted;
         }
       }
     }
@@ -604,6 +789,12 @@ export class SterlingTools {
     // re-baseline. A duplicate returns the EXISTING item rather than throwing:
     // producers are mechanisms reporting a fact, and a fact reported twice is
     // not an error.
+    // Cited-id resolution warnings (board fc053051): scanned from the same
+    // text the FTS extractor already derives for this type, so no new
+    // per-type field list is invented here. Computed on `parsed` (post-schema,
+    // pre-store) so a scan sees exactly what is about to be written.
+    const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
+
     const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
     if (isSystemTodo) {
       const res = this.store.enqueueSystemTodo(candidate);
@@ -613,11 +804,20 @@ export class SterlingTools {
         check_skipped: skipped,
         ...(res.deduped ? { deduped: true } : {}),
         ...(res.text_updated ? { text_updated: true } : {}),
+        warnings: citationWarnings,
       };
     }
     const record = this.store.create(candidate);
     this.surfacePromotionCandidate(record, type);
-    return { record, check_skipped: skipped };
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
+    // types — other types' create responses stay byte-identical. Computed
+    // AFTER the store write (AC6: disclosure never blocks or gates), on the
+    // registered FTS extractor's text (same source citedIdWarnings already
+    // used above), excluding only the record just minted.
+    const sameSubject = SterlingTools.SAME_SUBJECT_TYPES.includes(type)
+      ? this.sameSubjectDigest(registered ? registered.fts(parsed) : '', new Set([record.id]))
+      : undefined;
+    return { record, check_skipped: skipped, warnings: citationWarnings, ...(sameSubject ? { same_subject: sameSubject } : {}) };
   }
 
   /**
@@ -961,17 +1161,21 @@ export class SterlingTools {
    *
    * It delegates to knowledgeUpdate rather than writing its own supersede, so it
    * CANNOT diverge from the update path's guarantees: version bump, prior version
-   * retained, file_baselines re-baseline, and the P4 drift-item drain all happen
-   * exactly once and exactly as before. Only the caller's transmission cost
-   * changes — this is not a second write path (invariant: one write code path).
+   * retained, file_baselines re-baseline, and (decision 68988832) an EXPLICIT
+   * resolves claim — never an implicit drain — all happen exactly once and
+   * exactly as before. Any open reconcile_needed/refresh_reference debt on the
+   * chain not named in resolves is warned on the receipt, not silently
+   * discharged. Only the caller's transmission cost changes — this is not a
+   * second write path (invariant: one write code path).
    *
    * Refuses loudly (P5) rather than guessing: an unknown field for the type (with
    * the valid set named, same helper as the write guards), a field whose current
    * value is not an array, an empty entry list, and `links` — typed edges have
    * their own tool and a second path would let the record_links index drift.
    */
-  knowledgeAppend(id: string, field: string, entries: unknown[]): { record: DurableRecord; warnings: string[] } {
+  knowledgeAppend(id: string, field: string, entries: unknown[], resolves?: string[]): { record: DurableRecord; warnings: string[] } {
     const old = this.resolveRecordId(id, 'knowledge_append');
+    this.refuseStaleAddress(old, id, 'knowledge_append');
     if (!Array.isArray(entries) || entries.length === 0) {
       throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
     }
@@ -988,10 +1192,23 @@ export class SterlingTools {
     }
     const next = [...((current as unknown[]) ?? []), ...entries];
     // Straight through the ONE update path — every guarantee above rides along,
-    // including the oversize check (board 8390f8fa): the write's result carries
-    // a warning on the SAME channel knowledge_update uses.
-    const record = this.knowledgeUpdate(old.id, { [field]: next });
-    return { record, warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)] };
+    // including the oversize check (board 8390f8fa) and the resolves claim
+    // (decision 68988832): the write's result carries a warning on the SAME
+    // channel knowledge_update uses. same_subject (ruling types only) is
+    // split off rather than left inside `record` — see splitSameSubject.
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, 'knowledge_append'));
+    // Cited-id scan (board fc053051 extension): only the newly APPENDED
+    // entries — never the array's pre-existing elements, which were already
+    // scanned (or not) on whatever write introduced them.
+    return {
+      record,
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
+        ...this.articleOversizeWarnings(record),
+        ...this.citedIdWarnings(JSON.stringify(entries)),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+      ],
+    };
   }
 
   /**
@@ -1017,17 +1234,19 @@ export class SterlingTools {
    * the article.
    *
    * Everything else rides the ONE update path — version bump, retained prior
-   * version, file_baselines re-baseline, drift-item auto-drain, coherence
-   * warnings — so an edit is a normal supersession and not a back door around
-   * any of it.
+   * version, file_baselines re-baseline, the explicit resolves claim (decision
+   * 68988832 — never an implicit auto-drain), coherence warnings — so an edit
+   * is a normal supersession and not a back door around any of it.
    */
   knowledgeEdit(
     id: string,
     field: string,
     find: string,
-    replace: string
+    replace: string,
+    resolves?: string[]
   ): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number }; warnings: string[] } {
     const old = this.resolveRecordId(id, 'knowledge_edit');
+    this.refuseStaleAddress(old, id, 'knowledge_edit');
     if (typeof find !== 'string' || find.length === 0) {
       throw new Error(`knowledge_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
     }
@@ -1079,11 +1298,21 @@ export class SterlingTools {
       }
       const nextEl = { ...el, [sub]: cur.replace(find, replace) };
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
-      const record = this.knowledgeUpdate(old.id, { [base]: nextArr });
+      // same_subject (ruling types only) is split off rather than left
+      // inside `record` — see splitSameSubject.
+      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, 'knowledge_edit'));
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
-        warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record), ...this.articleOversizeWarnings(record)],
+        // Cited-id scan (board fc053051 extension): the REPLACE text only —
+        // never `find`, never the rest of the record, which was already
+        // scanned (or not) on whatever write introduced it.
+        warnings: [
+          ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
+          ...this.articleOversizeWarnings(record),
+          ...this.citedIdWarnings(replace),
+          ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ],
       };
     }
     this.refuseServerOwnedFields({ [field]: replace }, 'knowledge_update');
@@ -1111,11 +1340,22 @@ export class SterlingTools {
       );
     }
     const next = current.replace(find, replace);
-    const record = this.knowledgeUpdate(old.id, { [field]: next });
+    // same_subject (ruling types only) is split off rather than left inside
+    // `record` — see splitSameSubject.
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, 'knowledge_edit'));
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
-      warnings: [...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record), ...this.articleOversizeWarnings(record)],
+      // Cited-id scan (board fc053051 extension): the REPLACE text only —
+      // never `find`, never the rest of the record (scope guarantee: an edit
+      // must not warn about a pre-existing citation elsewhere in the record
+      // just because that record happens to get written again).
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
+        ...this.articleOversizeWarnings(record),
+        ...this.citedIdWarnings(replace),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+      ],
     };
   }
 
@@ -1155,8 +1395,9 @@ export class SterlingTools {
     // bounded separately by rotation (article_history_max_entries), so counting
     // it here flagged articles a split could not fix and minted duplicate items
     // from writes the reconcile contract itself demanded.
-    const { history: _h, ...body } = record as unknown as Record<string, unknown>;
-    const size = JSON.stringify(body).length;
+    // recordSizes is the ONE size decomposition (board a382af6b) — the digest
+    // size column and knowledge_stats measure with the same function.
+    const size = recordSizes(record as unknown as Record<string, unknown>).body_chars;
     const threshold = this.config.article_oversize_chars;
     if (size <= threshold) return [];
     const a = record as unknown as { slug: string; files?: { path: string }[] };
@@ -1172,7 +1413,7 @@ export class SterlingTools {
     // 86216751's refreshes-in-place contract. The slug is the one handle
     // stable across versions AND files[] changes; the closing quote in the
     // marker keeps a slug from prefix-matching a longer sibling.
-    const marker = `article '${a.slug}'`;
+    const marker = this.articleOversizeMarker(a.slug);
     const open = this.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }) as unknown as { id: string; text?: string }[];
     const existing = open.find((t) => (t.text ?? '').startsWith(marker));
     if (existing) {
@@ -1187,8 +1428,9 @@ export class SterlingTools {
   }
 
   /**
-   * History rotation disclosure (board 0697c6bd). knowledgeUpdate bounds a
-   * feature_article's history to the newest article_history_max_entries at the
+   * History rotation disclosure (board 0697c6bd; middle-out since ab87fe24).
+   * knowledgeUpdate bounds a feature_article's history to the first
+   * article_history_genesis_entries plus the newest remainder at the
    * write; this reports it on the same warnings channel the coherence and
    * oversize checks use. `attempted` is what the merged write WOULD have stored
    * unbounded (computed by attemptedHistoryLen from the caller's body and the
@@ -1200,9 +1442,13 @@ export class SterlingTools {
     if (record.type !== 'feature_article') return [];
     const kept = ((record as unknown as { history?: unknown[] }).history ?? []).length;
     if (kept >= attempted) return [];
+    const max = this.config.article_history_max_entries;
+    const genesis = Math.min(this.config.article_history_genesis_entries, max - 1);
+    const recentKeep = max - genesis;
     return [
-      `history rotated: kept the newest ${kept} of ${attempted} entries (article_history_max_entries=${this.config.article_history_max_entries}). ` +
-        `Older entries are not lost — they remain readable in the retained superseded versions (knowledge_get a prior version's id).`,
+      `history rotated (middle-out): kept ${kept} of ${attempted} entries — the ${genesis} genesis/founding entries plus the newest ${recentKeep} ` +
+        `(article_history_max_entries=${max}, article_history_genesis_entries=${this.config.article_history_genesis_entries}); the entries evicted from the middle ` +
+        `are not lost — they remain readable in the retained superseded prior version (knowledge_get a prior version's id).`,
     ];
   }
 
@@ -1230,9 +1476,27 @@ export class SterlingTools {
    * would be ceremony on the common case (P1) and would train callers to pass
    * fields they had no reason to touch — which is its own drift.
    */
-  knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[] } {
-    const before = this.store.get(id);
-    const record = this.knowledgeUpdate(id, body);
+  knowledgeUpdateResult(
+    id: string,
+    body: Record<string, unknown>,
+    resolves?: string[]
+  ): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[] } {
+    // Resolved the SAME way knowledgeUpdate resolves its own `id` (uuid/slug/
+    // 8-char-prefix ladder) — review finding, 2026-08-21: a raw store.get(id)
+    // here only matches an exact uuid, so a slug- or prefix-addressed write
+    // skipped the pre-state entirely and with it every warning below
+    // (history-rotation, coherence, and the open-reconcile-lane disclosure).
+    // Exact-uuid callers see byte-identical behavior — resolveRecordId returns
+    // the same record store.get would, and a genuinely bad id throws here with
+    // the same 'knowledge_update' naming knowledgeUpdate's own resolution would.
+    const before = this.resolveRecordId(id, 'knowledge_update');
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5, HIGH review finding): lift
+    // same_subject OUT of the flattened record and onto its own envelope
+    // sibling — mirroring knowledge_create/knowledge_supersede — BEFORE this
+    // wraps it as `record`. Left inside, the digest write-projection
+    // (writeProjected -> digestRecord's field whitelist) silently drops it,
+    // and projection:'full' would echo it back as a fake record field.
+    const { record, same_subject } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves));
     const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
     if (before?.type === 'feature_article' && 'what_it_does' in body) {
       const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
@@ -1245,7 +1509,18 @@ export class SterlingTools {
       }
     }
     warnings.push(...this.articleOversizeWarnings(record));
-    return { record, warnings };
+    // Cited-id scan (board fc053051 extension): only the WRITTEN partial
+    // fields — `body`, the caller's own overrides — never the untouched rest
+    // of the merged record, which was already scanned (or not) on whatever
+    // write introduced it.
+    warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
+    // OPEN RECONCILE-LANE DEBT DISCLOSURE (decision 68988832-2ef5-4ff3-b693-
+    // d8bd8dae1): any reconcile_needed/refresh_reference item still open on
+    // this article's chain, not named in this write's resolves, is unclaimed
+    // debt — named here so it is visible at the exact moment the writer is
+    // looking, never silent (P5). Empty when nothing is owed (P1).
+    if (before) warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
+    return { record, warnings, ...(same_subject ? { same_subject } : {}) };
   }
 
   /**
@@ -1278,6 +1553,26 @@ export class SterlingTools {
 
   knowledgeQueryResult(opts: QueryOptions & { projection?: Projection }): KnowledgeQueryResult {
     const { projection = 'full', ...filter } = opts;
+    // projection:'count' never enumerates — no records fetch, no cap, no rank.
+    // The store's uncapped count() IS the whole answer (board fa19524d): a
+    // capped window can never establish absence, so a count sidesteps the
+    // question of "how many can I see" entirely by never taking a window.
+    if (projection === 'count') {
+      const matchedFilter = this.store.count(filter);
+      const byType =
+        (filter.types?.length ?? 0) > 1
+          ? Object.fromEntries((filter.types as string[]).map((t) => [t, this.store.count({ ...filter, types: [t] })]))
+          : undefined;
+      return {
+        matched_filter: matchedFilter,
+        returned: 0,
+        cap: filter.cap ?? DEFAULT_QUERY_CAP,
+        capped: false,
+        answerability: matchedFilter === 0 ? 'insufficient' : 'ready',
+        records: [],
+        ...(byType ? { by_type: byType } : {}),
+      };
+    }
     const records = this.knowledgeQuery(filter);
     const cap = filter.cap ?? DEFAULT_QUERY_CAP;
     // count() shares query()'s base filter but is rank-BLIND (rank_terms is a
@@ -1318,45 +1613,115 @@ export class SterlingTools {
    * than discovering a governing record only after a subagent has already gone
    * wrong (H20/H19 relevance slice 4b). Reuses the SAME axis extraction +
    * stage-2 centrality floors H20 already applies at delivery time. Since
-   * board 39c3d762 the candidate surface spans all four governing types —
-   * anti_pattern, decision, feature_article (territory = slug/family/title),
-   * research_finding (subject = question) — because the two missing types made
-   * an article-governed question answer 'nothing governs this', a false
-   * negative dressed as a verdict; and the no-match verdict is 'ungoverned'
-   * (renamed from 'ready', whose query-envelope reading is the opposite).
+   * board 39c3d762 (widened by e7157d0b) the candidate surface spans all five
+   * governing types — anti_pattern, decision, feature_article (territory =
+   * slug/family/title), research_finding and disconfirmed_hypothesis (subject
+   * = question) — because a missing type made an article-governed question
+   * answer 'nothing governs this', a false negative dressed as a verdict; and
+   * the no-match verdict is 'ungoverned' (renamed from 'ready', whose
+   * query-envelope reading is the opposite).
    */
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
       return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matches: [] };
     }
+    const matches = this.axisCandidateMatches(text, terms).map(({ record, hits }) => ({
+      id: record.id,
+      type: record.type,
+      // research_finding carries no title — its question IS the identity;
+      // an article's slug beats its long title as the handle.
+      title: SterlingTools.axisRecordTitle(record),
+      matched_on: hits,
+      central: recordCentralityHits(record, text),
+    }));
+    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
+  }
+
+  /**
+   * The candidate-matching CORE shared by knowledgePreflight and same-subject
+   * surfacing on write (decision 7e3c66c5) — the preflight axis floors
+   * (extractAxisTerms already run by the caller -> store.query the five
+   * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
+   * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
+   * Callers differ only in what they do with the (record, hits) pairs and in
+   * which candidates they exclude — never in how a candidate qualifies.
+   */
+  private axisCandidateMatches(text: string, terms: string[]): { record: DurableRecord; hits: string[] }[] {
+    // rank_terms is schema-bound to <=64 chars (store's §3.4 QueryOptions
+    // parse) — extractAxisTerms has no upper bound (only AXIS_MIN_TERM_LEN, a
+    // floor), so a long unbroken run of the same character in authored
+    // content (e.g. a filler/placeholder body) mints a term that store.query
+    // would refuse outright. This is the query-building step only — filtered
+    // terms still surface on knowledgePreflight's own `terms` field unchanged.
+    const queryTerms = terms.filter((t) => t.length <= 64);
+    // Every extracted term exceeded 64 chars: rank_terms would be [], and
+    // store.query's empty-rank_terms path is a MECHANICAL RECENCY FALLBACK
+    // (40 newest per type) — the wrong candidate semantics for axis matching
+    // (a candidate must share vocabulary with `text`, not merely be recent)
+    // and a wasted 4-type query for a result that filters to nothing once
+    // axisHits runs against the (long, filtered-out-of-the-query) terms.
+    if (queryTerms.length === 0) return [];
     const candidates = [
-      ...this.store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
-      ...this.store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
-      ...this.store.query({ types: ['feature_article'], rank_terms: terms, cap: 40 }),
-      ...this.store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
+      ...this.store.query({ types: ['anti_pattern'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['decision'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['feature_article'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['research_finding'], rank_terms: queryTerms, cap: 40 }),
+      // Refuted trails join the prior-answer surface (board e7157d0b): a brief
+      // about to re-litigate a disproved hypothesis is the exact re-derivation
+      // waste preflight exists to stop.
+      ...this.store.query({ types: ['disconfirmed_hypothesis'], rank_terms: queryTerms, cap: 40 }),
     ];
-    const matches = candidates
+    return candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))
       .filter(
         ({ record, hits }) =>
           hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(record, text)
       )
-      .sort((a, b) => b.hits.length - a.hits.length)
+      .sort((a, b) => b.hits.length - a.hits.length);
+  }
+
+  /** research_finding carries no title — its question IS the identity; an
+   *  article's slug beats its long title as the handle. Shared by
+   *  knowledgePreflight and sameSubjectDigest so the fallback chain is
+   *  defined once. */
+  private static axisRecordTitle(record: DurableRecord): string {
+    return (
+      (record as unknown as { title?: string }).title ??
+      (record as unknown as { question?: string }).question ??
+      (record as unknown as { slug?: string }).slug ??
+      ''
+    );
+  }
+
+  /** Disclosure cap (decision 7e3c66c5, AC7): same_subject is a hint at what
+   *  else governs this subject, never an unbounded inventory. */
+  private static readonly SAME_SUBJECT_CAP = 5;
+
+  /**
+   * SAME-SUBJECT SURFACING ON WRITE (decision 7e3c66c5): reuses
+   * axisCandidateMatches unchanged, sourced from the WRITTEN record's own text
+   * (the registered FTS extractor's output — the same text the citation scan
+   * uses) rather than an outgoing dispatch prompt, and excludes a
+   * caller-supplied set of ids (the write's own lineage: on update, the prior
+   * version and every ancestor; on supersede, the old record and its chain;
+   * on create, just the new id) rather than nothing. Advisory only: the
+   * caller decides whether/where to attach the result, this never throws and
+   * never influences the write itself.
+   */
+  private sameSubjectDigest(text: string, excludeIds: Set<string>): SameSubjectEntry[] {
+    const terms = extractAxisTerms(text, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) return [];
+    return this.axisCandidateMatches(text, terms)
+      .filter(({ record }) => !excludeIds.has(record.id))
+      .slice(0, SterlingTools.SAME_SUBJECT_CAP)
       .map(({ record, hits }) => ({
         id: record.id,
+        slug: (record as unknown as { slug?: string }).slug,
         type: record.type,
-        // research_finding carries no title — its question IS the identity;
-        // an article's slug beats its long title as the handle.
-        title:
-          (record as unknown as { title?: string }).title ??
-          (record as unknown as { question?: string }).question ??
-          (record as unknown as { slug?: string }).slug ??
-          '',
+        title: SterlingTools.axisRecordTitle(record),
         matched_on: hits,
-        central: recordCentralityHits(record, text),
       }));
-    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
   }
 
   /**
@@ -1429,6 +1794,23 @@ export class SterlingTools {
   }
 
   /**
+   * Auto-mint a slug from a headline (title, or question for
+   * research_finding), suffixing -2/-3/... on collision. Returns undefined
+   * when the headline slugifies to nothing (blank/symbols-only headline).
+   * Shared by knowledgeCreate (a new record with no explicit slug) and
+   * knowledge_supersede (F4 review finding: a slugless old record — e.g. a
+   * pre-slug legacy row — must not silently produce a slugless new head; it
+   * mints exactly the same way a brand-new create would).
+   */
+  private mintSlug(headline: string): string | undefined {
+    const base = SterlingTools.slugify(headline);
+    if (!base) return undefined;
+    let slug = base;
+    for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+    return slug;
+  }
+
+  /**
    * knowledge_get — full uuid, or the 8-char PREFIX every citation in this repo
    * uses (decision 27f148c2). CLAUDE.md, code comments and record prose all cite
    * "decision 6dfbe675" style, and check-record-citations already resolves that
@@ -1450,9 +1832,105 @@ export class SterlingTools {
    * _update, _retire, _link) resolve through the exact same three-form
    * contract instead of a bare store.get — knowledge_get is now a thin
    * wrapper over it.
+   *
+   * WINDOWED/FIELD READ (decision compaction-tooling-windowed-read-plus-split,
+   * board 136091d2): `opts.field` requests one field's value instead of the
+   * whole record, so an oversize article stays readable through the tool that
+   * is supposed to read it — the measured defect was 4 of 77 articles in a
+   * consuming project overflowing their own read tool. No `opts` (or an `opts`
+   * with none of field/offset/length set) is UNCHANGED behavior — full record,
+   * terminus handling included. With `field`: validated against
+   * knownFieldsFor(record.type) (unknown field refused, naming it plus the
+   * valid set), then projected by its runtime shape — string → kind:'string'
+   * (offset/length address CHARACTERS), array → kind:'array' (offset/length
+   * address ELEMENTS), anything else → kind:'value' (offset/length are refused
+   * as not windowable — there is nothing to page through). offset at/past the
+   * end is NOT an error: empty value/entries with the TRUE total, so paging
+   * has a clean termination. `offset`/`length` without `field` is refused — a
+   * window addresses one named field, never the whole record.
    */
-  knowledgeGet(id: string): DurableRecord {
-    return this.resolveRecordId(id, 'knowledge_get');
+  knowledgeGet(id: string, opts?: { field?: string; offset?: number; length?: number }): DurableRecord | Record<string, unknown> {
+    let record: DurableRecord;
+    try {
+      record = this.resolveRecordId(id, 'knowledge_get');
+    } catch (err) {
+      // DEAD-SLUG FALLTHROUGH (decision df361a0f, board 2b9f2f1a part 3,
+      // 'supersede + disclose'), knowledge_get-ONLY: resolveRecordId already
+      // tried live-slug then id-prefix resolution and both failed, so this
+      // can never shadow a live record. If the id names a slug carried only
+      // by superseded rows, serve the NEWEST carrier, version-pinned (own
+      // id/body/status) — never redirected to the live head, which stays a
+      // straight id/slug citation. No match at all (a slug never carried, or
+      // an ambiguous/torn-store error) rethrows the original refusal
+      // unchanged. The write surface (resolveRecordId's other callers) never
+      // sees this fallback — a dead slug is not a write handle.
+      //
+      // The fallthrough only fires for a genuine UNRESOLVED IDENTIFIER
+      // (UnresolvedIdentifierError — see resolveRecordId): the too-short and
+      // no-match throws, where nothing at all matched the citation. Every
+      // other refusal — a live slug collision, an ambiguous id prefix, or a
+      // torn-store inconsistency — names records that DID match and must
+      // reach the caller unchanged, never be swallowed in favour of a
+      // superseded body (review finding, 2026-08-20).
+      if (!(err instanceof UnresolvedIdentifierError)) throw err;
+      const deadSlugCarriers = this.store.supersededRecordsBySlug(id);
+      if (!deadSlugCarriers.length) throw err;
+      record = deadSlugCarriers[0];
+    }
+    // Additive terminus disclosure (decision de1a7329): the pinned record's own
+    // fields are never touched — a live record gets no `terminus` key at all,
+    // never a null/undefined one (AC6). Only a superseded record gains it,
+    // sourced from store.resolveTerminus so the disclosed end is the true chain
+    // end, not the one-hop superseded_by (AC7).
+    let full: DurableRecord | (DurableRecord & { terminus: unknown }) = record;
+    if (record.status === 'superseded') {
+      const terminus = this.store.resolveTerminus(record.id);
+      if (terminus) full = { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
+    }
+
+    // No windowing requested at all: exactly today's behavior, untouched.
+    if (!opts || (opts.field === undefined && opts.offset === undefined && opts.length === undefined)) {
+      return full;
+    }
+    const { field, offset, length } = opts;
+    if (field === undefined) {
+      throw new Error(
+        `knowledge_get: 'offset'/'length' require 'field' to be set — a window addresses one named field on the record, never the whole thing.`
+      );
+    }
+    const known = knownFieldsFor(full.type);
+    if (!known || !known.has(field)) {
+      const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
+      throw new Error(`knowledge_get: '${full.type}' does not define field '${field}' — valid fields: ${valid}.`);
+    }
+    const rec = full as unknown as Record<string, unknown>;
+    const value = rec[field];
+    const base: Record<string, unknown> = {
+      id: full.id,
+      type: full.type,
+      status: full.status,
+      field,
+      ...(rec.slug !== undefined ? { slug: rec.slug } : {}),
+      ...(rec.version !== undefined ? { version: rec.version } : {}),
+    };
+    if (typeof value === 'string') {
+      const off = offset ?? 0;
+      const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
+      return { ...base, kind: 'string', total_chars: value.length, offset: off, value: windowed };
+    }
+    if (Array.isArray(value)) {
+      const off = offset ?? 0;
+      const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
+      return { ...base, kind: 'array', total_entries: value.length, offset: off, entries: windowed };
+    }
+    // scalar / object / undefined: whole value, no offset/length — there is
+    // nothing to page through.
+    if (offset !== undefined || length !== undefined) {
+      throw new Error(
+        `knowledge_get: field '${field}' on ${full.type} is not a string or array — offset/length are not windowable on it.`
+      );
+    }
+    return { ...base, kind: 'value', value };
   }
 
   /**
@@ -1478,18 +1956,26 @@ export class SterlingTools {
     const bySlug = this.store.recordsBySlug(id);
     if (bySlug.length === 1) return bySlug[0];
     if (bySlug.length > 1) {
+      // NOT an UnresolvedIdentifierError: the slug matched — more than one
+      // record — so this is a genuine collision (e.g. a project record plus
+      // a promoted domain copy under one slug), not a miss. knowledge_get's
+      // dead-slug fallthrough must never swallow this in favour of a
+      // superseded body (review finding, 2026-08-20).
       throw new Error(
         `${toolName}: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join('; ')}) — a slug must name one record; cite the id.`
       );
     }
     if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
-      throw new Error(
+      throw new UnresolvedIdentifierError(
         `${toolName}: no ${noun} '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
       );
     }
     const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
-    if (hits.length === 0) throw new Error(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
+    if (hits.length === 0) throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
     if (hits.length > 1) {
+      // NOT an UnresolvedIdentifierError: the prefix matched multiple records
+      // — an ambiguity between real hits, not a miss. Must reach the caller
+      // unchanged, same reasoning as the slug-collision throw above.
       throw new Error(
         `${toolName}: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits
           .map((r) => `${r.id} (${r.type}, ${r.status})`)
@@ -1499,13 +1985,243 @@ export class SterlingTools {
     const record = this.store.get(hits[0].id);
     // The index and the bodies come from the same rows, so a hit with no body is
     // a torn store, not a miss — say which it is rather than reporting "no record".
+    // NOT an UnresolvedIdentifierError: the index DID resolve the id; the
+    // inconsistency is in the store, not the citation.
     if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
     return record;
   }
 
+  /**
+   * Cited-id resolution warnings (board fc053051 — the phantom-id propagation
+   * defect: a fabricated decision id was cited by three agents across three
+   * sessions because nothing verified that record ids quoted INSIDE written
+   * text actually resolve).
+   *
+   * Matches a citation-shaped token — a full uuid, or an 8-plus-hex-char
+   * prefix — immediately following `knowledge_get` or a record-type word, the
+   * convention already used throughout this store's own prose (e.g.
+   * "(knowledge_get 19b506ce-…)", "decision de1a7329"). Deliberately
+   * conservative: a hex-looking word with no adjacent trigger word never
+   * matches, so false negatives are preferred over false positives.
+   *
+   * Resolution reuses recordIdIndex() — the same cheap, no-body-fetch read
+   * knowledge_get's own prefix resolution uses — so ANY status resolves,
+   * tombstones included (decision de1a7329: a superseded record is a
+   * legitimate citation).
+   */
+  // Separator class widened (board fc053051 extension) to tolerate the
+  // spellings already seen in review feedback and in this store's own prose:
+  // a plain space, an opening paren, a colon ("decision: 19b506ce"), and a
+  // backtick ("decision `19b506ce`") — alongside the original space/paren.
+  // The id capture is widened from EXACTLY 8 hex chars to 8-40, because a
+  // dash-less citation longer than 8 (e.g. a 12- or 16-char prefix) used to
+  // be clipped at 8 chars and then fail the trailing \b boundary check
+  // (still a hex digit, not a boundary) — so it silently matched nothing. A
+  // real uuid's first segment is exactly 8 hex chars before its own dash, so
+  // the greedy {8,40} run still stops there and the optional dashed
+  // remainder below picks up the rest unchanged.
+  private static readonly CITATION_TRIGGER = ['knowledge_get', ...Object.keys(RECORD_TYPES)].join('|');
+  private static readonly CITATION_RE = new RegExp(
+    `\\b(?:${SterlingTools.CITATION_TRIGGER})\\b[\\s(:\`]*([0-9a-fA-F]{8,40}(?:-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?)\\b`,
+    'g'
+  );
+
+  private citedIdWarnings(text: string): string[] {
+    if (!text) return [];
+    const index = this.store.recordIdIndex();
+    const seen = new Set<string>();
+    const warnings: string[] = [];
+    for (const match of text.matchAll(SterlingTools.CITATION_RE)) {
+      const cited = match[1];
+      const lower = cited.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      const resolves = index.some((r) => r.id.toLowerCase().startsWith(lower));
+      if (!resolves) {
+        warnings.push(
+          `cited id '${cited}' does not resolve to any record in the project store or any mounted domain, at any status — check for a fabricated or mistyped citation`
+        );
+      }
+    }
+    return warnings;
+  }
+
+  /**
+   * knowledgeUpdate's return is the new record FLATTENED, with same_subject
+   * spliced in as an extra property for ruling types — convenient for a
+   * direct caller reading `.status` and `.same_subject` off one object, but
+   * poison for anything that re-wraps the return as `record`: the field
+   * would either vanish under the digest write-projection's field whitelist
+   * (finding: knowledge_update's disclosure never reached MCP callers while
+   * create/supersede, which emit it as a proper envelope sibling, survived)
+   * or, on projection:'full', round-trip as a FAKE record field. Every
+   * internal re-wrapper (knowledgeAppend, knowledgeEdit, knowledgeUpdateResult)
+   * splits it off here first and puts it on its own envelope instead.
+   */
+  private splitSameSubject(rec: DurableRecord & { same_subject?: SameSubjectEntry[] }): { record: DurableRecord; same_subject?: SameSubjectEntry[] } {
+    const { same_subject, ...record } = rec;
+    return { record: record as DurableRecord, same_subject };
+  }
+
+  /**
+   * The whole supersede lineage a maintenance item's feature_link may point
+   * at: `record`'s own id plus every ancestor it already carries a
+   * 'supersedes' link to. An item raised against an earlier version still
+   * matches after a later reconcile superseded it — chain membership, not
+   * exact-id match. Shared by knowledgeUpdate's resolves validation/drain,
+   * repointPromotionReview, and the open-reconcile-lane disclosure below.
+   */
+  private supersedeChain(record: DurableRecord): Set<string> {
+    const chain = new Set<string>([record.id]);
+    for (const link of (record.links ?? []) as { rel: string; target_id: string }[]) {
+      if (link.rel === 'supersedes') chain.add(link.target_id);
+    }
+    return chain;
+  }
+
+  /**
+   * The article_oversize dedup marker articleOversizeWarnings mints/matches
+   * for a slug (decision article-oversize-dedups-on-the-slug-at-its-minting-
+   * site, 19b506ce-5c12-46d5-afa1-5a32170bab8d). Extracted so every caller
+   * that needs to recognize "is this item the oversize item for THIS article"
+   * — articleOversizeWarnings itself and validateResolveClaim's split
+   * semantics below — derives the prefix from the ONE place that owns the
+   * text format, never a hand-copied literal.
+   */
+  private articleOversizeMarker(slug: string): string {
+    return `article '${slug}'`;
+  }
+
+  /**
+   * VERSION-CONFLICT DISCLOSURE (board 13bd5507's live half): a uuid that
+   * resolves to a SUPERSEDED record means the writer read a version that
+   * moved while they held it. The store's supersede() guard would refuse the
+   * fork anyway — this refusal fires FIRST, before any field logic operates
+   * on the stale body (knowledge_edit's find-match, knowledge_append's array
+   * read), so the stale reader learns WHAT happened and WHERE the head is
+   * instead of an opaque low-context error. Slug addresses always serve the
+   * head, so they never land here. resolveTerminus never PROMISES a live
+   * terminus (truncation past MAX_HOPS; a dangling chain returns the record
+   * itself), so the head is named only when verifiably live; otherwise the
+   * remedy is slug resolution (review finding 2026-08-21).
+   */
+  private refuseStaleAddress(old: DurableRecord, id: string, toolName: string): void {
+    if (old.status !== 'superseded') return;
+    const terminus = this.store.resolveTerminus(old.id);
+    const head = terminus && !terminus.truncated ? this.store.get(terminus.id) : null;
+    const h = head as { id: string; status: string; slug?: string; version?: number } | null;
+    const headIsLive = h !== null && h.status !== 'superseded' && h.id !== old.id;
+    const where = headIsLive
+      ? `The live head is ${h.id}${h.slug ? ` (slug '${h.slug}')` : ''}${h.version !== undefined ? ` v${h.version}` : ''}.`
+      : `The supersession chain could not be followed to a live head from this record — resolve by SLUG, which always serves the head.`;
+    const addressed = id === old.id ? `'${old.id}'` : `'${id}' → '${old.id}'`;
+    throw new Error(
+      `${toolName}: version conflict — ${addressed} resolves to a SUPERSEDED record: it was superseded (or retired in favour of a survivor) while you held it. ` +
+        `${where} Re-read the live head and re-apply your change on it — nothing was written.`
+    );
+  }
+
+  /**
+   * Validate ONE `resolves` claim BEFORE any write lands (decision
+   * 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373 — replaces the
+   * implicit chain-based auto-drain of decision 8ecd435f). The named id must:
+   * exist as an open maintenance item; be in a DRAINABLE lane
+   * (reconcile_needed or refresh_reference — promotion_review and every
+   * other lane close only through their own mechanism, never resolves); and
+   * key to the record being written, via feature_link landing in its
+   * supersedes chain (this id or an ancestor). Any miss throws, naming the
+   * offending id and the reason, so a write that lands is a write whose
+   * claims were checked — no version minted, no item removed on a refusal.
+   *
+   * `options.splitMarker`, set ONLY by knowledge_split (decision
+   * compaction-tooling-windowed-read-plus-split), widens the lane/match rules
+   * without a second copy of this function: promotion_review stays refused
+   * UNCONDITIONALLY either way (P1 — a human gate, same wording both paths);
+   * every OTHER lane closes when the item's feature_link lands in the
+   * supersede chain passed in OR its text starts with the article-oversize
+   * marker for the split's parent slug — the item a split most naturally
+   * discharges (article_oversize) predates the split and carries neither a
+   * matching feature_link nor a restriction to knowledgeUpdate's two lanes.
+   */
+  private validateResolveClaim(id: string, chain: Set<string>, options?: { splitMarker: string }): DurableRecord {
+    const record = this.store.get(id);
+    if (!record) {
+      // Distinguish "never existed" from "already removed" the same way
+      // removedItemError does for maintenance_remove — a closed item cannot
+      // be re-claimed, and that is a different refusal than a bogus id.
+      const trace = this.store.drainLogEntry(id);
+      if (trace) {
+        throw new Error(
+          `resolves: names '${id}', which is not OPEN — it was already removed` +
+            (trace.drained_at ? ` at ${trace.drained_at}` : '') +
+            ` (per the drain log). A closed item cannot be re-claimed; nothing was written.`
+        );
+      }
+      throw new Error(`resolves: names '${id}', which does not exist as a maintenance item; nothing was written.`);
+    }
+    const it = record as unknown as { type: string; source?: string; system_reason?: string; feature_link?: string; text?: string };
+    if (it.type !== 'todo' || it.source !== 'system') {
+      throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
+    }
+    const isSplit = options !== undefined;
+    const laneAllowed = isSplit
+      ? it.system_reason !== 'promotion_review'
+      : it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference';
+    if (!laneAllowed) {
+      throw new Error(
+        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only reconcile_needed and refresh_reference items ` +
+          `close via resolves; every other lane, including promotion_review, closes only through its own mechanism. Nothing was written.`
+      );
+    }
+    const inChain = it.feature_link !== undefined && chain.has(it.feature_link);
+    const marksThisArticle = isSplit && (it.text ?? '').startsWith(options!.splitMarker);
+    if (!inChain && !marksThisArticle) {
+      throw new Error(
+        isSplit
+          ? `resolves: names '${id}', whose feature_link does not match this split's parent (or its supersedes-chain ancestors), and whose text does not match the article-oversize marker for the parent's slug; nothing was written.`
+          : `resolves: names '${id}', whose feature_link does not match this record or any of its supersedes-chain ancestors; nothing was written.`
+      );
+    }
+    return record;
+  }
+
+  /**
+   * Open reconcile_needed/refresh_reference debt still standing on `chain`
+   * after a write — one line per item (id + text prefix), never the whole
+   * item (decision 68988832). Called AFTER the write, so any item this same
+   * write's `resolves` claimed is already gone from maintenanceQuery and
+   * never appears here; empty when nothing is owed (P1 — a clean write stays
+   * clean).
+   */
+  private openReconcileLaneWarnings(chain: Set<string>): string[] {
+    const warnings: string[] = [];
+    const sweepCap = 1000;
+    const items = this.maintenanceQuery({ cap: sweepCap });
+    for (const item of items) {
+      const it = item as unknown as { id: string; feature_link?: string; system_reason?: string; text?: string };
+      if (
+        (it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference') &&
+        it.feature_link !== undefined &&
+        chain.has(it.feature_link)
+      ) {
+        warnings.push(`open ${it.system_reason} item '${it.id}' on this article is not named in resolves and stays open — ${(it.text ?? '').slice(0, 120)}`);
+      }
+    }
+    // The sweep is capped (P5): a queue exactly AT the cap may be hiding more
+    // open debt past this window — say so rather than reading the sweep as
+    // exhaustive (mirrors boardFiltered's scanTruncated disclosure).
+    if (items.length >= sweepCap) {
+      warnings.push(
+        `the open-reconcile-lane sweep hit its ${sweepCap}-item cap — more open reconcile_needed/refresh_reference debt may exist past this window; narrow with maintenance_query to confirm.`
+      );
+    }
+    return warnings;
+  }
+
   /** Versioned change (§10): new version + supersede prior. Never mutates in place. */
-  knowledgeUpdate(id: string, body: Record<string, unknown>): DurableRecord {
-    const old = this.resolveRecordId(id, 'knowledge_update');
+  knowledgeUpdate(id: string, body: Record<string, unknown>, resolves?: string[], toolName = 'knowledge_update'): DurableRecord & { same_subject?: SameSubjectEntry[] } {
+    const old = this.resolveRecordId(id, toolName);
+    this.refuseStaleAddress(old, id, toolName);
     this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
     const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, ...overrides } = body;
@@ -1514,6 +2230,25 @@ export class SterlingTools {
     // call. Without it the merge silently discarded the field and reported a new
     // version — the failure that makes a "fix" look applied when it never landed.
     this.refuseUnknownFields(old.type, overrides);
+    // The item's feature_link points to whatever version was current when it
+    // was raised, which may now be an ancestor, so match the whole supersede
+    // chain — computed for every type, since promotion_review (below) can
+    // point at any supersedable record, not only feature_article/reference_material.
+    const chain = this.supersedeChain(old);
+    // A duplicated id is a meaningless second claim — the item can only be
+    // drained once, so naming it twice is refused loudly rather than silently
+    // validating and no-oping on the repeat (same refuse-on-meaningless-claim
+    // posture as every other resolves violation below).
+    if (resolves) {
+      const seen = new Set<string>();
+      const duplicate = resolves.find((rid) => (seen.has(rid) ? true : (seen.add(rid), false)));
+      if (duplicate !== undefined) {
+        throw new Error(`resolves: '${duplicate}' is named more than once — an item can only be claimed once; nothing was written.`);
+      }
+    }
+    // RESOLVES CLAIM VALIDATION runs BEFORE any write (decision 68988832): a
+    // write that does not validate is a write that must not land.
+    const claims = (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
     const next: Record<string, unknown> = {
       ...old,
       ...overrides,
@@ -1527,8 +2262,8 @@ export class SterlingTools {
     if (old.type === 'feature_article' && body.version === undefined) {
       next.version = (old as { version: number }).version + 1;
     }
-    // History rotation (board 0697c6bd): bound the stored history to the newest
-    // N entries. The oldest are dropped from THIS version only — the version
+    // History rotation (board 0697c6bd): bound the stored history to genesis +
+    // newest entries. The middle is dropped from THIS version only — the version
     // being superseded right here retains them forever, so the supersede chain
     // is the archive and no entry ever becomes unreadable. Callers see the
     // rotation via historyRotationWarnings on the write's result envelope.
@@ -1536,7 +2271,14 @@ export class SterlingTools {
       const hist = next.history as unknown[] | undefined;
       const max = this.config.article_history_max_entries;
       if (Array.isArray(hist) && hist.length > max) {
-        next.history = hist.slice(-max);
+        // MIDDLE-OUT rotation (board ab87fe24, replacing the old "keep newest
+        // max" behavior): keep the first `genesis` entries (founding, by array
+        // position) plus the newest (max - genesis) entries, evicting the
+        // middle. genesis clamps to max - 1 so at least one recent entry
+        // always survives even when genesis_entries >= max.
+        const genesis = Math.min(this.config.article_history_genesis_entries, max - 1);
+        const recentKeep = max - genesis;
+        next.history = [...hist.slice(0, genesis), ...hist.slice(hist.length - recentKeep)];
       }
     }
     // re-baseline on every reconcile: the new version's owned-file hashes become
@@ -1547,47 +2289,322 @@ export class SterlingTools {
       next.file_baselines = this.computeBaselines(next);
     }
     const updated = this.store.supersede(old.id, next);
-    // The item's feature_link points to whatever version was current when it was
-    // raised, which may now be an ancestor, so match the whole supersede chain —
-    // computed for every type, since promotion_review (below) can point at any
-    // supersedable record, not only feature_article/reference_material.
-    const chain = new Set<string>([old.id]);
-    for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
-      if (link.rel === 'supersedes') chain.add(link.target_id);
+    // EXPLICIT-RESOLVES CLOSURE (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1;
+    // board 68fe8373): drain EXACTLY the named+validated items, through the
+    // SAME drain-log path maintenance_remove uses, so maintenance_remove later
+    // answers already_drained:true. The old implicit chain-based auto-drain
+    // (decision 8ecd435f — every open reconcile_needed/refresh_reference item
+    // on the chain, discharged by ANY write, no claim required) is REMOVED: a
+    // write that does not name an item leaves it open, however tightly linked.
+    for (const claim of claims) {
+      this.store.remove(claim.id, ts);
     }
-    // P4 lifecycle-bind: reconciling an article/doc IS the fulfilling artifact for
-    // any DRIFT-driven maintenance item about it. Re-baselining (above) already
-    // self-clears the read-time drift flag; this drains the standing queue item in
-    // the SAME event so it can never orphan — closing the gap where an item
-    // outlived the reconcile that should have closed it because board_remove was a
-    // separate, forgotten step (observed 2026-06-27: two already-reconciled
-    // reconcile_needed items left in the queue). Scoped to the two drift reasons H7
-    // and the read-time check raise (reconcile_needed + refresh_reference, both
-    // keyed by feature_link).
-    if (next.type === 'feature_article' || next.type === 'reference_material') {
-      for (const item of this.maintenanceQuery({ cap: 1000 })) {
-        const it = item as { id: string; feature_link?: string; system_reason?: string };
-        if (
-          (it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference') &&
-          it.feature_link !== undefined &&
-          chain.has(it.feature_link)
-        ) {
-          this.store.remove(it.id, ts);
-        }
-      }
-    }
-    // promotion_review stays a human gate (P1) — a supersession never DRAINS it,
-    // it is not the review being paid. But leaving its feature_link pointed at the
-    // now-superseded id STRANDS it silently (todo 6202a0f5): the review is still
-    // owed, same lineage, so RE-POINT rather than drop. In-place via updateTodo
-    // (no new version, no id churn) so every other reference to the item survives.
-    for (const item of this.maintenanceQuery({ cap: 1000 })) {
-      const it = item as DurableRecord & { feature_link?: string; system_reason?: string };
-      if (it.system_reason === 'promotion_review' && it.feature_link !== undefined && chain.has(it.feature_link) && it.feature_link !== updated.id) {
-        this.store.updateTodo(it.id, { ...it, feature_link: updated.id, updated_at: ts });
-      }
+    this.repointPromotionReview(chain, updated.id, ts);
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
+    // types — other types' update responses stay byte-identical. Excludes
+    // the update's own lineage: `chain` (the prior version plus every
+    // ancestor it already carries a 'supersedes' link to — the exact set
+    // repointPromotionReview reuses above) plus the new record's own id, so
+    // the disclosure never names the write's own prior self or its own new
+    // self. Sourced from the registered FTS extractor's text over the
+    // MERGED record about to be persisted.
+    if (SterlingTools.SAME_SUBJECT_TYPES.includes(old.type)) {
+      const registered = RECORD_TYPES[old.type as keyof typeof RECORD_TYPES];
+      const excludeIds = new Set(chain);
+      excludeIds.add(updated.id);
+      const sameSubject = this.sameSubjectDigest(registered ? registered.fts(next) : '', excludeIds);
+      return { ...updated, same_subject: sameSubject };
     }
     return updated;
+  }
+
+  /**
+   * knowledge_split (decision compaction-tooling-windowed-read-plus-split,
+   * board 136091d2) mechanically enforces the split invariants decision
+   * 8b87efcb established BY HAND for the hooks-suite split. The MECHANICAL
+   * guarantees — the ones this function actually enforces, in code — are:
+   * files[]/current_ac[]/live_test_refs ENTRIES are relocated VERBATIM (moved
+   * as the identical object, never rewritten), ac_ids are INHERITED never
+   * renumbered, live_test_refs is RE-POINTED (an entry follows its ac_id to
+   * whichever side — parent or child — now owns it), the parent SURVIVES
+   * under its ORIGINAL slug (a split is additive children plus a parent
+   * trim, never a retire-and-replace), and FILE COVERAGE stays TOTAL — every
+   * path the parent owned before the split lands on exactly the parent or
+   * one child afterward, never both, never neither. "VERBATIM" describes
+   * ONLY that entry relocation and these structural invariants — it does
+   * NOT extend to the narrative prose (each child's what_it_does/
+   * intended_behavior, parent_what_it_does/parent_intended_behavior): that
+   * text is caller-authored free-form content, and its fidelity to what the
+   * pre-split parent actually said remains conductor discipline, the same as
+   * any other knowledge_update/knowledge_create body.
+   *
+   * ALL validation — parent type/status, per-child move_files/move_ac_ids
+   * ownership, cross-child claim collisions, child slug collisions (reusing
+   * the same store.articlesBySlug check knowledgeCreate's feature_article
+   * branch uses), and the retain-at-least-one-file floor (full donation is
+   * refused: that shape is retire-and-replace, rejected by decision
+   * 8b87efcb's own alternatives) — runs BEFORE any write, so a call mixing a
+   * valid and an invalid child refuses the WHOLE thing, never creates the
+   * valid one first. One shape is validated only INSIDE knowledgeCreate,
+   * post-write rather than pre-write, because it is knowledgeCreate's own
+   * schema that owns it, not a knowledge_split-specific rule: a child whose
+   * move_files/move_ac_ids/dependencies would make the created record itself
+   * schema-invalid fails there, inside the same transaction, and rolls back
+   * exactly like any other mid-split failure — safe, just not pre-empted.
+   *
+   * The children-plus-parent write then lands in ONE store transaction
+   * (store.withTransaction) so a mid-split failure leaves the store
+   * byte-for-byte untouched — nothing rides on process-level try/catch
+   * cleanup. `resolves` closes named open maintenance items via
+   * validateResolveClaim's split semantics (options.splitMarker) — broader
+   * than knowledgeUpdate's own lane-restricted resolves, since the item a
+   * split most naturally discharges (article_oversize) is outside that
+   * lane: promotion_review still refuses unconditionally (P1), every other
+   * lane closes on a chain-matching feature_link OR the article-oversize
+   * marker for this parent's slug. An item left unnamed stays open, exactly
+   * the explicit-claim posture decision 68988832 established.
+   */
+  knowledgeSplit(input: KnowledgeSplitInput): { parent: { id: string; slug: string; version: number }; children: { id: string; slug: string }[] } {
+    const { id, children, parent_what_it_does, parent_intended_behavior, reason, resolves } = input;
+
+    if (!Array.isArray(children) || children.length === 0) {
+      throw new Error(`knowledge_split: 'children' must be a non-empty array — at least one child is required; nothing was written.`);
+    }
+
+    const parent = this.resolveRecordId(id, 'knowledge_split');
+    if (parent.type !== 'feature_article') {
+      throw new Error(
+        `knowledge_split: '${id}' resolves to a ${parent.type}, not a feature_article — only a feature_article can be split; nothing was written.`
+      );
+    }
+    if (parent.status !== 'active') {
+      throw new Error(`knowledge_split: parent '${id}' is not active (status ${parent.status}) — only a live feature_article can be split; nothing was written.`);
+    }
+    const parentRec = parent as unknown as {
+      id: string;
+      slug: string;
+      state: string;
+      history: { date: string; event: string; target_id?: string }[];
+      files: { path: string; role: string; unverified?: boolean }[];
+      current_ac: { ac_id: string; text: string; verifiable_at: string }[];
+      live_test_refs: { ac_id: string; test_paths: string[] }[];
+      dependencies?: { relies_on: string[]; relied_by: string[] };
+    };
+
+    // Child slugs pairwise distinct within this call, and none colliding with
+    // an existing feature_article slug — the same two-records-one-slug refusal
+    // knowledgeCreate's feature_article branch already enforces (board 56c8a509).
+    const seenSlugs = new Set<string>();
+    for (const child of children) {
+      if (seenSlugs.has(child.slug)) {
+        throw new Error(`knowledge_split: two children in this call share slug '${child.slug}' — child slugs must be pairwise distinct; nothing was written.`);
+      }
+      seenSlugs.add(child.slug);
+      const clash = this.store.articlesBySlug(child.slug);
+      if (clash.length) {
+        throw new Error(
+          `knowledge_split: child slug '${child.slug}' collides with an existing feature_article ('${clash[0].id}') — two records under one slug is worse than one wrong record; choose a distinct slug. Nothing was written.`
+        );
+      }
+    }
+
+    // Ownership + no-double-claim validation for move_files/move_ac_ids — ALL
+    // of it before any write (P5): a call mixing a valid and an invalid child
+    // must refuse the WHOLE call, never create the valid one first.
+    const parentPaths = new Set(parentRec.files.map((f) => f.path));
+    const parentAcIds = new Set(parentRec.current_ac.map((a) => a.ac_id));
+    const claimedPaths = new Map<string, string>();
+    const claimedAcIds = new Map<string, string>();
+    for (const child of children) {
+      for (const path of child.move_files ?? []) {
+        if (!parentPaths.has(path)) {
+          throw new Error(
+            `knowledge_split: child '${child.slug}' names move_files path '${path}', which parent '${parentRec.slug}' does not own — nothing was written.`
+          );
+        }
+        if (claimedPaths.has(path)) {
+          throw new Error(
+            `knowledge_split: path '${path}' is claimed by two children ('${claimedPaths.get(path)}' and '${child.slug}') — a path moves to exactly one child; nothing was written.`
+          );
+        }
+        claimedPaths.set(path, child.slug);
+      }
+      for (const acId of child.move_ac_ids ?? []) {
+        if (!parentAcIds.has(acId)) {
+          throw new Error(
+            `knowledge_split: child '${child.slug}' names move_ac_ids '${acId}', which parent '${parentRec.slug}' does not own — nothing was written.`
+          );
+        }
+        if (claimedAcIds.has(acId)) {
+          throw new Error(
+            `knowledge_split: ac_id '${acId}' is claimed by two children ('${claimedAcIds.get(acId)}' and '${child.slug}') — an ac_id moves to exactly one child; nothing was written.`
+          );
+        }
+        claimedAcIds.set(acId, child.slug);
+      }
+    }
+
+    // A child owning zero files is refused — it would be invisible to
+    // path-scoped delivery (same invariant class as the parent's
+    // retain-at-least-one floor). Checked AFTER the ownership/double-claim
+    // loop so a child whose real offense is a bad ac_id is refused by that
+    // name first; the wire schema (.min(1)) refuses the shape outright.
+    for (const child of children) {
+      if (!child.move_files?.length) {
+        throw new Error(
+          `knowledge_split: child '${child.slug}' names no move_files — a child article must own at least one file; nothing was written.`
+        );
+      }
+    }
+
+    // Full donation refused (decision 8b87efcb's own rejected alternatives:
+    // that shape is retire-and-replace, not a split) — the parent must retain
+    // at least one owned file.
+    if (parentRec.files.length > 0 && claimedPaths.size >= parentRec.files.length) {
+      throw new Error(
+        `knowledge_split: this split moves all ${parentRec.files.length} of parent '${parentRec.slug}''s files — the parent must retain at least one owned file (full donation is retire-and-replace, rejected by decision 8b87efcb); nothing was written.`
+      );
+    }
+
+    // resolves: validated (broader than knowledgeUpdate's own lane-restricted
+    // check — see validateResolveClaim's options.splitMarker) BEFORE any
+    // write, same duplicate-claim refusal knowledgeUpdate itself applies.
+    if (resolves) {
+      const seen = new Set<string>();
+      for (const rid of resolves) {
+        if (seen.has(rid)) {
+          throw new Error(`resolves: '${rid}' is named more than once — an item can only be claimed once; nothing was written.`);
+        }
+        seen.add(rid);
+      }
+    }
+    const parentChain = this.supersedeChain(parent);
+    const splitMarker = this.articleOversizeMarker(parentRec.slug);
+    const resolveClaims = (resolves ?? []).map((rid) => this.validateResolveClaim(rid, parentChain, { splitMarker }));
+
+    const ts = this.now();
+    const childSlugs = children.map((c) => c.slug).join(', ');
+    const childResults: { id: string; slug: string }[] = [];
+    let parentResult!: DurableRecord;
+
+    // SYMMETRIC DEPENDENCY EDGE (skeptic finding 2, knowledge_get 2334f653):
+    // relied_by is derived at READ time from the union of every OTHER
+    // article's relies_on, so leaving the parent's STORED relied_by
+    // untouched would read back as relied_by_stored_stale the instant a
+    // reader compares it — right after the split that created the mismatch.
+    // Only a child whose relies_on actually names the parent (the default —
+    // dependencies ?? {relies_on: [parentRec.slug], ...} — earns the parent
+    // a back-edge; a caller who passed EXPLICIT dependencies without the
+    // parent gets no fabricated edge. Existing stored entries are preserved
+    // and deduped, never dropped.
+    const reliedByAdditions = children
+      .filter((child) => (child.dependencies?.relies_on ?? [parentRec.slug]).includes(parentRec.slug))
+      .map((child) => child.slug);
+    const parentReliedBy = Array.from(new Set([...(parentRec.dependencies?.relied_by ?? []), ...reliedByAdditions]));
+
+    this.store.withTransaction(() => {
+      for (const child of children) {
+        const movedFiles = parentRec.files.filter((f) => claimedPaths.get(f.path) === child.slug);
+        const movedAc = parentRec.current_ac.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
+        const movedRefs = parentRec.live_test_refs.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
+        const created = this.knowledgeCreate('feature_article', {
+          slug: child.slug,
+          title: child.title,
+          what_it_does: child.what_it_does,
+          intended_behavior: child.intended_behavior,
+          files: movedFiles,
+          current_ac: movedAc,
+          live_test_refs: movedRefs,
+          dependencies: child.dependencies ?? { relies_on: [parentRec.slug], relied_by: [] },
+          state: parentRec.state,
+          version: 1,
+          history: [{ date: ts, event: `split from '${parentRec.slug}'${reason ? ` — ${reason}` : ''}` }],
+        });
+        childResults.push({ id: created.record.id, slug: child.slug });
+      }
+
+      const remainingFiles = parentRec.files.filter((f) => !claimedPaths.has(f.path));
+      const remainingAc = parentRec.current_ac.filter((a) => !claimedAcIds.has(a.ac_id));
+      const remainingRefs = parentRec.live_test_refs.filter((r) => !claimedAcIds.has(r.ac_id));
+      const splitEvent = { date: ts, event: `split off ${childSlugs}${reason ? ` — ${reason}` : ''}` };
+      parentResult = this.knowledgeUpdate(parentRec.id, {
+        what_it_does: parent_what_it_does,
+        ...(parent_intended_behavior !== undefined ? { intended_behavior: parent_intended_behavior } : {}),
+        files: remainingFiles,
+        current_ac: remainingAc,
+        live_test_refs: remainingRefs,
+        history: [...parentRec.history, splitEvent],
+        dependencies: { relies_on: parentRec.dependencies?.relies_on ?? [], relied_by: parentReliedBy },
+      });
+
+      // Explicit-claim closure (decision 68988832's posture, broadened per
+      // validateResolveClaim's split semantics above): drained INSIDE the
+      // same transaction so a claim only lands alongside a split that
+      // actually landed.
+      for (const claim of resolveClaims) {
+        this.store.remove(claim.id, ts);
+      }
+    });
+
+    return {
+      parent: {
+        id: parentResult.id,
+        slug: (parentResult as unknown as { slug: string }).slug,
+        version: (parentResult as unknown as { version: number }).version,
+      },
+      children: childResults,
+    };
+  }
+
+  /**
+   * knowledge_split's MCP-facing wrapper (review finding B): every other
+   * write surface re-measures oversize via its own *Result wrapper
+   * (knowledgeUpdateResult, above) after the version lands — knowledgeSplit
+   * itself was measured by NOTHING, so a split that trimmed the parent too
+   * little, or handed a child too much, silently skipped the article_oversize
+   * lane every other write is held to. Wraps knowledgeSplit — which stays
+   * exactly as the frozen split suite calls and asserts it, no warnings
+   * expected there — and appends an ADDITIVE `warnings` sibling, the same
+   * shape knowledgeUpdateResult already returns, covering the trimmed parent
+   * AND every newly-created child.
+   */
+  knowledgeSplitResult(input: KnowledgeSplitInput): {
+    parent: { id: string; slug: string; version: number };
+    children: { id: string; slug: string }[];
+    warnings: string[];
+  } {
+    const result = this.knowledgeSplit(input);
+    const warnings: string[] = [];
+    const parentRecord = this.store.get(result.parent.id);
+    if (parentRecord) warnings.push(...this.articleOversizeWarnings(parentRecord));
+    for (const child of result.children) {
+      const childRecord = this.store.get(child.id);
+      if (childRecord) warnings.push(...this.articleOversizeWarnings(childRecord));
+    }
+    return { ...result, warnings };
+  }
+
+  /**
+   * promotion_review stays a human gate (P1) — a supersession never DRAINS it,
+   * it is not the review being paid. But leaving its feature_link pointed at a
+   * now-superseded id STRANDS it silently (todo 6202a0f5): the review is still
+   * owed, same lineage, so RE-POINT rather than drop. In-place via updateTodo
+   * (no new version, no id churn) so every other reference to the item survives.
+   *
+   * Shared by knowledgeUpdate (decision 01f31039) and knowledge_supersede
+   * (decision e17794ea) — both mint a new id for the same lineage, so both owe
+   * the same re-point. `chain` is every id this supersession's target answers
+   * for (the old id plus any ancestors it already carries a 'supersedes' link
+   * to) — computed for every type, since promotion_review can point at any
+   * supersedable record, not only feature_article/reference_material.
+   */
+  private repointPromotionReview(chain: Set<string>, newId: string, ts: string): void {
+    for (const item of this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 })) {
+      const it = item as DurableRecord & { feature_link?: string; system_reason?: string };
+      if (it.feature_link !== undefined && chain.has(it.feature_link) && it.feature_link !== newId) {
+        this.store.updateTodo(it.id, { ...it, feature_link: newId, updated_at: ts });
+      }
+    }
   }
 
   /**
@@ -1607,9 +2624,11 @@ export class SterlingTools {
     if (!original) throw new Error(`knowledge_promote: no record '${id}'`);
     if (original.status !== 'active') throw new Error(`knowledge_promote: record '${id}' is not active (status ${original.status})`);
     if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${id}' is ${original.scope} — only project-scoped records promote`);
-    const UNPROMOTABLE = ['feature_article', 'todo'];
+    const UNPROMOTABLE = ['feature_article', 'todo', 'attestation'];
     if (UNPROMOTABLE.includes(original.type)) {
-      throw new Error(`knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo is a project surface`);
+      throw new Error(
+        `knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo is a project surface; an attestation's artifact_key names a project-local artifact that means nothing in a shared domain store (review finding, 2026-08-21)`
+      );
     }
     const ts = this.now();
     // copy content; the envelope (id/clocks/status/scope/links) is rebuilt for the domain
@@ -1766,9 +2785,35 @@ export class SterlingTools {
       const needle = filter.contains.toLowerCase();
       filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
     }
+    if (filter.feature_slug !== undefined) {
+      const chain = this.articleChainIds(filter.feature_slug);
+      filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
+    }
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
     return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
+  }
+
+  /**
+   * Resolves a feature_slug to its owning article's id PLUS every ancestor id
+   * in its supersede chain — the article's own rel:'supersedes' links, which
+   * accumulate every prior version across reconciles (the same join
+   * knowledgeUpdate's drift-item auto-drain already walks, decision 8ecd435f),
+   * so an item raised against an earlier version of the article still matches
+   * after it was superseded. Returns null when the slug resolves to no article
+   * at all — the caller treats that as "narrows to nothing", not an error.
+   */
+  private articleChainIds(slug: string): Set<string> | null {
+    const articles = this.store.articlesBySlug(slug);
+    if (articles.length === 0) return null;
+    const chain = new Set<string>();
+    for (const article of articles) {
+      chain.add(article.id);
+      for (const link of (article.links ?? []) as { rel: string; target_id: string }[]) {
+        if (link.rel === 'supersedes') chain.add(link.target_id);
+      }
+    }
+    return chain;
   }
 
   boardQuery(filter: BoardFilter = {}): DurableRecord[] {
@@ -1871,6 +2916,73 @@ export class SterlingTools {
   }
 
   /**
+   * board_get(id) — the full, untruncated board/queue item (board e725979c):
+   * board_query/maintenance_query's projection:'digest' clips text at
+   * DIGEST_CLIP, and until now there was no escape hatch back to the whole
+   * record short of an uncapped full-projection re-query. Resolves through the
+   * SAME three-form ladder as knowledge_get (full uuid, exact slug, 8-char
+   * citation prefix — resolveRecordId, board slice 85ecfe43), so a citation
+   * copied from anywhere in this store resolves the same way here as
+   * everywhere else. An unknown id is refused, naming the id that was not
+   * found, rather than returning undefined.
+   */
+  boardGet(id: string): DurableRecord {
+    const record = this.resolveRecordId(id, 'board_get');
+    if (record.type !== 'todo') {
+      throw new Error(
+        `board_get: '${id}' resolves to a ${record.type}, not a board/queue item — board_get reads board_add/maintenance_enqueue items only; use knowledge_get for other record types`
+      );
+    }
+    return record;
+  }
+
+  /**
+   * board_edit(id, find, replace) — knowledge_edit's exactly-once find/replace
+   * contract (board fd6d8da9), applied to a board/queue item's `text` IN
+   * PLACE: id preserved, no new version minted, unlike knowledge_edit's
+   * supersession (decision a91c80b5 — board_update's identity semantics, not
+   * knowledge_update's). Delegates the actual write to boardUpdate so there is
+   * exactly one in-place-edit code path — source/system_reason cannot move an
+   * item between surfaces, status/id/created_at stay server-owned, updated_at
+   * moves to the write-time clock — and works identically on a user task or a
+   * system maintenance item; this method only adds the surgical find/replace
+   * over `text` that boardUpdate's retransmit-the-whole-field shape lacked.
+   * FIND MUST MATCH EXACTLY ONCE: zero and multiple matches are BOTH refused,
+   * naming the count, with nothing written — the same contract knowledge_edit
+   * already holds callers to, so a caller cannot lean on a blind
+   * replace-first-occurrence against text nobody re-read in full.
+   */
+  boardEdit(id: string, find: string, replace: string): { record: DurableRecord; replaced: { chars_before: number; chars_after: number } } {
+    const old = this.resolveRecordId(id, 'board_edit');
+    if (old.type !== 'todo') {
+      throw new Error(`board_edit: '${id}' is a ${old.type}, not a task — board_edit only edits board/queue items`);
+    }
+    if (typeof find !== 'string' || find.length === 0) {
+      throw new Error(`board_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
+    }
+    const current = (old as unknown as { text?: string }).text;
+    if (typeof current !== 'string') {
+      throw new Error(`board_edit: '${id}' has no 'text' field to edit`);
+    }
+    const occurrences = current.split(find).length - 1;
+    if (occurrences === 0) {
+      throw new Error(
+        `board_edit: 'find' does not appear in the item's text — nothing was written. ` +
+          `The text is ${current.length} chars; confirm the exact text (including whitespace and punctuation) before retrying.`
+      );
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `board_edit: 'find' appears ${occurrences} times in the item's text — refused as ambiguous, nothing was written. ` +
+          `Extend 'find' with surrounding text until it identifies exactly one site.`
+      );
+    }
+    const next = current.replace(find, replace);
+    const record = this.boardUpdate(old.id, { text: next });
+    return { record, replaced: { chars_before: current.length, chars_after: next.length } };
+  }
+
+  /**
    * P4: done = removed. The artifact-write binding is now BUILT as EVIDENCE
    * DISCLOSURE, deliberately not a refusal (board b8ff0b68 — 'the plugin's own
    * receipt admits its close-with-artifact rule is unenforced'). Two reasons a
@@ -1883,39 +2995,77 @@ export class SterlingTools {
    * item's file_keys written since the item was born. An empty list means the
    * close rides the operator's word, and the receipt says so out loud.
    */
-  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string } | { check_skipped: SkippedCheck[] } {
+  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
+    const since = item.created_at;
+    const evidenceTypes = ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'reference_material'];
+    // FIX M1 (upgrade-polish review, 2026-08-21): the id-citation arm below needs
+    // no file identity at all — concept_article_missing / research_owed / plain
+    // tasks routinely carry no file_keys, and those are exactly the items most
+    // wronged by an early return that skipped BOTH arms. Only the file_keys arm
+    // is conditional on fileKeys being non-empty; the id-citation arm always runs.
+    let fileKeyMatches: DurableRecord[] = [];
+    const checkSkipped: SkippedCheck[] = [];
     if (fileKeys.length === 0) {
-      // No file identity to join on — the check cannot run, and says so
-      // (P5: a skipped check is loud, never a silent no-op).
+      // No file identity to join on for THIS arm only — it cannot run, and says
+      // so (P5: a skipped check is loud, never a silent no-op).
       const skipped = { check: 'board-remove-artifact-binding', reason: 'no_file_keys' };
       this.store.recordCheckSkipped(skipped.check, skipped.reason, this.activeRunId(), this.now());
-      return { check_skipped: [skipped] };
+      checkSkipped.push(skipped);
+    } else {
+      // Scan WIDE, filter by since, THEN trim the receipt (review finding 12,
+      // 2026-08-09 — the same pre-cap/post-cap ordering hazard as audit finding
+      // 33/43): the store orders by file-key-overlap count first and updated_at
+      // only as a tiebreak, so a small cap on a well-documented area fills with
+      // old high-overlap records and pushes the one NEW artifact out — and this
+      // receipt would then accuse the operator of drift that never happened.
+      // 200 is a bounded scan, not a guarantee; past it the disclosure errs
+      // toward the scanned window and never blocks either way.
+      fileKeyMatches = this.store
+        .query({ types: evidenceTypes, file_keys: fileKeys, cap: 200 })
+        .filter((r) => r.created_at >= since || r.updated_at >= since);
     }
-    const since = item.created_at;
-    // Scan WIDE, filter by since, THEN trim the receipt (review finding 12,
-    // 2026-08-09 — the same pre-cap/post-cap ordering hazard as audit finding
-    // 33/43): the store orders by file-key-overlap count first and updated_at
-    // only as a tiebreak, so a small cap on a well-documented area fills with
-    // old high-overlap records and pushes the one NEW artifact out — and this
-    // receipt would then accuse the operator of drift that never happened.
-    // 200 is a bounded scan, not a guarantee; past it the disclosure errs
-    // toward the scanned window and never blocks either way.
-    const evidence = this.store
-      .query({
-        types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'reference_material'],
-        file_keys: fileKeys,
-        cap: 200,
-      })
-      .filter((r) => r.created_at >= since || r.updated_at >= since)
-      .slice(0, 25)
-      .map((r) => digestRecord(r as unknown as Record<string, unknown>));
+    // FIX B (upgrade-polish, 2026-08-21): a durable record can fulfil this item
+    // WITHOUT ever touching its file_keys — e.g. a decision that closes the
+    // item by citing its own id (the citation convention: decisions write
+    // 'board <prefix8>', or occasionally the full uuid). Scan wide over the
+    // same record surface (no store schema or new index — a linear scan is
+    // cheap at this scale) and keep only records written at-or-after the item
+    // was created, so a coincidental same-prefix record predating the item
+    // never counts as its fulfilling write.
+    const prefix = item.id.slice(0, 8);
+    const citesItem = (r: DurableRecord): boolean => {
+      const body = JSON.stringify(r);
+      return body.includes(item.id) || body.includes(prefix);
+    };
+    // 200 is the SAME bounded scan as the file_keys arm above — the id-citation
+    // window covers only the 200 most-recently-updated records of the evidence
+    // types, never the whole store; past it the disclosure errs toward the
+    // scanned window and never blocks either way.
+    const idMatches = this.store
+      .query({ types: evidenceTypes, cap: 200 })
+      .filter((r) => (r.created_at >= since || r.updated_at >= since) && citesItem(r));
+    // Dedupe across the two arms by record id — file_keys order first, then any
+    // id-citation matches not already covered.
+    const seen = new Set<string>();
+    const combined: DurableRecord[] = [];
+    for (const r of [...fileKeyMatches, ...idMatches]) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      combined.push(r);
+    }
+    const evidence = combined.slice(0, 25).map((r) => digestRecord(r as unknown as Record<string, unknown>));
     return {
       artifact_evidence: evidence,
+      ...(checkSkipped.length > 0 ? { check_skipped: checkSkipped } : {}),
       ...(evidence.length === 0
         ? {
+            // FIX M2 (upgrade-polish review, 2026-08-21): disclose the id arm's
+            // window honestly — it is a bounded scan of the 200 most-recently-
+            // updated records of the evidence types, not an exhaustive search of
+            // everything ever written citing this id.
             note:
-              `no fulfilling artifact-write found touching this item's file_keys since it was created — removed on the operator's word. ` +
+              `no fulfilling artifact-write found — nothing touching this item's file_keys, and nothing citing its id among the 200 most-recently-updated evidence records, since it was created — removed on the operator's word. ` +
               `If work fulfilled this item, its capture is missing (that is drift, not a formality).`,
           }
         : {}),
@@ -1974,9 +3124,28 @@ export class SterlingTools {
    * a user item by design, naming board_remove as the conductor's path so the
    * refusal teaches rather than merely blocks.
    */
-  maintenanceRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
+  maintenanceRemove(
+    id: string
+  ): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[]; already_drained?: boolean } {
     const record = this.store.get(id);
-    if (!record) throw this.removedItemError('maintenance_remove', id);
+    if (!record) {
+      // IDEMPOTENT ALREADY-DRAINED (board 83478fc6, extending 97d773ef): a
+      // drain-log trace naming a SYSTEM item (system_reason set, per the store's
+      // `record.system_reason ?? ''` write) means this id was a maintenance-queue
+      // item that is already gone — auto-drained by a knowledge_update
+      // re-baseline (decision 8ecd435f) or closed a moment earlier by a
+      // concurrent librarian call. That is the caller's desired end state, not a
+      // failure, so it SUCCEEDS idempotently instead of throwing. A trace with no
+      // system_reason (a user item) or no trace at all still falls through to the
+      // loud refusal below — collapsing either into "already drained" would let
+      // a genuine typo, or a request against the human's own board, silently
+      // read as success.
+      const trace = this.store.drainLogEntry(id);
+      if (trace && trace.system_reason) {
+        return { removed: id, already_drained: true };
+      }
+      throw this.removedItemError('maintenance_remove', id);
+    }
     if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
     const source = (record as unknown as { source?: string }).source;
     if (source !== 'system') {
@@ -2047,6 +3216,259 @@ export class SterlingTools {
     // channel is for.
     const retired = this.store.retireInFavorOf(record.id, inFavorOf, this.now());
     return { retired };
+  }
+
+  // -- knowledge_supersede (decision e17794ea, board 0b33c27b) ----------------
+
+  /** old-record types knowledge_supersede accepts — see the class comment above.
+   *  attestation is deliberately NOT here: its supersession path is
+   *  knowledge_update fix-forward (immutable-by-construction, the decision
+   *  analog), and the orphan-coverage check below is ruling-prose-shaped. */
+  private static readonly SUPERSEDE_ALLOWED_TYPES = ['decision', 'anti_pattern', 'research_finding'];
+
+  /** ruling-write types whose create/update receipts surface SAME-SUBJECT
+   *  records (decision 7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
+   *  2026-08-21 (review finding on board 259a455f): a second attestation on
+   *  one artifact_key is exactly the write that must surface the prior verdict. */
+  private static readonly SAME_SUBJECT_TYPES = ['decision', 'anti_pattern', 'research_finding', 'attestation'];
+
+  /** Coverage threshold: a ruling unit counts as covered when at least this fraction of its own content words reappear in the replacement fields. */
+  private static readonly ORPHAN_COVERAGE_THRESHOLD = 0.4;
+
+  private static readonly ORPHAN_STOPWORDS = new Set([
+    'this', 'that', 'with', 'from', 'have', 'will', 'were', 'been', 'into', 'than', 'then', 'them',
+    'they', 'also', 'each', 'such', 'some', 'more', 'most', 'over', 'under', 'about', 'which',
+    'while', 'still', 'only', 'just', 'very', 'much', 'many', 'both', 'after', 'before', 'being',
+    'doing', 'having', 'itself', 'those', 'these', 'would', 'could', 'should', 'shall', 'must',
+    'might', 'when', 'where', 'what', 'your', 'their', 'there', 'here', 'other', 'above', 'below',
+    'again', 'because',
+  ]);
+
+  /** Numbered marker forms: "1.", "2)", "(3)" — a marker sits at the start of the string or after whitespace, and is itself followed by whitespace. Digits land in either capture group depending on which form matched. */
+  private static readonly ORPHAN_NUMBER_RE = /(?:^|(?<=\s))(?:(\d{1,3})[).]|\((\d{1,3})\))(?=\s)/g;
+
+  /** Bulleted marker forms: "- ", "* ", "• " — counted ONLY at the start of a line (start of text, or immediately after a newline plus optional indent) so a mid-sentence prose dash ("the gate holds - which surprised us") never counts as a marker (F1 review finding). */
+  private static readonly ORPHAN_BULLET_RE = /(?:^|\n)[ \t]*[-*•](?=\s)/g;
+
+  /** The old record's primary ruling fields, per type — the fields a ruling actually lives in, not provenance/rationale filler. Returned as SEPARATE field texts, not joined, so segmentation never straddles a field boundary (F2 review finding: a final unit used to run from a marker in one field into the next field's own text). */
+  private static rulingSourceFields(record: DurableRecord): string[] {
+    const r = record as unknown as Record<string, unknown>;
+    const parts: unknown[] =
+      record.type === 'decision'
+        ? [r.title, r.statement]
+        : record.type === 'anti_pattern'
+          ? [r.title, r.trigger, r.guidance, r.wrong_way, r.right_way]
+          : record.type === 'research_finding'
+            ? [r.question, r.answer]
+            : [];
+    return parts.filter((v): v is string => typeof v === 'string');
+  }
+
+  /**
+   * Enumerated ruling units — numbered or bulleted items — segmented from
+   * `text`. Bullets count only at line-start (see ORPHAN_BULLET_RE). Numbered
+   * markers count as an enumeration only when the FULL sequence of numbers
+   * found in `text`, in order, forms an ascending run starting at 1 — "as of
+   * step 2. ... fixed in phase 3." starts at 2 and is discarded WHOLE (not
+   * partially), because a fragment of an unrelated list is not evidence of an
+   * enumerated ruling. Fewer than 2 total markers (bullets plus a qualifying
+   * numbered run) means the record makes no enumerated claim, so this returns
+   * [].
+   */
+  private static segmentRulingUnits(text: string): string[] {
+    const bulletRe = new RegExp(SterlingTools.ORPHAN_BULLET_RE.source, 'g');
+    const bulletMarkers: { start: number; contentStart: number }[] = [];
+    let bm: RegExpExecArray | null;
+    while ((bm = bulletRe.exec(text))) {
+      const bulletPos = bm.index + bm[0].length - 1;
+      bulletMarkers.push({ start: bulletPos, contentStart: bulletPos + 1 });
+    }
+
+    const numberRe = new RegExp(SterlingTools.ORPHAN_NUMBER_RE.source, 'g');
+    const numberMarkers: { start: number; contentStart: number; value: number }[] = [];
+    let nm: RegExpExecArray | null;
+    while ((nm = numberRe.exec(text))) {
+      numberMarkers.push({ start: nm.index, contentStart: nm.index + nm[0].length, value: Number(nm[1] ?? nm[2]) });
+    }
+    const numbersAscendFromOne = numberMarkers.length > 0 && numberMarkers.every((mk, i) => mk.value === i + 1);
+
+    const markers = [...bulletMarkers, ...(numbersAscendFromOne ? numberMarkers : [])].sort((a, b) => a.start - b.start);
+    if (markers.length < 2) return [];
+    return markers
+      .map((mk, i) => text.slice(mk.contentStart, i + 1 < markers.length ? markers[i + 1].start : text.length).trim())
+      .filter((u) => u.length > 0);
+  }
+
+  /** Every distinct content word (lowercase, alphanumeric, 4+ chars, not a stopword) in `text`. */
+  private static contentWords(text: string): Set<string> {
+    const words = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').match(/[a-z0-9]{4,}/g) ?? [];
+    return new Set(words.filter((w) => !SterlingTools.ORPHAN_STOPWORDS.has(w)));
+  }
+
+  /** Every string value in `value`, recursively (arrays and plain objects) — "the combined text of fields". */
+  private static flattenFieldStrings(value: unknown, out: string[] = []): string[] {
+    if (typeof value === 'string') out.push(value);
+    else if (Array.isArray(value)) for (const v of value) SterlingTools.flattenFieldStrings(v, out);
+    else if (value && typeof value === 'object') for (const v of Object.values(value)) SterlingTools.flattenFieldStrings(v, out);
+    return out;
+  }
+
+  private static clipExcerpt(text: string, max = 160): string {
+    return text.length > max ? `${text.slice(0, max)}…` : text;
+  }
+
+  /**
+   * knowledge_supersede — atomic replacement of a ruling record (decision /
+   * anti_pattern / research_finding), riding the existing store.supersede()
+   * transaction (new row + CAS retire of the old row, no second supersession
+   * path). Distinct from knowledge_update (a fix-forward DELTA within one
+   * lineage — the caller passes only what changed) and knowledge_retire (a
+   * no-new-row duplicate tombstone): `fields` here is a COMPLETE create-shaped
+   * body of the same type, because this is a REPLACEMENT, not a patch.
+   *
+   * ORPHAN DETECTION (ADDENDUM 08-14-2045): the measured incident was a
+   * decision recording three separable rulings, superseded by a record that
+   * only restated one of them — the other two silently stopped being served.
+   * When the old record's primary text enumerates 2+ ruling units (numbered or
+   * bulleted), each unit must have substantive lexical coverage in the new
+   * fields or the write is REFUSED, naming the orphaned excerpts and both
+   * remedies. `orphans_acknowledged: true` proceeds anyway and the response
+   * discloses which candidates were accepted. Fewer than 2 units is ordinary
+   * single-ruling supersession — no check.
+   *
+   * Every refusal below runs before store.supersede is ever called, so a
+   * refused call leaves the store untouched.
+   */
+  knowledgeSupersede(oldId: string, fields: Record<string, unknown>, orphansAcknowledged?: boolean): { superseded: string; id: string; type: string; slug?: string; orphan_candidates?: string[]; warnings: string[]; same_subject: SameSubjectEntry[] } {
+    const old = this.resolveRecordId(oldId, 'knowledge_supersede');
+    if (old.type === 'todo') {
+      throw new Error(
+        `knowledge_supersede: '${oldId}' is a todo — those leave through board_remove / maintenance_remove (done = removed, P4), not supersession.`
+      );
+    }
+    if (old.type === 'feature_article' || old.type === 'reference_material') {
+      throw new Error(
+        `knowledge_supersede: '${oldId}' is a ${old.type} — those evolve in place via knowledge_update (fix-forward, same lineage), or for a genuine ` +
+          `duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`
+      );
+    }
+    if (!SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
+      throw new Error(
+        `knowledge_supersede: '${old.type}' records are not supported — allowed: ${SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(', ')}.`
+      );
+    }
+    if (old.status === 'superseded') {
+      throw new Error(`knowledge_supersede: '${oldId}' is already superseded — resolve its chain to the live head first (knowledge_get discloses the terminus).`);
+    }
+
+    this.refuseServerOwnedFields(fields, 'knowledge_supersede');
+    const type = old.type;
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
+
+    // Slug continuity (decision de1a7329): fields with no slug inherit the old
+    // record's slug so the concept handle survives the replacement — the old
+    // record itself still owns that slug at this point (it is still active),
+    // so its own id is excluded from the collision check.
+    const explicitSlug = (body as { slug?: string }).slug;
+    let slug: string | undefined;
+    if (explicitSlug !== undefined) {
+      const clash = this.store.recordsBySlug(explicitSlug).filter((r) => r.id !== old.id);
+      if (clash.length) {
+        throw new Error(
+          `knowledge_supersede: a record with slug '${explicitSlug}' already exists ('${clash[0].id}') — one handle resolves to one record. ` +
+            `Choose a distinct slug, or omit it to inherit '${(old as unknown as { slug?: string }).slug ?? ''}'.`
+        );
+      }
+      slug = explicitSlug;
+    } else {
+      slug = (old as unknown as { slug?: string }).slug;
+      // F4 review finding: an old record with NO slug (e.g. a pre-slug legacy
+      // row) used to leave the new head slugless too — the same auto-mint
+      // path knowledgeCreate takes for a slugless new record applies here,
+      // so a replacement of a legacy record gains the stable handle it never
+      // had, exactly as if it were freshly created.
+      if (slug === undefined) {
+        const headline = ((body as { title?: string; question?: string }).title ?? (body as { question?: string }).question ?? '') as string;
+        slug = this.mintSlug(headline);
+      }
+    }
+
+    const ts = this.now();
+    const candidate: Record<string, unknown> = {
+      id: this.newId(),
+      type,
+      created_at: ts,
+      updated_at: ts,
+      author: (body.author as string) ?? 'conductor',
+      status: 'active',
+      superseded_by: null,
+      links: body.links ?? [],
+      scope: (body.scope as string) ?? 'project',
+      stack_tags: body.stack_tags ?? [],
+      ...body,
+      ...(slug !== undefined ? { slug } : {}),
+    };
+    this.refuseUnknownFields(type, candidate, 'knowledge_supersede');
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    // Cited-id resolution warnings (board fc053051, F3 review finding: every
+    // other write path emits these — knowledge_supersede was the one gap).
+    // Computed on `parsed` (post-schema, pre-store) so a scan sees exactly
+    // what is about to be written, same as knowledgeCreate (tools.ts:688).
+    const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
+
+    // Orphan detection — deterministic, no model call (P3), scoped to the
+    // measured defect shape (enumerated multi-ruling records).
+    const units = SterlingTools.rulingSourceFields(old).flatMap((f) => SterlingTools.segmentRulingUnits(f));
+    let orphanCandidates: string[] = [];
+    if (units.length >= 2) {
+      const fieldsWords = SterlingTools.contentWords(SterlingTools.flattenFieldStrings(fields).join(' '));
+      const uncovered = units.filter((u) => {
+        const unitWords = SterlingTools.contentWords(u);
+        if (unitWords.size === 0) return false;
+        let shared = 0;
+        for (const w of unitWords) if (fieldsWords.has(w)) shared++;
+        return shared / unitWords.size < SterlingTools.ORPHAN_COVERAGE_THRESHOLD;
+      });
+      if (uncovered.length > 0) {
+        if (orphansAcknowledged !== true) {
+          throw new Error(
+            `knowledge_supersede: '${oldId}' enumerates ${units.length} ruling units and the replacement fields leave ${uncovered.length} of them ` +
+              `without substantive coverage — a whole-record supersession would silently drop the surviving ruling(s), the exact failure this check ` +
+              `exists to catch. Orphaned:\n` +
+              uncovered.map((u) => `  - "${SterlingTools.clipExcerpt(u)}"`).join('\n') +
+              `\nExtend fields to carry the surviving ruling(s) forward, or re-call with orphans_acknowledged:true to proceed and accept the loss.`
+          );
+        }
+        orphanCandidates = uncovered.map((u) => SterlingTools.clipExcerpt(u));
+      }
+    }
+
+    const chain = new Set<string>([old.id]);
+    for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
+      if (link.rel === 'supersedes') chain.add(link.target_id);
+    }
+    const updated = this.store.supersede(old.id, parsed);
+    this.repointPromotionReview(chain, updated.id, ts);
+
+    // SAME-SUBJECT SURFACING (decision 7e3c66c5): knowledge_supersede only
+    // ever operates on the three ruling types (SUPERSEDE_ALLOWED_TYPES,
+    // enforced above), so this always applies here. Excludes the old,
+    // just-superseded record and its own supersede chain, plus the new
+    // record's own id — never the write's own lineage.
+    const sameSubjectExclude = new Set(chain);
+    sameSubjectExclude.add(updated.id);
+    const sameSubject = this.sameSubjectDigest(registered ? registered.fts(parsed) : '', sameSubjectExclude);
+
+    return {
+      superseded: old.id,
+      id: updated.id,
+      type: updated.type,
+      slug: (updated as unknown as { slug?: string }).slug,
+      ...(orphanCandidates.length > 0 ? { orphan_candidates: orphanCandidates } : {}),
+      warnings: citationWarnings,
+      same_subject: sameSubject,
+    };
   }
 
   // -- run protocol (§5.2, §10) -------------------------------------------------
@@ -2271,26 +3693,31 @@ export class SterlingTools {
     });
   }
 
-  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number } = {}): DurableRecord[] {
+  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number } = {}): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap. contains
-    // (work order d9960c98) rides the same boardFiltered pass for the same reason.
+    // (work order d9960c98) and feature_slug (board e725979c) ride the same
+    // boardFiltered pass for the same reason, and combine as a genuine AND.
     return this.boardQuery({
       source: 'system',
       system_reason: filter.system_reason,
       file_keys: filter.file_keys,
       contains: filter.contains,
+      feature_slug: filter.feature_slug,
       cap: filter.cap,
     });
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
-  maintenanceQueryResult(filter: { system_reason?: string; file_keys?: string[]; contains?: string; cap?: number; projection?: Projection } = {}): BoardQueryResult {
+  maintenanceQueryResult(
+    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; projection?: Projection } = {}
+  ): BoardQueryResult {
     return this.boardQueryResult({
       source: 'system',
       system_reason: filter.system_reason,
       file_keys: filter.file_keys,
       contains: filter.contains,
+      feature_slug: filter.feature_slug,
       cap: filter.cap,
       projection: filter.projection,
     });

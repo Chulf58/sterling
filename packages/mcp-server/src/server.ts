@@ -73,7 +73,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         rank_terms: z.array(z.string()).optional(),
         include_unconfirmed: z.boolean().optional(),
         cap: z.number().int().positive().optional(),
-        projection: z.enum(['full', 'digest']).optional(),
+        projection: z.enum(['full', 'digest', 'count']).optional(),
       }),
     },
     (opts) => json(tools.knowledgeQueryResult(opts))
@@ -81,8 +81,50 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
 
   server.registerTool(
     'knowledge_get',
-    { description: 'Fetch a record by id — the full-fidelity read (query results are projected).', inputSchema: strict({ id: z.string() }) },
-    ({ id }) => json(tools.knowledgeGet(id))
+    {
+      description:
+        'Fetch a record by id — the full-fidelity read (query results are projected). No `field`: exactly the whole record, terminus handling included. With `field`: a WINDOWED projection of just that one field instead of the whole record (decision compaction-tooling-windowed-read-plus-split) — the measured defect this closes is an oversize article that overflows its own read tool. Unknown field is refused, naming it plus the valid set for the record\'s type. A string/array field returns {kind, total_chars|total_entries, offset, value|entries} — offset/length address CHARACTERS on a string, ELEMENTS on an array; offset at/past the end is not an error (empty value/entries, true total still reported, for clean paging termination). A scalar/object field returns {kind:"value", value} whole — offset/length alongside it are refused as not windowable. offset/length without field is refused.',
+      inputSchema: strict({
+        id: z.string(),
+        field: z.string().optional(),
+        offset: z.number().int().nonnegative().optional(),
+        length: z.number().int().positive().optional(),
+      }),
+    },
+    ({ id, field, offset, length }) => json(tools.knowledgeGet(id, { field, offset, length }))
+  );
+
+  server.registerTool(
+    'knowledge_split',
+    {
+      description:
+        'Split a feature_article: move a subset of its files[]/current_ac[]/live_test_refs entries into one or more NEW child articles, mechanically enforcing the invariants decision 8b87efcb established by hand for the hooks-suite split (decision compaction-tooling-windowed-read-plus-split) — prose moved VERBATIM, ac_ids INHERITED never renumbered, live_test_refs RE-POINTED to whichever side now owns the ac_id, the parent SURVIVES under its ORIGINAL slug (superseded to version+1, never replaced), and FILE COVERAGE stays TOTAL (every parent-owned path lands on exactly the parent or one child). Every child move_files path must be owned by the parent and claimed by at most one child; same for move_ac_ids; child slugs must be pairwise distinct and not collide with an existing feature_article; the parent must retain at least one file (moving all of them is refused — that shape is retire-and-replace, not a split). ALL validation runs before any write, and the whole split (every child plus the parent supersession) lands in ONE transaction, so a mid-split failure leaves the store untouched. resolves closes named open maintenance items exactly like knowledge_update\'s explicit-claim contract; an unnamed item stays open. Returns {parent:{id,slug,version}, children:[{id,slug}], warnings:[]} — warnings never gate the write, and report a still-oversize parent or an oversize-born child needing its own further split, the same article_oversize mechanism knowledge_update carries.',
+      inputSchema: strict({
+        id: z.string(),
+        children: z
+          .array(
+            z.object({
+              slug: z.string().min(1),
+              title: z.string().min(1),
+              what_it_does: z.string().min(1),
+              intended_behavior: z.string().min(1),
+              move_files: z.array(z.string()).min(1),
+              move_ac_ids: z.array(z.string()),
+              dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }).optional(),
+            }).strict()
+          )
+          .min(1),
+        parent_what_it_does: z.string(),
+        parent_intended_behavior: z.string().optional(),
+        reason: z.string().optional(),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open maintenance-queue item ids this split discharges — validated before the write'),
+      }),
+    },
+    ({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }) =>
+      json(tools.knowledgeSplitResult({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }))
   );
 
   server.registerTool(
@@ -96,6 +138,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_stats',
+    {
+      description:
+        'Size and composition WITHOUT the body (board a382af6b). With id (uuid/slug/8-char prefix): body_chars (the number the article_oversize threshold judges — history excluded), history_chars, history_entries, supersedes_count, and over_threshold for a feature_article. With no id: the aggregate over the MOUNTED store set (project + any domain mounts, unconfirmed included) — per-type counts and body sizes, the total, and the 10 largest feature_article bodies flagged against the threshold. Use it before deciding how to write to a big record (knowledge_edit/knowledge_append vs a full retransmit) and to find what is bloating; query digest lines carry each record\'s size_chars for the cheap scan, this is the drill-down.',
+      inputSchema: strict({ id: z.string().optional() }),
+    },
+    ({ id }) => json(tools.knowledgeStats(id))
+  );
+
+  server.registerTool(
     'knowledge_retire',
     {
       description:
@@ -106,33 +158,70 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_supersede',
+    {
+      description:
+        'Atomically REPLACE a ruling record (decision / anti_pattern / research_finding only) with a NEW one: creates the replacement from `fields` (a COMPLETE create-shaped body, not a delta) and marks old_id superseded → the new id, in ONE transaction. Distinct from knowledge_update (a fix-forward DELTA within one lineage — pass only what changed) and knowledge_retire (a no-new-row duplicate tombstone, no replacement content). old_id resolves via the same uuid/slug/8-char-prefix ladder as knowledge_get. fields with no slug inherit the old record\'s slug so the concept handle survives; an explicit fields.slug is checked for collision like any other. ORPHAN DETECTION: when the old record\'s text enumerates 2+ numbered/bulleted rulings, a replacement that leaves any of them without substantive lexical coverage is REFUSED — naming the orphaned excerpts and both remedies (extend fields to carry the ruling forward, or re-call with orphans_acknowledged:true, which proceeds and discloses the accepted candidates). Fewer than 2 enumerated units never triggers the check. todo/feature_article/reference_material old_ids are refused, naming their real exit paths (board_remove/maintenance_remove, or knowledge_update/knowledge_retire respectively). Every refusal leaves the store untouched.',
+      inputSchema: strict({ old_id: z.string(), fields: passthrough, orphans_acknowledged: z.boolean().optional() }),
+    },
+    ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged))
+  );
+
+  server.registerTool(
     'knowledge_update',
     {
       description:
-        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. The echo defaults to a one-line digest receipt (warnings kept, body dropped — you just authored it); pass projection:"full" for the whole stored record.',
-      inputSchema: strict({ id: z.string(), body: passthrough, projection: z.enum(['full', 'digest']).optional() }),
+        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. This write does NOT auto-close any maintenance item: pass resolves:[<item ids>] to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write — a bad id refuses the whole call); anything left unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt (warnings kept, body dropped — you just authored it); pass projection:"full" for the whole stored record.',
+      inputSchema: strict({
+        id: z.string(),
+        body: passthrough,
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
     },
-    ({ id, body, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body), projection))
+    ({ id, body, resolves, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves), projection))
   );
 
   server.registerTool(
     'knowledge_append',
     {
       description:
-        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, the file_baselines re-baseline and the drift-item drain are identical. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). The echo defaults to a one-line digest receipt (warnings kept) — a single full-record append echo once measured 49.8KB of content the caller had just written; pass projection:"full" for the whole stored record.',
-      inputSchema: strict({ id: z.string(), field: z.string(), entries: z.array(z.unknown()), projection: z.enum(['full', 'digest']).optional() }),
+        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, and the file_baselines re-baseline are identical — including resolves: pass item ids to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write); anything unnamed stays open and is warned on the receipt. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). The echo defaults to a one-line digest receipt (warnings kept) — a single full-record append echo once measured 49.8KB of content the caller had just written; pass projection:"full" for the whole stored record.',
+      inputSchema: strict({
+        id: z.string(),
+        field: z.string(),
+        entries: z.array(z.unknown()),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
     },
-    ({ id, field, entries, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries), projection))
+    ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection))
   );
 
   server.registerTool(
     'knowledge_edit',
     {
       description:
-        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical. The echo defaults to a one-line digest receipt (warnings + replaced counts kept — chars_before/chars_after prove the edit landed); pass projection:\"full\" for the whole stored record.",
-      inputSchema: strict({ id: z.string(), field: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
+        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, and baseline re-baseline are identical — including resolves: pass item ids to explicitly discharge open reconcile_needed/refresh_reference items on this record's chain (validated before the write); anything unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt (warnings + replaced counts kept — chars_before/chars_after prove the edit landed); pass projection:\"full\" for the whole stored record.",
+      inputSchema: strict({
+        id: z.string(),
+        field: z.string(),
+        find: z.string(),
+        replace: z.string(),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
     },
-    ({ id, field, find, replace, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace), projection))
+    ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection))
   );
 
   server.registerTool(
@@ -216,6 +305,26 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
       }),
     },
     ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection))
+  );
+
+  server.registerTool(
+    'board_get',
+    {
+      description:
+        'Fetch a board/queue item by id — the full, untruncated record (board_query\'s projection:"digest" clips text; this is the escape hatch back to the whole item). Resolves through the same ladder as knowledge_get: full uuid, exact slug, or an unambiguous 8-char citation prefix. An unknown id is refused, naming the id that was not found.',
+      inputSchema: strict({ id: z.string() }),
+    },
+    ({ id }) => json(tools.boardGet(id))
+  );
+
+  server.registerTool(
+    'board_edit',
+    {
+      description:
+        'Replace a passage INSIDE a board/queue item\'s text without retransmitting the whole field — knowledge_edit\'s exactly-once find/replace contract, but IN PLACE: id stable, no new version minted (decision a91c80b5 — board_update\'s identity semantics, not knowledge_update\'s supersession). \'find\' must match EXACTLY ONCE: zero matches and multiple matches are both refused, naming the count, with nothing written. Works identically on a user task or a system maintenance item. The echo defaults to a one-line digest receipt; pass projection:"full" for the whole stored record.',
+      inputSchema: strict({ id: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
+    },
+    ({ id, find, replace, projection }) => json(tools.writeProjected(tools.boardEdit(id, find, replace), projection))
   );
 
   server.registerTool(
@@ -319,29 +428,23 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     ({ payload }) => json(tools.runEscalate(payload))
   );
 
-  server.registerTool(
-    'maintenance_enqueue',
-    {
-      description: 'Enqueue a maintenance item (system todo): reconcile_needed | stale_research | deletion_candidate | capture_owed | promotion_review | wire_in_dormant.',
-      inputSchema: strict({
-        reason: z.string(),
-        text: z.string(),
-        file_keys: z.array(z.string()).optional(),
-        feature_link: z.string().optional(),
-      }),
-    },
-    (args) => json(tools.maintenanceEnqueue(args))
-  );
+  // maintenance_enqueue is deliberately NOT wire-registered (decision
+  // 6269b714, todo-stays-one-type…keep): system items are minted only by
+  // registered detection events through the server-internal
+  // tools.maintenanceEnqueue / enqueueSystemTodo choke point. The wire tool
+  // had zero legitimate external callers and was the route by which agents
+  // gamed source/system_reason to hand-park work as store maintenance.
 
   server.registerTool(
     'maintenance_query',
     {
       description:
-        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, or contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
+        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax), or feature_slug (narrows to items owned by ONE article, resolved from its slug and CHAIN-AWARE — an item raised against an earlier superseded version of the article still matches; every filter combines as a genuine AND). An unresolvable feature_slug narrows to nothing rather than erroring. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         contains: z.string().optional(),
+        feature_slug: z.string().optional(),
         cap: z.number().int().positive().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),

@@ -38,6 +38,7 @@ Exactly the required-inputs manifest; the dispatch reason names the signal that 
 3. Validation: trust boundaries where input enters (routes, file reads, MCP/tool arguments) — schema-validated or not.
 4. Dependency changes: new packages, scripts, postinstall behavior.
 5. Severity-block anti-patterns on touched files — mandatory check items.
+6. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

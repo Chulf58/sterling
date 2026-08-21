@@ -87,15 +87,20 @@ export function extractAxisTerms(text: unknown, maxTerms: number): string[] {
  *  discuss context rather than assert the rule, and matching them is what would
  *  turn this into noise. Since board 39c3d762 (preflight coverage): a
  *  feature_article's slug/family/title state its TERRITORY (what_it_does is
- *  excluded — tens of KB of discussion), and a research_finding's question IS
- *  its subject (answer excluded, same reason). Additive for existing callers:
- *  H19/H20 delivery only ever pass anti_pattern/decision records here. */
+ *  excluded — tens of KB of discussion), and a research_finding's or
+ *  disconfirmed_hypothesis's question IS its subject (answer/rejected_answer
+ *  excluded, same reason). H20 delivery passes all five types since board
+ *  e7157d0b; H19 delivery remains anti_pattern/decision. */
 export function axisNarrowText(record: AxisRecord | null | undefined): string {
   if (!record || typeof record !== 'object') return '';
   if (record.type === 'anti_pattern') return `${record.title ?? ''}\n${record.trigger ?? ''}`;
   if (record.type === 'decision') return `${record.title ?? ''}\n${record.statement ?? ''}`;
   if (record.type === 'feature_article') return `${record.slug ?? ''} ${record.concept_family ?? ''}\n${record.title ?? ''}`;
   if (record.type === 'research_finding') return `${record.question ?? ''}`;
+  // Board e7157d0b (prior-answer check): a refuted trail's subject is its
+  // question, exactly the research_finding rule — rejected_answer/evidence are
+  // discussion, matching them would be noise.
+  if (record.type === 'disconfirmed_hypothesis') return `${record.question ?? ''}`;
   return '';
 }
 

@@ -4,7 +4,7 @@
 // .sterling/transient/delivery/ is cleared by h19-clear-session at SessionStart
 // — the delivered-guard's TTL is the whole session by design (grill answer:
 // whole session, no expiry; re-arm rides per-file/per-record keying).
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 export function deliveryDir(cwd) {
@@ -82,7 +82,36 @@ export function pendingPath(cwd) {
  *  real delivery on a later Read of it — a pointer would then COST knowledge
  *  instead of adding it. Pointers dedupe per FILE; articles dedupe per RECORD. */
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+}
+
+/** The lineage key for a record: its slug when it has one (feature_article,
+ *  reference_material — stable across a knowledge_update supersede, which
+ *  mints a NEW id for the SAME slug), else its id (decision/anti_pattern have
+ *  no slug, so id-churn IS lineage-churn for them — a genuinely different
+ *  record, not a reconcile of the same one). */
+export function lineageKey(record) {
+  return record?.slug ?? record?.id;
+}
+
+/** Delivered if EITHER the exact id was guarded (today's behavior, still
+ *  correct for slug-less types) OR the record's lineage was already delivered
+ *  under a since-superseded id (board 5a807e68 — an edited record must not
+ *  re-deliver as "fresh"). */
+export function isDelivered(guard, record) {
+  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+}
+
+/** Mark a batch of records delivered: both the exact id (today's key, kept for
+ *  slug-less types and as a fast id-based check) and the lineage key (so a
+ *  later supersede of the same slug is recognised as already-seen), each
+ *  deduped against what is already guarded. */
+export function markDelivered(guard, records) {
+  for (const r of records) {
+    if (!guard.records.includes(r.id)) guard.records.push(r.id);
+    const key = lineageKey(r);
+    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+  }
 }
 
 export function readGuard(path) {
@@ -101,14 +130,86 @@ export function readGuard(path) {
 
 export function writeGuard(path, guard) {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(guard));
+  // tmp+rename (torn-guard prevention, board 5e3d6ff4 fixer pass): NOT locked —
+  // a lost update here costs at most one duplicate pointer/guard entry, and
+  // readGuard already self-heals a torn file, so the cheaper fix is enough.
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(guard));
+  renameSync(tmp, path);
+}
+
+// ---------------------------------------------------------------------------
+// COOPERATING-WRITER LOCK (board 5e3d6ff4 fixer pass). hooks.json runs more
+// than one PostToolUse hook per event (h19-knowledge-delivery + h23-output-
+// axis on Read; h19-bash-delivery + h23-output-axis on Bash), and every one of
+// them can call enqueuePending against the SAME pending.json in the SAME
+// event. Measured precedent for what an unguarded read-modify-write does under
+// that: ledger.mjs:27-34 — two concurrent PostToolUse:Read processes tore a
+// JSON file on a DrvFs mount. A torn pending.json is worse than a torn ledger:
+// drainPending's JSON.parse failure rmSyncs the WHOLE queue while the
+// producers' guards already marked their records delivered — permanent silent
+// loss, not "ask for a re-Read".
+//
+// mkdirSync is atomic (EEXIST on contention) on every platform Node supports,
+// so it doubles as a lock with no extra dependency. Age-based staleness ONLY —
+// a lock whose mtime is older than LOCK_STALE_MS is reclaimed as abandoned by
+// a crashed holder; never PID-liveness (anti_pattern 8e603e23: a recycled PID
+// gives a false lock identity). On deadline expiry this PROCEEDS WITHOUT THE
+// LOCK rather than blocking the hook forever — delivery is an aid, never a
+// gate, so degraded beats blocked. A caller that never acquired the lock also
+// never releases it, so a slow/expired waiter can't rip an active holder's
+// lock out from under it.
+// ---------------------------------------------------------------------------
+const LOCK_DEADLINE_MS = 2000;
+const LOCK_STALE_MS = 5000;
+const LOCK_POLL_MS = 5;
+
+function withFileLock(targetPath, fn) {
+  mkdirSync(dirname(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  const deadline = Date.now() + LOCK_DEADLINE_MS;
+  let acquired = false;
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync(lockPath);
+      acquired = true;
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue; // retake immediately — no need to sleep first
+        }
+      } catch {
+        continue; // lock vanished between the EEXIST and the stat — retry now
+      }
+      // Bounded synchronous wait between attempts, never a busy CPU spin.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (acquired) {
+      try {
+        rmSync(lockPath, { recursive: true, force: true });
+      } catch {
+        // best-effort release; a leftover lock self-heals via the staleness check
+      }
+    }
+  }
 }
 
 export function enqueuePending(path, entry) {
-  const entries = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : [];
-  entries.push(entry);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(entries));
+  withFileLock(path, () => {
+    const entries = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : [];
+    entries.push(entry);
+    // tmp+rename: a crash mid-write can never leave a torn file behind.
+    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmp, JSON.stringify(entries));
+    renameSync(tmp, path);
+  });
 }
 
 /** Read-and-remove: the queue is one-shot (P4 — consumed by the event that
@@ -228,7 +329,7 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map((ap) =>
     [
-      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}' (full record: knowledge_get ${ap.id})`,
+      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ''} (full record: knowledge_get ${ap.id})`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
     ].join('\n')
@@ -242,6 +343,41 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
     blocks.push(`… ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return blocks;
+}
+
+/** How many feature_article pointers render per dispatch (H20 subject-axis
+ *  delivery, board 62806222 follow-up / consuming-project retro
+ *  2026-08-17-2111). Tighter than DECISION_POINTER_CAP: a pointer is the
+ *  cheapest unit this mechanism renders (one line, no body at all — see
+ *  renderArticlePointers below), but the dispatch payload as a whole must
+ *  still stay small (P1), so the cap is deliberately small and the overflow
+ *  is DISCLOSED rather than silently dropped, matching renderHazards/
+ *  renderDecisionPointers' own cap-and-disclose shape. */
+export const ARTICLE_POINTER_CAP = 3;
+
+/** feature_articles matching a dispatch's SUBJECT, as POINTER lines ONLY —
+ *  slug, title, and a knowledge_get reference to the full record. NEVER the
+ *  article's what_it_does/intended_behavior prose: unlike renderArticle
+ *  (file-touch delivery, where the article IS the owning knowledge for a
+ *  path the reader is about to edit), a subject match here is weaker
+ *  evidence of relevance — the same reasoning that keeps decisions and
+ *  hazards capped tighter on this channel than on H19's file-touch channel
+ *  (see the MAX_DECISIONS comment in h20-mechanism-axis.mjs). The reader
+ *  decides whether to spend a knowledge_get, not have the body pushed at
+ *  them. */
+export function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
+  const shown = articles.slice(0, cap);
+  const lines = [
+    `▸ ARTICLES matching this prompt's SUBJECT (${articles.length}) — pointers only, follow knowledge_get before assuming the answer:`,
+  ];
+  for (const a of shown) {
+    lines.push(`  → '${a.slug}': ${clip(a.title, 140)} (knowledge_get ${a.id})`);
+  }
+  if (articles.length > shown.length) {
+    const widen = remedy ?? `knowledge_query types:["feature_article"] cap:${articles.length}`;
+    lines.push(`  … ${articles.length - shown.length} more matched but NOT shown (cap ${cap}) — ${widen} for the full set`);
+  }
+  return lines.join('\n');
 }
 
 /** How many decision pointers render before the rest are disclosed as dropped. */
@@ -278,7 +414,7 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
     `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
   ];
   for (const d of shown) {
-    lines.push(`  → ${clip(d.statement, DECISION_STATEMENT_CLIP)} (knowledge_get ${d.id})`);
+    lines.push(`  → ${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
       .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
       .filter(Boolean)
@@ -292,6 +428,45 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
     lines.push(`  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// LINE-SUSPECT ADVISORY (board 04ccecb1-a338-4b4e-91f0-c99588c1cdce). Warn-only
+// (P1 advisory): this renderer only ever ADDS a trailing block to the payload,
+// never changes what else renders or the hook's exit code. The SCAN (regex
+// match against `rel`'s `<rel>:digits[-digits]` tokens, plus the record's
+// updated_at vs the file's current mtime) lives at the hook's own assembly
+// seam, beside freshOwners/freshHazards/freshDecisions — this is only the
+// renderer, matching renderHazards/renderDecisionPointers' own shape.
+// ---------------------------------------------------------------------------
+
+/** How the payload already names a record's type: slug for an owning article
+ *  or reference doc, title for a hazard anti_pattern, id for a decision
+ *  (decisions carry no slug at all — renderDecisionPointers only ever shows
+ *  one when a record happens to have it). Mirrors each render* function's own
+ *  naming rather than inventing a new one for this block. */
+function suspectLabel(record) {
+  if (record.type === 'anti_pattern') return `anti-pattern '${record.title}'`;
+  if (record.type === 'decision') return `decision ${record.id}`;
+  if (record.slug) return `article '${record.slug}'`;
+  return record.title ?? record.id;
+}
+
+/** One trailing block naming every stale-citing record and the token(s) it
+ *  cites. `suspects` is `{record, tokens}[]`, already filtered to the stale
+ *  ones by the caller's scan — this only renders what it is handed. Returns
+ *  `[]` (no block at all) when nothing is suspect, matching the other
+ *  render* helpers' empty-array-means-nothing-to-add convention. */
+export function renderLineSuspects(suspects, charCap) {
+  if (!suspects?.length) return [];
+  const lines = [
+    "⚠ LINE-SUSPECT (H19 advisory) — cited line position(s) below may have rotted: the citing record predates this file's current version.",
+  ];
+  for (const { record, tokens } of suspects) {
+    lines.push(`  → ${suspectLabel(record)} cites ${clip(tokens.join(', '), charCap)} — this position may no longer be accurate.`);
+  }
+  lines.push('  Line numbers rot as a file changes — cite an anchor (function/slug/passage) instead where possible.');
+  return [lines.join('\n')];
 }
 
 /** The delivery envelope. `unowned` swaps the header for the frontier signal:
@@ -385,11 +560,12 @@ export function renderBashPointers(entries) {
   ];
   for (const e of entries) {
     for (const h of e.hazards) {
-      lines.push(`  • ${e.rel} — ⚠ HAZARD anti_pattern '${h.title ?? h.slug ?? h.id}' · knowledge_get ${h.id}`);
+      const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : (h.title ?? h.slug ?? h.id);
+      lines.push(`  • ${e.rel} — ⚠ HAZARD anti_pattern '${hazardLabel}' · knowledge_get ${h.id}`);
     }
     for (const o of e.owners) {
       const kind = o.type === 'reference_material' ? 'reference' : 'article';
-      const label = o.slug ?? o.title ?? o.id;
+      const label = o.title && o.slug ? `${o.title} [${o.slug}]` : (o.slug ?? o.title ?? o.id);
       const state = o.state ? ` (${o.state})` : '';
       lines.push(`  • ${e.rel} — ${kind} '${label}'${state} · knowledge_get ${o.id}`);
     }

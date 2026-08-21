@@ -43,12 +43,12 @@ interface FeatureArticleRec {
 }
 
 interface DecisionRec {
-  id: string; title: string; statement: string; rationale: string;
+  id: string; slug?: string; title: string; statement: string; rationale: string;
   alternatives_rejected: { option: string; reason: string }[];
 }
 
 interface AntiPatternRec {
-  id: string; title: string; trigger: string; guidance: string;
+  id: string; slug?: string; title: string; trigger: string; guidance: string;
   wrong_way: string; right_way: string; severity?: string;
 }
 
@@ -86,7 +86,7 @@ export function toCard(rec: unknown): Card {
         type: 'decision',
         title: d.title,
         body: `${d.statement}\n\nWhy:\n${d.rationale}${altSection}`,
-        detail: d.title,
+        detail: [d.slug, d.title].filter(Boolean).join(' · '),
       };
     }
     case 'anti_pattern': {
@@ -96,7 +96,7 @@ export function toCard(rec: unknown): Card {
         type: 'anti_pattern',
         title: ap.title,
         body: `Trigger:\n${ap.trigger}\n\nDon't:\n${ap.wrong_way}\n\nDo:\n${ap.right_way}\n\nGuidance:\n${ap.guidance}`,
-        detail: [ap.severity, ap.title].filter(Boolean).join(' · '),
+        detail: [ap.slug, ap.severity, ap.title].filter(Boolean).join(' · '),
       };
     }
     case 'research_finding': {

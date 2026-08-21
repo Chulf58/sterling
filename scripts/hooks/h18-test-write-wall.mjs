@@ -14,7 +14,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesGlob, normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
-import { readStdin, deny, allow, loadConfig, repoRel } from './lib/common.mjs';
+import { readStdin, deny, allow, loadConfig, repoRel, environmentDefectDenial } from './lib/common.mjs';
 import { isEnforcementSurface } from './lib/contract.mjs';
 
 const input = readStdin();
@@ -61,7 +61,7 @@ try {
   // (2) test-path allowlist: the write must match a declared toolchain test glob.
   const config = loadConfig(input.cwd);
   if (!config?.toolchains?.length) {
-    deny('H18: no toolchains in .sterling/config.json — cannot resolve test globs to authorize the write; failing closed (P5)');
+    deny(environmentDefectDenial('H18', 'No toolchains in .sterling/config.json — cannot resolve test globs to authorize the write; failing closed (P5).'));
   }
   for (const tc of config.toolchains) {
     for (const glob of tc.test_globs ?? []) {
@@ -85,5 +85,5 @@ try {
       `If it is genuinely source, docs or config, that belongs to the coder/conductor: exit contract-violated naming the file.`
   );
 } catch (e) {
-  deny(`H18: write-gate evaluation failed (${(e && e.message) || e}) — failing closed (P5)`);
+  deny(environmentDefectDenial('H18', `Write-gate evaluation failed (${(e && e.message) || e}) — failing closed (P5).`));
 }

@@ -56,9 +56,15 @@
   "session_events": {
     "research_agents": ["researcher", "claude-code-guide"]
   },
+  "delegation": {
+    "max_concurrent": 5
+  },
   "delegation_watch": {
     "min_hand_work": 15,
     "max_dispatches": 0
+  },
+  "dispatch_register": {
+    "stale_minutes": 60
   },
   "maintenance_queue": {
     "deep_threshold": 15
@@ -74,5 +80,6 @@
   "delivery": {
     "injection_rung": "prompt",
     "payload_char_cap": 2400
-  }
+  },
+  "article_history_genesis_entries": 2
 }

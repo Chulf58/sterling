@@ -182,6 +182,36 @@ export class MountedStores {
     return this.all().flatMap((s) => s.recordsBySlug(slug));
   }
 
+  /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
+   *  fallthrough is the sole caller (decision df361a0f) and takes result[0] as
+   *  THE newest carrier, so the fan-in order is load-bearing. A slug does NOT
+   *  live in exactly one store: retireInFavorOf's promotion shape leaves the
+   *  project tombstone behind while the live copy is promoted into a domain
+   *  store, so one lineage's tombstones can be split across stores. Plain
+   *  project-first concatenation would let an OLDER project tombstone shadow a
+   *  NEWER domain one, so the fanned results are merge-sorted by updated_at
+   *  DESC — each store's own rows already arrive newest-first, so this is a
+   *  stable merge, not a full re-sort. rowid ordering (and the newest-first
+   *  guarantee it gives) is only meaningful WITHIN one store; updated_at is
+   *  the one field comparable across stores, and is therefore the cross-store
+   *  sort key here (review finding, 2026-08-20). */
+  supersededRecordsBySlug(slug: string): DurableRecord[] {
+    return this.all()
+      .flatMap((s) => s.supersededRecordsBySlug(slug))
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  }
+
+  /** Cross-store terminus resolution (decision de1a7329): a record lives in
+   *  exactly one store (same reasoning as get()), so this tries each mounted
+   *  store project-first and returns the first hit. */
+  resolveTerminus(id: string): ReturnType<SterlingStore['resolveTerminus']> {
+    for (const s of this.all()) {
+      const r = s.resolveTerminus(id);
+      if (r) return r;
+    }
+    return null;
+  }
+
   // -- record mutations: route to the store that HOLDS the record --------------
   // A record's scope decided where it lives at create time; a later change has to
   // land in that same store, so these route by where the id actually is — never
@@ -274,6 +304,14 @@ export class MountedStores {
   }
   setRunReviewMandatory(...args: Parameters<SterlingStore['setRunReviewMandatory']>): ReturnType<SterlingStore['setRunReviewMandatory']> {
     return this.project.setRunReviewMandatory(...args);
+  }
+
+  /** knowledge_split's multi-record write (decision
+   *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
+   *  only — feature_article is always project-scoped (§3.3), so the split's
+   *  children-plus-parent transaction never needs to span a domain mount. */
+  withTransaction<T>(fn: () => T): T {
+    return this.project.withTransaction(fn);
   }
 
   /** Per-store snapshot (§2.3): each store snapshots independently; the caller

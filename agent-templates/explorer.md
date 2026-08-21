@@ -3,7 +3,7 @@ name: explorer
 description: Codebase exploration and blast-radius mapping. Consults articles first, code second. Its map can register as the debug-scope contract (H3).
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: Read, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
+tools: Read, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__maintenance_query, mcp__plugin_sterling_sterling__maintenance_query, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - the exploration question or target (feature, symptom, or file set)
   - knowledge slice (owning articles for the implicated area — articles first, code second)
@@ -34,6 +34,7 @@ Exactly the required-inputs manifest.
 2. Report repo-relative POSIX paths with the role each file plays.
 3. Bound the map: name what you did NOT explore and why it's out of reach.
 4. Cite file:line for every load-bearing claim.
+5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

@@ -2,6 +2,7 @@
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 
@@ -113,6 +114,69 @@ export function allow() {
   process.exit(0);
 }
 
+/**
+ * Standardized wrapper for a gate denial caused by BROKEN INTERNAL STATE (a
+ * torn ledger, a corrupt config/store, a missing transient file) rather than
+ * by anything the calling agent did (board c7b81456). Motivating incident: a
+ * coder burned ~205k tokens diagnosing H3's fail-closed denial over a torn
+ * reads-ledger — the denial read exactly like ordinary "you never read it"
+ * misconduct, so the agent tried to fix its own behavior (re-reading,
+ * re-diagnosing, retrying the gate) instead of exiting blocked and letting
+ * the conductor repair the environment.
+ *
+ * Every blocking gate that denies because it CANNOT EVALUATE (as opposed to
+ * evaluating the agent's action and finding a genuine scope/contract
+ * violation, which stays exactly as worded — those denials teach a fix the
+ * agent can make and typically resolve via contract-violated / tests-invalid,
+ * never this helper) routes its message through this ONE wrapper, so the two
+ * failure classes are never visually confusable. `detail` carries the gate's
+ * ORIGINAL wording verbatim (path, error text, counts) — this only wraps it,
+ * it never replaces or trims it, so every existing substring assertion on a
+ * wrapped message's detail keeps matching.
+ *
+ * AUDIENCE-AWARE (review finding F2): H3 and H15 are globally registered, so
+ * they fire for the CONDUCTOR too (no `input.agent_id`) — telling the
+ * conductor to "exit `blocked` and let the conductor fix the environment" is
+ * self-referential nonsense. Passing an `agentId` key in `opts` (even
+ * `undefined`) OPTS IN to audience-awareness: present/truthy -> the
+ * agent-facing blocked-exit instruction (unchanged wording); absent/falsy ->
+ * repair-facing wording that says so explicitly (there is no conductor above
+ * the conductor to exit `blocked` to), since there is no one else to hand
+ * the defect to. A caller that never had an audience question — every OTHER
+ * hook's environmentDefectDenial calls fire only under agent-scoped
+ * registration (frontmatter, never the global hooks.json), so `input.agent_id`
+ * is always present there — keeps calling this with no third argument at all,
+ * and gets EXACTLY the original unconditional agent-facing text: opting a
+ * caller in requires naming `agentId`, never an implicit default switch, so
+ * this shared-lib change carries zero blast radius into hooks this fixer
+ * pass never touched (H4/H5/H14/H18).
+ *
+ * SELF-HEALING STATES (review finding F1): some broken states heal on the
+ * very next successful action (a torn read-evidence ledger is rebuilt by the
+ * next appendRead, e.g. after a Read) — "do not retry" is exactly wrong
+ * there. `opts.selfHeal = { action, onRepeat }` swaps in `action` (what to do
+ * now, which doubles as the repair) followed by `onRepeat` (the repeat
+ * condition, e.g. "If this same TORN denial repeats after that Read") whose
+ * resolution still varies by audience.
+ */
+export function environmentDefectDenial(gateName, detail, opts = {}) {
+  const audienceAware = 'agentId' in opts;
+  const { agentId, selfHeal } = opts;
+  const repair = 'repair it (or restart the session) before proceeding';
+  const noConductorAbove = `there is no conductor above you to exit \`blocked\` to — ${repair}.`;
+  const agentFacing = `Do not diagnose, repair, or retry ${gateName} yourself — exit \`blocked\`, citing this message VERBATIM, and let the conductor fix the environment.`;
+  let instruction;
+  if (selfHeal) {
+    const resolution = !audienceAware || agentId ? 'exit `blocked` citing it.' : noConductorAbove;
+    instruction = `${selfHeal.action} ${selfHeal.onRepeat}, ${resolution}`;
+  } else if (audienceAware && !agentId) {
+    instruction = `This is broken state, and ${noConductorAbove}`;
+  } else {
+    instruction = agentFacing;
+  }
+  return `⚠ ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
+}
+
 /** Non-blocking internal failure: loud on stderr, exit 1 (P5: visible, never a silent gate-void). */
 export function warnNonBlocking(message) {
   process.stderr.write(message);
@@ -122,6 +186,30 @@ export function warnNonBlocking(message) {
 export function loadConfig(cwd) {
   const p = join(cwd, '.sterling', 'config.json');
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
+}
+
+/**
+ * Which of the given repo-relative paths git ignores, as a Set (board 1de3653b:
+ * an ignored path is never governed territory, so the H19 frontier signal and
+ * the H10 article demand must not fire on it — measured at ~20 false
+ * firings/session on render output across the 2026-08-14→20 feedback batch).
+ *
+ * Returns null when git cannot answer (no repo, no git, timeout) — the CALLER
+ * owns the degrade, and it must degrade TOWARD signaling (treat nothing as
+ * ignored), never toward silence. Exit 0 = some ignored, 1 = none ignored;
+ * both are answers. Anything else is a failure.
+ */
+export function gitIgnored(paths, cwd) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return new Set();
+  const res = spawnSync('git', ['check-ignore', '-z', '--stdin'], {
+    cwd,
+    input: list.join('\0') + '\0',
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  if (res.status !== 0 && res.status !== 1) return null;
+  return new Set((res.stdout || '').split('\0').filter(Boolean));
 }
 
 /** Synchronous sleep for the store busy-retry (no async in a hook body). */

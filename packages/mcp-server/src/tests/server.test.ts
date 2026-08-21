@@ -19,14 +19,26 @@ const SERVED_TOOLS = [
   'knowledge_get',
   // Ask what a type requires instead of learning by rejection (board 7acfbe48).
   'knowledge_schema',
+  // Size and composition without the body — per-id drill-down or store-wide
+  // aggregate; digest lines carry size_chars for the scan (board a382af6b).
+  'knowledge_stats',
   'knowledge_update',
   'knowledge_append',
   // The string sibling of append — a surgical edit inside a field too large to
   // retransmit (board fd6d8da9).
   'knowledge_edit',
+  // Mechanized article split enforcing the 8b87efcb invariants in one
+  // transaction (board 136091d2, decision compaction-tooling-windowed-read-plus-split).
+  'knowledge_split',
   // The retirement path: supersede in favour of a survivor, so a duplicate stops
   // being served instead of becoming MORE visible (board 77f00139).
   'knowledge_retire',
+  // Atomic replace-and-mark-superseded for one ruling record (decision /
+  // anti_pattern / research_finding), with orphan detection over enumerated
+  // rulings — distinct from knowledge_update (fix-forward delta) and
+  // knowledge_retire (duplicate tombstone, no new row). Board
+  // 0b33c27b-f36c-4d66-b92d-83885dbb1725 (ADDENDUM 08-14-2045).
+  'knowledge_supersede',
   'knowledge_promote',
   'knowledge_link',
   // H20/H19 relevance slice 4 (board 5fac3459): the conductor-callable analog
@@ -38,6 +50,11 @@ const SERVED_TOOLS = [
   'board_query',
   'board_remove',
   'board_update',
+  // board e725979c (2026-08-20): surgical board reads/edits — board_get is the
+  // untruncated escape hatch from digest clips, board_edit the exactly-once
+  // find/replace that keeps trackers current without retransmitting them.
+  'board_get',
+  'board_edit',
   // Session-event register writers (boards 75b1a05f + 1af5d630): the script
   // paths were unreachable from a consuming project's shell; the MCP surface
   // is mounted wherever the store is. Scripts remain the no-server fallback.
@@ -48,7 +65,8 @@ const SERVED_TOOLS = [
   'run_escalate',
   'agent_exit',
   'run_signal',
-  'maintenance_enqueue',
+  // maintenance_enqueue deliberately unregistered — decision 6269b714:
+  // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',
   // board_remove scoped to the queue, so the librarian can close what it drains
   // (board afeae7d9).
@@ -94,6 +112,97 @@ test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom st
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MCP: research_finding gains file_keys — create normalizes it, query joins by path, other types stay refused (decision 8dbbc85d, board b1de6fab)', async () => {
+  const { client, cleanup } = await harness();
+  try {
+    // (2) knowledge_create accepts a research_finding WITH file_keys and
+    // normalizes the path — the same invariant decision/anti_pattern already get.
+    const created = payload(
+      await client.callTool({
+        name: 'knowledge_create',
+        arguments: {
+          type: 'research_finding',
+          fields: {
+            question: 'does the platform rate-limit per org or per token?',
+            answer: 'per-org',
+            source_urls: [],
+            source_date: '2026-01-15',
+            capture_date: '2026-06-01',
+            volatility_hint: 'medium',
+            file_keys: ['scripts\\hooks\\x.mjs'],
+          },
+          projection: 'full',
+        },
+      })
+    ) as { record: { id: string; file_keys?: string[] } };
+    assert.deepEqual(
+      created.record.file_keys,
+      ['scripts/hooks/x.mjs'],
+      'path invariant holds for research_finding across the MCP boundary, same as decision'
+    );
+
+    // (3) a research_finding WITHOUT file_keys stays valid — no migration,
+    // existing records and callers unaffected.
+    const bare = payload(
+      await client.callTool({
+        name: 'knowledge_create',
+        arguments: {
+          type: 'research_finding',
+          fields: {
+            question: 'unrelated question with no file identity',
+            answer: 'a',
+            source_urls: [],
+            source_date: '2026-05-01',
+            capture_date: '2026-06-01',
+          },
+          projection: 'full',
+        },
+      })
+    ) as { record: { id: string; file_keys?: string[] } };
+    assert.ok(
+      bare.record.file_keys === undefined,
+      'file_keys stays optional — omitting it entirely is still a valid write'
+    );
+
+    // (4) knowledge_query with file_keys JOINS research_finding by path
+    // exactly as it already joins decisions/anti_patterns.
+    const hit = payload(
+      await client.callTool({ name: 'knowledge_query', arguments: { file_keys: ['scripts/hooks/x.mjs'] } })
+    ) as { records: { id: string }[] };
+    assert.deepEqual(hit.records.map((r) => r.id), [created.record.id], 'the finding carrying that file_key is returned');
+
+    const miss = payload(
+      await client.callTool({ name: 'knowledge_query', arguments: { file_keys: ['scripts/hooks/other.mjs'] } })
+    ) as { records: { id: string }[] };
+    assert.ok(
+      !miss.records.some((r) => r.id === created.record.id),
+      'and is NOT returned for a different path'
+    );
+
+    // (5) a type that does NOT define file_keys still refuses it, naming the
+    // valid set — decision b47889b7 unchanged; reference_material is the control.
+    const refused = await client.callTool({
+      name: 'knowledge_create',
+      arguments: {
+        type: 'reference_material',
+        fields: {
+          title: 'ROADMAP',
+          kind: 'doc',
+          location: 'ROADMAP.md',
+          summary: 's',
+          source_date: '2026-07-29',
+          capture_date: '2026-07-29',
+          file_keys: ['ROADMAP.md'],
+        },
+      },
+    });
+    assert.equal(refused.isError, true, 'reference_material still has no file_keys field — the write is refused, not silently accepted');
+    assert.match((refused.content as { text: string }[])[0].text, /'file_keys'/, 'the refusal names the offending field');
+  } finally {
+    await cleanup();
   }
 });
 
@@ -713,14 +822,24 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
     // 5. ACCEPTANCE REPLAY — the incident's nine false todos drain BY the fix:
     // an article WITHOUT working_tree owning a copy-only path gets the false
     // deletion item (the bug); knowledge_update adding working_tree re-baselines
-    // against the right tree AND auto-drains the item through the supersede chain.
+    // against the right tree. Closing the resulting debt is no longer implicit
+    // (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 retired the old
+    // knowledge_update auto-drain from decision 8ecd435f) — the SAME fix write
+    // now names the false-deletion item via an explicit `resolves` claim, which
+    // is exactly how an operator would perform this healing in practice: one
+    // write that both re-baselines the tree AND discharges the debt it caused.
     writeFileSync(join(copy, 'src', 'hull.mjs'), 'hv1');
     utimesSync(join(copy, 'src', 'hull.mjs'), old, old);
     const h = article('hull-traits', 'src/hull.mjs'); // no working_tree → resolves against root → false deletion
     tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(items('hull-traits').length, 1, 'the incident: root resolution mints a false deletion item');
-    const healed = tools.knowledgeUpdate(h.id, { working_tree: 'juiced' });
-    assert.equal(items('hull-traits').length, 0, 'the fix drains the item — knowledge_update auto-drain, no manual deletion');
+    const falseDeletionItem = items('hull-traits')[0] as unknown as { id: string };
+    const healed = (
+      tools as unknown as {
+        knowledgeUpdate(id: string, patch: Record<string, unknown>, resolves?: string[]): Record<string, unknown>;
+      }
+    ).knowledgeUpdate(h.id, { working_tree: 'juiced' }, [falseDeletionItem.id]);
+    assert.equal(items('hull-traits').length, 0, 'the fix drains the item — via the explicit resolves claim named on the same write, not an implicit auto-drain');
     assert.ok((healed as unknown as { file_baselines?: Record<string, string> }).file_baselines?.['src/hull.mjs'], 're-baselined against the correct tree');
     arts = tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(arts.find((r) => r.id === healed.id)?.verify_before_use, undefined, 'healed article reads clean');

@@ -26,6 +26,17 @@ export const decisionSchema = base
     alternatives_rejected: z.array(z.object({ option: z.string(), reason: z.string() })),
     rationale: z.string().min(1),
     file_keys: z.array(repoPath).optional(),
+    // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+    // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+    // the record's load-bearing claims were measured or inferred (a false
+    // anti-pattern once lived 8 minutes because nothing marked it inferred);
+    // measured_by names the command/instrument that produced a measured claim,
+    // so a quoted number can be re-derived instead of trusted. Named
+    // evidence_basis because anti_pattern already carries an unrelated `basis`
+    // enum (codebase|platform|external). Instrument-staleness re-test machinery
+    // is DEFERRED — see the decision's rejected alternatives.
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -111,6 +122,11 @@ export const antiPatternSchema = base
     file_keys: z.array(repoPath).optional(),
     severity: z.enum(['info', 'warn', 'block']).optional(),
     basis: z.enum(['codebase', 'platform', 'external']).default('codebase'),
+    // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+    // measured|inferred, distinct from this type's pre-existing `basis`
+    // (where the knowledge CAME FROM, not how it was established).
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -128,6 +144,15 @@ export const researchFindingSchema = base
     source_date: isoDate,
     capture_date: isoDate,
     volatility_hint: z.enum(['fast', 'medium', 'stable']).optional(),
+    // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+    // seam, a library's behavior in one adapter) join the file-key economy the
+    // same way decision/anti_pattern/todo do; many findings are fileless
+    // (platform behavior, pricing) so this stays optional, never required.
+    file_keys: z.array(repoPath).optional(),
+    // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+    // is measured (measured_by = the probe), a docs-read finding is inferred.
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -194,6 +219,41 @@ export const disconfirmedHypothesisSchema = base
     question: z.string().min(1),
     rejected_answer: z.string().min(1),
     evidence: z.string().min(1),
+    file_keys: z.array(repoPath).optional(),
+  })
+  .superRefine(refineSupersession);
+
+// Attestation — a HUMAN inspected an artifact and ruled on it (board 259a455f,
+// user-approved 2026-08-21). The durable per-item progress surface consuming
+// projects were hand-building as markdown ledgers (2,268 lines for 392 parts,
+// repeatedly stale). A point-in-time fact: immutable like a decision — a
+// re-inspection or changed verdict is a NEW attestation superseding the old,
+// never an edit of history.
+export const attestationSchema = base
+  .extend({
+    type: z.literal('attestation'),
+    // Optional explicit handle. NEVER auto-minted (no title/question headline
+    // to mint from); an explicit one passes the cross-type collision refusal
+    // like every slug-bearing type (review finding 3, 2026-08-21).
+    slug: z.string().min(1).optional(),
+    // What was inspected — a free-form artifact identity (a part number, a
+    // render name, a document version). Repo files it corresponds to belong in
+    // file_keys, which joins the retrieval economy; artifact_key does not need
+    // to be a path and often is not.
+    artifact_key: z.string().min(1),
+    verdict: z.enum(['approved', 'rejected', 'needs_rework']),
+    // Who ruled — a human identity. An agent's judgment is a review finding or
+    // a decision, never an attestation; the type exists precisely to mark the
+    // human-eyes event.
+    inspector: z.string().min(1),
+    // When the inspection HAPPENED — created_at is merely when the record was
+    // written, and ledger entries are routinely written after the fact.
+    inspected_at: isoDate,
+    // Instrument provenance: what the inspection looked at/through (a render
+    // at a commit, a physical sample batch) — the hook for later instrument-
+    // staleness work (board 1d02b6b4's deferred half).
+    instrument: z.string().min(1).optional(),
+    notes: z.string().optional(),
     file_keys: z.array(repoPath).optional(),
   })
   .superRefine(refineSupersession);
@@ -487,7 +547,7 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     schema: researchFindingSchema,
     immutable: false,
     fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join('\n'),
-    fileKeys: () => [],
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
     // No title on this type — the question IS the identity. Both clocks ride
     // along because a finding's currency decides whether it may be used at all.
     digest: { slug: 'plain', question: 'clip', source_date: 'plain', capture_date: 'plain' },
@@ -519,6 +579,17 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     // The rejected answer is the reusable half — it stops the question being
     // re-asked and re-answered the same wrong way.
     digest: { question: 'clip', rejected_answer: 'clip' },
+  },
+  attestation: {
+    schema: attestationSchema,
+    // Point-in-time human ruling: supersession is the only change path, exactly
+    // the decision contract (§3.2.1 analog; board 259a455f).
+    immutable: true,
+    fts: (r) => [s(r.slug), s(r.artifact_key), s(r.verdict), s(r.inspector), s(r.notes)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The progress-surface read: artifact + verdict + who + when answer the
+    // ledger question without opening the record.
+    digest: { artifact_key: 'plain', verdict: 'plain', inspector: 'plain', inspected_at: 'plain' },
   },
   feature_article: {
     schema: featureArticleSchema,
@@ -567,6 +638,21 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
  * projection is a read convenience and must never be the thing that makes a
  * read fail.
  */
+/**
+ * Size decomposition every size consumer shares (board a382af6b): the oversize
+ * lane, the digest size column, and knowledge_stats all measure the SAME two
+ * numbers or they drift — body_chars is the record WITHOUT history (the number
+ * a split can fix, the number the article_oversize threshold judges), and
+ * history_chars is the rotated-bounded rest.
+ */
+export function recordSizes(record: Record<string, unknown>): { body_chars: number; history_chars: number } {
+  const { history, ...body } = record;
+  return {
+    body_chars: JSON.stringify(body).length,
+    history_chars: Array.isArray(history) && history.length ? JSON.stringify(history).length : 0,
+  };
+}
+
 export function digestRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {
     id: record.id,
@@ -582,6 +668,12 @@ export function digestRecord(record: Record<string, unknown>): Record<string, un
     const value = mode === 'clip' ? clipped(record[field]) : record[field];
     if (value !== undefined && value !== null && value !== '') out[field] = value;
   }
+  // Size rides every REGISTERED-type digest line (board a382af6b; the
+  // unregistered-type early return above keeps its minimal shape): a reader
+  // scanning the landscape sees WHICH records are bloating before a
+  // knowledge_get ever chokes on one. body_chars only — history is
+  // rotation-bounded elsewhere.
+  out.size_chars = recordSizes(record).body_chars;
   return out;
 }
 
@@ -593,6 +685,7 @@ export type DurableRecord =
   | z.infer<typeof researchFindingSchema>
   | z.infer<typeof referenceMaterialSchema>
   | z.infer<typeof disconfirmedHypothesisSchema>
+  | z.infer<typeof attestationSchema>
   | z.infer<typeof featureArticleSchema>
   | z.infer<typeof todoSchema>
   | z.infer<typeof briefSchema>;
@@ -631,6 +724,16 @@ export interface FieldShape {
   type: string;
   /** Present only for closed sets — the whole point of asking. */
   enum_values?: string[];
+  /**
+   * Present only when this field's top-level type is an array-of-objects
+   * (e.g. files[]'s `{path, role}[]`, current_ac[]'s `{ac_id, text,
+   * verifiable_at}[]`) — the element object's OWN sub-fields, one level deep,
+   * with their own type + enum_values (board db0e2799). Without this, a
+   * nested enum (e.g. current_ac[].verifiable_at) was invisible in
+   * knowledge_schema and only discoverable by having a write on that
+   * sub-field rejected.
+   */
+  element_fields?: FieldShape[];
 }
 
 /**
@@ -639,7 +742,7 @@ export interface FieldShape {
  * degrades to 'unknown' rather than throwing, because a SCHEMA READ must never
  * be why a call fails.
  */
-function describeZod(node: unknown, depth = 0): { type: string; enum_values?: string[] } {
+function describeZod(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[] } {
   if (!node || typeof node !== 'object' || depth > 6) return { type: 'unknown' };
   const def = (node as { _def?: Record<string, unknown> })._def;
   const name = def?.typeName as string | undefined;
@@ -665,7 +768,12 @@ function describeZod(node: unknown, depth = 0): { type: string; enum_values?: st
       return { type: `literal ${JSON.stringify(def?.value)}` };
     case 'ZodArray': {
       const inner = describeZod(def?.type, depth + 1);
-      return { type: `${inner.type}[]`, ...(inner.enum_values ? { enum_values: inner.enum_values } : {}) };
+      const elementFields = describeElementFields(def?.type, depth + 1);
+      return {
+        type: `${inner.type}[]`,
+        ...(inner.enum_values ? { enum_values: inner.enum_values } : {}),
+        ...(elementFields ? { element_fields: elementFields } : {}),
+      };
     }
     case 'ZodObject': {
       const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
@@ -697,6 +805,40 @@ function describeZod(node: unknown, depth = 0): { type: string; enum_values?: st
 }
 
 /**
+ * An array field's ELEMENT sub-fields, one level deep, when the element is an
+ * object (board db0e2799) — e.g. files[]'s {path, role}, current_ac[]'s
+ * {ac_id, text, verifiable_at}. Only unwraps the same optional/nullable/
+ * default/effects wrappers describeZod already unwraps (never recurses INTO
+ * a nested array-of-objects-within-an-object — one level is what the reported
+ * gap needed). Returns undefined for a non-object array element (e.g.
+ * string[]), so `element_fields` is omitted entirely rather than reported
+ * empty.
+ */
+function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefined {
+  if (!node || typeof node !== 'object' || depth > 6) return undefined;
+  const def = (node as { _def?: Record<string, unknown> })._def;
+  const name = def?.typeName as string | undefined;
+  switch (name) {
+    case 'ZodObject': {
+      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
+      return Object.entries(shape).map(([fieldName, fieldNode]) => {
+        const described = describeZod(fieldNode, depth + 1);
+        const required = !(fieldNode as { isOptional?: () => boolean }).isOptional?.();
+        return { name: fieldName, required, type: described.type, ...(described.enum_values ? { enum_values: described.enum_values } : {}) };
+      });
+    }
+    case 'ZodOptional':
+    case 'ZodNullable':
+    case 'ZodDefault':
+      return describeElementFields(def?.innerType, depth + 1);
+    case 'ZodEffects':
+      return describeElementFields(def?.schema, depth + 1);
+    default:
+      return undefined;
+  }
+}
+
+/**
  * The shape of a registered record type, DERIVED from its own zod schema
  * (board 7acfbe48 / feedback §2.7).
  *
@@ -722,7 +864,13 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
   const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
     const described = describeZod(node);
     const required = !(node as { isOptional?: () => boolean }).isOptional?.();
-    return { name, required, type: described.type, ...(described.enum_values ? { enum_values: described.enum_values } : {}) };
+    return {
+      name,
+      required,
+      type: described.type,
+      ...(described.enum_values ? { enum_values: described.enum_values } : {}),
+      ...(described.element_fields ? { element_fields: described.element_fields } : {}),
+    };
   });
   return { type, fields };
 }

@@ -38,6 +38,7 @@ Exactly the required-inputs manifest. Mutation survivors are your first stops: t
 3. Async: unawaited promises, racing writes, error paths that drop or double-handle.
 4. Boundary behavior the tests may not pin: empty, max, concurrent.
 5. Diff↔brief fidelity: does the change do what the handoff claims?
+6. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 

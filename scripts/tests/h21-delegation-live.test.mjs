@@ -88,9 +88,13 @@ function streakOf(dir) {
 const readOf = (dir, file) => ({ tool_name: 'Read', tool_input: { file_path: join(dir, file) } });
 const grepOf = () => ({ tool_name: 'Grep', tool_input: { pattern: 'x' } });
 const globOf = () => ({ tool_name: 'Glob', tool_input: { pattern: '**/*.mjs' } });
-const knowledgeUpdate = (prefix = 'mcp__sterling__') => ({ tool_name: `${prefix}knowledge_update`, tool_input: {} });
-const knowledgeAppend = (prefix = 'mcp__sterling__') => ({ tool_name: `${prefix}knowledge_append`, tool_input: {} });
-const knowledgeEdit = (prefix = 'mcp__sterling__') => ({ tool_name: `${prefix}knowledge_edit`, tool_input: {} });
+// Payloads sit ABOVE write_bytes_advise (2000) since the size-weighting change
+// (board 25b89890): these pins assert the advisory's content/counting for writes
+// that DO qualify — sub-threshold silence is h21-precision.test.mjs's territory.
+const BULKY = 'x'.repeat(2400);
+const knowledgeUpdate = (prefix = 'mcp__sterling__') => ({ tool_name: `${prefix}knowledge_update`, tool_input: { fields: BULKY } });
+const knowledgeAppend = (prefix = 'mcp__sterling__') => ({ tool_name: `${prefix}knowledge_append`, tool_input: { entries: BULKY } });
+const knowledgeEdit = (prefix = 'mcp__sterling__') => ({ tool_name: `${prefix}knowledge_edit`, tool_input: { replace: BULKY } });
 const taskOf = () => ({ tool_name: 'Task', tool_input: {} });
 const agentOf = () => ({ tool_name: 'Agent', tool_input: {} });
 

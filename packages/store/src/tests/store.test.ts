@@ -38,6 +38,19 @@ function decision(over: Record<string, unknown> = {}) {
   };
 }
 
+function researchFinding(over: Record<string, unknown> = {}) {
+  return {
+    ...envelope('research_finding'),
+    question: 'does the platform rate-limit per org or per token?',
+    answer: 'per-org',
+    source_urls: ['https://developer.genesys.cloud/x'],
+    source_date: '2026-01-15',
+    capture_date: '2026-06-01',
+    volatility_hint: 'medium',
+    ...over,
+  };
+}
+
 function article(over: Record<string, unknown> = {}) {
   return {
     ...envelope('feature_article'),
@@ -135,6 +148,22 @@ test('query: filter by type and stack tags, file-key join, cap (§3.4 order)', (
     assert.equal(store.query({ types: ['decision'], stack_tags: ['python'] }).length, 1);
     assert.equal(store.query({ file_keys: ['src/export/csv.ts'] }).length, 1);
     assert.equal(store.query({ types: ['decision'], cap: 1 }).length, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('query: research_finding file-key join — the same join every other file_keys-bearing type gets (decision 8dbbc85d, board b1de6fab)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const withKey = store.create(researchFinding({ question: 'q-with-key', file_keys: ['scripts/hooks/x.mjs'] }));
+    store.create(researchFinding({ question: 'q-other-key', file_keys: ['scripts/hooks/other.mjs'] }));
+    store.create(researchFinding({ question: 'q-no-key' })); // (3) file_keys omitted — still a valid, queryable-by-type record; just never joined by path
+    assert.equal(store.query({ types: ['research_finding'] }).length, 3, 'all three are valid research findings regardless of file_keys presence');
+    assert.equal(store.query({ file_keys: ['scripts/hooks/x.mjs'] }).length, 1, 'joins exactly the finding carrying that path');
+    assert.equal((store.query({ file_keys: ['scripts/hooks/x.mjs'] })[0] as unknown as { id: string }).id, withKey.id);
+    assert.equal(store.query({ file_keys: ['scripts/hooks/other.mjs'] }).length, 1, 'and the finding at a DIFFERENT path is not returned for this key');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
