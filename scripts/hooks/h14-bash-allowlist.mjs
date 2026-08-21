@@ -57,7 +57,12 @@ try {
     deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
   }
 
-  const runCommandPrefixes = config.toolchains.flatMap((tc) => Object.values(tc.run_commands ?? {}));
+  // 'node scripts/run-gate.mjs' joins the declared run_commands prefixes
+  // (decision 98549344, slug toolchain-success-predicates-run-gate, board
+  // babf3a9e): it is the sanctioned success-predicate runner, not a
+  // per-project declared command, so it is allowlisted here directly rather
+  // than baked into any project's config.toolchains[].run_commands.
+  const runCommandPrefixes = [...config.toolchains.flatMap((tc) => Object.values(tc.run_commands ?? {})), 'node scripts/run-gate.mjs'];
   const firstArg = command.match(/^node\s+(?:"([^"]+)"|(\S+))/);
   const helperArg = firstArg ? (firstArg[1] ?? firstArg[2]) : undefined;
   const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, '/'));

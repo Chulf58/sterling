@@ -52,7 +52,11 @@
 import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
 import { parseConfig } from '@sterling/schemas';
 
-const BUILTIN_FLOOR = ['node --test', 'npm test', 'npm run check'];
+// 'node scripts/run-gate.mjs' joins the floor (decision 98549344, slug
+// toolchain-success-predicates-run-gate, board babf3a9e): a run-gate
+// invocation IS a gate — masking its exit with ';'/'||' must deny exactly
+// like the other builtins.
+const BUILTIN_FLOOR = ['node --test', 'npm test', 'npm run check', 'node scripts/run-gate.mjs'];
 
 let input;
 try {

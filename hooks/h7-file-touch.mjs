@@ -4746,6 +4746,14 @@ var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
 });
+var successPredicateSchema = external_exports.object({
+  output_regex: external_exports.string().optional(),
+  output_regex_absent: external_exports.string().optional(),
+  artifact: external_exports.object({
+    path: external_exports.string(),
+    min_bytes: external_exports.number().optional()
+  }).optional()
+}).refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4753,7 +4761,9 @@ var configSchema = external_exports.object({
     // baked from the adapter at init (§9.1)
     test_globs: external_exports.array(external_exports.string()).optional(),
     run_commands: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional()
+    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional(),
+    // §see comment above: keyed by run_command key, optional, never defaulted to {}
+    success_predicates: external_exports.record(external_exports.string(), successPredicateSchema).optional()
   })).default([]),
   backup_path: external_exports.string().optional(),
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;

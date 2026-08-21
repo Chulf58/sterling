@@ -11,6 +11,29 @@ const modelEffort = z.object({
   effort: z.enum(['low', 'medium', 'high', 'xhigh']),
 });
 
+// Toolchain success predicates (decision 98549344, slug
+// toolchain-success-predicates-run-gate, board babf3a9e). Lives ALONGSIDE
+// run_commands, keyed by the same run_command key — never nested inside a
+// run_commands string value (that would break H14's Object.values flatMap
+// over run_commands as plain strings). At least one criterion must be
+// declared; an empty {} is refused rather than silently accepted as "nothing
+// to check" (P5).
+const successPredicateSchema = z
+  .object({
+    output_regex: z.string().optional(),
+    output_regex_absent: z.string().optional(),
+    artifact: z
+      .object({
+        path: z.string(),
+        min_bytes: z.number().optional(),
+      })
+      .optional(),
+  })
+  .refine(
+    (v) => v.output_regex !== undefined || v.output_regex_absent !== undefined || v.artifact !== undefined,
+    { message: 'success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)' }
+  );
+
 export const configSchema = z.object({
   toolchains: z
     .array(
@@ -21,6 +44,8 @@ export const configSchema = z.object({
         test_globs: z.array(z.string()).optional(),
         run_commands: z.record(z.string(), z.string()).optional(),
         capabilities: z.record(z.string(), z.boolean()).optional(),
+        // §see comment above: keyed by run_command key, optional, never defaulted to {}
+        success_predicates: z.record(z.string(), successPredicateSchema).optional(),
       })
     )
     .default([]),
