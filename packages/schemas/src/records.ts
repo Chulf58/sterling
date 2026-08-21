@@ -128,6 +128,11 @@ export const researchFindingSchema = base
     source_date: isoDate,
     capture_date: isoDate,
     volatility_hint: z.enum(['fast', 'medium', 'stable']).optional(),
+    // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+    // seam, a library's behavior in one adapter) join the file-key economy the
+    // same way decision/anti_pattern/todo do; many findings are fileless
+    // (platform behavior, pricing) so this stays optional, never required.
+    file_keys: z.array(repoPath).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -487,7 +492,7 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     schema: researchFindingSchema,
     immutable: false,
     fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join('\n'),
-    fileKeys: () => [],
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
     // No title on this type — the question IS the identity. Both clocks ride
     // along because a finding's currency decides whether it may be used at all.
     digest: { slug: 'plain', question: 'clip', source_date: 'plain', capture_date: 'plain' },

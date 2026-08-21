@@ -109,6 +109,97 @@ test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom st
   }
 });
 
+test('MCP: research_finding gains file_keys — create normalizes it, query joins by path, other types stay refused (decision 8dbbc85d, board b1de6fab)', async () => {
+  const { client, cleanup } = await harness();
+  try {
+    // (2) knowledge_create accepts a research_finding WITH file_keys and
+    // normalizes the path — the same invariant decision/anti_pattern already get.
+    const created = payload(
+      await client.callTool({
+        name: 'knowledge_create',
+        arguments: {
+          type: 'research_finding',
+          fields: {
+            question: 'does the platform rate-limit per org or per token?',
+            answer: 'per-org',
+            source_urls: [],
+            source_date: '2026-01-15',
+            capture_date: '2026-06-01',
+            volatility_hint: 'medium',
+            file_keys: ['scripts\\hooks\\x.mjs'],
+          },
+          projection: 'full',
+        },
+      })
+    ) as { record: { id: string; file_keys?: string[] } };
+    assert.deepEqual(
+      created.record.file_keys,
+      ['scripts/hooks/x.mjs'],
+      'path invariant holds for research_finding across the MCP boundary, same as decision'
+    );
+
+    // (3) a research_finding WITHOUT file_keys stays valid — no migration,
+    // existing records and callers unaffected.
+    const bare = payload(
+      await client.callTool({
+        name: 'knowledge_create',
+        arguments: {
+          type: 'research_finding',
+          fields: {
+            question: 'unrelated question with no file identity',
+            answer: 'a',
+            source_urls: [],
+            source_date: '2026-05-01',
+            capture_date: '2026-06-01',
+          },
+          projection: 'full',
+        },
+      })
+    ) as { record: { id: string; file_keys?: string[] } };
+    assert.ok(
+      bare.record.file_keys === undefined,
+      'file_keys stays optional — omitting it entirely is still a valid write'
+    );
+
+    // (4) knowledge_query with file_keys JOINS research_finding by path
+    // exactly as it already joins decisions/anti_patterns.
+    const hit = payload(
+      await client.callTool({ name: 'knowledge_query', arguments: { file_keys: ['scripts/hooks/x.mjs'] } })
+    ) as { records: { id: string }[] };
+    assert.deepEqual(hit.records.map((r) => r.id), [created.record.id], 'the finding carrying that file_key is returned');
+
+    const miss = payload(
+      await client.callTool({ name: 'knowledge_query', arguments: { file_keys: ['scripts/hooks/other.mjs'] } })
+    ) as { records: { id: string }[] };
+    assert.ok(
+      !miss.records.some((r) => r.id === created.record.id),
+      'and is NOT returned for a different path'
+    );
+
+    // (5) a type that does NOT define file_keys still refuses it, naming the
+    // valid set — decision b47889b7 unchanged; reference_material is the control.
+    const refused = await client.callTool({
+      name: 'knowledge_create',
+      arguments: {
+        type: 'reference_material',
+        fields: {
+          title: 'ROADMAP',
+          kind: 'doc',
+          location: 'ROADMAP.md',
+          summary: 's',
+          source_date: '2026-07-29',
+          capture_date: '2026-07-29',
+          file_keys: ['ROADMAP.md'],
+        },
+      },
+    });
+    assert.equal(refused.isError, true, 'reference_material still has no file_keys field — the write is refused, not silently accepted');
+    assert.match((refused.content as { text: string }[])[0].text, /'file_keys'/, 'the refusal names the offending field');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('MCP integration: the spine tool surface is served and callable end-to-end', async () => {
   const { client, store, cleanup } = await harness();
   try {

@@ -298,6 +298,44 @@ test('full §3.2 record set: anti_pattern, research_finding, reference_material,
   });
 });
 
+test('research_finding: file_keys is OPTIONAL and normalizes at the boundary like every other path field (§3.2, decision 8dbbc85d)', () => {
+  const base = {
+    ...envelope('research_finding'),
+    question: 'does the platform rate-limit per org or per token?',
+    answer: 'per-org',
+    source_urls: ['https://developer.genesys.cloud/x'],
+    source_date: '2026-01-15',
+    capture_date: '2026-06-01',
+    volatility_hint: 'medium',
+  };
+
+  // (3) omitted entirely — still a valid record; no migration for every
+  // research_finding written before this change.
+  const withoutKeys = validateRecord({ ...base }) as unknown as { file_keys?: string[] };
+  assert.ok(!('file_keys' in withoutKeys), 'file_keys absent stays absent — no default, no null placeholder');
+
+  // (2) present, with a Windows-separator path — normalized exactly like
+  // decision/anti_pattern/disconfirmed_hypothesis file_keys above.
+  const withKeys = validateRecord({ ...base, id: randomUUID(), file_keys: ['scripts\\hooks\\x.mjs'] }) as unknown as { file_keys: string[] };
+  assert.deepEqual(withKeys.file_keys, ['scripts/hooks/x.mjs'], 'backslash path normalizes to repo-relative POSIX, the same invariant every other file_keys field gets');
+});
+
+test("registry: research_finding.fileKeys reads its own file_keys field — the decision/anti_pattern/disconfirmed_hypothesis pattern, not reference_material's location-derived one", () => {
+  const fk = RECORD_TYPES.research_finding.fileKeys;
+  assert.deepEqual(fk({ file_keys: ['a.ts', 'b.ts'] }), ['a.ts', 'b.ts'], 'the extractor reads file_keys directly, like decision/anti_pattern/disconfirmed_hypothesis');
+  assert.deepEqual(fk({}), [], 'no file_keys present yields an empty join set, never a throw');
+});
+
+test('knownFieldsFor: research_finding gains file_keys; reference_material still does not (decision b47889b7 unchanged, board b1de6fab)', () => {
+  const rf = knownFieldsFor('research_finding');
+  assert.ok(rf, 'research_finding must resolve its known field set');
+  assert.ok(rf!.has('file_keys'), 'file_keys is now a real field of research_finding');
+
+  const ref = knownFieldsFor('reference_material');
+  assert.ok(ref, 'reference_material must resolve its known field set');
+  assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)');
+});
+
 test('registry: full record set registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
   assert.deepEqual(Object.keys(RECORD_TYPES).sort(), [
     'anti_pattern',

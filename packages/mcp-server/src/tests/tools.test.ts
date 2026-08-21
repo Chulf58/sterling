@@ -1849,6 +1849,59 @@ test('knowledge_schema reports required vs optional, types and closed enums (§2
   }
 });
 
+test('knowledge_schema(research_finding) reports file_keys as optional; reference_material still does not (decision 8dbbc85d, board b1de6fab)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const rf = tools.knowledgeSchema('research_finding');
+    assert.ok(rf.optional.includes('file_keys'), 'file_keys is reported optional on research_finding');
+    const fk = rf.fields.find((f) => f.name === 'file_keys');
+    assert.ok(fk, 'file_keys is a described field, not just named in the optional list');
+    assert.equal(typeof fk?.type, 'string');
+    assert.notEqual(fk?.type, 'unknown', 'the new field is described, not left undescribed');
+
+    // control: the per-type split still holds — reference_material carries its
+    // path via `location`, not file_keys, and this addition must not blur that
+    // (decision b47889b7, unchanged).
+    const ref = tools.knowledgeSchema('reference_material');
+    assert.ok(!ref.optional.includes('file_keys') && !ref.required.includes('file_keys'), 'reference_material is unaffected by this addition');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_create/knowledge_query: research_finding accepts file_keys, normalizes it, and joins by it — same as decision/anti_pattern (decision 8dbbc85d, board b1de6fab)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record } = tools.knowledgeCreate('research_finding', {
+      question: 'does the platform rate-limit per org or per token?',
+      answer: 'per-org',
+      source_urls: [],
+      source_date: '2026-01-15',
+      capture_date: '2026-06-01',
+      volatility_hint: 'medium',
+      file_keys: ['scripts\\hooks\\x.mjs'],
+    });
+    assert.deepEqual(
+      (record as unknown as { file_keys: string[] }).file_keys,
+      ['scripts/hooks/x.mjs'],
+      'path invariant holds through the tool surface, same as decision/anti_pattern'
+    );
+
+    const hits = tools.knowledgeQuery({ file_keys: ['scripts/hooks/x.mjs'] });
+    assert.equal(hits.length, 1, 'the finding joins by its file_keys');
+    assert.equal((hits[0] as unknown as { id: string }).id, record.id);
+
+    const misses = tools.knowledgeQuery({ file_keys: ['scripts/hooks/other.mjs'] });
+    assert.equal(
+      misses.some((r) => (r as unknown as { id: string }).id === record.id),
+      false,
+      'not returned for a different path'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_schema is derived from the live schema — every registered type answers', () => {
   const { tools, cleanup } = harness();
   try {

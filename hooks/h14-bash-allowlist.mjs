@@ -4217,7 +4217,12 @@ var researchFindingSchema = base.extend({
   source_urls: external_exports.array(external_exports.string()),
   source_date: isoDate,
   capture_date: isoDate,
-  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional()
+  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
+  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // seam, a library's behavior in one adapter) join the file-key economy the
+  // same way decision/anti_pattern/todo do; many findings are fileless
+  // (platform behavior, pricing) so this stays optional, never required.
+  file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
 var modelsCatalogSchema = external_exports.object({
   entries: external_exports.array(external_exports.object({
