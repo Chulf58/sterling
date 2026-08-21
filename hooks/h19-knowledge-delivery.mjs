@@ -5,6 +5,10 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h19-knowledge-delivery.mjs
+import { statSync as statSync2 } from "node:fs";
+import { join as join3 } from "node:path";
+
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join, resolve } from "node:path";
@@ -6350,6 +6354,23 @@ function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { r
   }
   return lines.join("\n");
 }
+function suspectLabel(record) {
+  if (record.type === "anti_pattern") return `anti-pattern '${record.title}'`;
+  if (record.type === "decision") return `decision ${record.id}`;
+  if (record.slug) return `article '${record.slug}'`;
+  return record.title ?? record.id;
+}
+function renderLineSuspects(suspects, charCap) {
+  if (!suspects?.length) return [];
+  const lines = [
+    "\u26A0 LINE-SUSPECT (H19 advisory) \u2014 cited line position(s) below may have rotted: the citing record predates this file's current version."
+  ];
+  for (const { record, tokens } of suspects) {
+    lines.push(`  \u2192 ${suspectLabel(record)} cites ${clip(tokens.join(", "), charCap)} \u2014 this position may no longer be accurate.`);
+  }
+  lines.push("  Line numbers rot as a file changes \u2014 cite an anchor (function/slug/passage) instead where possible.");
+  return [lines.join("\n")];
+}
 function renderPayload(rel2, blocks, { unowned = false } = {}) {
   return [
     unowned ? renderFrontier(rel2, { hasOtherKnowledge: blocks.length > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
@@ -6397,13 +6418,31 @@ try {
   const frontierFresh = unowned && !guard.frontier_files.includes(rel);
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  let lineSuspectBlocks = [];
+  try {
+    const mtimeMs = statSync2(join3(input.cwd, rel)).mtimeMs;
+    const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const lineTokenRe = new RegExp(`(?:(?<=\\\\[nt])|(?<![\\w./-]))${escapedRel}:\\d+(?:-\\d+)?`, "g");
+    const suspects = [];
+    for (const record of fresh) {
+      const { history: _history, ...liveBody } = record;
+      const tokens = [...new Set(JSON.stringify(liveBody).match(lineTokenRe) ?? [])];
+      if (!tokens.length) continue;
+      const updatedAtMs = Date.parse(record.updated_at ?? "");
+      if (!Number.isFinite(updatedAtMs) || updatedAtMs >= mtimeMs) continue;
+      suspects.push({ record, tokens });
+    }
+    lineSuspectBlocks = renderLineSuspects(suspects, charCap);
+  } catch {
+  }
   const blocks = [
     ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
     ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
-    ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []
+    ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
+    ...lineSuspectBlocks
   ];
   const payload = renderPayload(rel, blocks, { unowned });
-  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
   if (mode === "enqueue") {
     enqueuePending(pendingPath(input.cwd), {
       kind: unowned ? "frontier" : "delivery",

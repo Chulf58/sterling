@@ -430,6 +430,45 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
   return lines.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// LINE-SUSPECT ADVISORY (board 04ccecb1-a338-4b4e-91f0-c99588c1cdce). Warn-only
+// (P1 advisory): this renderer only ever ADDS a trailing block to the payload,
+// never changes what else renders or the hook's exit code. The SCAN (regex
+// match against `rel`'s `<rel>:digits[-digits]` tokens, plus the record's
+// updated_at vs the file's current mtime) lives at the hook's own assembly
+// seam, beside freshOwners/freshHazards/freshDecisions — this is only the
+// renderer, matching renderHazards/renderDecisionPointers' own shape.
+// ---------------------------------------------------------------------------
+
+/** How the payload already names a record's type: slug for an owning article
+ *  or reference doc, title for a hazard anti_pattern, id for a decision
+ *  (decisions carry no slug at all — renderDecisionPointers only ever shows
+ *  one when a record happens to have it). Mirrors each render* function's own
+ *  naming rather than inventing a new one for this block. */
+function suspectLabel(record) {
+  if (record.type === 'anti_pattern') return `anti-pattern '${record.title}'`;
+  if (record.type === 'decision') return `decision ${record.id}`;
+  if (record.slug) return `article '${record.slug}'`;
+  return record.title ?? record.id;
+}
+
+/** One trailing block naming every stale-citing record and the token(s) it
+ *  cites. `suspects` is `{record, tokens}[]`, already filtered to the stale
+ *  ones by the caller's scan — this only renders what it is handed. Returns
+ *  `[]` (no block at all) when nothing is suspect, matching the other
+ *  render* helpers' empty-array-means-nothing-to-add convention. */
+export function renderLineSuspects(suspects, charCap) {
+  if (!suspects?.length) return [];
+  const lines = [
+    "⚠ LINE-SUSPECT (H19 advisory) — cited line position(s) below may have rotted: the citing record predates this file's current version.",
+  ];
+  for (const { record, tokens } of suspects) {
+    lines.push(`  → ${suspectLabel(record)} cites ${clip(tokens.join(', '), charCap)} — this position may no longer be accurate.`);
+  }
+  lines.push('  Line numbers rot as a file changes — cite an anchor (function/slug/passage) instead where possible.');
+  return [lines.join('\n')];
+}
+
 /** The delivery envelope. `unowned` swaps the header for the frontier signal:
  *  hazards and decisions can attach to territory NO article owns, and claiming
  *  'owning knowledge for X' above them would be false. With no blocks at all the
