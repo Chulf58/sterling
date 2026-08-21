@@ -4567,7 +4567,15 @@ var handoffSchema = external_exports.object({
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
 var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum(["research_tool", "agent_dispatch", "debug_scope", "concept_designed", "no_capture", "capture_pending"]),
+  kind: external_exports.enum([
+    "research_tool",
+    "agent_dispatch",
+    "debug_scope",
+    "concept_designed",
+    "no_capture",
+    "capture_pending",
+    "test_repair"
+  ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1)
 });
@@ -5032,7 +5040,7 @@ try {
     for (const glob of tc.test_globs ?? []) {
       if (matchesGlob(rel, glob)) {
         deny(
-          `H5: '${rel}' is a test path ('${glob}', ${tc.adapter} toolchain) \u2014 tests are frozen during the fix loop. If you believe a test is wrong, exit tests-invalid with evidence; never edit it silently.`
+          `H5: '${rel}' is a test path ('${glob}', ${tc.adapter} toolchain) \u2014 test paths are frozen for pipeline agents. If you believe a test is wrong, exit tests-invalid with evidence; never edit it silently. A demonstrably buggy test is a conductor repair, recorded via node scripts/test-repair.mjs \u2014 never a silent pipeline-agent edit.`
         );
       }
     }

@@ -1793,6 +1793,68 @@ test('H10 no-capture duty: an old declaration does not retroactively cover a LAT
   }
 });
 
+test('H10 test-repair evidence: a test_repair event later than the touch of its named path satisfies the capture duty PER PATH; an unrelated path stays armed', () => {
+  const satisfied = makeProject();
+  try {
+    writeTouchesAt(satisfied.dir, [{ path: 'tests/foo.test.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(satisfied.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — fixture asserted an unsatisfiable oracle', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(satisfied.dir, { hook_event_name: 'Stop' }), satisfied.dir);
+    assert.equal(r.code, 0, 'a test_repair event later than the touch of its named path satisfies the capture duty');
+    assert.equal(owed(satisfied.store, 'capture_owed').length, 0, 'nothing owed — the repair evidence IS the capture');
+  } finally {
+    satisfied.cleanup();
+  }
+  const unrelated = makeProject();
+  try {
+    writeTouchesAt(unrelated.dir, [{ path: 'src/other.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(unrelated.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — fixture asserted an unsatisfiable oracle', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(unrelated.dir, { hook_event_name: 'Stop' }), unrelated.dir);
+    assert.equal(r.code, 2, 'a test_repair event covers ONLY its named path — an unrelated touch stays armed');
+  } finally {
+    unrelated.cleanup();
+  }
+  const rearmed = makeProject();
+  try {
+    writeTouchesAt(rearmed.dir, [{ path: 'tests/foo.test.mjs', at: LATE_EVENT_AT }]);
+    writeSessionEvents(rearmed.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — fixture asserted an unsatisfiable oracle', at: R_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(rearmed.dir, { hook_event_name: 'Stop' }), rearmed.dir);
+    assert.equal(r.code, 2, 'a touch AFTER the repair event re-arms the duty — evidence cannot cover future work');
+  } finally {
+    rearmed.cleanup();
+  }
+});
+
+test('H10 test-repair evidence: coverage is EXACT-PATH — a longer sibling path or evidence text naming the path never covers it', () => {
+  const sibling = makeProject();
+  try {
+    writeTouchesAt(sibling.dir, [{ path: 'tests/foo.test.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(sibling.dir, [
+      { kind: 'test_repair', detail: 'x-tests/foo.test.mjs — repaired the OTHER suite', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(sibling.dir, { hook_event_name: 'Stop' }), sibling.dir);
+    assert.equal(r.code, 2, 'a repair of a longer sibling path never covers the shorter touch');
+  } finally {
+    sibling.cleanup();
+  }
+  const evidenceLeak = makeProject();
+  try {
+    writeTouchesAt(evidenceLeak.dir, [{ path: 'src/gate.mjs', at: R_EVENT_AT }]);
+    writeSessionEvents(evidenceLeak.dir, [
+      { kind: 'test_repair', detail: 'tests/foo.test.mjs — the assertion about src/gate.mjs was wrong', at: LATE_EVENT_AT },
+    ]);
+    const r = runHook('h10-direct-capture.mjs', hookInput(evidenceLeak.dir, { hook_event_name: 'Stop' }), evidenceLeak.dir);
+    assert.equal(r.code, 2, 'free-text evidence naming a path never discharges that path\'s duty');
+  } finally {
+    evidenceLeak.cleanup();
+  }
+});
+
 // ---- capture-pending deferral (board 1af5d630: the truthful middle state) ----
 // capture_pending declares the capture EXISTS and its write is in flight on a
 // named target. Unlike no_capture it covers LATER work too — wave work keeps

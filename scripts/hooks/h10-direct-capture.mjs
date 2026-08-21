@@ -520,6 +520,22 @@ try {
   // on a landed write or converts to a deduped capture_owed item.
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
+
+  // Test-repair evidence (decision frozen-test-repair-signatures-plus-visible-repair):
+  // scripts/test-repair.mjs records that the conductor repaired a demonstrably
+  // buggy frozen test, with evidence, at a named path. The event SATISFIES the
+  // capture duty for that path's touches EARLIER than the event — PER PATH,
+  // unlike no_capture's global cutoff — so the sanctioned route H5's denial
+  // now names actually quiets the duty it discharges (a satisfier the gate
+  // ignores would be a false affordance). A later touch of the same path
+  // re-arms the duty as usual.
+  // The declared path is the detail's leading segment (test-repair.mjs writes
+  // `<path> — <evidence>`) and must match the touch EXACTLY — a substring
+  // match would let the free-text evidence, or a longer sibling path, silently
+  // discharge the wrong file's duty (review finding 2026-08-21).
+  const testRepairEvents = sessionEvents.filter((e) => e.kind === 'test_repair' && e.detail && e.at);
+  const coveredByTestRepair = (t) =>
+    t.at && testRepairEvents.some((e) => String(e.detail).split(' — ')[0].trim() === t.path && e.at > t.at);
   // Touch-noise precision (board 05e298f0): reading an image/binary file is
   // inspection, not knowledge-producing work — excluded from the CAPTURE
   // duty's touch set only (never the article-demand `paths` below, which
@@ -530,7 +546,7 @@ try {
   // `earliest` either, which would anchor the captured-set window to work whose
   // duty is not owed yet.
   const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
-    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path)
+    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t)
   );
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;

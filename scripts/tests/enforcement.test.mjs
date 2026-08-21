@@ -666,6 +666,41 @@ test('H5: a corrupt config denies (fail closed), never a voided frozen-test gate
   }
 });
 
+// Visible-repair half of decision frozen-test-repair-signatures-plus-visible-repair
+// (knowledge_get 7a4c3fb6-dc23-4c2f-9369-d2592132f408; board a06e4a1c): H5's denial
+// dropped a precondition it never actually checks ('during the fix loop' implies a
+// run/phase state the hook never inspects) and never named the one route that IS
+// sanctioned — conductor hand-repair with evidence recorded via test_repair (H5
+// binds coder/debugger frontmatter only; the conductor is exempt by construction
+// and was never denied by this hook in the first place). NOTE for conductor
+// adjudication: the PRE-EXISTING test above ('H5: denies test-path edits per
+// adapter test globs...', this file, asserts only /frozen/ and /tests-invalid/)
+// does not pin 'during the fix loop' verbatim, so it does not conflict with this
+// new assertion set — but it also does not yet assert the NEW required content
+// (b)/(d) below, so it will need strengthening once the message ships to stop
+// under-specifying the denial's fixed shape.
+test('H5 denial (visible-repair, decision 7a4c3fb6): names test paths as frozen for pipeline agents, never claims a fix-loop precondition, keeps the tests-invalid route, and names the conductor test_repair route', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const edit = (p) => runHook('h5-frozen-tests.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: p } }), dir);
+    const r = edit(join(dir, 'tests', 'feature.spec.ts'));
+    assert.equal(r.code, 2);
+    // (a) still names the freeze
+    assert.match(r.stderr, /frozen/);
+    // (b) states the WHO — frozen for pipeline agents — not an unchecked run-state claim
+    assert.match(r.stderr, /pipeline agent/i, 'denial names test paths as frozen for pipeline agents');
+    assert.doesNotMatch(r.stderr, /during the fix loop/, "the hook never checks run/phase state, so it must not claim this precondition");
+    // (c) keeps the tests-invalid escape hatch
+    assert.match(r.stderr, /tests-invalid/, 'keeps pointing at the typed escape hatch');
+    assert.match(r.stderr, /evidence/i, '"exit tests-invalid with evidence" guidance survives');
+    // (d) names the sanctioned repair route explicitly
+    assert.match(r.stderr, /conductor/i, 'names the conductor as the one who repairs');
+    assert.match(r.stderr, /test_repair|test-repair/, 'names the test_repair evidence route by name');
+  } finally {
+    cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // H14 Bash allowlist
 // ---------------------------------------------------------------------------

@@ -5,9 +5,13 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h18-test-write-wall.mjs
-import { dirname as dirname2 } from "node:path";
-import { fileURLToPath } from "node:url";
+// scripts/hooks/h27-dispatch-signatures.mjs
+import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2, resolve as resolve2, sep } from "node:path";
+
+// scripts/hooks/lib/common.mjs
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4081,45 +4085,6 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
-function matchesGlob(path, glob) {
-  const g = glob.replace(/\\/g, "/");
-  let re = "";
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i];
-    if (c === "*") {
-      if (g[i + 1] === "*") {
-        i++;
-        if (g[i + 1] === "/") {
-          re += "(?:[^/]*/)*";
-          i++;
-        } else {
-          re += ".*";
-        }
-      } else {
-        re += "[^/]*";
-      }
-    } else if (c === "?") {
-      re += "[^/]";
-    } else if (".+^${}()|[]\\".includes(c)) {
-      re += "\\" + c;
-    } else {
-      re += c;
-    }
-  }
-  return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
-}
-function toRepoRelative(absolutePath, repoRoot) {
-  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const abs = norm(absolutePath);
-  const root = norm(repoRoot);
-  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
-  const a = drivePrefixed ? abs.toLowerCase() : abs;
-  const r = drivePrefixed ? root.toLowerCase() : root;
-  if (!(a === r || a.startsWith(r + "/"))) {
-    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
-  }
-  return normalizeRepoPath(abs.slice(root.length + 1));
-}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
@@ -4961,10 +4926,6 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
-// scripts/hooks/lib/common.mjs
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 
@@ -4999,83 +4960,80 @@ function deny(message) {
 function allow() {
   process.exit(0);
 }
-function environmentDefectDenial(gateName, detail, opts = {}) {
-  const audienceAware = "agentId" in opts;
-  const { agentId, selfHeal } = opts;
-  const repair = "repair it (or restart the session) before proceeding";
-  const noConductorAbove = `there is no conductor above you to exit \`blocked\` to \u2014 ${repair}.`;
-  const agentFacing = `Do not diagnose, repair, or retry ${gateName} yourself \u2014 exit \`blocked\`, citing this message VERBATIM, and let the conductor fix the environment.`;
-  let instruction;
-  if (selfHeal) {
-    const resolution = !audienceAware || agentId ? "exit `blocked` citing it." : noConductorAbove;
-    instruction = `${selfHeal.action} ${selfHeal.onRepeat}, ${resolution}`;
-  } else if (audienceAware && !agentId) {
-    instruction = `This is broken state, and ${noConductorAbove}`;
-  } else {
-    instruction = agentFacing;
-  }
-  return `\u26A0 ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
-}
-function loadConfig(cwd) {
-  const p = join(cwd, ".sterling", "config.json");
-  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
-}
-function repoRel(toolPath2, cwd) {
-  if (!toolPath2) return null;
-  const fwd = String(toolPath2).replace(/\\/g, "/");
-  try {
-    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
-    return normalizeRepoPath(fwd);
-  } catch {
-    return null;
-  }
+function warnNonBlocking(message) {
+  process.stderr.write(message);
+  process.exit(1);
 }
 
-// scripts/hooks/lib/contract.mjs
-var ENFORCEMENT_SURFACE = [".claude/settings*.json", ".claude/agents/**", ".sterling/config.json"];
-function isEnforcementSurface(rel) {
-  return typeof rel === "string" && ENFORCEMENT_SURFACE.some((g) => matchesGlob(rel, g));
-}
-
-// scripts/hooks/h18-test-write-wall.mjs
-var input = readStdin();
-var toolPath = input.tool_input?.file_path;
-if (!toolPath) allow();
+// scripts/hooks/h27-dispatch-signatures.mjs
+var MARKER = "STERLING-SIGNATURES";
+var input;
 try {
-  const fwd = String(toolPath).replace(/\\/g, "/");
-  const hooksDir = dirname2(fileURLToPath(import.meta.url)).replace(/\\/g, "/");
-  if (fwd === hooksDir || fwd.startsWith(hooksDir + "/")) {
-    deny(`H18 [self-protection]: '${toolPath}' is inside the bundled hooks directory \u2014 the enforcement surface is never test-writer-writable (\xA76)`);
-  }
-  const rel = repoRel(toolPath, input.cwd);
-  if (!rel) {
-    let emptyNormalize = false;
-    try {
-      if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) toRepoRelative(fwd, input.cwd);
-      else normalizeRepoPath(fwd);
-    } catch (e) {
-      emptyNormalize = /empty path/.test(e && e.message || "");
+  input = readStdin();
+} catch (e) {
+  warnNonBlocking(`H27: failed to parse stdin: ${e && e.message || e}`);
+}
+function emit(additionalContext) {
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
+    })
+  );
+}
+try {
+  if (!existsSync2(join2(input.cwd ?? ".", ".sterling", "sterling.db"))) allow();
+  const prompt = String(input.tool_input?.prompt ?? "");
+  const lines = prompt.split("\n");
+  const markerIdxs = lines.flatMap((l, i) => l.trim() === MARKER ? [i] : []);
+  if (!markerIdxs.length) allow();
+  const markerIdx = markerIdxs.find((i) => (lines[i + 1] ?? "").startsWith("- ")) ?? markerIdxs[0];
+  const entries = [];
+  for (let i = markerIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.startsWith("- ")) break;
+    const rest = line.slice(2);
+    const sep2 = rest.match(/\s+::\s+/);
+    if (!sep2) {
+      deny(
+        `H27: malformed STERLING-SIGNATURES entry (missing ' :: ' separator): '${line}'
+Expected format: - <repo-relative-path> :: <signature text>`
+      );
     }
+    const path = rest.slice(0, sep2.index).trim();
+    const sig = rest.slice(sep2.index + sep2[0].length).trim();
+    entries.push({ path, sig });
+  }
+  if (!entries.length) {
     deny(
-      emptyNormalize ? `H18: '${toolPath}' normalizes to an empty path (it resolves to the repo root itself, not a file inside it) \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)` : `H18: '${toolPath}' is outside the repository \u2014 the test-writer writes ONLY test files inside the repo (\xA76 H18)`
+      `H27: STERLING-SIGNATURES marker present but zero entries follow it \u2014 a declared-but-empty section is a half-wired extension.
+Expected format: - <repo-relative-path> :: <signature text>`
     );
   }
-  if (isEnforcementSurface(rel)) {
-    deny(`H18 [self-protection]: '${rel}' is enforcement surface (${[".claude/settings*.json", ".claude/agents/**", ".sterling/config.json"].join(", ")}) \u2014 never test-writer-writable, in any mode (\xA76)`);
-  }
-  const config = loadConfig(input.cwd);
-  if (!config?.toolchains?.length) {
-    deny(environmentDefectDenial("H18", "No toolchains in .sterling/config.json \u2014 cannot resolve test globs to authorize the write; failing closed (P5)."));
-  }
-  for (const tc of config.toolchains) {
-    for (const glob of tc.test_globs ?? []) {
-      if (matchesGlob(rel, glob)) allow();
+  const root = resolve2(input.cwd ?? ".");
+  for (const entry of entries) {
+    const abs = resolve2(root, entry.path);
+    if (abs !== root && !abs.startsWith(root + sep)) {
+      deny(`H27: STERLING-SIGNATURES entry escapes the project root: '${entry.path}' \u2014 paths must be repo-relative.`);
+    }
+    if (!existsSync2(abs)) {
+      deny(`H27: STERLING-SIGNATURES entry names a file that does not exist: '${entry.path}'`);
+    }
+    let content;
+    try {
+      content = readFileSync2(abs, "utf8");
+    } catch (e) {
+      deny(`H27: STERLING-SIGNATURES entry '${entry.path}' could not be read (${e && e.message || e}) \u2014 the gate cannot verify it.`);
+    }
+    if (!content.includes(entry.sig)) {
+      deny(
+        `H27: STERLING-SIGNATURES entry for '${entry.path}' \u2014 declared signature not found verbatim in the file: '${entry.sig}'. Re-read the source and paste the exact line, or drop the entry.`
+      );
     }
   }
-  const declared = config.toolchains.flatMap((tc) => (tc.test_globs ?? []).map((g) => `${g} (${tc.adapter})`));
-  deny(
-    `H18: '${rel}' matches NO declared test glob \u2014 the test-writer writes ONLY test files (\xA79.1). Compared against: ${declared.length ? declared.join(", ") : "(none \u2014 every declared toolchain has an empty test_globs)"}. If this IS meant to be a test, its path or extension does not match any of those \u2014 author it at a path that does. If it is genuinely source, docs or config, that belongs to the coder/conductor: exit contract-violated naming the file.`
+  emit(
+    `H27: ${entries.length} signature(s) verified against source files named in the STERLING-SIGNATURES section.`
   );
+  allow();
 } catch (e) {
-  deny(environmentDefectDenial("H18", `Write-gate evaluation failed (${e && e.message || e}) \u2014 failing closed (P5).`));
+  warnNonBlocking(`H27: dispatch-signature verification failed: ${e && e.message || e}`);
 }

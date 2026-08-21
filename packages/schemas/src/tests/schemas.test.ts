@@ -542,6 +542,40 @@ test('sessionEventSchema: the six register kinds parse; unknown kind + missing f
   assert.throws(() => s.parse({ kind: 'research_tool', detail: 'x' }), 'at is required');
 });
 
+// ---- test_repair kind (decision frozen-test-repair-signatures-plus-visible-repair
+// 7a4c3fb6-dc23-4c2f-9369-d2592132f408; board a06e4a1c): the visible-repair half —
+// a conductor hand-repair of a frozen test raises a capture duty, and the repair
+// event itself is a sixth session-event kind. Mirrors the no_capture precedent
+// (board 7bbec3bd) directly above: same schema, same round-trip shape, new kind.
+test('sessionEventSchema: test_repair joins the register as the SIXTH kind — detail carries the repaired path + evidence summary', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  // detail carries BOTH the repaired test path and the evidence for why the
+  // test (not the code) was wrong — same free-text-with-required-substance
+  // shape as capture_pending's "<target> — <reason>" convention.
+  const detail = 'tests/feature.spec.ts — assertion pinned the OLD (pre-rename) export name, not the code under test';
+  const repaired = s.parse({ kind: 'test_repair', detail, at: NOW });
+  assert.equal(repaired.kind, 'test_repair');
+  assert.equal(repaired.detail, detail);
+  assert.equal(repaired.at, NOW);
+
+  // kind is now a closed enum of exactly SIX register writers — the five
+  // pre-existing kinds still parse (totality holds after the addition)...
+  assert.equal(s.parse({ kind: 'research_tool', detail: 'x', at: NOW }).kind, 'research_tool');
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'x', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'x', at: NOW }).kind, 'debug_scope');
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'x', at: NOW }).kind, 'concept_designed');
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'x', at: NOW }).kind, 'no_capture');
+  // ...and a kind outside the six is still rejected — the totality boundary moved
+  // from five to six, it did not open.
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the six writers is rejected');
+  assert.throws(() => s.parse({ kind: 'test_repair', at: NOW }), 'detail is required for test_repair too');
+  assert.throws(() => s.parse({ kind: 'test_repair', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'test_repair', detail }), 'at is required for test_repair too');
+});
+
 test('research_owed is a registered SYSTEM_REASONS member draining under "captured"; 1:1 totality holds (AC7, interface slice 4)', () => {
   const reasons = SYSTEM_REASONS as readonly string[];
   const verbs = DRAIN_VERBS as Record<string, string>;

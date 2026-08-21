@@ -121,9 +121,24 @@ export type MachineState = z.infer<typeof machineState>;
 // the capture duty one Stop (registers preserved, so a landed write settles
 // cleanly) and converts a still-pending duty to ONE deduped capture_owed item
 // on the next — pending work defers or lands on the queue, never evaporates.
-// Never a durable store record.
+// test_repair (decision frozen-test-repair-signatures-plus-visible-repair,
+// 7a4c3fb6-dc23-4c2f-9369-d2592132f408; board a06e4a1c): the VISIBLE-REPAIR
+// half — the conductor stays sanctioned to hand-repair a demonstrably buggy
+// frozen test (H5 rides coder/debugger frontmatter only), but the repair
+// must stop being invisible. detail carries the repaired repo-relative test
+// path plus the evidence for why the TEST, not the code, was wrong; written
+// by scripts/test-repair.mjs (a CLI, not a hook — mirrors no-capture.mjs's
+// append shape). Never a durable store record.
 export const sessionEventSchema = z.object({
-  kind: z.enum(['research_tool', 'agent_dispatch', 'debug_scope', 'concept_designed', 'no_capture', 'capture_pending']),
+  kind: z.enum([
+    'research_tool',
+    'agent_dispatch',
+    'debug_scope',
+    'concept_designed',
+    'no_capture',
+    'capture_pending',
+    'test_repair',
+  ]),
   detail: z.string().min(1),
   at: z.string().min(1),
 });
