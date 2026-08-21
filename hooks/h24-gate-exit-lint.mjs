@@ -4621,8 +4621,8 @@ var successPredicateSchema = external_exports.object({
   artifact: external_exports.object({
     path: external_exports.string(),
     min_bytes: external_exports.number().optional()
-  }).optional()
-}).refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
+  }).strict().optional()
+}).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4957,7 +4957,8 @@ function loadConfig(cwd) {
 }
 
 // scripts/hooks/h24-gate-exit-lint.mjs
-var BUILTIN_FLOOR = ["node --test", "npm test", "npm run check", "node scripts/run-gate.mjs"];
+var BUILTIN_FLOOR = ["node --test", "npm test", "npm run check"];
+var RUN_GATE_RE = /^(node\s+(?:\S*[\/\\])?scripts\/run-gate\.mjs)(?:\s|$)/;
 var input;
 try {
   input = readStdin();
@@ -4983,6 +4984,8 @@ function matchGate(segment) {
   for (const g of gateList) {
     if (segment === g || segment.startsWith(g) && /\s/.test(segment[g.length])) return g;
   }
+  const runGateMatch = segment.match(RUN_GATE_RE);
+  if (runGateMatch) return runGateMatch[1];
   return null;
 }
 function scanTopLevel(cmd) {

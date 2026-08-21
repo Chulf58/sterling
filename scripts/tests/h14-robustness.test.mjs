@@ -292,3 +292,45 @@ test('H14 AC-Z: a QUOTED path argument containing whitespace that climbs out of 
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Review finding pinned below (board babf3a9e, governing decision
+// knowledge_get 98549344-e355-42da-93dd-ce7c2dc4dfcb): "H14 allowlists the
+// run-gate invocation prefix so agents can be briefed to run gates through
+// it" — and the arm must be PATH-AGNOSTIC (an absolute clone path, not just
+// a repo-relative "scripts/run-gate.mjs" literal). ADD-ONLY: nothing above
+// this line was touched. A fixer is landing the corresponding repair in
+// parallel.
+// ---------------------------------------------------------------------------
+
+test('H14 (review finding — run-gate path-agnostic arm): the coder allowlist accepts an absolute-path run-gate invocation regardless of where the clone lives', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // EXPECTED FAILURE SHAPE (pre-fix): if H14's allowlist has no run-gate
+    // arm yet (or only recognizes a repo-relative "scripts/run-gate.mjs"
+    // literal), an absolute clone path is denied "not on the allowlist" and
+    // this assert.equal(r.code, 0) fails.
+    const r = bash(dir, 'node /abs/clone/scripts/run-gate.mjs export');
+    assert.equal(r.code, 0, `an absolute-path run-gate invocation must be allowlisted regardless of clone location; stderr: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H14 (review finding): the same run-gate arm still denies when chained with \';\' into a mutating command — the control-operator gate fires before any allowlist prefix match', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // EXPECTED SHAPE: this is a regression-pinning case, not a red one — the
+    // existing control-operator check (exercised by AC3/AC4 above, e.g.
+    // 'node --test && git push') already fires on ANY additional chained
+    // command regardless of whether the leading prefix is allowlisted, so
+    // this is expected to be GREEN today independent of whether the run-gate
+    // arm itself has landed yet. It is included to pin that adding the arm
+    // must never accidentally widen past the control-operator gate.
+    const r = bash(dir, 'node /abs/clone/scripts/run-gate.mjs export; rm -rf x');
+    assert.equal(r.code, 2, "chaining a run-gate invocation with a mutating command via ';' must stay denied — the control-operator check fires before any allowlist prefix match");
+    assert.match(r.stderr, /control operators/, 'the denial cites control operators, same as any other chained command');
+  } finally {
+    cleanup();
+  }
+});

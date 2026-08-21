@@ -425,3 +425,86 @@ test('H24 fail posture: tool_name \'Read\' — exit 0 even with a masked gate st
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Review findings pinned below (board babf3a9e / 7d88b237, governing
+// decision knowledge_get 98549344-e355-42da-93dd-ce7c2dc4dfcb): run-gate.mjs
+// joins the builtin gate floor, so masking ITS OWN exit is denied like any
+// other gate — and the matcher must be PATH-AGNOSTIC (a consuming project
+// invokes the clone's run-gate.mjs through an arbitrary absolute path, never
+// the repo-relative "scripts/run-gate.mjs" this repo happens to use). ADD-
+// ONLY: nothing above this line was touched. A fixer is landing the
+// corresponding repair in parallel.
+//
+// NOTE per task instruction: these DENY cases assert directly on r.code and
+// a stderr match rather than calling assertDeny — assertDeny's first-line
+// regex expects the EXACT matched gate text on its own, and it is not
+// pinned down here whether a run-gate invocation is reported the same way
+// the plain floor literals ('node --test', 'npm test', ...) are.
+// ---------------------------------------------------------------------------
+
+test('H24 DENY (review finding, board babf3a9e/7d88b237): "node scripts/run-gate.mjs export; echo $?" masks run-gate\'s own exit', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'node scripts/run-gate.mjs export; echo $?'), dir);
+    // EXPECTED FAILURE SHAPE (pre-fix): run-gate.mjs is not yet part of the
+    // builtin gate floor, so the hook does not recognize this command as a
+    // gate invocation at all — r.code stays 0 (allowed), failing the
+    // assert.equal(r.code, 2) below.
+    assert.equal(r.code, 2, `expected deny (exit 2), got ${r.code}; stderr: ${r.stderr}`);
+    assert.match(r.stderr, /run-gate/i, 'the denial names run-gate as the matched gate');
+    assert.match(r.stderr, /;/, "the denial identifies ';' as the masking construct");
+    assert.match(r.stderr, /7d88b237/, 'denial cites board 7d88b237');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 DENY (G4 review finding — path-agnostic matcher): a CONSUMER project\'s absolute clone path still denies "node /home/user/sterling-clone/scripts/run-gate.mjs export; true"', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'node /home/user/sterling-clone/scripts/run-gate.mjs export; true'), dir);
+    // EXPECTED FAILURE SHAPE (pre-fix): if the matcher hard-codes the
+    // repo-relative literal "scripts/run-gate.mjs" (or run-gate is not
+    // recognized at all yet), an arbitrary absolute clone path never
+    // matches, so r.code stays 0 and this assert.equal(r.code, 2) fails —
+    // pinning that the matcher must recognize run-gate.mjs regardless of
+    // whatever path prefix sits in front of it on a consumer machine.
+    assert.equal(r.code, 2, `expected deny (exit 2) regardless of the clone's absolute path, got ${r.code}; stderr: ${r.stderr}`);
+    assert.match(r.stderr, /run-gate/i, 'the denial names run-gate as the matched gate even at a consumer-machine absolute path');
+    assert.match(r.stderr, /7d88b237/, 'denial cites board 7d88b237');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 ALLOW boundary: "node scripts/run-gate.mjs.bak; true" — the ".bak" suffix means this is not actually run-gate.mjs at a token boundary', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'node scripts/run-gate.mjs.bak; true'), dir);
+    // EXPECTED FAILURE SHAPE: if the matcher is a naive substring/prefix
+    // check ("contains run-gate.mjs") rather than a token-boundary match, a
+    // ".bak" backup file is wrongly caught as a gate invocation and this
+    // command is wrongly denied (r.code === 2) instead of allowed, failing
+    // assertAllow's assert.equal(r.code, 0).
+    assertAllow(r);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 ALLOW: "node scripts/run-gate.mjs export && git add -A" — \'&&\' propagates a red exit, deliberately allowed for run-gate same as any other gate', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // EXPECTED FAILURE SHAPE (pre-fix): if run-gate is not yet recognized as
+    // a gate at all, this already reads as allowed (r.code 0) for the WRONG
+    // reason (no gate detected, rather than "gate detected, && correctly
+    // allowed"). Paired with the two DENY cases above, which DO exercise
+    // detection directly, this pins both "run-gate is a recognized gate" and
+    // "the recognition does not overreach into legitimate && chains".
+    const r = runHook(gateInput(dir, 'node scripts/run-gate.mjs export && git add -A'), dir);
+    assertAllow(r);
+  } finally {
+    cleanup();
+  }
+});

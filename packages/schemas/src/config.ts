@@ -27,8 +27,10 @@ const successPredicateSchema = z
         path: z.string(),
         min_bytes: z.number().optional(),
       })
+      .strict()
       .optional(),
   })
+  .strict()
   .refine(
     (v) => v.output_regex !== undefined || v.output_regex_absent !== undefined || v.artifact !== undefined,
     { message: 'success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)' }

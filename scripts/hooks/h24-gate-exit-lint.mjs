@@ -52,11 +52,20 @@
 import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
 import { parseConfig } from '@sterling/schemas';
 
-// 'node scripts/run-gate.mjs' joins the floor (decision 98549344, slug
+// A run-gate invocation joins the floor (decision 98549344, slug
 // toolchain-success-predicates-run-gate, board babf3a9e): a run-gate
 // invocation IS a gate — masking its exit with ';'/'||' must deny exactly
-// like the other builtins.
-const BUILTIN_FLOOR = ['node --test', 'npm test', 'npm run check', 'node scripts/run-gate.mjs'];
+// like the other builtins. It is matched by REGEX, not a literal-prefix
+// floor entry (G4 review finding, same decision): the literal prefix
+// 'node scripts/run-gate.mjs' never matches a CONSUMING project's invocation
+// ('node /path/to/clone/scripts/run-gate.mjs export'), so matchGate() below
+// carries a second, path-agnostic arm for it instead.
+const BUILTIN_FLOOR = ['node --test', 'npm test', 'npm run check'];
+
+// Path-agnostic run-gate matcher (G4): recognizes the invocation regardless
+// of what precedes 'scripts/run-gate.mjs' — a bare relative path, an
+// absolute clone path, forward or back slashes.
+const RUN_GATE_RE = /^(node\s+(?:\S*[\/\\])?scripts\/run-gate\.mjs)(?:\s|$)/;
 
 let input;
 try {
@@ -102,6 +111,12 @@ function matchGate(segment) {
   for (const g of gateList) {
     if (segment === g || (segment.startsWith(g) && /\s/.test(segment[g.length]))) return g;
   }
+  // Second arm (G4, decision 98549344 / toolchain-success-predicates-run-gate):
+  // a run-gate invocation is recognized by the path-agnostic RUN_GATE_RE
+  // rather than literal floor membership, so a consuming project's absolute
+  // clone path still matches.
+  const runGateMatch = segment.match(RUN_GATE_RE);
+  if (runGateMatch) return runGateMatch[1];
   return null;
 }
 
