@@ -1175,6 +1175,7 @@ export class SterlingTools {
    */
   knowledgeAppend(id: string, field: string, entries: unknown[], resolves?: string[]): { record: DurableRecord; warnings: string[] } {
     const old = this.resolveRecordId(id, 'knowledge_append');
+    this.refuseStaleAddress(old, id, 'knowledge_append');
     if (!Array.isArray(entries) || entries.length === 0) {
       throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
     }
@@ -1195,7 +1196,7 @@ export class SterlingTools {
     // (decision 68988832): the write's result carries a warning on the SAME
     // channel knowledge_update uses. same_subject (ruling types only) is
     // split off rather than left inside `record` — see splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves));
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, 'knowledge_append'));
     // Cited-id scan (board fc053051 extension): only the newly APPENDED
     // entries — never the array's pre-existing elements, which were already
     // scanned (or not) on whatever write introduced them.
@@ -1245,6 +1246,7 @@ export class SterlingTools {
     resolves?: string[]
   ): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number }; warnings: string[] } {
     const old = this.resolveRecordId(id, 'knowledge_edit');
+    this.refuseStaleAddress(old, id, 'knowledge_edit');
     if (typeof find !== 'string' || find.length === 0) {
       throw new Error(`knowledge_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
     }
@@ -1298,7 +1300,7 @@ export class SterlingTools {
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
       // same_subject (ruling types only) is split off rather than left
       // inside `record` — see splitSameSubject.
-      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves));
+      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, 'knowledge_edit'));
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
@@ -1340,7 +1342,7 @@ export class SterlingTools {
     const next = current.replace(find, replace);
     // same_subject (ruling types only) is split off rather than left inside
     // `record` — see splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves));
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, 'knowledge_edit'));
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
@@ -2091,6 +2093,35 @@ export class SterlingTools {
   }
 
   /**
+   * VERSION-CONFLICT DISCLOSURE (board 13bd5507's live half): a uuid that
+   * resolves to a SUPERSEDED record means the writer read a version that
+   * moved while they held it. The store's supersede() guard would refuse the
+   * fork anyway — this refusal fires FIRST, before any field logic operates
+   * on the stale body (knowledge_edit's find-match, knowledge_append's array
+   * read), so the stale reader learns WHAT happened and WHERE the head is
+   * instead of an opaque low-context error. Slug addresses always serve the
+   * head, so they never land here. resolveTerminus never PROMISES a live
+   * terminus (truncation past MAX_HOPS; a dangling chain returns the record
+   * itself), so the head is named only when verifiably live; otherwise the
+   * remedy is slug resolution (review finding 2026-08-21).
+   */
+  private refuseStaleAddress(old: DurableRecord, id: string, toolName: string): void {
+    if (old.status !== 'superseded') return;
+    const terminus = this.store.resolveTerminus(old.id);
+    const head = terminus && !terminus.truncated ? this.store.get(terminus.id) : null;
+    const h = head as { id: string; status: string; slug?: string; version?: number } | null;
+    const headIsLive = h !== null && h.status !== 'superseded' && h.id !== old.id;
+    const where = headIsLive
+      ? `The live head is ${h.id}${h.slug ? ` (slug '${h.slug}')` : ''}${h.version !== undefined ? ` v${h.version}` : ''}.`
+      : `The supersession chain could not be followed to a live head from this record — resolve by SLUG, which always serves the head.`;
+    const addressed = id === old.id ? `'${old.id}'` : `'${id}' → '${old.id}'`;
+    throw new Error(
+      `${toolName}: version conflict — ${addressed} resolves to a SUPERSEDED record: it was superseded (or retired in favour of a survivor) while you held it. ` +
+        `${where} Re-read the live head and re-apply your change on it — nothing was written.`
+    );
+  }
+
+  /**
    * Validate ONE `resolves` claim BEFORE any write lands (decision
    * 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373 — replaces the
    * implicit chain-based auto-drain of decision 8ecd435f). The named id must:
@@ -2188,8 +2219,9 @@ export class SterlingTools {
   }
 
   /** Versioned change (§10): new version + supersede prior. Never mutates in place. */
-  knowledgeUpdate(id: string, body: Record<string, unknown>, resolves?: string[]): DurableRecord & { same_subject?: SameSubjectEntry[] } {
-    const old = this.resolveRecordId(id, 'knowledge_update');
+  knowledgeUpdate(id: string, body: Record<string, unknown>, resolves?: string[], toolName = 'knowledge_update'): DurableRecord & { same_subject?: SameSubjectEntry[] } {
+    const old = this.resolveRecordId(id, toolName);
+    this.refuseStaleAddress(old, id, toolName);
     this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
     const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, ...overrides } = body;
