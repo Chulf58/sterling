@@ -1083,16 +1083,19 @@ export class SterlingTools {
    *
    * It delegates to knowledgeUpdate rather than writing its own supersede, so it
    * CANNOT diverge from the update path's guarantees: version bump, prior version
-   * retained, file_baselines re-baseline, and the P4 drift-item drain all happen
-   * exactly once and exactly as before. Only the caller's transmission cost
-   * changes — this is not a second write path (invariant: one write code path).
+   * retained, file_baselines re-baseline, and (decision 68988832) an EXPLICIT
+   * resolves claim — never an implicit drain — all happen exactly once and
+   * exactly as before. Any open reconcile_needed/refresh_reference debt on the
+   * chain not named in resolves is warned on the receipt, not silently
+   * discharged. Only the caller's transmission cost changes — this is not a
+   * second write path (invariant: one write code path).
    *
    * Refuses loudly (P5) rather than guessing: an unknown field for the type (with
    * the valid set named, same helper as the write guards), a field whose current
    * value is not an array, an empty entry list, and `links` — typed edges have
    * their own tool and a second path would let the record_links index drift.
    */
-  knowledgeAppend(id: string, field: string, entries: unknown[]): { record: DurableRecord; warnings: string[] } {
+  knowledgeAppend(id: string, field: string, entries: unknown[], resolves?: string[]): { record: DurableRecord; warnings: string[] } {
     const old = this.resolveRecordId(id, 'knowledge_append');
     if (!Array.isArray(entries) || entries.length === 0) {
       throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
@@ -1110,11 +1113,11 @@ export class SterlingTools {
     }
     const next = [...((current as unknown[]) ?? []), ...entries];
     // Straight through the ONE update path — every guarantee above rides along,
-    // including the oversize check (board 8390f8fa): the write's result carries
-    // a warning on the SAME channel knowledge_update uses. same_subject (ruling
-    // types only) is split off rather than left inside `record` — see
-    // splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }));
+    // including the oversize check (board 8390f8fa) and the resolves claim
+    // (decision 68988832): the write's result carries a warning on the SAME
+    // channel knowledge_update uses. same_subject (ruling types only) is
+    // split off rather than left inside `record` — see splitSameSubject.
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves));
     // Cited-id scan (board fc053051 extension): only the newly APPENDED
     // entries — never the array's pre-existing elements, which were already
     // scanned (or not) on whatever write introduced them.
@@ -1124,6 +1127,7 @@ export class SterlingTools {
         ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(JSON.stringify(entries)),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
       ],
     };
   }
@@ -1151,15 +1155,16 @@ export class SterlingTools {
    * the article.
    *
    * Everything else rides the ONE update path — version bump, retained prior
-   * version, file_baselines re-baseline, drift-item auto-drain, coherence
-   * warnings — so an edit is a normal supersession and not a back door around
-   * any of it.
+   * version, file_baselines re-baseline, the explicit resolves claim (decision
+   * 68988832 — never an implicit auto-drain), coherence warnings — so an edit
+   * is a normal supersession and not a back door around any of it.
    */
   knowledgeEdit(
     id: string,
     field: string,
     find: string,
-    replace: string
+    replace: string,
+    resolves?: string[]
   ): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number }; warnings: string[] } {
     const old = this.resolveRecordId(id, 'knowledge_edit');
     if (typeof find !== 'string' || find.length === 0) {
@@ -1215,7 +1220,7 @@ export class SterlingTools {
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
       // same_subject (ruling types only) is split off rather than left
       // inside `record` — see splitSameSubject.
-      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }));
+      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves));
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
@@ -1226,6 +1231,7 @@ export class SterlingTools {
           ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
           ...this.articleOversizeWarnings(record),
           ...this.citedIdWarnings(replace),
+          ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
         ],
       };
     }
@@ -1256,7 +1262,7 @@ export class SterlingTools {
     const next = current.replace(find, replace);
     // same_subject (ruling types only) is split off rather than left inside
     // `record` — see splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }));
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves));
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
@@ -1268,6 +1274,7 @@ export class SterlingTools {
         ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(replace),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
       ],
     };
   }
@@ -1388,15 +1395,27 @@ export class SterlingTools {
    * would be ceremony on the common case (P1) and would train callers to pass
    * fields they had no reason to touch — which is its own drift.
    */
-  knowledgeUpdateResult(id: string, body: Record<string, unknown>): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[] } {
-    const before = this.store.get(id);
+  knowledgeUpdateResult(
+    id: string,
+    body: Record<string, unknown>,
+    resolves?: string[]
+  ): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[] } {
+    // Resolved the SAME way knowledgeUpdate resolves its own `id` (uuid/slug/
+    // 8-char-prefix ladder) — review finding, 2026-08-21: a raw store.get(id)
+    // here only matches an exact uuid, so a slug- or prefix-addressed write
+    // skipped the pre-state entirely and with it every warning below
+    // (history-rotation, coherence, and the open-reconcile-lane disclosure).
+    // Exact-uuid callers see byte-identical behavior — resolveRecordId returns
+    // the same record store.get would, and a genuinely bad id throws here with
+    // the same 'knowledge_update' naming knowledgeUpdate's own resolution would.
+    const before = this.resolveRecordId(id, 'knowledge_update');
     // SAME-SUBJECT SURFACING (decision 7e3c66c5, HIGH review finding): lift
     // same_subject OUT of the flattened record and onto its own envelope
     // sibling — mirroring knowledge_create/knowledge_supersede — BEFORE this
     // wraps it as `record`. Left inside, the digest write-projection
     // (writeProjected -> digestRecord's field whitelist) silently drops it,
     // and projection:'full' would echo it back as a fake record field.
-    const { record, same_subject } = this.splitSameSubject(this.knowledgeUpdate(id, body));
+    const { record, same_subject } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves));
     const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
     if (before?.type === 'feature_article' && 'what_it_does' in body) {
       const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
@@ -1414,6 +1433,12 @@ export class SterlingTools {
     // of the merged record, which was already scanned (or not) on whatever
     // write introduced it.
     warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
+    // OPEN RECONCILE-LANE DEBT DISCLOSURE (decision 68988832-2ef5-4ff3-b693-
+    // d8bd8dae1): any reconcile_needed/refresh_reference item still open on
+    // this article's chain, not named in this write's resolves, is unclaimed
+    // debt — named here so it is visible at the exact moment the writer is
+    // looking, never silent (P5). Empty when nothing is owed (P1).
+    if (before) warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
     return { record, warnings, ...(same_subject ? { same_subject } : {}) };
   }
 
@@ -1891,8 +1916,103 @@ export class SterlingTools {
     return { record: record as DurableRecord, same_subject };
   }
 
+  /**
+   * The whole supersede lineage a maintenance item's feature_link may point
+   * at: `record`'s own id plus every ancestor it already carries a
+   * 'supersedes' link to. An item raised against an earlier version still
+   * matches after a later reconcile superseded it — chain membership, not
+   * exact-id match. Shared by knowledgeUpdate's resolves validation/drain,
+   * repointPromotionReview, and the open-reconcile-lane disclosure below.
+   */
+  private supersedeChain(record: DurableRecord): Set<string> {
+    const chain = new Set<string>([record.id]);
+    for (const link of (record.links ?? []) as { rel: string; target_id: string }[]) {
+      if (link.rel === 'supersedes') chain.add(link.target_id);
+    }
+    return chain;
+  }
+
+  /**
+   * Validate ONE `resolves` claim BEFORE any write lands (decision
+   * 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373 — replaces the
+   * implicit chain-based auto-drain of decision 8ecd435f). The named id must:
+   * exist as an open maintenance item; be in a DRAINABLE lane
+   * (reconcile_needed or refresh_reference — promotion_review and every
+   * other lane close only through their own mechanism, never resolves); and
+   * key to the record being written, via feature_link landing in its
+   * supersedes chain (this id or an ancestor). Any miss throws, naming the
+   * offending id and the reason, so a write that lands is a write whose
+   * claims were checked — no version minted, no item removed on a refusal.
+   */
+  private validateResolveClaim(id: string, chain: Set<string>): DurableRecord {
+    const record = this.store.get(id);
+    if (!record) {
+      // Distinguish "never existed" from "already removed" the same way
+      // removedItemError does for maintenance_remove — a closed item cannot
+      // be re-claimed, and that is a different refusal than a bogus id.
+      const trace = this.store.drainLogEntry(id);
+      if (trace) {
+        throw new Error(
+          `resolves: names '${id}', which is not OPEN — it was already removed` +
+            (trace.drained_at ? ` at ${trace.drained_at}` : '') +
+            ` (per the drain log). A closed item cannot be re-claimed; nothing was written.`
+        );
+      }
+      throw new Error(`resolves: names '${id}', which does not exist as a maintenance item; nothing was written.`);
+    }
+    const it = record as unknown as { type: string; source?: string; system_reason?: string; feature_link?: string };
+    if (it.type !== 'todo' || it.source !== 'system') {
+      throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
+    }
+    if (it.system_reason !== 'reconcile_needed' && it.system_reason !== 'refresh_reference') {
+      throw new Error(
+        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only reconcile_needed and refresh_reference items ` +
+          `close via resolves; every other lane, including promotion_review, closes only through its own mechanism. Nothing was written.`
+      );
+    }
+    if (it.feature_link === undefined || !chain.has(it.feature_link)) {
+      throw new Error(
+        `resolves: names '${id}', whose feature_link does not match this record or any of its supersedes-chain ancestors; nothing was written.`
+      );
+    }
+    return record;
+  }
+
+  /**
+   * Open reconcile_needed/refresh_reference debt still standing on `chain`
+   * after a write — one line per item (id + text prefix), never the whole
+   * item (decision 68988832). Called AFTER the write, so any item this same
+   * write's `resolves` claimed is already gone from maintenanceQuery and
+   * never appears here; empty when nothing is owed (P1 — a clean write stays
+   * clean).
+   */
+  private openReconcileLaneWarnings(chain: Set<string>): string[] {
+    const warnings: string[] = [];
+    const sweepCap = 1000;
+    const items = this.maintenanceQuery({ cap: sweepCap });
+    for (const item of items) {
+      const it = item as unknown as { id: string; feature_link?: string; system_reason?: string; text?: string };
+      if (
+        (it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference') &&
+        it.feature_link !== undefined &&
+        chain.has(it.feature_link)
+      ) {
+        warnings.push(`open ${it.system_reason} item '${it.id}' on this article is not named in resolves and stays open — ${(it.text ?? '').slice(0, 120)}`);
+      }
+    }
+    // The sweep is capped (P5): a queue exactly AT the cap may be hiding more
+    // open debt past this window — say so rather than reading the sweep as
+    // exhaustive (mirrors boardFiltered's scanTruncated disclosure).
+    if (items.length >= sweepCap) {
+      warnings.push(
+        `the open-reconcile-lane sweep hit its ${sweepCap}-item cap — more open reconcile_needed/refresh_reference debt may exist past this window; narrow with maintenance_query to confirm.`
+      );
+    }
+    return warnings;
+  }
+
   /** Versioned change (§10): new version + supersede prior. Never mutates in place. */
-  knowledgeUpdate(id: string, body: Record<string, unknown>): DurableRecord & { same_subject?: SameSubjectEntry[] } {
+  knowledgeUpdate(id: string, body: Record<string, unknown>, resolves?: string[]): DurableRecord & { same_subject?: SameSubjectEntry[] } {
     const old = this.resolveRecordId(id, 'knowledge_update');
     this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
@@ -1902,6 +2022,25 @@ export class SterlingTools {
     // call. Without it the merge silently discarded the field and reported a new
     // version — the failure that makes a "fix" look applied when it never landed.
     this.refuseUnknownFields(old.type, overrides);
+    // The item's feature_link points to whatever version was current when it
+    // was raised, which may now be an ancestor, so match the whole supersede
+    // chain — computed for every type, since promotion_review (below) can
+    // point at any supersedable record, not only feature_article/reference_material.
+    const chain = this.supersedeChain(old);
+    // A duplicated id is a meaningless second claim — the item can only be
+    // drained once, so naming it twice is refused loudly rather than silently
+    // validating and no-oping on the repeat (same refuse-on-meaningless-claim
+    // posture as every other resolves violation below).
+    if (resolves) {
+      const seen = new Set<string>();
+      const duplicate = resolves.find((rid) => (seen.has(rid) ? true : (seen.add(rid), false)));
+      if (duplicate !== undefined) {
+        throw new Error(`resolves: '${duplicate}' is named more than once — an item can only be claimed once; nothing was written.`);
+      }
+    }
+    // RESOLVES CLAIM VALIDATION runs BEFORE any write (decision 68988832): a
+    // write that does not validate is a write that must not land.
+    const claims = (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
     const next: Record<string, unknown> = {
       ...old,
       ...overrides,
@@ -1942,34 +2081,15 @@ export class SterlingTools {
       next.file_baselines = this.computeBaselines(next);
     }
     const updated = this.store.supersede(old.id, next);
-    // The item's feature_link points to whatever version was current when it was
-    // raised, which may now be an ancestor, so match the whole supersede chain —
-    // computed for every type, since promotion_review (below) can point at any
-    // supersedable record, not only feature_article/reference_material.
-    const chain = new Set<string>([old.id]);
-    for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
-      if (link.rel === 'supersedes') chain.add(link.target_id);
-    }
-    // P4 lifecycle-bind: reconciling an article/doc IS the fulfilling artifact for
-    // any DRIFT-driven maintenance item about it. Re-baselining (above) already
-    // self-clears the read-time drift flag; this drains the standing queue item in
-    // the SAME event so it can never orphan — closing the gap where an item
-    // outlived the reconcile that should have closed it because board_remove was a
-    // separate, forgotten step (observed 2026-06-27: two already-reconciled
-    // reconcile_needed items left in the queue). Scoped to the two drift reasons H7
-    // and the read-time check raise (reconcile_needed + refresh_reference, both
-    // keyed by feature_link).
-    if (next.type === 'feature_article' || next.type === 'reference_material') {
-      for (const item of this.maintenanceQuery({ cap: 1000 })) {
-        const it = item as { id: string; feature_link?: string; system_reason?: string };
-        if (
-          (it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference') &&
-          it.feature_link !== undefined &&
-          chain.has(it.feature_link)
-        ) {
-          this.store.remove(it.id, ts);
-        }
-      }
+    // EXPLICIT-RESOLVES CLOSURE (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1;
+    // board 68fe8373): drain EXACTLY the named+validated items, through the
+    // SAME drain-log path maintenance_remove uses, so maintenance_remove later
+    // answers already_drained:true. The old implicit chain-based auto-drain
+    // (decision 8ecd435f — every open reconcile_needed/refresh_reference item
+    // on the chain, discharged by ANY write, no claim required) is REMOVED: a
+    // write that does not name an item leaves it open, however tightly linked.
+    for (const claim of claims) {
+      this.store.remove(claim.id, ts);
     }
     this.repointPromotionReview(chain, updated.id, ts);
     // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling

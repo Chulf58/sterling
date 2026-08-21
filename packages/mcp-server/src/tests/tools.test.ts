@@ -206,7 +206,7 @@ const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
     live_test_refs: [],
   }).record;
 
-test('knowledge_update drains the article\'s drift maintenance items (reconcile_needed/refresh_reference) but RE-POINTS an open promotion_review rather than draining it — P4 lifecycle-bind + todo 6202a0f5', () => {
+test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review still RE-POINTS rather than draining (unaffected by this flip), and an unrelated article\'s debt stays untouched (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -219,16 +219,18 @@ test('knowledge_update drains the article\'s drift maintenance items (reconcile_
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'other'`, file_keys: ['src/other.ts'], feature_link: other.id });
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 4);
 
+    // NO resolves named — decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1: a
+    // write is not a claim, so nothing here is discharged by writing alone.
     const updated = tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
 
     const open = tools.maintenanceQuery({ cap: 1000 });
     const has = (reason: string, link: string) =>
       open.some((t) => (t as { system_reason?: string }).system_reason === reason && (t as { feature_link?: string }).feature_link === link);
-    assert.equal(has('reconcile_needed', article.id), false, 'reconcile_needed drained by the reconcile');
-    assert.equal(has('refresh_reference', article.id), false, 'refresh_reference drained by the reconcile');
-    assert.equal(has('promotion_review', article.id), false, 'promotion_review no longer points at the now-superseded id — it must not strand there');
+    assert.equal(has('reconcile_needed', article.id), true, 'reconcile_needed stays OPEN — the old implicit drain is dead');
+    assert.equal(has('refresh_reference', article.id), true, 'refresh_reference stays OPEN — same reason, still owed until claimed');
+    assert.equal(has('promotion_review', article.id), false, 'promotion_review no longer points at the now-superseded id — its re-pointing mechanism is untouched by this flip');
     assert.equal(has('promotion_review', updated.id), true, 'promotion_review re-pointed to the superseding version — same review, same lineage, still owed');
-    assert.equal(open.length, 2, 'still exactly 2 open items: the unrelated other-article debt and the re-pointed review');
+    assert.equal(open.length, 4, 'nothing drained by an unclaimed write: both `thing` items, the re-pointed review, and the unrelated `other` debt all remain');
     assert.equal(has('reconcile_needed', other.id), true, "an unrelated article's debt is untouched");
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).find((t) => t.id === review.record.id)?.id, review.record.id, 'same item id — re-pointed in place, not replaced');
   } finally {
@@ -354,16 +356,18 @@ test('article_oversize: knowledge_append and knowledge_edit carry the same warni
   }
 });
 
-test('knowledge_update drains a drift item whose feature_link points to an ANCESTOR version (supersede-chain match)', () => {
+test('knowledge_update no longer drains a drift item whose feature_link points to an ANCESTOR version on an UNCLAIMED write — the auto-drain-via-chain is gone (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1); explicit ancestor-chain claiming via resolves is pinned in resolves-claim.test.ts', () => {
   const { tools, cleanup } = harness();
   try {
     const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
     const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'v2' });
-    // an item raised against the now-superseded v1 (a flag that lagged a version);
-    // reconciling v2→v3 must still drain it via the supersede chain.
+    // an item raised against the now-superseded v1 (a flag that lagged a version).
+    // OLD CONTRACT (decision 8ecd435f): reconciling v2→v3 alone drained it via
+    // the supersede chain, no claim needed. NEW CONTRACT: a write is not a
+    // claim — it stays open until named via `resolves`.
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'thing'`, file_keys: ['src/thing.ts'], feature_link: v1.id });
     tools.knowledgeUpdate(v2.id, { what_it_does: 'v3' });
-    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 0, 'ancestor-linked drift item drained via the chain');
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 1, 'the ancestor-linked drift item stays OPEN — no implicit drain via the chain anymore');
   } finally {
     cleanup();
   }
@@ -2564,8 +2568,8 @@ test('stable handle: an EXPLICIT slug that collides with any slug-bearing record
 test("removes distinguish 'already removed' from 'never existed' via the drain-log trace (board 97d773ef)", () => {
   const { tools, cleanup } = harness();
   try {
-    // the ROUTINE path: a reconcile_needed item auto-drained by the article
-    // re-baseline between minting and the remove call.
+    // the ROUTINE path: a reconcile_needed item closed by an explicit resolves
+    // claim on the article write between minting and the remove call.
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'reconcile_needed',
@@ -2573,12 +2577,16 @@ test("removes distinguish 'already removed' from 'never existed' via the drain-l
       file_keys: ['src/thing.ts'],
       feature_link: article.id,
     });
-    tools.knowledgeUpdate(article.id, { state: 'active' }); // auto-drains the item
+    // CONDUCTOR HARNESS REPAIR 2026-08-21 (decision 68988832): the implicit
+    // auto-drain this line relied on is retired — the item is closed via the
+    // explicit resolves claim, preserving this test's subject (the drain-log
+    // trace distinguishing 'already removed' from 'never existed').
+    tools.knowledgeUpdate(article.id, { state: 'active' }, [item.id]);
     // Superseded pin (board 83478fc6, 2026-08-20): the already-drained case is
     // the DESIRED state, so it succeeds idempotently with already_drained:true
     // instead of throwing — a drain that finds its work done is not a failure.
     const already = tools.maintenanceRemove(item.id) as { already_drained?: boolean; removed?: string };
-    assert.equal(already.already_drained, true, 'already-auto-drained succeeds idempotently, marked');
+    assert.equal(already.already_drained, true, 'already-claimed-drained succeeds idempotently, marked');
     // a genuinely wrong id: no trace, and the message hedges on the capped log
     assert.throws(
       () => tools.boardRemove(randomUUID()),

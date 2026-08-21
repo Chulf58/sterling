@@ -119,30 +119,57 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description:
-        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. The echo defaults to a one-line digest receipt (warnings kept, body dropped — you just authored it); pass projection:"full" for the whole stored record.',
-      inputSchema: strict({ id: z.string(), body: passthrough, projection: z.enum(['full', 'digest']).optional() }),
+        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. This write does NOT auto-close any maintenance item: pass resolves:[<item ids>] to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write — a bad id refuses the whole call); anything left unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt (warnings kept, body dropped — you just authored it); pass projection:"full" for the whole stored record.',
+      inputSchema: strict({
+        id: z.string(),
+        body: passthrough,
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
     },
-    ({ id, body, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body), projection))
+    ({ id, body, resolves, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves), projection))
   );
 
   server.registerTool(
     'knowledge_append',
     {
       description:
-        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, the file_baselines re-baseline and the drift-item drain are identical. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). The echo defaults to a one-line digest receipt (warnings kept) — a single full-record append echo once measured 49.8KB of content the caller had just written; pass projection:"full" for the whole stored record.',
-      inputSchema: strict({ id: z.string(), field: z.string(), entries: z.array(z.unknown()), projection: z.enum(['full', 'digest']).optional() }),
+        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, and the file_baselines re-baseline are identical — including resolves: pass item ids to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write); anything unnamed stays open and is warned on the receipt. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). The echo defaults to a one-line digest receipt (warnings kept) — a single full-record append echo once measured 49.8KB of content the caller had just written; pass projection:"full" for the whole stored record.',
+      inputSchema: strict({
+        id: z.string(),
+        field: z.string(),
+        entries: z.array(z.unknown()),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
     },
-    ({ id, field, entries, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries), projection))
+    ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection))
   );
 
   server.registerTool(
     'knowledge_edit',
     {
       description:
-        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, baseline re-baseline and drift-item drain are identical. The echo defaults to a one-line digest receipt (warnings + replaced counts kept — chars_before/chars_after prove the edit landed); pass projection:\"full\" for the whole stored record.",
-      inputSchema: strict({ id: z.string(), field: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
+        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, and baseline re-baseline are identical — including resolves: pass item ids to explicitly discharge open reconcile_needed/refresh_reference items on this record's chain (validated before the write); anything unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt (warnings + replaced counts kept — chars_before/chars_after prove the edit landed); pass projection:\"full\" for the whole stored record.",
+      inputSchema: strict({
+        id: z.string(),
+        field: z.string(),
+        find: z.string(),
+        replace: z.string(),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
     },
-    ({ id, field, find, replace, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace), projection))
+    ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection))
   );
 
   server.registerTool(

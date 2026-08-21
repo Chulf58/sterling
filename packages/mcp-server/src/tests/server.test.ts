@@ -725,14 +725,24 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
     // 5. ACCEPTANCE REPLAY — the incident's nine false todos drain BY the fix:
     // an article WITHOUT working_tree owning a copy-only path gets the false
     // deletion item (the bug); knowledge_update adding working_tree re-baselines
-    // against the right tree AND auto-drains the item through the supersede chain.
+    // against the right tree. Closing the resulting debt is no longer implicit
+    // (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 retired the old
+    // knowledge_update auto-drain from decision 8ecd435f) — the SAME fix write
+    // now names the false-deletion item via an explicit `resolves` claim, which
+    // is exactly how an operator would perform this healing in practice: one
+    // write that both re-baselines the tree AND discharges the debt it caused.
     writeFileSync(join(copy, 'src', 'hull.mjs'), 'hv1');
     utimesSync(join(copy, 'src', 'hull.mjs'), old, old);
     const h = article('hull-traits', 'src/hull.mjs'); // no working_tree → resolves against root → false deletion
     tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(items('hull-traits').length, 1, 'the incident: root resolution mints a false deletion item');
-    const healed = tools.knowledgeUpdate(h.id, { working_tree: 'juiced' });
-    assert.equal(items('hull-traits').length, 0, 'the fix drains the item — knowledge_update auto-drain, no manual deletion');
+    const falseDeletionItem = items('hull-traits')[0] as unknown as { id: string };
+    const healed = (
+      tools as unknown as {
+        knowledgeUpdate(id: string, patch: Record<string, unknown>, resolves?: string[]): Record<string, unknown>;
+      }
+    ).knowledgeUpdate(h.id, { working_tree: 'juiced' }, [falseDeletionItem.id]);
+    assert.equal(items('hull-traits').length, 0, 'the fix drains the item — via the explicit resolves claim named on the same write, not an implicit auto-drain');
     assert.ok((healed as unknown as { file_baselines?: Record<string, string> }).file_baselines?.['src/hull.mjs'], 're-baselined against the correct tree');
     arts = tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(arts.find((r) => r.id === healed.id)?.verify_before_use, undefined, 'healed article reads clean');

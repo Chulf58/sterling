@@ -75,7 +75,7 @@ test('AC1: maintenance_remove on an open system item removes it and returns the 
   }
 });
 
-test('AC2: maintenance_remove on an id auto-drained by a knowledge_update re-baseline SUCCEEDS with already_drained:true, and repeats idempotently (board 83478fc6)', () => {
+test('AC2: maintenance_remove on an id closed by an explicit knowledge_update resolves claim SUCCEEDS with already_drained:true, and repeats idempotently (board 83478fc6; decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -86,13 +86,19 @@ test('AC2: maintenance_remove on an id auto-drained by a knowledge_update re-bas
       feature_link: article.id,
     });
 
-    // the routine race this AC exists for: the reconcile closes the item
-    // mechanically (decision 8ecd435f) BEFORE maintenance_remove is ever called.
-    tools.knowledgeUpdate(article.id, { state: 'active' });
+    // the routine race this AC exists for: the reconcile closes the item via
+    // an EXPLICIT resolves claim (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1
+    // retired the old implicit auto-drain pinned by decision 8ecd435f) BEFORE
+    // maintenance_remove is ever called.
+    (
+      tools as unknown as {
+        knowledgeUpdate(id: string, patch: Record<string, unknown>, resolves?: string[]): unknown;
+      }
+    ).knowledgeUpdate(article.id, { state: 'active' }, [item.id]);
     assert.equal(
       tools.maintenanceQuery({ cap: 1000 }).length,
       0,
-      'precondition: the item is already gone from the open queue before we call remove'
+      'precondition: the claimed item is already gone from the open queue before we call remove'
     );
 
     // EXPECTED TO FAIL TODAY: this currently throws (assert.throws is pinned

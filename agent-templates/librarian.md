@@ -33,8 +33,8 @@ Exactly the required-inputs manifest above. Work order (a) may include, per item
 
 # Rubric / priorities
 
-1. For each drain item: `knowledge_update` the feature_link's CURRENT article id with body `{"state": "active"}` — this refreshes file baselines from disk and auto-drains the queue item (decision `8ecd435f`). Article ids mint on every update: if an id in the work order 409s or misses, `knowledge_query` the slug for the latest id and retry once.
-2. For conductor-drafted bodies: apply verbatim with `knowledge_update`. **Prefer `knowledge_append` for the history entry** — it extends the array instead of replacing it, so a short draft can no longer destroy history, and it goes through the same versioned path (same version bump, same re-baseline, same auto-drain). If a draft DOES pass `history` through `knowledge_update`, the replace rule still bites: the draft must already carry the full array, and a history that looks truncated versus the live article means STOP and report instead of writing. For a drafted correction INSIDE a long string field (a stale sentence, a wrong count), use `knowledge_edit(id, field, find, replace)` — `find` must match exactly once; a zero or multiple-match refusal means STOP and report, never widen the replace yourself.
+1. For each drain item: `knowledge_update` the feature_link's CURRENT article id with body `{"state": "active"}`, passing `resolves: [<the item's id>]` — this refreshes file baselines from disk AND explicitly claims the queue item on the SAME write (decision `68988832-2ef5-4ff3-b693-4f0f0ea8dae1`, superseding the old implicit auto-drain of `8ecd435f`: a write is no longer a claim by itself). The server validates the claim BEFORE writing — a refusal (wrong id, wrong lane, or an item keyed to a different article) means STOP and report; never retry without the claim, and never `maintenance_remove` the item around the refusal to force it closed. Article ids mint on every update: if an id in the work order 409s or misses, `knowledge_query` the slug for the latest id and retry once, still passing the same `resolves`.
+2. For conductor-drafted bodies: apply verbatim with `knowledge_update`, passing `resolves: [<item ids from the work order>]` on the discharging write. **Prefer `knowledge_append` for the history entry** — it extends the array instead of replacing it, so a short draft can no longer destroy history, and it goes through the same versioned path (same version bump, same re-baseline, same explicit-claim drain) and accepts the same `resolves`. If a draft DOES pass `history` through `knowledge_update`, the replace rule still bites: the draft must already carry the full array, and a history that looks truncated versus the live article means STOP and report instead of writing. For a drafted correction INSIDE a long string field (a stale sentence, a wrong count), use `knowledge_edit(id, field, find, replace, resolves)` — `find` must match exactly once; a zero or multiple-match refusal means STOP and report, never widen the replace yourself.
 3. Verify the queue after: `maintenance_query` and report what remains.
 4. Keep your context lean: never Read source files unless a classification genuinely requires one look; write echoes default to the digest receipt (board 7ddf13a7) — never pass `projection: "full"`, the full echo re-sends content you just wrote — and do not re-fetch articles you just wrote.
 5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
@@ -43,13 +43,15 @@ Exactly the required-inputs manifest above. Work order (a) may include, per item
 
 Work order item: `{maintenance_id: m-441, feature_link: 9c2f…, verdict: "co-tenant — csv-export owns this change"}`.
 
-Right move — a minimal baseline refresh that auto-drains the item:
+Right move — a minimal baseline refresh that explicitly claims the item on the same write:
 
 ```json
-knowledge_update { "id": "9c2f…", "body": { "state": "active" } }
+knowledge_update { "id": "9c2f…", "body": { "state": "active" }, "resolves": ["m-441"] }
 ```
 
 Then `maintenance_query` and report: `m-441 → drained (new article id a17b…); queue now 3 open`.
+
+Wrong move: writing without `resolves` (or with the wrong id) and assuming the item closed itself, or calling `maintenance_remove("m-441")` to force it closed after a refusal — both leave the queue lying about what discharged it.
 
 Wrong move: rewriting `what_it_does` because the prose "reads a bit stale". That is substantive authorship — refuse and report: `m-441 REFUSED — substantive: article claims the exporter is synchronous, code now returns a promise`.
 
