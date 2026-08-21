@@ -336,9 +336,32 @@ test('knownFieldsFor: research_finding gains file_keys; reference_material still
   assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)');
 });
 
+test('attestation: human-inspection ruling round-trips; verdict enum closed; immutable like a decision; file_keys joins the path economy (board 259a455f)', () => {
+  const rec = validateRecord({
+    ...envelope('attestation'),
+    artifact_key: 'part-0042 rear bracket',
+    verdict: 'approved',
+    inspector: 'cuj',
+    inspected_at: '2026-08-21',
+    instrument: 'render v3 @ commit abc1234',
+    notes: 'weld seam acceptable',
+    file_keys: ['parts\\rear-bracket.step'],
+  }) as unknown as { file_keys: string[] };
+  assert.deepEqual(rec.file_keys, ['parts/rear-bracket.step'], 'paths normalize at the boundary like every path field');
+  assert.throws(
+    () => validateRecord({ ...envelope('attestation'), artifact_key: 'p', verdict: 'looks-fine', inspector: 'cuj', inspected_at: '2026-08-21' }),
+    /invalid/i,
+    'the verdict enum is closed — free-text verdicts are refused'
+  );
+  assert.equal(RECORD_TYPES.attestation.immutable, true, 'supersession is the only change path (decision analog)');
+  assert.deepEqual(RECORD_TYPES.attestation.fileKeys({ file_keys: ['a.ts'] }), ['a.ts']);
+  assert.deepEqual(RECORD_TYPES.attestation.fileKeys({}), [], 'fileless attestation never throws');
+});
+
 test('registry: full record set registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
   assert.deepEqual(Object.keys(RECORD_TYPES).sort(), [
     'anti_pattern',
+    'attestation', // human-inspection ruling (board 259a455f, user-approved 2026-08-21)
     'brief',
     'decision',
     'disconfirmed_hypothesis',

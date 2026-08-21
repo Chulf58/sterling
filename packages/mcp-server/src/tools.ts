@@ -733,7 +733,11 @@ export class SterlingTools {
     // deterministic); an EXPLICIT slug that collides with ANY slug-bearing
     // record is refused loudly — same two-records-one-handle reasoning as the
     // feature_article branch above, across every type knowledge_get resolves.
-    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding') {
+    // attestation joins the EXPLICIT-collision half only (review finding 1,
+    // 2026-08-21): it has no title/question headline, so nothing auto-mints —
+    // but an explicit slug colliding with a live record would brick slug
+    // addressing of that record for every reader (the 1e639f32 incident shape).
+    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding' || type === 'attestation') {
       const explicit = (parsed as { slug?: string }).slug;
       if (explicit) {
         if (this.store.recordsBySlug(explicit).length) {
@@ -788,7 +792,7 @@ export class SterlingTools {
     // AFTER the store write (AC6: disclosure never blocks or gates), on the
     // registered FTS extractor's text (same source citedIdWarnings already
     // used above), excluding only the record just minted.
-    const sameSubject = SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(type)
+    const sameSubject = SterlingTools.SAME_SUBJECT_TYPES.includes(type)
       ? this.sameSubjectDigest(registered ? registered.fts(parsed) : '', new Set([record.id]))
       : undefined;
     return { record, check_skipped: skipped, warnings: citationWarnings, ...(sameSubject ? { same_subject: sameSubject } : {}) };
@@ -2153,7 +2157,7 @@ export class SterlingTools {
     // the disclosure never names the write's own prior self or its own new
     // self. Sourced from the registered FTS extractor's text over the
     // MERGED record about to be persisted.
-    if (SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
+    if (SterlingTools.SAME_SUBJECT_TYPES.includes(old.type)) {
       const registered = RECORD_TYPES[old.type as keyof typeof RECORD_TYPES];
       const excludeIds = new Set(chain);
       excludeIds.add(updated.id);
@@ -2203,9 +2207,11 @@ export class SterlingTools {
     if (!original) throw new Error(`knowledge_promote: no record '${id}'`);
     if (original.status !== 'active') throw new Error(`knowledge_promote: record '${id}' is not active (status ${original.status})`);
     if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${id}' is ${original.scope} — only project-scoped records promote`);
-    const UNPROMOTABLE = ['feature_article', 'todo'];
+    const UNPROMOTABLE = ['feature_article', 'todo', 'attestation'];
     if (UNPROMOTABLE.includes(original.type)) {
-      throw new Error(`knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo is a project surface`);
+      throw new Error(
+        `knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo is a project surface; an attestation's artifact_key names a project-local artifact that means nothing in a shared domain store (review finding, 2026-08-21)`
+      );
     }
     const ts = this.now();
     // copy content; the envelope (id/clocks/status/scope/links) is rebuilt for the domain
@@ -2759,8 +2765,17 @@ export class SterlingTools {
 
   // -- knowledge_supersede (decision e17794ea, board 0b33c27b) ----------------
 
-  /** old-record types knowledge_supersede accepts — see the class comment above. */
+  /** old-record types knowledge_supersede accepts — see the class comment above.
+   *  attestation is deliberately NOT here: its supersession path is
+   *  knowledge_update fix-forward (immutable-by-construction, the decision
+   *  analog), and the orphan-coverage check below is ruling-prose-shaped. */
   private static readonly SUPERSEDE_ALLOWED_TYPES = ['decision', 'anti_pattern', 'research_finding'];
+
+  /** ruling-write types whose create/update receipts surface SAME-SUBJECT
+   *  records (decision 7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
+   *  2026-08-21 (review finding on board 259a455f): a second attestation on
+   *  one artifact_key is exactly the write that must surface the prior verdict. */
+  private static readonly SAME_SUBJECT_TYPES = ['decision', 'anti_pattern', 'research_finding', 'attestation'];
 
   /** Coverage threshold: a ruling unit counts as covered when at least this fraction of its own content words reappear in the replacement fields. */
   private static readonly ORPHAN_COVERAGE_THRESHOLD = 0.4;

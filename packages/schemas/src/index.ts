@@ -8,6 +8,7 @@ export {
   researchFindingSchema,
   referenceMaterialSchema,
   disconfirmedHypothesisSchema,
+  attestationSchema,
   featureArticleSchema,
   todoSchema,
   briefSchema,

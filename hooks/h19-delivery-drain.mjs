@@ -4267,6 +4267,32 @@ var disconfirmedHypothesisSchema = base.extend({
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var attestationSchema = base.extend({
+  type: external_exports.literal("attestation"),
+  // Optional explicit handle. NEVER auto-minted (no title/question headline
+  // to mint from); an explicit one passes the cross-type collision refusal
+  // like every slug-bearing type (review finding 3, 2026-08-21).
+  slug: external_exports.string().min(1).optional(),
+  // What was inspected — a free-form artifact identity (a part number, a
+  // render name, a document version). Repo files it corresponds to belong in
+  // file_keys, which joins the retrieval economy; artifact_key does not need
+  // to be a path and often is not.
+  artifact_key: external_exports.string().min(1),
+  verdict: external_exports.enum(["approved", "rejected", "needs_rework"]),
+  // Who ruled — a human identity. An agent's judgment is a review finding or
+  // a decision, never an attestation; the type exists precisely to mark the
+  // human-eyes event.
+  inspector: external_exports.string().min(1),
+  // When the inspection HAPPENED — created_at is merely when the record was
+  // written, and ledger entries are routinely written after the fact.
+  inspected_at: isoDate,
+  // Instrument provenance: what the inspection looked at/through (a render
+  // at a commit, a physical sample batch) — the hook for later instrument-
+  // staleness work (board 1d02b6b4's deferred half).
+  instrument: external_exports.string().min(1).optional(),
+  notes: external_exports.string().optional(),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine(refineSupersession);
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
