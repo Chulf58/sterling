@@ -19,6 +19,7 @@ export {
   unknownFieldsIn,
   schemaFor,
   digestRecord,
+  recordSizes,
   DIGEST_CLIP,
   AGENT_MODEL_KEY,
   REVIEWER_ROLES,

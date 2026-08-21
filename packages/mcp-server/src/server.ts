@@ -96,6 +96,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_stats',
+    {
+      description:
+        'Size and composition WITHOUT the body (board a382af6b). With id (uuid/slug/8-char prefix): body_chars (the number the article_oversize threshold judges — history excluded), history_chars, history_entries, supersedes_count, and over_threshold for a feature_article. With no id: the aggregate over the MOUNTED store set (project + any domain mounts, unconfirmed included) — per-type counts and body sizes, the total, and the 10 largest feature_article bodies flagged against the threshold. Use it before deciding how to write to a big record (knowledge_edit/knowledge_append vs a full retransmit) and to find what is bloating; query digest lines carry each record\'s size_chars for the cheap scan, this is the drill-down.',
+      inputSchema: strict({ id: z.string().optional() }),
+    },
+    ({ id }) => json(tools.knowledgeStats(id))
+  );
+
+  server.registerTool(
     'knowledge_retire',
     {
       description:

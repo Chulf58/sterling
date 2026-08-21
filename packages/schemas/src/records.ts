@@ -572,6 +572,21 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
  * projection is a read convenience and must never be the thing that makes a
  * read fail.
  */
+/**
+ * Size decomposition every size consumer shares (board a382af6b): the oversize
+ * lane, the digest size column, and knowledge_stats all measure the SAME two
+ * numbers or they drift — body_chars is the record WITHOUT history (the number
+ * a split can fix, the number the article_oversize threshold judges), and
+ * history_chars is the rotated-bounded rest.
+ */
+export function recordSizes(record: Record<string, unknown>): { body_chars: number; history_chars: number } {
+  const { history, ...body } = record;
+  return {
+    body_chars: JSON.stringify(body).length,
+    history_chars: Array.isArray(history) && history.length ? JSON.stringify(history).length : 0,
+  };
+}
+
 export function digestRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {
     id: record.id,
@@ -587,6 +602,12 @@ export function digestRecord(record: Record<string, unknown>): Record<string, un
     const value = mode === 'clip' ? clipped(record[field]) : record[field];
     if (value !== undefined && value !== null && value !== '') out[field] = value;
   }
+  // Size rides every REGISTERED-type digest line (board a382af6b; the
+  // unregistered-type early return above keeps its minimal shape): a reader
+  // scanning the landscape sees WHICH records are bloating before a
+  // knowledge_get ever chokes on one. body_chars only — history is
+  // rotation-bounded elsewhere.
+  out.size_chars = recordSizes(record).body_chars;
   return out;
 }
 

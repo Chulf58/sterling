@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, recordSizes, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -565,6 +565,58 @@ export class SterlingTools {
       fields: described.fields,
       required: described.fields.filter((f) => f.required).map((f) => f.name),
       optional: described.fields.filter((f) => !f.required).map((f) => f.name),
+    };
+  }
+
+  /**
+   * knowledge_stats — size and composition WITHOUT the body (board a382af6b).
+   * Per-id: the shared size decomposition (recordSizes — the same numbers the
+   * article_oversize lane judges) plus composition counts. No-arg: the
+   * store-wide aggregate, so bloat is visible before a knowledge_get chokes on
+   * it. Read-only; the digest size column (size_chars) is the cheap scan and
+   * this is the drill-down.
+   */
+  knowledgeStats(id?: string): Record<string, unknown> {
+    const threshold = this.config.article_oversize_chars;
+    if (id) {
+      const rec = this.resolveRecordId(id, 'knowledge_stats') as unknown as Record<string, unknown>;
+      const sizes = recordSizes(rec);
+      const history = Array.isArray(rec.history) ? (rec.history as unknown[]) : [];
+      const links = Array.isArray(rec.links) ? (rec.links as { rel: string }[]) : [];
+      return {
+        id: rec.id,
+        type: rec.type,
+        ...(rec.slug ? { slug: rec.slug } : {}),
+        ...(rec.title ? { title: rec.title } : {}),
+        ...(rec.version !== undefined ? { version: rec.version } : {}),
+        body_chars: sizes.body_chars,
+        history_chars: sizes.history_chars,
+        total_chars: sizes.body_chars + sizes.history_chars,
+        history_entries: history.length,
+        supersedes_count: links.filter((l) => l.rel === 'supersedes').length,
+        ...(rec.type === 'feature_article' ? { oversize_threshold: threshold, over_threshold: sizes.body_chars > threshold } : {}),
+      };
+    }
+    const by_type: Record<string, { count: number; body_chars: number }> = {};
+    const articles: { slug: string; body_chars: number }[] = [];
+    for (const type of Object.keys(RECORD_TYPES)) {
+      // include_unconfirmed: an aggregate that silently omits derived-unconfirmed
+      // records would under-report a store it claims to size (review LOW, 2026-08-21).
+      const records = this.store.query({ types: [type], cap: 100000, include_unconfirmed: true }) as unknown as Record<string, unknown>[];
+      let chars = 0;
+      for (const r of records) {
+        const s = recordSizes(r);
+        chars += s.body_chars;
+        if (type === 'feature_article') articles.push({ slug: String(r.slug ?? r.id), body_chars: s.body_chars });
+      }
+      by_type[type] = { count: records.length, body_chars: chars };
+    }
+    articles.sort((a, b) => b.body_chars - a.body_chars);
+    return {
+      by_type,
+      total_body_chars: Object.values(by_type).reduce((n, t) => n + t.body_chars, 0),
+      oversize_threshold: threshold,
+      largest_articles: articles.slice(0, 10).map((a) => ({ ...a, over_threshold: a.body_chars > threshold })),
     };
   }
 
@@ -1315,8 +1367,9 @@ export class SterlingTools {
     // bounded separately by rotation (article_history_max_entries), so counting
     // it here flagged articles a split could not fix and minted duplicate items
     // from writes the reconcile contract itself demanded.
-    const { history: _h, ...body } = record as unknown as Record<string, unknown>;
-    const size = JSON.stringify(body).length;
+    // recordSizes is the ONE size decomposition (board a382af6b) — the digest
+    // size column and knowledge_stats measure with the same function.
+    const size = recordSizes(record as unknown as Record<string, unknown>).body_chars;
     const threshold = this.config.article_oversize_chars;
     if (size <= threshold) return [];
     const a = record as unknown as { slug: string; files?: { path: string }[] };

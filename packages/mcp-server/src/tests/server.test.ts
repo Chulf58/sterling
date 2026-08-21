@@ -19,6 +19,9 @@ const SERVED_TOOLS = [
   'knowledge_get',
   // Ask what a type requires instead of learning by rejection (board 7acfbe48).
   'knowledge_schema',
+  // Size and composition without the body — per-id drill-down or store-wide
+  // aggregate; digest lines carry size_chars for the scan (board a382af6b).
+  'knowledge_stats',
   'knowledge_update',
   'knowledge_append',
   // The string sibling of append — a surgical edit inside a field too large to
