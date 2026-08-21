@@ -4,7 +4,7 @@
 // .sterling/transient/delivery/ is cleared by h19-clear-session at SessionStart
 // — the delivered-guard's TTL is the whole session by design (grill answer:
 // whole session, no expiry; re-arm rides per-file/per-record keying).
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 export function deliveryDir(cwd) {
@@ -130,14 +130,86 @@ export function readGuard(path) {
 
 export function writeGuard(path, guard) {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(guard));
+  // tmp+rename (torn-guard prevention, board 5e3d6ff4 fixer pass): NOT locked —
+  // a lost update here costs at most one duplicate pointer/guard entry, and
+  // readGuard already self-heals a torn file, so the cheaper fix is enough.
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(guard));
+  renameSync(tmp, path);
+}
+
+// ---------------------------------------------------------------------------
+// COOPERATING-WRITER LOCK (board 5e3d6ff4 fixer pass). hooks.json runs more
+// than one PostToolUse hook per event (h19-knowledge-delivery + h23-output-
+// axis on Read; h19-bash-delivery + h23-output-axis on Bash), and every one of
+// them can call enqueuePending against the SAME pending.json in the SAME
+// event. Measured precedent for what an unguarded read-modify-write does under
+// that: ledger.mjs:27-34 — two concurrent PostToolUse:Read processes tore a
+// JSON file on a DrvFs mount. A torn pending.json is worse than a torn ledger:
+// drainPending's JSON.parse failure rmSyncs the WHOLE queue while the
+// producers' guards already marked their records delivered — permanent silent
+// loss, not "ask for a re-Read".
+//
+// mkdirSync is atomic (EEXIST on contention) on every platform Node supports,
+// so it doubles as a lock with no extra dependency. Age-based staleness ONLY —
+// a lock whose mtime is older than LOCK_STALE_MS is reclaimed as abandoned by
+// a crashed holder; never PID-liveness (anti_pattern 8e603e23: a recycled PID
+// gives a false lock identity). On deadline expiry this PROCEEDS WITHOUT THE
+// LOCK rather than blocking the hook forever — delivery is an aid, never a
+// gate, so degraded beats blocked. A caller that never acquired the lock also
+// never releases it, so a slow/expired waiter can't rip an active holder's
+// lock out from under it.
+// ---------------------------------------------------------------------------
+const LOCK_DEADLINE_MS = 2000;
+const LOCK_STALE_MS = 5000;
+const LOCK_POLL_MS = 5;
+
+function withFileLock(targetPath, fn) {
+  mkdirSync(dirname(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  const deadline = Date.now() + LOCK_DEADLINE_MS;
+  let acquired = false;
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync(lockPath);
+      acquired = true;
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue; // retake immediately — no need to sleep first
+        }
+      } catch {
+        continue; // lock vanished between the EEXIST and the stat — retry now
+      }
+      // Bounded synchronous wait between attempts, never a busy CPU spin.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (acquired) {
+      try {
+        rmSync(lockPath, { recursive: true, force: true });
+      } catch {
+        // best-effort release; a leftover lock self-heals via the staleness check
+      }
+    }
+  }
 }
 
 export function enqueuePending(path, entry) {
-  const entries = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : [];
-  entries.push(entry);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(entries));
+  withFileLock(path, () => {
+    const entries = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : [];
+    entries.push(entry);
+    // tmp+rename: a crash mid-write can never leave a torn file behind.
+    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmp, JSON.stringify(entries));
+    renameSync(tmp, path);
+  });
 }
 
 /** Read-and-remove: the queue is one-shot (P4 — consumed by the event that

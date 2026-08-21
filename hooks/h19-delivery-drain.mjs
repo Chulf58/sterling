@@ -4940,7 +4940,7 @@ function warnNonBlocking(message) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync, existsSync as existsSync2, rmSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync, existsSync as existsSync2, rmSync, renameSync, statSync } from "node:fs";
 import { join as join2, dirname as dirname2 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");

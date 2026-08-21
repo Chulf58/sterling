@@ -6347,7 +6347,7 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync } from "node:fs";
 import { join as join2, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
@@ -6395,7 +6395,9 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   mkdirSync2(dirname3(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(guard));
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(guard));
+  renameSync(tmp, path);
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");

@@ -438,6 +438,117 @@ test('AC8: a >64KB tool_response with matching vocabulary inside the first 16,00
   }
 });
 
+// ---------------------------------------------------------------------------
+// Review-mandated additions (2026-08-21 correctness review of commit 4d854b6):
+// PowerShell parity, the .sterling/ self-reference exclusion, the two ownership
+// edge cases the gate predicate turns on, and the same-event concurrency pin
+// for the withFileLock fix in lib/delivery.mjs.
+// ---------------------------------------------------------------------------
+
+test('review (a): PowerShell tool_response content matches enqueue exactly like Bash', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(
+      { hook_event_name: 'PostToolUse', tool_name: 'PowerShell', tool_input: { command: 'Get-Content run.log' }, tool_response: CONTENT_SENTENCE, cwd: dir },
+      dir
+    );
+    assert.equal(r.code, 0);
+    const pending = pendingOf(dir);
+    assert.equal(pending.length, 1, 'PowerShell is a first-class seam, same as Bash');
+    assert.match(pending[0].payload, new RegExp(`knowledge_get ${ap.id}`));
+  } finally {
+    cleanup();
+  }
+});
+
+test('review (b): Read of a path under .sterling/ enqueues nothing — the store tree is the highest-false-positive, self-referential input', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(postRead(dir, '.sterling/transient/delivery/pending.json', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    assert.equal(pendingOf(dir).length, 0, 'reading the delivery queue must never feed the delivery queue');
+  } finally {
+    cleanup();
+  }
+});
+
+test('review (c): a file owned ONLY by a working_tree-scoped article still enqueues — working-tree owners do not gate, matching H19', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('tree-scoped', ['logs/probe.txt'], { working_tree: 'detached-copy' }));
+    const dec = store.create(markedDecision('DEC-GAMMA'));
+    const r = runHook(postRead(dir, 'logs/probe.txt', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    const pending = pendingOf(dir);
+    assert.equal(pending.length, 1, 'a working_tree-scoped owner means H19 delivers no substance here, so H23 must fire');
+    assert.match(pending[0].payload, new RegExp(`knowledge_get ${dec.id}`));
+  } finally {
+    cleanup();
+  }
+});
+
+test('review (d): a file owned by a repo-located reference_material enqueues nothing — the ownership predicate matches H19 exactly', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create({
+      ...envelope('reference_material'),
+      title: 'probe rendering reference',
+      kind: 'doc',
+      location: 'docs/probe-ref.md',
+      summary: 'reference summary',
+      source_date: '2026-08-01',
+      capture_date: '2026-08-02',
+    });
+    store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(postRead(dir, 'docs/probe-ref.md', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    assert.equal(pendingOf(dir).length, 0, 'a repo-located reference doc confers ownership, same as H19');
+  } finally {
+    cleanup();
+  }
+});
+
+// Second, disjoint vocabulary family for the concurrency pin, same freq-3
+// centrality idiom as the DOMAIN_* fixtures — so each concurrent process
+// matches exactly one record and the two enqueues are distinguishable.
+const SLUICE_TRIGGER =
+  'quench manifold quench manifold arbor sluice arbor sluice gantry pylon gantry pylon ' +
+  'recur constantly though this fault rarely touches a coolant loop stage during purge work';
+
+const SLUICE_CONTENT =
+  'The purge trace shows the quench manifold venting while the sluice arbor and the gantry pylon both drift past nominal torque.';
+
+test('review (e): two h23 processes on the SAME project concurrently — pending.json stays valid JSON and holds BOTH entries (withFileLock pin)', async () => {
+  const { spawn } = await import('node:child_process');
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const a = store.create(markedAntiPattern('AP-ALPHA'));
+    const b = store.create(antiPattern('AP-SLUICE quench manifold sluice arbor gantry pylon failure', SLUICE_TRIGGER));
+    const run = (input) =>
+      new Promise((resolve) => {
+        const p = spawn(process.execPath, [join(HOOKS, 'h23-output-axis.mjs')], { cwd: dir });
+        p.on('exit', (code) => resolve(code));
+        p.stdin.write(JSON.stringify(input));
+        p.stdin.end();
+      });
+    const [c1, c2] = await Promise.all([
+      run(postBash(dir, 'cat run.log', CONTENT_SENTENCE)),
+      run(postBash(dir, 'cat purge.log', SLUICE_CONTENT)),
+    ]);
+    assert.equal(c1, 0);
+    assert.equal(c2, 0);
+    const pending = pendingOf(dir); // JSON.parse here IS the torn-file assertion
+    assert.equal(pending.length, 2, 'both concurrent enqueues survive — no lost update, no torn queue');
+    const all = pending.map((e) => e.payload).join('\n');
+    assert.match(all, new RegExp(`knowledge_get ${a.id}`));
+    assert.match(all, new RegExp(`knowledge_get ${b.id}`));
+  } finally {
+    cleanup();
+  }
+});
+
 test('AC8: vocabulary appearing only AFTER the first 16,000 chars is never matched — the clip boundary is real, not a suggestion', () => {
   const { dir, store, cleanup } = makeProject();
   try {

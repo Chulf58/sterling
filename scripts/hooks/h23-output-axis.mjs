@@ -92,13 +92,28 @@ try {
   const store = openStore(input.cwd);
   if (!store) allow(); // not a Sterling project — no ceremony (P1)
 
-  // READ SEAM OWNERSHIP GATE: silent on territory an owning feature_article
-  // already covers — H19 delivers substance there. Unresolvable/outside-repo
-  // paths fall through to the match (no jurisdiction to gate on).
+  // READ SEAM OWNERSHIP GATE: silent on territory an owning feature_article or
+  // repo-located reference_material already covers — H19 delivers substance
+  // (or, for a reference doc, its own pointer) there. Mirrors
+  // h19-knowledge-delivery's owner query EXACTLY (same types, same
+  // working_tree filter, review finding 2) so the two channels agree on what
+  // 'governed' means — a divergent predicate here would silently disagree
+  // with H19 about the same path. Unresolvable/outside-repo paths fall through
+  // to the match (no jurisdiction to gate on).
+  //
+  // PATH EXCLUSIONS mirror h19-knowledge-delivery.mjs:41-42 (review finding
+  // 1): reading the store's own tree or its delivery queue is the highest
+  // false-positive input this hook could face, and it is self-referential —
+  // matching on .sterling/transient/delivery/pending.json's own content would
+  // let this hook feed itself.
   if (toolName === 'Read') {
     const rel = repoRel(input.tool_input?.file_path, input.cwd);
+    if (rel === '.git' || rel?.startsWith('.git/')) allow();
+    if (rel?.startsWith('.sterling/')) allow();
     if (rel) {
-      const owners = store.query({ types: ['feature_article'], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+      const owners = store
+        .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
+        .filter((r) => !r.working_tree);
       if (owners.length) allow();
     }
   }
