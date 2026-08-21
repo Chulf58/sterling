@@ -5184,6 +5184,8 @@ ${record.statement ?? ""}`;
 ${record.title ?? ""}`;
   if (record.type === "research_finding")
     return `${record.question ?? ""}`;
+  if (record.type === "disconfirmed_hypothesis")
+    return `${record.question ?? ""}`;
   return "";
 }
 function axisHits(record, terms) {
@@ -6475,7 +6477,15 @@ try {
   const candidates = [
     ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
     ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 })
+    ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 }),
+    // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
+    // question and a disconfirmed_hypothesis an already-refuted trail — the two
+    // types a dispatch about to fan out on that question is about to RE-DERIVE
+    // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
+    // 6,142-file sweep on a question the store answered). Same floors as every
+    // other candidate; axisNarrowText matches their question fields.
+    ...store.query({ types: ["research_finding"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["disconfirmed_hypothesis"], rank_terms: terms, cap: 40 })
   ];
   if (!candidates.length) allow();
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
@@ -6487,7 +6497,8 @@ try {
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
   const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
   const articles = fresh.filter((x) => x.record.type === "feature_article");
-  if (!hazards.length && !decisions.length && !articles.length) allow();
+  const priorAnswers = fresh.filter((x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis");
+  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) allow();
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
@@ -6510,10 +6521,29 @@ try {
       remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
     })
   ] : [];
+  const PRIOR_ANSWER_CAP = 3;
+  const clip2 = (v, n = 160) => {
+    const t = String(v ?? "").replace(/\s+/g, " ").trim();
+    return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
+  };
+  const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
+  const priorBlocks = priorAnswers.length ? [
+    [
+      `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these. knowledge_get before fanning out:`,
+      ...shownPrior.map((x) => {
+        const r = x.record;
+        return r.type === "research_finding" ? `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}` : `  \u2192 REFUTED TRAIL: ${clip2(r.question)} \u2014 rejected: ${clip2(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
+      }),
+      ...priorAnswers.length > PRIOR_ANSWER_CAP ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more \u2014 knowledge_query types:["research_finding","disconfirmed_hypothesis"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",")}] cap:${priorAnswers.length})`] : []
+    ].join("\n")
+  ] : [];
   const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
   const blocks = [
     header,
-    ...promptIsQuestionShaped ? [...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...articleBlocks]
+    // A prior ANSWER outranks everything on a question-shaped prompt — it is
+    // the direct "don't re-derive" signal; on a change-shaped prompt hazards
+    // still lead (stop the mistake), answers ride with the article pointers.
+    ...promptIsQuestionShaped ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]
   ];
   process.stdout.write(
     JSON.stringify({
@@ -6521,7 +6551,7 @@ try {
     })
   );
   const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles]);
+  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {

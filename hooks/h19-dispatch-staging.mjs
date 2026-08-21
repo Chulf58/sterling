@@ -5196,6 +5196,8 @@ ${record.statement ?? ""}`;
 ${record.title ?? ""}`;
   if (record.type === "research_finding")
     return `${record.question ?? ""}`;
+  if (record.type === "disconfirmed_hypothesis")
+    return `${record.question ?? ""}`;
   return "";
 }
 function axisHits(record, terms) {

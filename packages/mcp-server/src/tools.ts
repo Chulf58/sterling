@@ -1589,12 +1589,13 @@ export class SterlingTools {
    * than discovering a governing record only after a subagent has already gone
    * wrong (H20/H19 relevance slice 4b). Reuses the SAME axis extraction +
    * stage-2 centrality floors H20 already applies at delivery time. Since
-   * board 39c3d762 the candidate surface spans all four governing types —
-   * anti_pattern, decision, feature_article (territory = slug/family/title),
-   * research_finding (subject = question) — because the two missing types made
-   * an article-governed question answer 'nothing governs this', a false
-   * negative dressed as a verdict; and the no-match verdict is 'ungoverned'
-   * (renamed from 'ready', whose query-envelope reading is the opposite).
+   * board 39c3d762 (widened by e7157d0b) the candidate surface spans all five
+   * governing types — anti_pattern, decision, feature_article (territory =
+   * slug/family/title), research_finding and disconfirmed_hypothesis (subject
+   * = question) — because a missing type made an article-governed question
+   * answer 'nothing governs this', a false negative dressed as a verdict; and
+   * the no-match verdict is 'ungoverned' (renamed from 'ready', whose
+   * query-envelope reading is the opposite).
    */
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
@@ -1615,8 +1616,8 @@ export class SterlingTools {
 
   /**
    * The candidate-matching CORE shared by knowledgePreflight and same-subject
-   * surfacing on write (decision 7e3c66c5) — the four preflight axis floors
-   * (extractAxisTerms already run by the caller -> store.query the four
+   * surfacing on write (decision 7e3c66c5) — the preflight axis floors
+   * (extractAxisTerms already run by the caller -> store.query the five
    * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
    * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
    * Callers differ only in what they do with the (record, hits) pairs and in
@@ -1642,6 +1643,10 @@ export class SterlingTools {
       ...this.store.query({ types: ['decision'], rank_terms: queryTerms, cap: 40 }),
       ...this.store.query({ types: ['feature_article'], rank_terms: queryTerms, cap: 40 }),
       ...this.store.query({ types: ['research_finding'], rank_terms: queryTerms, cap: 40 }),
+      // Refuted trails join the prior-answer surface (board e7157d0b): a brief
+      // about to re-litigate a disproved hypothesis is the exact re-derivation
+      // waste preflight exists to stop.
+      ...this.store.query({ types: ['disconfirmed_hypothesis'], rank_terms: queryTerms, cap: 40 }),
     ];
     return candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))

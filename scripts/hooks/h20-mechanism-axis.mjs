@@ -133,6 +133,14 @@ try {
     ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
     ...store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
     ...store.query({ types: ['feature_article'], rank_terms: terms, cap: 40 }),
+    // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
+    // question and a disconfirmed_hypothesis an already-refuted trail — the two
+    // types a dispatch about to fan out on that question is about to RE-DERIVE
+    // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
+    // 6,142-file sweep on a question the store answered). Same floors as every
+    // other candidate; axisNarrowText matches their question fields.
+    ...store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ['disconfirmed_hypothesis'], rank_terms: terms, cap: 40 }),
   ];
   if (!candidates.length) allow();
 
@@ -170,7 +178,8 @@ try {
   // renderDecisionPointers; slicing early would lose the true matched count
   // the disclosure line needs.
   const articles = fresh.filter((x) => x.record.type === 'feature_article');
-  if (!hazards.length && !decisions.length && !articles.length) allow();
+  const priorAnswers = fresh.filter((x) => x.record.type === 'research_finding' || x.record.type === 'disconfirmed_hypothesis');
+  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) allow();
 
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(', ');
   // Name the covered CENTRAL terms too, so the reader can see at a glance that
@@ -217,6 +226,31 @@ try {
         }),
       ]
     : [];
+  // PRIOR-ANSWER pointers (board e7157d0b): one line each — the question is the
+  // subject, the clocks say how current the answer is, the id is the read. Shown
+  // slice only marks delivered (cappedHazards rule).
+  const PRIOR_ANSWER_CAP = 3;
+  const clip = (v, n = 160) => {
+    const t = String(v ?? '').replace(/\s+/g, ' ').trim();
+    return t.length <= n ? t : `${t.slice(0, n)}…`;
+  };
+  const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
+  const priorBlocks = priorAnswers.length
+    ? [
+        [
+          `▸ PRIOR ANSWERS in the store (${priorAnswers.length}) — this dispatch may be about to RE-DERIVE one of these. knowledge_get before fanning out:`,
+          ...shownPrior.map((x) => {
+            const r = x.record;
+            return r.type === 'research_finding'
+              ? `  → ANSWERED: ${clip(r.question)} (source ${r.source_date ?? '?'}, captured ${r.capture_date ?? '?'}${r.status === 'flagged_stale' ? ', FLAGGED STALE — re-verify before trusting' : ''}) · knowledge_get ${r.id}`
+              : `  → REFUTED TRAIL: ${clip(r.question)} — rejected: ${clip(r.rejected_answer, 100)} · knowledge_get ${r.id}`;
+          }),
+          ...(priorAnswers.length > PRIOR_ANSWER_CAP
+            ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more — knowledge_query types:["research_finding","disconfirmed_hypothesis"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',')}] cap:${priorAnswers.length})`]
+            : []),
+        ].join('\n'),
+      ]
+    : [];
   // RANKING (consuming-project retro 2026-08-17-2111, AC2): a QUESTION-SHAPED
   // prompt is the reader asking the store a fact, so the article pointer — the
   // direct answer — leads; a CHANGE-SHAPED prompt keeps today's hazard-first
@@ -226,9 +260,12 @@ try {
   const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
   const blocks = [
     header,
+    // A prior ANSWER outranks everything on a question-shaped prompt — it is
+    // the direct "don't re-derive" signal; on a change-shaped prompt hazards
+    // still lead (stop the mistake), answers ride with the article pointers.
     ...(promptIsQuestionShaped
-      ? [...articleBlocks, ...hazardDecisionBlocks]
-      : [...hazardDecisionBlocks, ...articleBlocks]),
+      ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks]
+      : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]),
   ];
 
   // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19 (council wf_db9a59aa-0af):
@@ -244,7 +281,7 @@ try {
   // read by the recipient, so it stays eligible for a later dispatch instead
   // of being silently lost for the rest of the session.
   const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles]);
+  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
