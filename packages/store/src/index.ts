@@ -258,6 +258,10 @@ export type ToolStore = Pick<
   | 'appendRunEscalation'
   | 'writeHandoff'
   | 'readHandoffs'
+  // knowledge_split's multi-record write (children + parent supersession)
+  // needs one atomic boundary spanning several store calls (decision
+  // compaction-tooling-windowed-read-plus-split) — see withTransaction above.
+  | 'withTransaction'
 >;
 
 export class SterlingStore {
@@ -1429,7 +1433,25 @@ export class SterlingStore {
     );
   }
 
+  /**
+   * REENTRANT — every other write primitive (create, supersede, …) already
+   * calls this internally, so a multi-record tool-layer write (knowledge_split:
+   * N child creates + one parent supersession, decision
+   * compaction-tooling-windowed-read-plus-split) that must land atomically
+   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
+   * nest transactions. `txDepth` makes a NESTED call join the already-open
+   * transaction instead of attempting a second one: only the outermost call
+   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
+   * whole thing exactly once.
+   */
+  private txDepth = 0;
+
   private tx(fn: () => void): void {
+    if (this.txDepth > 0) {
+      fn();
+      return;
+    }
+    this.txDepth++;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       fn();
@@ -1437,6 +1459,25 @@ export class SterlingStore {
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
+    } finally {
+      this.txDepth--;
     }
+  }
+
+  /**
+   * PUBLIC transaction boundary for the tool layer (decision
+   * compaction-tooling-windowed-read-plus-split): the store is the one write
+   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
+   * that must write several records atomically — knowledge_split's N children
+   * plus one parent supersession — gets the transaction FROM the store rather
+   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
+   * every store write primitive called from `fn` joins this same transaction.
+   */
+  withTransaction<T>(fn: () => T): T {
+    let result!: T;
+    this.tx(() => {
+      result = fn();
+    });
+    return result;
   }
 }

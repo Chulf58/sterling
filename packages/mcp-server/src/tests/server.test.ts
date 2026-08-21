@@ -27,6 +27,9 @@ const SERVED_TOOLS = [
   // The string sibling of append — a surgical edit inside a field too large to
   // retransmit (board fd6d8da9).
   'knowledge_edit',
+  // Mechanized article split enforcing the 8b87efcb invariants in one
+  // transaction (board 136091d2, decision compaction-tooling-windowed-read-plus-split).
+  'knowledge_split',
   // The retirement path: supersede in favour of a survivor, so a duplicate stops
   // being served instead of becoming MORE visible (board 77f00139).
   'knowledge_retire',

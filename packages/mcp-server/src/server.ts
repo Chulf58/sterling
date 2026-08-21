@@ -81,8 +81,50 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
 
   server.registerTool(
     'knowledge_get',
-    { description: 'Fetch a record by id — the full-fidelity read (query results are projected).', inputSchema: strict({ id: z.string() }) },
-    ({ id }) => json(tools.knowledgeGet(id))
+    {
+      description:
+        'Fetch a record by id — the full-fidelity read (query results are projected). No `field`: exactly the whole record, terminus handling included. With `field`: a WINDOWED projection of just that one field instead of the whole record (decision compaction-tooling-windowed-read-plus-split) — the measured defect this closes is an oversize article that overflows its own read tool. Unknown field is refused, naming it plus the valid set for the record\'s type. A string/array field returns {kind, total_chars|total_entries, offset, value|entries} — offset/length address CHARACTERS on a string, ELEMENTS on an array; offset at/past the end is not an error (empty value/entries, true total still reported, for clean paging termination). A scalar/object field returns {kind:"value", value} whole — offset/length alongside it are refused as not windowable. offset/length without field is refused.',
+      inputSchema: strict({
+        id: z.string(),
+        field: z.string().optional(),
+        offset: z.number().int().nonnegative().optional(),
+        length: z.number().int().positive().optional(),
+      }),
+    },
+    ({ id, field, offset, length }) => json(tools.knowledgeGet(id, { field, offset, length }))
+  );
+
+  server.registerTool(
+    'knowledge_split',
+    {
+      description:
+        'Split a feature_article: move a subset of its files[]/current_ac[]/live_test_refs entries into one or more NEW child articles, mechanically enforcing the invariants decision 8b87efcb established by hand for the hooks-suite split (decision compaction-tooling-windowed-read-plus-split) — prose moved VERBATIM, ac_ids INHERITED never renumbered, live_test_refs RE-POINTED to whichever side now owns the ac_id, the parent SURVIVES under its ORIGINAL slug (superseded to version+1, never replaced), and FILE COVERAGE stays TOTAL (every parent-owned path lands on exactly the parent or one child). Every child move_files path must be owned by the parent and claimed by at most one child; same for move_ac_ids; child slugs must be pairwise distinct and not collide with an existing feature_article; the parent must retain at least one file (moving all of them is refused — that shape is retire-and-replace, not a split). ALL validation runs before any write, and the whole split (every child plus the parent supersession) lands in ONE transaction, so a mid-split failure leaves the store untouched. resolves closes named open maintenance items exactly like knowledge_update\'s explicit-claim contract; an unnamed item stays open. Returns {parent:{id,slug,version}, children:[{id,slug}]}.',
+      inputSchema: strict({
+        id: z.string(),
+        children: z
+          .array(
+            z.object({
+              slug: z.string().min(1),
+              title: z.string().min(1),
+              what_it_does: z.string().min(1),
+              intended_behavior: z.string().min(1),
+              move_files: z.array(z.string()),
+              move_ac_ids: z.array(z.string()),
+              dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }).optional(),
+            }).strict()
+          )
+          .min(1),
+        parent_what_it_does: z.string(),
+        parent_intended_behavior: z.string().optional(),
+        reason: z.string().optional(),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open maintenance-queue item ids this split discharges — validated before the write'),
+      }),
+    },
+    ({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }) =>
+      json(tools.knowledgeSplit({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }))
   );
 
   server.registerTool(

@@ -6114,7 +6114,24 @@ var SterlingStore = class _SterlingStore {
     }
     this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(record));
   }
+  /**
+   * REENTRANT — every other write primitive (create, supersede, …) already
+   * calls this internally, so a multi-record tool-layer write (knowledge_split:
+   * N child creates + one parent supersession, decision
+   * compaction-tooling-windowed-read-plus-split) that must land atomically
+   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
+   * nest transactions. `txDepth` makes a NESTED call join the already-open
+   * transaction instead of attempting a second one: only the outermost call
+   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
+   * whole thing exactly once.
+   */
+  txDepth = 0;
   tx(fn) {
+    if (this.txDepth > 0) {
+      fn();
+      return;
+    }
+    this.txDepth++;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       fn();
@@ -6122,7 +6139,25 @@ var SterlingStore = class _SterlingStore {
     } catch (e) {
       this.db.exec("ROLLBACK");
       throw e;
+    } finally {
+      this.txDepth--;
     }
+  }
+  /**
+   * PUBLIC transaction boundary for the tool layer (decision
+   * compaction-tooling-windowed-read-plus-split): the store is the one write
+   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
+   * that must write several records atomically — knowledge_split's N children
+   * plus one parent supersession — gets the transaction FROM the store rather
+   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
+   * every store write primitive called from `fn` joins this same transaction.
+   */
+  withTransaction(fn) {
+    let result;
+    this.tx(() => {
+      result = fn();
+    });
+    return result;
   }
 };
 

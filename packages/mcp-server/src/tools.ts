@@ -1808,8 +1808,24 @@ export class SterlingTools {
    * _update, _retire, _link) resolve through the exact same three-form
    * contract instead of a bare store.get — knowledge_get is now a thin
    * wrapper over it.
+   *
+   * WINDOWED/FIELD READ (decision compaction-tooling-windowed-read-plus-split,
+   * board 136091d2): `opts.field` requests one field's value instead of the
+   * whole record, so an oversize article stays readable through the tool that
+   * is supposed to read it — the measured defect was 4 of 77 articles in a
+   * consuming project overflowing their own read tool. No `opts` (or an `opts`
+   * with none of field/offset/length set) is UNCHANGED behavior — full record,
+   * terminus handling included. With `field`: validated against
+   * knownFieldsFor(record.type) (unknown field refused, naming it plus the
+   * valid set), then projected by its runtime shape — string → kind:'string'
+   * (offset/length address CHARACTERS), array → kind:'array' (offset/length
+   * address ELEMENTS), anything else → kind:'value' (offset/length are refused
+   * as not windowable — there is nothing to page through). offset at/past the
+   * end is NOT an error: empty value/entries with the TRUE total, so paging
+   * has a clean termination. `offset`/`length` without `field` is refused — a
+   * window addresses one named field, never the whole record.
    */
-  knowledgeGet(id: string): DurableRecord {
+  knowledgeGet(id: string, opts?: { field?: string; offset?: number; length?: number }): DurableRecord | Record<string, unknown> {
     let record: DurableRecord;
     try {
       record = this.resolveRecordId(id, 'knowledge_get');
@@ -1842,10 +1858,55 @@ export class SterlingTools {
     // never a null/undefined one (AC6). Only a superseded record gains it,
     // sourced from store.resolveTerminus so the disclosed end is the true chain
     // end, not the one-hop superseded_by (AC7).
-    if (record.status !== 'superseded') return record;
-    const terminus = this.store.resolveTerminus(record.id);
-    if (!terminus) return record;
-    return { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
+    let full: DurableRecord | (DurableRecord & { terminus: unknown }) = record;
+    if (record.status === 'superseded') {
+      const terminus = this.store.resolveTerminus(record.id);
+      if (terminus) full = { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
+    }
+
+    // No windowing requested at all: exactly today's behavior, untouched.
+    if (!opts || (opts.field === undefined && opts.offset === undefined && opts.length === undefined)) {
+      return full;
+    }
+    const { field, offset, length } = opts;
+    if (field === undefined) {
+      throw new Error(
+        `knowledge_get: 'offset'/'length' require 'field' to be set — a window addresses one named field on the record, never the whole thing.`
+      );
+    }
+    const known = knownFieldsFor(full.type);
+    if (!known || !known.has(field)) {
+      const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
+      throw new Error(`knowledge_get: '${full.type}' does not define field '${field}' — valid fields: ${valid}.`);
+    }
+    const rec = full as unknown as Record<string, unknown>;
+    const value = rec[field];
+    const base: Record<string, unknown> = {
+      id: full.id,
+      type: full.type,
+      status: full.status,
+      field,
+      ...(rec.slug !== undefined ? { slug: rec.slug } : {}),
+      ...(rec.version !== undefined ? { version: rec.version } : {}),
+    };
+    if (typeof value === 'string') {
+      const off = offset ?? 0;
+      const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
+      return { ...base, kind: 'string', total_chars: value.length, offset: off, value: windowed };
+    }
+    if (Array.isArray(value)) {
+      const off = offset ?? 0;
+      const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
+      return { ...base, kind: 'array', total_entries: value.length, offset: off, entries: windowed };
+    }
+    // scalar / object / undefined: whole value, no offset/length — there is
+    // nothing to page through.
+    if (offset !== undefined || length !== undefined) {
+      throw new Error(
+        `knowledge_get: field '${field}' on ${full.type} is not a string or array — offset/length are not windowable on it.`
+      );
+    }
+    return { ...base, kind: 'value', value };
   }
 
   /**
@@ -2170,6 +2231,243 @@ export class SterlingTools {
       return { ...updated, same_subject: sameSubject };
     }
     return updated;
+  }
+
+  /**
+   * knowledge_split's OWN resolves validation (decision
+   * compaction-tooling-windowed-read-plus-split): unlike knowledgeUpdate's
+   * validateResolveClaim, this is deliberately NOT lane-restricted to
+   * reconcile_needed/refresh_reference and does not require a feature_link
+   * into the record's supersede chain — the item a split most naturally
+   * closes is the article_oversize item that MOTIVATED it, which carries
+   * neither. The named id must exist as an OPEN system maintenance-queue
+   * item; any other type or an already-drained id is refused by name, the
+   * same shape validateResolveClaim's own refusals use.
+   */
+  private validateSplitResolveClaim(id: string): DurableRecord {
+    const record = this.store.get(id);
+    if (!record) {
+      const trace = this.store.drainLogEntry(id);
+      if (trace) {
+        throw new Error(
+          `resolves: names '${id}', which is not OPEN — it was already removed` +
+            (trace.drained_at ? ` at ${trace.drained_at}` : '') +
+            ` (per the drain log). A closed item cannot be re-claimed; nothing was written.`
+        );
+      }
+      throw new Error(`resolves: names '${id}', which does not exist as a maintenance item; nothing was written.`);
+    }
+    const it = record as unknown as { type: string; source?: string };
+    if (it.type !== 'todo' || it.source !== 'system') {
+      throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
+    }
+    return record;
+  }
+
+  /**
+   * knowledge_split (decision compaction-tooling-windowed-read-plus-split,
+   * board 136091d2) mechanically enforces the split invariants decision
+   * 8b87efcb established BY HAND for the hooks-suite split: prose moved
+   * VERBATIM (files[]/current_ac[]/live_test_refs entries are relocated, not
+   * rewritten), ac_ids INHERITED never renumbered, live_test_refs RE-POINTED
+   * (an entry follows its ac_id to whichever side — parent or child — now
+   * owns it), the parent SURVIVES under its ORIGINAL slug (a split is
+   * additive children plus a parent trim, never a retire-and-replace), and
+   * FILE COVERAGE stays TOTAL — every path the parent owned before the split
+   * lands on exactly the parent or one child afterward, never both, never
+   * neither.
+   *
+   * ALL validation — parent type/status, per-child move_files/move_ac_ids
+   * ownership, cross-child claim collisions, child slug collisions (reusing
+   * the same store.articlesBySlug check knowledgeCreate's feature_article
+   * branch uses), and the retain-at-least-one-file floor (full donation is
+   * refused: that shape is retire-and-replace, rejected by decision
+   * 8b87efcb's own alternatives) — runs BEFORE any write, so a call mixing a
+   * valid and an invalid child refuses the WHOLE thing, never creates the
+   * valid one first.
+   *
+   * The children-plus-parent write then lands in ONE store transaction
+   * (store.withTransaction) so a mid-split failure leaves the store
+   * byte-for-byte untouched — nothing rides on process-level try/catch
+   * cleanup. `resolves` closes named open maintenance items via
+   * validateSplitResolveClaim above (deliberately broader than
+   * knowledgeUpdate's own lane-restricted resolves, since the item a split
+   * most naturally discharges — article_oversize — is outside that lane);
+   * an item left unnamed stays open, exactly the explicit-claim posture
+   * decision 68988832 established.
+   */
+  knowledgeSplit(input: {
+    id: string;
+    children: {
+      slug: string;
+      title: string;
+      what_it_does: string;
+      intended_behavior: string;
+      move_files: string[];
+      move_ac_ids: string[];
+      dependencies?: { relies_on: string[]; relied_by: string[] };
+    }[];
+    parent_what_it_does: string;
+    parent_intended_behavior?: string;
+    reason?: string;
+    resolves?: string[];
+  }): { parent: { id: string; slug: string; version: number }; children: { id: string; slug: string }[] } {
+    const { id, children, parent_what_it_does, parent_intended_behavior, reason, resolves } = input;
+
+    if (!Array.isArray(children) || children.length === 0) {
+      throw new Error(`knowledge_split: 'children' must be a non-empty array — at least one child is required; nothing was written.`);
+    }
+
+    const parent = this.resolveRecordId(id, 'knowledge_split');
+    if (parent.type !== 'feature_article') {
+      throw new Error(
+        `knowledge_split: '${id}' resolves to a ${parent.type}, not a feature_article — only a feature_article can be split; nothing was written.`
+      );
+    }
+    if (parent.status !== 'active') {
+      throw new Error(`knowledge_split: parent '${id}' is not active (status ${parent.status}) — only a live feature_article can be split; nothing was written.`);
+    }
+    const parentRec = parent as unknown as {
+      id: string;
+      slug: string;
+      state: string;
+      history: { date: string; event: string; target_id?: string }[];
+      files: { path: string; role: string; unverified?: boolean }[];
+      current_ac: { ac_id: string; text: string; verifiable_at: string }[];
+      live_test_refs: { ac_id: string; test_paths: string[] }[];
+    };
+
+    // Child slugs pairwise distinct within this call, and none colliding with
+    // an existing feature_article slug — the same two-records-one-slug refusal
+    // knowledgeCreate's feature_article branch already enforces (board 56c8a509).
+    const seenSlugs = new Set<string>();
+    for (const child of children) {
+      if (seenSlugs.has(child.slug)) {
+        throw new Error(`knowledge_split: two children in this call share slug '${child.slug}' — child slugs must be pairwise distinct; nothing was written.`);
+      }
+      seenSlugs.add(child.slug);
+      const clash = this.store.articlesBySlug(child.slug);
+      if (clash.length) {
+        throw new Error(
+          `knowledge_split: child slug '${child.slug}' collides with an existing feature_article ('${clash[0].id}') — two records under one slug is worse than one wrong record; choose a distinct slug. Nothing was written.`
+        );
+      }
+    }
+
+    // Ownership + no-double-claim validation for move_files/move_ac_ids — ALL
+    // of it before any write (P5): a call mixing a valid and an invalid child
+    // must refuse the WHOLE call, never create the valid one first.
+    const parentPaths = new Set(parentRec.files.map((f) => f.path));
+    const parentAcIds = new Set(parentRec.current_ac.map((a) => a.ac_id));
+    const claimedPaths = new Map<string, string>();
+    const claimedAcIds = new Map<string, string>();
+    for (const child of children) {
+      for (const path of child.move_files ?? []) {
+        if (!parentPaths.has(path)) {
+          throw new Error(
+            `knowledge_split: child '${child.slug}' names move_files path '${path}', which parent '${parentRec.slug}' does not own — nothing was written.`
+          );
+        }
+        if (claimedPaths.has(path)) {
+          throw new Error(
+            `knowledge_split: path '${path}' is claimed by two children ('${claimedPaths.get(path)}' and '${child.slug}') — a path moves to exactly one child; nothing was written.`
+          );
+        }
+        claimedPaths.set(path, child.slug);
+      }
+      for (const acId of child.move_ac_ids ?? []) {
+        if (!parentAcIds.has(acId)) {
+          throw new Error(
+            `knowledge_split: child '${child.slug}' names move_ac_ids '${acId}', which parent '${parentRec.slug}' does not own — nothing was written.`
+          );
+        }
+        if (claimedAcIds.has(acId)) {
+          throw new Error(
+            `knowledge_split: ac_id '${acId}' is claimed by two children ('${claimedAcIds.get(acId)}' and '${child.slug}') — an ac_id moves to exactly one child; nothing was written.`
+          );
+        }
+        claimedAcIds.set(acId, child.slug);
+      }
+    }
+
+    // Full donation refused (decision 8b87efcb's own rejected alternatives:
+    // that shape is retire-and-replace, not a split) — the parent must retain
+    // at least one owned file.
+    if (parentRec.files.length > 0 && claimedPaths.size >= parentRec.files.length) {
+      throw new Error(
+        `knowledge_split: this split moves all ${parentRec.files.length} of parent '${parentRec.slug}''s files — the parent must retain at least one owned file (full donation is retire-and-replace, rejected by decision 8b87efcb); nothing was written.`
+      );
+    }
+
+    // resolves: validated (broader than knowledgeUpdate's own lane-restricted
+    // check — see validateSplitResolveClaim) BEFORE any write, same
+    // duplicate-claim refusal knowledgeUpdate itself applies.
+    if (resolves) {
+      const seen = new Set<string>();
+      for (const rid of resolves) {
+        if (seen.has(rid)) {
+          throw new Error(`resolves: '${rid}' is named more than once — an item can only be claimed once; nothing was written.`);
+        }
+        seen.add(rid);
+      }
+    }
+    const resolveClaims = (resolves ?? []).map((rid) => this.validateSplitResolveClaim(rid));
+
+    const ts = this.now();
+    const childSlugs = children.map((c) => c.slug).join(', ');
+    const childResults: { id: string; slug: string }[] = [];
+    let parentResult!: DurableRecord;
+
+    this.store.withTransaction(() => {
+      for (const child of children) {
+        const movedFiles = parentRec.files.filter((f) => claimedPaths.get(f.path) === child.slug);
+        const movedAc = parentRec.current_ac.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
+        const movedRefs = parentRec.live_test_refs.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
+        const created = this.knowledgeCreate('feature_article', {
+          slug: child.slug,
+          title: child.title,
+          what_it_does: child.what_it_does,
+          intended_behavior: child.intended_behavior,
+          files: movedFiles,
+          current_ac: movedAc,
+          live_test_refs: movedRefs,
+          dependencies: child.dependencies ?? { relies_on: [parentRec.slug], relied_by: [] },
+          state: parentRec.state,
+          version: 1,
+          history: [{ date: ts, event: `split from '${parentRec.slug}'${reason ? ` — ${reason}` : ''}` }],
+        });
+        childResults.push({ id: created.record.id, slug: child.slug });
+      }
+
+      const remainingFiles = parentRec.files.filter((f) => !claimedPaths.has(f.path));
+      const remainingAc = parentRec.current_ac.filter((a) => !claimedAcIds.has(a.ac_id));
+      const remainingRefs = parentRec.live_test_refs.filter((r) => !claimedAcIds.has(r.ac_id));
+      const splitEvent = { date: ts, event: `split off ${childSlugs}${reason ? ` — ${reason}` : ''}` };
+      parentResult = this.knowledgeUpdate(parentRec.id, {
+        what_it_does: parent_what_it_does,
+        ...(parent_intended_behavior !== undefined ? { intended_behavior: parent_intended_behavior } : {}),
+        files: remainingFiles,
+        current_ac: remainingAc,
+        live_test_refs: remainingRefs,
+        history: [...parentRec.history, splitEvent],
+      });
+
+      // Explicit-claim closure (decision 68988832's posture, broadened per
+      // validateSplitResolveClaim above): drained INSIDE the same transaction
+      // so a claim only lands alongside a split that actually landed.
+      for (const claim of resolveClaims) {
+        this.store.remove(claim.id, ts);
+      }
+    });
+
+    return {
+      parent: {
+        id: parentResult.id,
+        slug: (parentResult as unknown as { slug: string }).slug,
+        version: (parentResult as unknown as { version: number }).version,
+      },
+      children: childResults,
+    };
   }
 
   /**

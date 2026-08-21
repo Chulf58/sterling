@@ -306,6 +306,14 @@ export class MountedStores {
     return this.project.setRunReviewMandatory(...args);
   }
 
+  /** knowledge_split's multi-record write (decision
+   *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
+   *  only — feature_article is always project-scoped (§3.3), so the split's
+   *  children-plus-parent transaction never needs to span a domain mount. */
+  withTransaction<T>(fn: () => T): T {
+    return this.project.withTransaction(fn);
+  }
+
   /** Per-store snapshot (§2.3): each store snapshots independently; the caller
    *  supplies a path per store name ('project' or 'domain-<name>'). */
   snapshotAll(pathFor: (storeName: string) => string): void {
