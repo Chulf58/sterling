@@ -16,24 +16,24 @@ hooks:
     - matcher: "Read|Grep"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h4-read-wall.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h4-read-wall.mjs"'
     - matcher: "Write|Edit|MultiEdit"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h18-test-write-wall.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h18-test-write-wall.mjs"'
     - matcher: "*"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h6-context-watch.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
   PostToolUse:
     - matcher: "Read"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h13-reads-ledger.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h13-reads-ledger.mjs"'
     - matcher: "*"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h6-context-watch.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
 ---
 
 # Role & owned judgment

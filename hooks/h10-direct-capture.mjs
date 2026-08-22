@@ -5007,7 +5007,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -6361,9 +6361,9 @@ try {
       return 0;
     }
   })();
-  const boundaryLine = () => dirtyPaths > 0 ? ` Working tree: ${dirtyPaths} uncommitted path(s) \u2014 finish the open slice to a COMMIT BOUNDARY (branch-local commit) before opening new work.` : "";
+  const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
   const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
-  const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% of the ${pressure.window}-token window. Do not open substantial new work in this window: finish and commit what is open, and DELEGATE remaining reads and mechanical work to subagents \u2014 the conductor's context is the scarce resource (P1).${boundaryLine()} Once the open slice is committed and captures are settled, prepare ROTATION: ${rotationCmd} --next-slice "<the exact next slice>" (--objective/--risks/--pointers optional), then tell the user READY TO CLEAR \u2014 H1 restores and consumes the note automatically in the fresh session. This notice fires once per session.` : `Conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2014 prefer finishing open work over opening large new areas; delegate reads to subagents.${boundaryLine()}`;
+  const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% (${pressure.window}-tok window) \u2192 finish/commit open work, delegate reads & mechanical work to subagents (P1).${boundaryLine()} Once committed: ${rotationCmd} --next-slice "<next slice>" (--objective/--risks/--pointers optional), then say READY TO CLEAR.` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
       const m = JSON.parse(readFileSync2(pressureMarker, "utf8"));
@@ -6382,7 +6382,7 @@ try {
     }
   };
   const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const gaugePart = () => `H10 window gauge: transcript model '${pressure.unmapped_model}' has NO entry in config.context_watch.windows \u2014 pressure is measured against the ${pressure.window}-token DEFAULT, so every fill % this session may be wrong in either direction, and a plausible-looking number is the dangerous case. Fix: add context_watch.windows["${pressure.unmapped_model}"] with the model's true window to .sterling/config.json. This notice fires once per session.`;
+  const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 measured against the ${pressure.window}-tok default (may mislead). Add context_watch.windows["${pressure.unmapped_model}"] to .sterling/config.json. (once per session)`;
   const delegationMarker = join2(input.cwd, ".sterling", "transient", "delegation-nagged.json");
   const delegationSpent = () => {
     try {
@@ -6481,7 +6481,7 @@ try {
     }
   })();
   const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const delegationPart = () => `H10 delegation watch: this session the conductor hand-read ${delegation.hand_reads} distinct file(s) and ran ${delegation.searches} search(es), with ${delegation.dispatches} subagent dispatch(es) (largest single-message batch: ${delegation.max_batch}, solo dispatches: ${delegation.solo_dispatches}) and ${delegation.article_writes} hand-run article write(s) this session. Hand-work that needed only its CONCLUSION was a dispatch (decision 677f1639, moment 3) \u2014 delegate remaining reads, sweeps and mechanical work to subagents (opus for judgment, sonnet for mechanical). This notice fires once per session.`;
+  const delegationPart = () => `H10 delegation watch: hand-read ${delegation.hand_reads} file(s), ${delegation.searches} search(es), ${delegation.dispatches} dispatch(es) (max batch ${delegation.max_batch}, solo ${delegation.solo_dispatches}), ${delegation.article_writes} hand-run article write(s) \u2192 delegate reads/sweeps/mechanical work (opus judgment / sonnet mechanical). (once per session)`;
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
       const parts = [];
@@ -6491,7 +6491,7 @@ try {
         parts.push(pressurePart());
       } else if (pressure.level === "soft" && dirtyPaths > 0 && !spent) {
         spendPressureMarker("soft");
-        parts.push(`H10 slice boundary: ${pressurePart()} This notice fires once per session.`);
+        parts.push(`${pressurePart()} (once per session)`);
       }
       if (delegation && !delegationSpent()) {
         spendDelegationMarker();
@@ -6560,15 +6560,14 @@ try {
   const disclosureParts = [];
   if (deferredPaths.length) {
     disclosureParts.push(
-      `H10 fan-out deferral: ${deferredPaths.length} touched file(s) are owned by ${deferredAgents.length} LIVE dispatch(es) [${deferredAgents.join(", ")}] \u2014 their capture and ownership duties are DEFERRED, and the session registers were deliberately NOT cleared, so each duty re-arms at the first Stop after its dispatch lands (decision ec9eacaa).
-Files: ${JSON.stringify(deferredPaths.slice(0, 20))}.`
+      `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}] \u2014 duty re-arms when they land`
     );
   }
   const touchedKeys = new Set(touchedExisting.map(joinKey));
   const staleBiting = staleDispatches.filter((e) => (Array.isArray(e.files) ? e.files : []).some((f) => touchedKeys.has(f)));
   if (staleBiting.length) {
     disclosureParts.push(
-      `H10 dispatch register: ${staleBiting.length} entry/entries owning a file touched this session are STALE (older than ${staleMinutes}m) and therefore DEFER NOTHING \u2014 agent(s) [${staleBiting.map((e) => e.agent_id).join(", ")}]. A SubagentStop that never fired (killed or aborted subagent) leaves the entry behind; every duty below holds in full. H1 sweeps the register at the next session start.`
+      `\u2022 stale dispatch: ${staleBiting.length} entry/entries [${staleBiting.map((e) => e.agent_id).join(", ")}] stale (>${staleMinutes}m) \u2192 defers nothing; H1 sweeps at next session start`
     );
   }
   const clearRegisters = () => {
@@ -6698,48 +6697,42 @@ Files: ${JSON.stringify(deferredPaths.slice(0, 20))}.`
     const ti = gitTestIntegrity({ cwd: input.cwd, testGlobs });
     if (ti.no_git) store.recordCheckSkipped("test-integrity", "no_git", void 0, now);
     else if (ti.modified.length || ti.deleted.length) {
-      integrityNote = `
-Test-integrity vs git HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${JSON.stringify(ti.deleted)} \u2014 review these before capture.`;
+      integrityNote = ` Test-integrity vs HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${JSON.stringify(ti.deleted)} \u2014 review before capture.`;
     }
   }
+  const H10_HEADER = "H10 \u25B8 duties before this session ends \u2014 act, then Stop again:";
   if (!input.stop_hook_active && !existsSync4(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [...disclosureParts];
     const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
     if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;
-      const declareLine = `Or declare: nothing durable \u2192 the no_capture MCP tool (or ${noCaptureCmd} --reason "<why>"); capture drafted and riding an in-flight commit/agent \u2192 the capture_pending MCP tool. A false declaration is drift.`;
+      const declareLine = `no_capture (${noCaptureCmd} --reason "<why>") if nothing durable, or capture_pending if riding an in-flight commit/agent \u2014 a false declaration is drift`;
       if (hasDebug) {
-        let capturePart = `H10: direct-mode work included debug investigation but nothing was captured (no decision/article since ${earliest}).
-Capture what was learned inline \u2014 expected types include disconfirmed_hypothesis (for disproven theories) and anti_pattern (for identified bad patterns).
-` + declareLine;
-        capturePart += integrityNote;
-        parts.push(capturePart);
+        parts.push(
+          `\u2022 capture: debug investigation since ${earliest}, nothing was captured \u2192 knowledge_create (disconfirmed_hypothesis for disproven theories, anti_pattern for bad patterns), or ${declareLine}` + integrityNote
+        );
       } else {
         parts.push(
-          `H10: direct-mode work touched ${activePaths.length} file(s) but nothing was captured (no decision/article since ${earliest}).
-Capture what was learned inline (knowledge_create). ${declareLine}` + integrityNote
+          `\u2022 capture: touched ${activePaths.length} file(s), nothing was captured since ${earliest} \u2192 knowledge_create (decision/anti_pattern/research_finding), or ${declareLine}` + integrityNote
         );
       }
     }
     if (hasResearchDuty && !researchSatisfied) {
       const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join(", ");
       parts.push(
-        `H10: research in this session was not followed by a durable capture (no research_finding/decision/anti_pattern since ${earliestResearch}).
-Queries/agents: ${queryTexts}
-Capture the research findings now (knowledge_create type research_finding), or state explicitly that nothing durable was learned.`
+        `\u2022 research: ${researchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) \u2192 knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or state nothing durable was learned`
       );
     }
     if (!conceptSatisfied) {
       parts.push(
-        `H10 concept demand: design settled this session for concept famil${unmetFamilies.length === 1 ? "y" : "ies"} ${JSON.stringify(unmetFamilies)} but no concept article was created or updated since.
-Create/update the family article(s) NOW (knowledge_create/knowledge_update type feature_article with concept_family set) \u2014 what the concept IS + members, INTENT + INTERACTIONS cross-referenced by sibling slug, owning code files; general capture does not satisfy this.`
+        `\u2022 concept: famil${unmetFamilies.length === 1 ? "y" : "ies"} ${JSON.stringify(unmetFamilies)} settled, no concept article since \u2192 knowledge_create/knowledge_update type feature_article with concept_family set (intent + interactions; members inside the family article)`
       );
     }
     if (articleDemand) {
+      const capList = (arr) => arr.length > 5 ? `${arr.slice(0, 5).join(", ")} +${arr.length - 5} more` : arr.join(", ");
       parts.push(
-        `H10 article demand (\xA76): ${unowned.length} touched file(s) have no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""}: ${JSON.stringify(unowned.slice(0, 20))}.
-Create or extend the owning article(s) NOW (knowledge_create type feature_article; for a governing document, reference_material kind doc) \u2014 the knowledge is freshest before this session ends; general capture does not satisfy this.`
+        `\u2022 articles: article demand \u2014 ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} new)` : ""}: ${capList(unowned)} \u2192 knowledge_create type feature_article (reference_material kind doc for a governing document)`
       );
     }
     if (pressure.level === "soft" || pressure.level === "hard") {
@@ -6750,7 +6743,8 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
       spendDelegationMarker();
       parts.push(delegationPart());
     }
-    deny(parts.join("\n\n"));
+    deny(`${H10_HEADER}
+${parts.join("\n\n")}`);
   }
   if (hasCaptureDuty && !captured) {
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
@@ -6839,5 +6833,5 @@ Create or extend the owning article(s) NOW (knowledge_create type feature_articl
     store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
   } catch {
   }
-  warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (recorded check_skipped h10-stop-duties; fix and re-run before relying on capture/article demand)`);
+  warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (check_skipped h10-stop-duties; fix & re-run)`);
 }

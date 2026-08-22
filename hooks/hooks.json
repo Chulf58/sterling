@@ -3,33 +3,33 @@
     "SubagentStart": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" }
         ]
       }
     ],
     "SubagentStop": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" }
         ]
       }
     ],
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h1-session-start.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h6-selfcheck.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-clear-session.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h1-session-start.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h6-selfcheck.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-clear-session.mjs\"" }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h2-selection-inject.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-clear-conductor.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-delivery-drain.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h2-selection-inject.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-clear-conductor.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-delivery-drain.mjs\"" }
         ]
       }
     ],
@@ -37,70 +37,70 @@
       {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h3-contract-gate.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h3-contract-gate.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" }
         ]
       },
       {
         "matcher": "Task|Agent",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h8-dispatch-cap.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h25-dispatch-capability.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h26-dispatch-overlap.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h27-dispatch-signatures.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h8-dispatch-cap.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h25-dispatch-capability.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h26-dispatch-overlap.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h27-dispatch-signatures.mjs\"" }
         ]
       },
       {
         "matcher": "AskUserQuestion",
-        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" }]
+        "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" }]
       },
       {
         "matcher": "Bash|PowerShell",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h15-store-guard.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h24-gate-exit-lint.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h15-store-guard.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h24-gate-exit-lint.mjs\"" }
         ]
       },
       {
         "matcher": "mcp__sterling__knowledge_update|mcp__sterling__knowledge_append|mcp__sterling__knowledge_edit|mcp__plugin_sterling_sterling__knowledge_update|mcp__plugin_sterling_sterling__knowledge_append|mcp__plugin_sterling_sterling__knowledge_edit|Read|Grep|Glob|Task|Agent",
-        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h21-delegation-live.mjs\"" }]
+        "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h21-delegation-live.mjs\"" }]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Read",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-reads-ledger.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-reads-ledger.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
         ]
       },
       {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h7-file-touch.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-reads-ledger.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h7-file-touch.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-reads-ledger.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-knowledge-delivery.mjs\"" }
         ]
       },
       {
         "matcher": "WebSearch|WebFetch|Task|Agent",
-        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h16-event-register.mjs\"" }]
+        "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h16-event-register.mjs\"" }]
       },
       {
         "matcher": "Bash|PowerShell",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h9-stop-backstop.mjs\"" },
-          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/h10-direct-capture.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h9-stop-backstop.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h10-direct-capture.mjs\"" }
         ]
       }
     ]
