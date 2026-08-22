@@ -6226,6 +6226,53 @@ var SterlingStore = class _SterlingStore {
     }
   }
   /**
+   * REMOVED record ids sharing a citation PREFIX, newest first — the prefix-rung
+   * collision guard on board_remove / maintenance_remove (decision
+   * id-ladder-extends-to-board-tools-with-collision-guard).
+   *
+   * drainLogEntry above answers "is THIS exact id already gone?"; this answers
+   * the question the guard actually needs, which drainLogEntry cannot: "is this
+   * 8-char prefix ALSO the prefix of something already hard-deleted?" Board rows
+   * are hard-deleted, so a stale prefix can silently retarget a live item — the
+   * one case that must fail loud (P5).
+   *
+   * SPANS BOTH REMOVAL TRAILS, because neither alone covers the board. remove()
+   * writes queue_drain_log for SYSTEM-source todos only ("user todos are never
+   * logged" — see its doc); a removed USER board item's only trace is the
+   * activity log's verb='removed' row. A guard reading the drain log alone would
+   * therefore protect maintenance_remove and silently miss board_remove's own
+   * user items, which are the majority of what board_remove destroys. The verb
+   * filter is load-bearing: activity_log also records created/updated, and
+   * matching those would refuse removals over records that are merely alive.
+   *
+   * Both trails are capped at the newest 50, so an empty result means "no RECENT
+   * collision", never proof there was none (the residual the decision discloses).
+   */
+  removedIdsByPrefix(prefix) {
+    if (!prefix)
+      return [];
+    const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const pattern = `${escaped}%`;
+    const seen = /* @__PURE__ */ new Set();
+    const collect = (sql) => {
+      const rows = this.db.prepare(sql).all(pattern);
+      for (const row of rows) {
+        if (typeof row.record_id === "string" && row.record_id)
+          seen.add(row.record_id);
+      }
+    };
+    try {
+      collect("SELECT record_id FROM queue_drain_log WHERE record_id LIKE ? ESCAPE '\\' ORDER BY seq DESC");
+      collect("SELECT record_id FROM activity_log WHERE verb = 'removed' AND record_id LIKE ? ESCAPE '\\' ORDER BY seq DESC");
+      return [...seen];
+    } catch (e) {
+      if (this.legacySchemaVersion !== void 0 && /record_id|activity_log|queue_drain_log/.test(String(e.message))) {
+        return [...seen];
+      }
+      throw e;
+    }
+  }
+  /**
    * Board 39d6462d activity feed — the ONE seam every knowledge write lands
    * through, so the Queue tab's activity section shows "what has been done"
    * without a second, separate write path (§3.1 invariant: one write path).
