@@ -9,7 +9,7 @@ var __export = (target, all) => {
 import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, realpathSync } from "node:fs";
 import { join as join2, dirname as dirname3, relative } from "node:path";
 import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -4383,7 +4383,15 @@ var SYSTEM_REASONS = [
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
-  "article_oversize"
+  "article_oversize",
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  "restore_performed"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -6376,6 +6384,83 @@ function verifyStampAttestation(cwd2, preExistingRels) {
     return { attested: false, stampPresent: true, failedPath: null };
   }
 }
+function stampAttestsCurrentBytes(cwd2, rel) {
+  try {
+    const stampPath = join2(cwd2, ".sterling", "transient", "enforcement-stamp.json");
+    if (!existsSync3(stampPath)) return false;
+    const stamp = JSON.parse(readFileSync2(stampPath, "utf8"));
+    if (!Array.isArray(stamp)) return false;
+    const entry = stamp.find((e) => e && e.path === rel);
+    if (!entry) return false;
+    const abs = join2(cwd2, rel);
+    if (!existsSync3(abs)) return entry.deleted === true;
+    if (typeof entry.sha256 !== "string") return false;
+    const current = createHash("sha256").update(readFileSync2(abs)).digest("hex");
+    return current === entry.sha256;
+  } catch {
+    return false;
+  }
+}
+function stampAttestsDirectory(cwd2, relDir) {
+  try {
+    const files = [];
+    const walk = (rel) => {
+      for (const de of readdirSync(join2(cwd2, rel), { withFileTypes: true })) {
+        const childRel = `${rel}/${de.name}`;
+        if (de.isDirectory()) walk(childRel);
+        else files.push(childRel);
+      }
+    };
+    walk(relDir);
+    if (!files.length) return false;
+    return files.every((f) => stampAttestsCurrentBytes(cwd2, f));
+  } catch {
+    return false;
+  }
+}
+function mintRestorePerformed(cwd2, paths, agentId) {
+  let mstore = null;
+  try {
+    mstore = openStore(cwd2);
+    if (!mstore) {
+      process.stderr.write(`H17: restore_performed maintenance item(s) NOT written (store unavailable); restore/deny proceed regardless.
+`);
+      return;
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    for (const rel of paths) {
+      try {
+        mstore.enqueueSystemTodo({
+          id: randomUUID2(),
+          type: "todo",
+          created_at: now,
+          updated_at: now,
+          author: "system",
+          status: "active",
+          superseded_by: null,
+          links: [],
+          scope: "project",
+          stack_tags: [],
+          text: `H17 restored '${rel}' to HEAD, reverting a Bash write by agent '${agentId}' at ${now} (no matching conductor stamp).`,
+          source: "system",
+          system_reason: "restore_performed",
+          file_keys: [rel]
+        });
+      } catch (e) {
+        process.stderr.write(`H17: restore_performed maintenance item failed to write for '${rel}': ${e && e.message || e}
+`);
+      }
+    }
+  } catch (e) {
+    process.stderr.write(`H17: restore_performed maintenance queue unavailable (${e && e.message || e}); restore/deny proceed regardless.
+`);
+  } finally {
+    try {
+      mstore?.close();
+    } catch {
+    }
+  }
+}
 function restoreTracked(cwd2, relRaw) {
   const rel = relRaw.replace(/\/+$/, "");
   const inHead = spawnSync("git", ["-C", cwd2, "cat-file", "-e", "HEAD:" + rel], { encoding: "utf8" }).status === 0;
@@ -6408,25 +6493,35 @@ if (event === "PreToolUse") {
   }
 }
 try {
-  const store = openStore(cwd);
-  let run;
+  let storeErr = null;
+  let store = null;
   try {
-    run = store ? withRetry(() => store.getRun()) : void 0;
+    store = openStore(cwd);
   } catch (e) {
-    store?.close();
-    throw new Error(`store/resolveRun threw (${e && e.message || e})`);
+    storeErr = new Error(`store/resolveRun threw (${e && e.message || e})`);
+  }
+  let run;
+  if (store) {
+    try {
+      run = withRetry(() => store.getRun());
+    } catch (e) {
+      storeErr = new Error(`store/resolveRun threw (${e && e.message || e})`);
+      store.close();
+      store = null;
+    }
   }
   const runId = run ? run.id : NO_RUN;
   let brief = null;
-  if (run) {
+  if (run && store) {
     try {
       brief = withRetry(() => store.get(run.brief_ref));
     } catch (e) {
-      store?.close();
-      throw new Error(`brief resolve threw (${e && e.message || e})`);
+      storeErr = new Error(`brief resolve threw (${e && e.message || e})`);
+      store.close();
+      store = null;
     }
-    if (!brief || brief.type !== "brief") {
-      store?.close();
+    if (store && (!brief || brief.type !== "brief")) {
+      store.close();
       deny(
         environmentDefectDenial(
           "H17",
@@ -6439,25 +6534,28 @@ try {
   store?.close();
   const violations = [];
   const preExisting = [];
-  const dPath = dirtyFile(cwd, runId);
-  if (!existsSync3(dPath)) {
-    deny(
-      environmentDefectDenial(
-        "H17",
-        `attribution record '${dPath}' absent at Post \u2014 cannot tell this command's writes from pre-existing ones; failing closed (P5). If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`,
-        { agentId: input.agent_id }
-      )
-    );
-  }
-  let preDirty;
-  try {
-    preDirty = new Set(JSON.parse(readFileSync2(dPath, "utf8")));
-  } catch {
-    deny(
-      environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`, {
-        agentId: input.agent_id
-      })
-    );
+  const restoredPaths = [];
+  let preDirty = /* @__PURE__ */ new Set();
+  if (!storeErr) {
+    const dPath = dirtyFile(cwd, runId);
+    if (!existsSync3(dPath)) {
+      deny(
+        environmentDefectDenial(
+          "H17",
+          `attribution record '${dPath}' absent at Post \u2014 cannot tell this command's writes from pre-existing ones; failing closed (P5). If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`,
+          { agentId: input.agent_id }
+        )
+      );
+    }
+    try {
+      preDirty = new Set(JSON.parse(readFileSync2(dPath, "utf8")));
+    } catch {
+      deny(
+        environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`, {
+          agentId: input.agent_id
+        })
+      );
+    }
   }
   const status = spawnSync("git", ["-C", cwd, "status", "--porcelain", "-z"], { encoding: "utf8" });
   if (status.error || status.status !== 0) {
@@ -6473,54 +6571,78 @@ try {
           preExisting.push(rel);
           continue;
         }
+        const isDir = (() => {
+          try {
+            return statSync(join2(cwd, rel)).isDirectory();
+          } catch {
+            return false;
+          }
+        })();
+        if (isDir ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
         restoreTracked(cwd, p);
+        violations.push(rel);
+        restoredPaths.push(rel);
+      }
+    }
+  }
+  if (restoredPaths.length) mintRestorePerformed(cwd, restoredPaths, input.agent_id);
+  if (!storeErr) {
+    const bPath = baselineFile(cwd, runId);
+    if (!existsSync3(bPath)) {
+      deny(
+        environmentDefectDenial(
+          "H17",
+          `Baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`,
+          { agentId: input.agent_id }
+        )
+      );
+    }
+    let baseline;
+    try {
+      baseline = JSON.parse(readFileSync2(bPath, "utf8"));
+    } catch {
+      deny(
+        environmentDefectDenial("H17", `Baseline '${bPath}' corrupt/unparseable \u2014 cannot verify the enforcement surface; failing closed (P5).`, {
+          agentId: input.agent_id
+        })
+      );
+    }
+    const valid = {};
+    for (const key of Object.keys(baseline)) {
+      const norm = validateBaselineKey(key);
+      if (!norm) {
+        deny(`H17: crafted baseline key rejected ('${key}' \u2014 not a repo-relative (B)-set path); no write performed, failing closed (P5).`);
+      }
+      valid[norm] = baseline[key];
+    }
+    const current = collectBaseline(cwd);
+    for (const [rel, content] of Object.entries(valid)) {
+      if (!(rel in current)) {
+        writeUnder(cwd, rel, content);
+        violations.push(rel);
+      } else if (current[rel] !== content) {
+        writeUnder(cwd, rel, content);
+        violations.push(rel);
+      }
+    }
+    for (const rel of Object.keys(current)) {
+      if (!(rel in valid)) {
+        rmSync(join2(cwd, rel), { recursive: true, force: true });
         violations.push(rel);
       }
     }
   }
-  const bPath = baselineFile(cwd, runId);
-  if (!existsSync3(bPath)) {
+  if (storeErr) {
+    const restoredNote = restoredPaths.length ? ` NOTE: ${restoredPaths.length} enforcement path(s) were HEAD-restored during this sweep despite the broken store: ${restoredPaths.join(", ")} \u2014 verify none were conductor work-in-flight.` : "";
     deny(
       environmentDefectDenial(
         "H17",
-        `Baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`,
-        { agentId: input.agent_id }
+        `Enforcement verification failed (${storeErr && storeErr.message || storeErr}) \u2014 failing closed (P5).${restoredNote}`,
+        {
+          agentId: input.agent_id
+        }
       )
     );
-  }
-  let baseline;
-  try {
-    baseline = JSON.parse(readFileSync2(bPath, "utf8"));
-  } catch {
-    deny(
-      environmentDefectDenial("H17", `Baseline '${bPath}' corrupt/unparseable \u2014 cannot verify the enforcement surface; failing closed (P5).`, {
-        agentId: input.agent_id
-      })
-    );
-  }
-  const valid = {};
-  for (const key of Object.keys(baseline)) {
-    const norm = validateBaselineKey(key);
-    if (!norm) {
-      deny(`H17: crafted baseline key rejected ('${key}' \u2014 not a repo-relative (B)-set path); no write performed, failing closed (P5).`);
-    }
-    valid[norm] = baseline[key];
-  }
-  const current = collectBaseline(cwd);
-  for (const [rel, content] of Object.entries(valid)) {
-    if (!(rel in current)) {
-      writeUnder(cwd, rel, content);
-      violations.push(rel);
-    } else if (current[rel] !== content) {
-      writeUnder(cwd, rel, content);
-      violations.push(rel);
-    }
-  }
-  for (const rel of Object.keys(current)) {
-    if (!(rel in valid)) {
-      rmSync(join2(cwd, rel), { recursive: true, force: true });
-      violations.push(rel);
-    }
   }
   let stampFailedPath = null;
   if (preExisting.length) {
