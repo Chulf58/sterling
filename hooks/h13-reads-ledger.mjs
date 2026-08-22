@@ -4996,7 +4996,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5163,6 +5163,17 @@ CREATE TABLE IF NOT EXISTS activity_log (
   title TEXT NOT NULL
 );
 `;
+var SUPPORTED_SCHEMA_VERSION = 1;
+var UnsupportedSchemaVersionError = class extends Error {
+  found;
+  supported;
+  constructor(found, supported) {
+    super(`Unsupported schema version: this store's user_version (${found}) is newer than the schema version this build supports (${supported}). This store was likely migrated by a newer build of Sterling. Do not open it with an older/downgraded build \u2014 writing with a downgraded build over a newer schema risks corrupting the store. Upgrade this build (or restore from a backup taken before the migration) before continuing.`);
+    this.name = "UnsupportedSchemaVersionError";
+    this.found = found;
+    this.supported = supported;
+  }
+};
 var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
@@ -5186,13 +5197,32 @@ var SterlingStore = class _SterlingStore {
   db;
   constructor(path) {
     this.db = new DatabaseSync2(path);
-    this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA busy_timeout=5000");
+    const foundSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
+    if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
+    this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(DDL);
     try {
       this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
     } catch {
+    }
+    try {
+      this.tx(() => {
+        const current = this.db.prepare("PRAGMA user_version").get().user_version;
+        if (current > SUPPORTED_SCHEMA_VERSION) {
+          throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
+        }
+        if (current < SUPPORTED_SCHEMA_VERSION) {
+          this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+        }
+      });
+    } catch (e) {
+      this.db.close();
+      throw e;
     }
   }
   journalMode() {

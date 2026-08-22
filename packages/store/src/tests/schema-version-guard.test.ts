@@ -1,0 +1,156 @@
+// ---------------------------------------------------------------------------
+// PIN GROUP A — schema-version marker (stable-identity wave S1, decision
+// stable-identity-design-v2 / 2176748e, board dee719dd). SPEC-ONLY: NOTHING
+// in this pin group is implemented yet. SterlingStore's constructor today
+// neither reads nor stamps PRAGMA user_version, so every test below is
+// expected to fail on its own assertion (a raw pragma read reporting the
+// SQLite default of 0 instead of 1, or `assert.throws` reporting "did not
+// throw" when the current constructor happily opens a user_version=99 file)
+// — never on a bare crash of the whole file.
+//
+// Ground truth for the pragma itself (research_finding 5555895c): PRAGMA
+// user_version lives at header offset 60 and is fully the application's own
+// to use; `schema_version` is SQLite-internal and this feature must never
+// touch it.
+//
+// Raw pragma access below goes through node:sqlite's DatabaseSync directly
+// against the .db file on disk — SterlingStore is never asked to expose a
+// pragma reader, so these tests observe the marker exactly the way an
+// external tool (or a fresh second connection) would.
+// ---------------------------------------------------------------------------
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SterlingStore } from '../index.js';
+
+function tempDbPath(prefix = 'sterling-schema-guard-') {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  return { dir, path: join(dir, 'sterling.db') };
+}
+
+/** Raw, out-of-band pragma read — never through SterlingStore. */
+function rawUserVersion(path: string): number {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const row = db.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
+    return row ? row.user_version : NaN;
+  } finally {
+    db.close();
+  }
+}
+
+/** Raw, out-of-band pragma write — simulates states the real migration would never write itself. */
+function rawSetUserVersion(path: string, value: number): void {
+  const db = new DatabaseSync(path);
+  try {
+    db.exec(`PRAGMA user_version = ${value}`);
+  } finally {
+    db.close();
+  }
+}
+
+/** Raw table-name snapshot — used to prove a refused open writes NOTHING, not even a new table. */
+function rawTableNames(path: string): string[] {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    return (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
+      .map((r) => r.name)
+      .sort();
+  } finally {
+    db.close();
+  }
+}
+
+test('A1: a freshly created store stamps PRAGMA user_version = 1 at open', () => {
+  const { dir, path } = tempDbPath();
+  try {
+    const store = new SterlingStore(path);
+    store.close();
+    assert.equal(rawUserVersion(path), 1, 'a brand-new store file is stamped to the currently-supported schema version (1)');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('A2: a legacy store (user_version = 0, pre-marker) is stamped to 1 on open — idempotent across repeated opens', () => {
+  const { dir, path } = tempDbPath();
+  try {
+    // Create a real, fully-initialized store, then roll its marker back to 0
+    // to SIMULATE a pre-marker legacy file (we cannot literally travel back
+    // to before this feature existed, so we force the one observable
+    // difference — the marker — back to the legacy value on an otherwise
+    // real, valid schema).
+    const seed = new SterlingStore(path);
+    seed.close();
+    rawSetUserVersion(path, 0);
+    assert.equal(rawUserVersion(path), 0, 'precondition: the file now looks like a legacy pre-marker store');
+
+    const first = new SterlingStore(path);
+    first.close();
+    assert.equal(rawUserVersion(path), 1, 'first open of a legacy store stamps the marker forward to 1');
+
+    const second = new SterlingStore(path);
+    second.close();
+    assert.equal(rawUserVersion(path), 1, 'a second open is idempotent — the marker does not advance past 1 on repeat opens');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('A3: a store whose user_version is GREATER than the code supports refuses to open, and writes nothing', () => {
+  const { dir, path } = tempDbPath();
+  try {
+    const seed = new SterlingStore(path);
+    seed.close();
+    rawSetUserVersion(path, 99);
+    const tablesBefore = rawTableNames(path);
+    const versionBefore = rawUserVersion(path);
+    assert.equal(versionBefore, 99, 'precondition: the fixture file claims a future, unsupported schema version');
+
+    assert.throws(
+      () => new SterlingStore(path),
+      /./,
+      'opening a store whose user_version exceeds what this code supports must throw, not silently proceed'
+    );
+
+    assert.equal(rawUserVersion(path), 99, 'the refused open must not touch user_version — still 99 after the throw');
+    assert.deepEqual(rawTableNames(path), tablesBefore, 'the refused open creates no new tables — no write of any kind lands on the db');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('A4: the refusal is a structured, renderable error naming BOTH the found and supported versions and the word "schema"', () => {
+  const supported = tempDbPath('sterling-schema-guard-probe2-');
+  const probe = new SterlingStore(supported.path);
+  probe.close();
+  const supportedVersion = rawUserVersion(supported.path);
+  rmSync(supported.dir, { recursive: true, force: true });
+
+  const { dir, path } = tempDbPath();
+  try {
+    const seed = new SterlingStore(path);
+    seed.close();
+    rawSetUserVersion(path, 99);
+
+    let caught: unknown;
+    try {
+      new SterlingStore(path);
+      assert.fail('constructing a store over an unsupported (too-new) schema version must throw');
+    } catch (err) {
+      caught = err;
+    }
+
+    assert.ok(caught instanceof Error, 'the refusal is a real Error (or subclass), not a bare string or null');
+    const message = (caught as Error).message;
+    assert.match(message, /schema/i, 'the message names the concept — "schema" — so the MCP server surface can render a meaningful failure');
+    assert.match(message, /99/, 'the message names the FOUND version (99)');
+    assert.ok(message.includes(String(supportedVersion)), `the message names the SUPPORTED version (${supportedVersion}) alongside the found one`);
+    assert.match(message, /downgrade/i, 'the message instructs against writing with an older/downgraded build over a newer schema');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

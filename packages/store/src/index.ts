@@ -107,6 +107,34 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 `;
 
+// ---------------------------------------------------------------------------
+// Schema-version guard (stable-identity wave S1, decision
+// stable-identity-design-v2 / 2176748e): refuse-until-migrated — the version
+// marker ships BEFORE any data migration. PRAGMA user_version (research_finding
+// 5555895c: a 32-bit application-owned integer at header offset 60 — NEVER
+// SQLite's own PRAGMA schema_version) is checked at the very top of open,
+// before the DDL or any other write lands, so a store from a NEWER, unsupported
+// schema is refused with nothing touched. A store at or below the supported
+// version is stamped forward to it (idempotent — a fresh file and a legacy
+// pre-marker file both read 0).
+// ---------------------------------------------------------------------------
+export const SUPPORTED_SCHEMA_VERSION = 1;
+
+export class UnsupportedSchemaVersionError extends Error {
+  readonly found: number;
+  readonly supported: number;
+  constructor(found: number, supported: number) {
+    super(
+      `Unsupported schema version: this store's user_version (${found}) is newer than the schema version this build supports (${supported}). ` +
+        `This store was likely migrated by a newer build of Sterling. Do not open it with an older/downgraded build — writing with a downgraded ` +
+        `build over a newer schema risks corrupting the store. Upgrade this build (or restore from a backup taken before the migration) before continuing.`
+    );
+    this.name = 'UnsupportedSchemaVersionError';
+    this.found = found;
+    this.supported = supported;
+  }
+}
+
 /** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
 export interface RecordedExit {
   signal: string;
@@ -269,8 +297,24 @@ export class SterlingStore {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode=WAL');
+
+    // Schema-version guard — checked BEFORE journal_mode/foreign_keys/DDL land
+    // (stable-identity design-v2 / 2176748e; fixer-mode F1): this ordering
+    // guarantees that a too-new store is refused with NOTHING touched — not
+    // even a WAL journal-mode header rewrite or the -wal/-shm sidecar files a
+    // refusal AFTER `PRAGMA journal_mode=WAL` would have persistently
+    // materialized on a non-WAL too-new db. `busy_timeout` is connection-local
+    // and writes nothing to the db file, so it is safe to set first for
+    // contention safety on the read below without weakening that guarantee.
     this.db.exec('PRAGMA busy_timeout=5000');
+    const foundSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version;
+    if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
+
+    this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec('PRAGMA foreign_keys=ON');
     this.db.exec(DDL);
     // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
@@ -282,6 +326,31 @@ export class SterlingStore {
       this.db.exec('ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT');
     } catch {
       /* column already exists */
+    }
+
+    // Stamp forward to the supported version, RE-READING user_version inside
+    // the same BEGIN IMMEDIATE transaction that writes it (fixer-mode F2 —
+    // closes a TOCTOU: the fast check above only skips work for a store
+    // already known too new at open time; without a re-read here, a
+    // concurrent migrator committing a newer version between that check and
+    // this write would be silently overwritten back down to 1, turning the
+    // guard's loud refusal into silent corruption). A re-read that is now
+    // too-new throws from inside the transaction (rolling back any stamp
+    // in progress); the catch below closes the connection before propagating,
+    // matching the fast-path refusal's write-nothing/close-cleanly contract.
+    try {
+      this.tx(() => {
+        const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+        if (current > SUPPORTED_SCHEMA_VERSION) {
+          throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
+        }
+        if (current < SUPPORTED_SCHEMA_VERSION) {
+          this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+        }
+      });
+    } catch (e) {
+      this.db.close();
+      throw e;
     }
   }
 

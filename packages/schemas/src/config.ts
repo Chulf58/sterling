@@ -295,7 +295,7 @@ export const configSchema = z.object({
     .object({
       allow_scripts: z
         .array(z.string())
-        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'scripts/domain-doctor.mjs', 'scripts/commit-reviewed.mjs', 'sterling-tui.mjs']),
+        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'scripts/domain-doctor.mjs', 'scripts/commit-reviewed.mjs', 'scripts/migration-preflight.mjs', 'sterling-tui.mjs']),
     })
     .default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
