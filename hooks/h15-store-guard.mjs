@@ -4863,7 +4863,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5008,7 +5008,7 @@ if (!input.cwd || !existsSync2(join2(input.cwd, ".sterling"))) allow();
 var command = String(input.tool_input?.command ?? "");
 var STORE_MENTION_RE = /\.sterling(?![\w.-])|sterling\.db/i;
 var DB_MENTION_RE = /sterling\.db/i;
-if (!STORE_MENTION_RE.test(command)) allow();
+if (!STORE_MENTION_RE.test(command) && !STORE_MENTION_RE.test(unquotedText(command))) allow();
 var allowScripts;
 try {
   allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;
@@ -5070,6 +5070,16 @@ function splitFragments(cmd) {
       i++;
       continue;
     }
+    if (c === "&") {
+      const prevChar = current.length ? current[current.length - 1] : "";
+      if (cmd[i + 1] === ">" || prevChar === ">") {
+        current += c;
+        continue;
+      }
+      parts.push(current);
+      current = "";
+      continue;
+    }
     if (c === "|" && cmd[i + 1] === "|") {
       parts.push(current);
       current = "";
@@ -5097,7 +5107,6 @@ var READONLY_VERBS = /* @__PURE__ */ new Set([
   "head",
   "tail",
   "wc",
-  "awk",
   "diff",
   "file",
   "stat",
@@ -5121,9 +5130,44 @@ var GIT_READONLY_SUBVERBS = /* @__PURE__ */ new Set([
   "rev-parse"
 ]);
 var GIT_WRITE_SUBVERBS = /* @__PURE__ */ new Set(["checkout", "restore", "clean", "rm", "stash"]);
+var GIT_GLOBAL_VALUE_FLAGS = /* @__PURE__ */ new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+var GIT_GLOBAL_BARE_FLAGS = /* @__PURE__ */ new Set(["--no-pager", "-p", "-P", "--paginate", "--no-optional-locks"]);
+function skipGitGlobalFlags(argsText) {
+  let s = argsText;
+  let flaggedStoreValue = null;
+  for (; ; ) {
+    const m = s.match(/^\s*(\S+)/);
+    if (!m) break;
+    const token = m[1];
+    const eq = token.indexOf("=");
+    const flagName = eq >= 0 ? token.slice(0, eq) : token;
+    if (GIT_GLOBAL_VALUE_FLAGS.has(flagName)) {
+      s = s.slice(m[0].length);
+      let value;
+      if (eq >= 0) {
+        value = token.slice(eq + 1);
+      } else {
+        const v = s.match(/^\s*(\S+)/);
+        value = v ? v[1] : "";
+        if (v) s = s.slice(v[0].length);
+      }
+      if (!flaggedStoreValue && STORE_MENTION_RE.test(value)) flaggedStoreValue = value;
+      continue;
+    }
+    if (GIT_GLOBAL_BARE_FLAGS.has(flagName)) {
+      s = s.slice(m[0].length);
+      continue;
+    }
+    break;
+  }
+  return { rest: s, flaggedStoreValue };
+}
 function classifyGit(trimmed) {
-  const m = trimmed.match(/^git\s+(\S+)/i);
-  const subverb = m ? m[1].toLowerCase() : "";
+  const m = trimmed.match(/^git\s+(.*)$/i);
+  const { rest, flaggedStoreValue } = m ? skipGitGlobalFlags(m[1]) : { rest: "", flaggedStoreValue: null };
+  if (flaggedStoreValue) return true;
+  const sm = rest.match(/^\s*(\S+)/);
+  const subverb = sm ? sm[1].toLowerCase() : "";
   if (GIT_READONLY_SUBVERBS.has(subverb)) return false;
   if (GIT_WRITE_SUBVERBS.has(subverb)) return true;
   return STORE_MENTION_RE.test(unquotedText(trimmed));
@@ -5174,17 +5218,32 @@ function unquotedText(str) {
   }
   return out;
 }
-function hasUnquotedRedirect(str) {
-  return unquotedText(str).includes(">");
+var PLAIN_WORD_RE = /^[A-Za-z0-9_./~+-]+$/;
+function redirectsIntoStore(str) {
+  const text = unquotedText(str);
+  const RE = /(?:[0-9]+|&)?(>>|>)(\s*)(\S+)?/g;
+  let m;
+  while (m = RE.exec(text)) {
+    const target = m[3];
+    if (target === void 0) return true;
+    if (/^&[0-9]+$/.test(target)) continue;
+    if (!PLAIN_WORD_RE.test(target)) return true;
+    if (STORE_MENTION_RE.test(target)) return true;
+  }
+  return false;
 }
 function classifyFragment(fragment) {
   const trimmed = fragment.trim();
-  if (!trimmed || !STORE_MENTION_RE.test(trimmed)) return { write: false, fragment: trimmed };
+  if (!trimmed || !STORE_MENTION_RE.test(trimmed) && !STORE_MENTION_RE.test(unquotedText(trimmed))) {
+    return { write: false, fragment: trimmed };
+  }
   if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed };
-  if (hasUnquotedRedirect(trimmed)) return { write: true, fragment: trimmed };
+  if (redirectsIntoStore(trimmed)) return { write: true, fragment: trimmed };
   const verb = firstWord(trimmed);
   if (verb === "sed") {
-    if (/(^|\s)-\w*i\w*(\s|=|$)/.test(trimmed)) return { write: true, fragment: trimmed };
+    if (/(^|\s)-\w*i\w*(\s|=|$)/.test(trimmed) || /(^|\s)--in-place(=\S*)?(\s|$)/.test(trimmed)) {
+      return { write: true, fragment: trimmed };
+    }
     return { write: false, fragment: trimmed };
   }
   if (verb === "git") return { write: classifyGit(trimmed), fragment: trimmed };
