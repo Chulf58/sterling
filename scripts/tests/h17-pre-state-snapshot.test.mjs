@@ -1,6 +1,10 @@
 // H17 PRE-STATE SNAPSHOT — decision h17-pre-state-snapshot-closes-false-denial-
 // not-the-restore-hole (knowledge_get 7021526c-09b0-4ec2-96eb-fd59cf52c0ad),
-// board 0b848342 finding (4). NOT YET IMPLEMENTED. Authored BLIND to
+// board 0b848342 finding (4). IMPLEMENTED AND SHIPPED as v3.3 (commit b945cf0),
+// then hardened by the five review findings pinned at the end of this file — so
+// every "today" / "RED today" framing in the per-pin comments below describes
+// the PRE-FIX baseline at authoring time, not current state. The whole file is
+// green as of the finding-1..5 fix. Authored BLIND to
 // scripts/hooks/h17-bash-write-sweep.mjs and scripts/enforcement-stamp.mjs per
 // H4 — no hook or CLI source was read to write these pins.
 //
@@ -48,15 +52,18 @@
 // per-run `.dirty.json` attribution file, so it must be discoverable as a
 // distinct `sterling-enforce-<projectTag>-*` temp file.
 //
-// DEGRADED-LOUD FALLBACK. tool_use_id is read by no hook in this repo today and
-// is attested only in docs/historical/PROBES.md:45, so when it is missing or
-// unusable H17 KEEPS the old blanket pre-existing denial AND SAYS SO. A silent
-// fall back to a per-run key is a defect, so both halves are pinned — the
-// denial, and the message naming the reason.
+// DEGRADED-LOUD FALLBACK. When this ruling was made, tool_use_id was read by no
+// hook in this repo and was attested only in docs/historical/PROBES.md:45 — H17
+// reads it now, which is what these pins drove. When it is missing or unusable
+// H17 KEEPS the old blanket pre-existing denial AND SAYS SO. A silent fall back
+// to a per-run key is a defect, so both halves are pinned — the denial, and the
+// message naming the reason. The denial's SOURCE is pinned too, since a fallback
+// that denies unconditionally is indistinguishable from one that works: see
+// PIN-REVERT-TO-CLEAN-DEGRADED's control arm.
 //
 // WHERE EACH PIN LIVES, so no behaviour has two homes. THIS FILE holds the
-// MECHANISM pins: the four state terms, per-call keying, the base64/invalid-UTF-8
-// representation, the fail-closed record branches, and the adjudicated
+// MECHANISM pins: the four state terms, per-call keying, the byte state's
+// digest-over-raw-bytes behaviour, the fail-closed record branches, and the adjudicated
 // stamp-consult arm on a CHANGED pre-dirty path (including its PER-PATH
 // disposition, which only shows up in message content, never in the exit code).
 // scripts/tests/enforcement.test.mjs holds the AC-LEVEL pins, in the slots the
@@ -485,12 +492,23 @@ test('PIN-MODE: a MODE flip with byte-identical content on a pre-dirty enforceme
 // lands, a bytes-only implementation ALLOWS and `assert.equal(r.code, 2)` fires
 // with actual 0.
 //
-// CATCHES SABOTAGE: the TYPE term deleted from the equality — PROVIDED the mode
-// term carries permission bits only (`mode & 0o7777`). An implementation that
-// snapshots the raw `st.mode` catches the type flip through the type BITS, in
-// which case this pin still denies correctly but the named sabotage must delete
-// mode and type together. Disclosed rather than hidden: the security property
-// (a symlink swap denies) is pinned either way.
+// WHAT CARRIES IT — CORRECTED 2026-08-22 FROM MEASUREMENT (two reviews plus the
+// conductor's battery; the original note below was a guess and it was wrong).
+// THIS PIN DOES NOT ISOLATE THE TYPE TERM. Three redundant terms carry it:
+//   * MODE — a regular file here is 0644 and a symlink reports 0777, so the mode
+//     term alone denies;
+//   * REPRESENTATION MISMATCH — a symlink state carries `target` and no
+//     `sha256`, so the file arm compares its digest against undefined;
+//   * TYPE — the term the name suggests.
+// So deleting TYPE alone is not enough, and the original instruction to "delete
+// mode and type together" is ALSO insufficient: you must additionally unify the
+// file/symlink representation before this test can go red.
+//
+// WHAT IT DOES PIN, which is why it stays: the security property — a
+// regular-file -> symlink swap with identical followed bytes DENIES — held up by
+// three independent terms. That is defense in depth, not hollowness (contrast
+// PIN-STAMP-TYPE-GATE-ON-CHANGED-PREDIRT below, whose original name claimed a
+// guard no mutation could move).
 // =========================================================================
 
 test('PIN-TYPE: swapping a pre-dirty regular file for a SYMLINK whose target holds identical bytes DENIES', { skip: GIT_SKIP || SYMLINK_SKIP }, () => {
@@ -646,18 +664,27 @@ test('PIN-INDEX-B: only the INDEX blob OID moves (porcelain XY held constant, wo
 });
 
 // =========================================================================
-// PIN-UTF8-CHANGED — REPRESENTATION IS BASE64, NEVER A UTF-8 STRING. The
-// pre-dirty file holds INVALID UTF-8. In-window, one invalid byte (0xC3, a
-// truncated 2-byte lead) is replaced by a different invalid byte (0xC0, an
-// overlong lead). Both decode to exactly one U+FFFD, so the two contents are
-// INDISTINGUISHABLE as UTF-8 strings while their raw bytes differ.
+// PIN-UTF8-CHANGED — THE BYTE STATE IS A DIGEST OVER RAW BYTES, NEVER OVER A
+// DECODED STRING. (Header corrected 2026-08-22: this pin was authored when the
+// representation was base64 bytes; finding 5 replaced that with a whole-file
+// raw-byte sha256. The PROPERTY pinned here is unchanged and still correct under
+// the digest — only the wording of the representation moved.) The pre-dirty file
+// holds INVALID UTF-8. In-window, one invalid byte (0xC3, a truncated 2-byte
+// lead) is replaced by a different invalid byte (0xC0, an overlong lead). Both
+// decode to exactly one U+FFFD, so the two contents are INDISTINGUISHABLE as
+// UTF-8 strings while their raw bytes differ.
 //
-// EXPECTED FAILURE SHAPE: denies today for the wrong reason; once PIN-ALLOW
-// lands, a UTF-8-string snapshot sees equality and ALLOWS, so
-// `assert.equal(r.code, 2)` fires with actual 0.
+// EXPECTED FAILURE SHAPE, as authored pre-fix: denied for the wrong reason (the
+// blanket pre-existing denial); once PIN-ALLOW's behaviour landed, a
+// decoded-string snapshot sees equality and ALLOWS, so `assert.equal(r.code, 2)`
+// fires with actual 0. GREEN with the fix in place.
 //
-// CATCHES SABOTAGE: `readFileSync(abs)` changed to `readFileSync(abs, 'utf8')`
-// — this is the fixture that sabotage needs to be observable at all.
+// CATCHES SABOTAGE: the digest fed a decoded string instead of the raw buffer
+// (`update(readFileSync(abs, 'utf8'))` rather than `update(readFileSync(abs))`)
+// — this fixture is what makes that substitution observable at all, since any
+// valid-text file hashes identically either way. Also one leg of
+// PIN-RECORD-NO-BYTES-BLOAT's dependency: it is part of what forbids reading
+// that pin's size budget as a licence to drop byte state entirely.
 // =========================================================================
 
 const UTF8_PRE = Buffer.concat([Buffer.from('// pre-dirty bundle with invalid utf-8: '), Buffer.from([0xc3]), Buffer.from('\n')]);
@@ -686,17 +713,21 @@ test('PIN-UTF8-CHANGED: two DIFFERENT invalid-UTF-8 byte sequences that decode i
 
 // =========================================================================
 // PIN-UTF8-UNCHANGED — the companion that stops PIN-UTF8-CHANGED from being
-// satisfiable by an always-mismatching representation. The same invalid-UTF-8
-// pre-dirty file, untouched across the window, must ALLOW: a lossless base64
-// round-trip has to compare EQUAL to itself, including for bytes that are not
-// valid text.
+// satisfiable by an always-mismatching representation. (Header corrected
+// 2026-08-22 alongside its companion: the representation is now a raw-byte
+// sha256, not base64. The property is unchanged.) The same invalid-UTF-8
+// pre-dirty file, untouched across the window, must ALLOW: a digest over raw
+// bytes is deterministic, so it has to compare EQUAL to itself — including for
+// bytes that are not valid text.
 //
-// EXPECTED FAILURE SHAPE (RED): today's blanket pre-existing denial fires, so
-// `assert.equal(r.code, 0)` fires with actual 2.
+// EXPECTED FAILURE SHAPE, as authored pre-fix (RED): the blanket pre-existing
+// denial fired, so `assert.equal(r.code, 0)` fires with actual 2. GREEN with the
+// fix in place.
 //
 // CATCHES SABOTAGE: equality forced to always-UNEQUAL, and any representation
-// that cannot round-trip non-text bytes (e.g. a hash over a decoded string that
-// is recomputed differently at Post).
+// that is not stable over non-text bytes (e.g. a digest recomputed over a
+// decoded string at Post, where the lossy U+FFFD substitution differs from what
+// Pre recorded).
 // =========================================================================
 
 test('PIN-UTF8-UNCHANGED: an UNTOUCHED invalid-UTF-8 pre-dirty file compares EQUAL (lossless round-trip) — ALLOWS', { skip: GIT_SKIP }, () => {
@@ -728,8 +759,18 @@ test('PIN-UTF8-UNCHANGED: an UNTOUCHED invalid-UTF-8 pre-dirty file compares EQU
 // RESURRECTS the file via `git checkout HEAD` — so `assert.equal(existsSync
 // (bundle), false)` is the red assertion.
 //
-// CATCHES SABOTAGE: the existence term deleted from the equality, and equality
-// forced to always-EQUAL (the deny disappears).
+// WHAT CARRIES IT — CORRECTED 2026-08-22 FROM MEASUREMENT. THIS PIN DOES NOT
+// ISOLATE THE EXISTENCE TERM, for the same reason PIN-TYPE does not isolate
+// TYPE: a deletion moves several terms at once — existence, file type, mode, and
+// the availability of a digest at all — so any one of them still denies with the
+// existence term gone. It goes red under equality forced to always-EQUAL, or
+// under those terms removed together.
+//
+// WHAT IT DOES PIN: the two properties in its name, neither of which any other
+// test covers — an in-window deletion of a pre-dirty enforcement path DENIES,
+// and it is NOT resurrected (a changed pre-dirty path is never restored). The
+// second assertion is the load-bearing one and it is isolated: only a restore
+// on this arm can move it.
 // =========================================================================
 
 test('PIN-EXISTENCE-GONE: a pre-dirty enforcement path DELETED in-window DENIES and is NOT resurrected', { skip: GIT_SKIP }, () => {
@@ -1401,20 +1442,55 @@ test('PIN-REVERT-TO-CLEAN: a pre-dirty enforcement path REVERTED to HEAD inside 
 // PIN-FALLBACK-BLANK uses; what differs here is that the command CLEANS the
 // dirt instead of leaving it.
 //
-// EXPECTED FAILURE SHAPE (RED TODAY): two independent red assertions — the
-// call is ALLOWED (`assert.equal(r.code, 2)` fires with actual 0, stderr
-// empty), and `assert.match(r.stderr, /tool_use_id/)` has nothing to match.
+// THE CONTROL ARM IS WHAT MAKES THIS PIN MEAN ANYTHING (added 2026-08-22 on an
+// external review finding). Without it the pin proves only that a degraded call
+// denies in this scenario — and an implementation that denied EVERY call with an
+// unusable tool_use_id would pass it identically. That is the same ambiguity
+// class as the hollow pin this file already had to replace, and it would be
+// sitting on the fix for the CRITICAL fail-closed violation. So the control arm
+// runs FIRST, on a CLEAN tree with no pre-dirty enforcement paths at all, and
+// must ALLOW. Only an implementation that SOURCES the denial from the RECORDED
+// pre-dirty set passes both arms.
 //
-// CATCHES SABOTAGE: the degraded blanket denial computed from the CURRENT
-// status instead of the RECORDED pre-dirty set (`if (currentDirty.length &&
-// noUsableId) deny`) — the cleaned tree then has nothing to deny over.
+// EXPECTED FAILURE SHAPE (RED as authored, pre-fix): three independent red
+// assertions — the pin arm is ALLOWED (`assert.equal(r.code, 2)` fires with
+// actual 0, stderr empty), and `assert.match(r.stderr, /tool_use_id/)` has
+// nothing to match.
+//
+// CATCHES SABOTAGE, one mutation per arm and they point in OPPOSITE directions:
+//   * PIN ARM — the degraded blanket denial computed from the CURRENT status
+//     instead of the RECORDED pre-dirty set (`if (currentDirty.length &&
+//     noUsableId) deny`): the cleaned tree has nothing to deny over, so the pin
+//     arm ALLOWS and fires.
+//   * CONTROL ARM — the degraded denial made UNCONDITIONAL (`if (noUsableId)
+//     deny`, ignoring the recorded set entirely): the clean-tree call is denied
+//     and the control fires.
+// Neither mutation can satisfy both arms, which is exactly the property the
+// single-arm version lacked.
 // =========================================================================
 
-test('PIN-REVERT-TO-CLEAN-DEGRADED: degraded mode (unusable tool_use_id) still DENIES when the command cleans EVERY pre-dirty enforcement path — the safety net may not fail open', { skip: GIT_SKIP }, () => {
+test('PIN-REVERT-TO-CLEAN-DEGRADED: degraded mode (unusable tool_use_id) still DENIES when the command cleans EVERY pre-dirty enforcement path — the safety net may not fail open (control: a degraded call on a CLEAN tree ALLOWS)', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const bundle = bundlePath(dir);
     const headBytes = readFileSync(bundle, 'utf8');
+
+    // ---- CONTROL ARM (expected ALLOW): degraded, but NOTHING was pre-dirty.
+    // This is what distinguishes "denied because a recorded pre-dirty path was
+    // cleaned" from "denied because degraded mode denies everything".
+    assert.equal(porcelain(dir), '', 'PRECONDITION: the tree is CLEAN — there is no pre-dirty enforcement path for a denial to be sourced from');
+    const cleanCall = { agent_id: 'a1', tool_use_id: '' };
+    assert.equal(h17(dir, 'PreToolUse', cleanCall).code, 0);
+    const control = h17(dir, 'PostToolUse', cleanCall); // the command writes nothing
+    assert.notEqual(control.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      control.code,
+      0,
+      `CONTROL: an unusable tool_use_id is not by itself a denial — with nothing pre-dirty the degraded fallback has nothing to fall back FROM (AC4: clean tree -> allow). If THIS fails, the pin arm below proves nothing, because a blanket "degraded always denies" would pass it too — actual ${control.code}, stderr: ${oneLine(control.stderr)}`
+    );
+
+    // ---- PIN ARM: the same degraded shape, but now a pre-dirty enforcement
+    // path exists at Pre and the command CLEANS it.
     preDirtyBundle(dir, '// conductor rebuild in flight, uncommitted\n');
 
     const blank = { agent_id: 'a1', tool_use_id: '' }; // present but unusable
@@ -1560,10 +1636,16 @@ test('PIN-STAMP-INDEX: `git add` inside the window (worktree bytes untouched) is
 // unchanged — so the measurement recorded above still describes this exact
 // test.
 //
-// CATCHES SABOTAGE (measured): the gate's TYPE term forced true, i.e. an
-// attestation predicate that treats a type change as byte-attestable — the
-// out-of-repo bytes are then hashed and attested and this test goes red.
-// DOES NOT CATCH (measured): either stamp-side link guard, alone or together.
+// CATCHES SABOTAGE (measured): the gate widened to treat this difference as
+// byte-attestable — the out-of-repo bytes are then hashed and attested and this
+// test goes red.
+// DOES NOT ISOLATE (measured, corrected 2026-08-22): the gate's TYPE term. The
+// symlink swap also moves the MODE term (0644 -> 0777), so the gate's MODE check
+// still rejects the difference with the type check removed — the same redundancy
+// PIN-TYPE has. What this pins is that the gate rejects this CLASS of
+// difference, not which term does the rejecting.
+// DOES NOT CATCH AT ALL (measured): either stamp-side link guard, alone or
+// together. That is the finding this test was renamed for.
 //
 // FINDING 3's LINK GUARDS ARE PINNED BY PIN-STAMP-SYMLINK-CLEAN-AT-PRE at the
 // end of this file, on the CLEAN-AT-PRE arm — where a path has no recorded
@@ -1632,10 +1714,14 @@ test('PIN-STAMP-TYPE-GATE-ON-CHANGED-PREDIRT: a pre-dirty path whose file TYPE c
 // PIN-NO-RECORD, PIN-CORRUPT-RECORD and PIN-KEY have). Once the record exists,
 // the carrying assertion is `assert.equal(r.code, 2)` with actual 0.
 //
-// CATCHES SABOTAGE: the per-path VALUE validation deleted, i.e. a directory
-// state read as `pre.children ?? {}` — the emptied directory then compares
-// equal and the call is allowed. Also catches a validator that checks only
-// `typeof value === 'object'`.
+// CATCHES SABOTAGE — CORRECTED 2026-08-22 FROM MEASUREMENT: the guard that
+// actually carries this is the STATE COMPARISON's own missing-children check,
+// not the record-loader validation this note originally named. Three redundant
+// guards stand behind it, and only the specific `?? {}` reintroduction (a
+// directory state read as `pre.children ?? {}` inside the comparison) turns it
+// red — the conductor's battery had to remove all three layers before it moved.
+// Genuine defense in depth, and the reason this pin is sound rather than hollow:
+// the property has no mutation that leaves it green.
 //
 // It asserts only THAT it denies, never HOW: per AC12 a malformed record may
 // legitimately deny naming the RECORD rather than the path, so pinning the
@@ -1710,14 +1796,26 @@ test('PIN-RECORD-DIR-NO-CHILDREN: a recorded DIRECTORY state with NO `children` 
 // exist, the carrying assertion is `assert.equal(r.code, 2)` with actual 0 if
 // the map is pollutable.
 //
-// CATCHES SABOTAGE: the parsed record copied into a fresh lookup object with
-// `Object.assign(map, parsed)` or a `for (const k of keys) map[k] = parsed[k]`
-// loop — both route an own `__proto__` property through [[Set]] and really do
-// change the map's prototype, after which the real path resolves the crafted
-// state, compares UNCHANGED, and is allowed. (JSON.parse alone creates
-// `__proto__` as an own data property and does not pollute — which is exactly
-// why the sabotage is a copy step, and why this pin must exist before someone
-// adds one.)
+// CATCHES SABOTAGE — CORRECTED 2026-08-22 FROM MEASUREMENT. What carries this
+// is STATE SHAPE VALIDATION, not the lookup's prototype safety: the crafted
+// `__proto__` entry's VALUE is a path -> state MAP, which is not a valid state,
+// so it is rejected on shape before prototype safety is ever reached.
+//
+// SO THIS PIN DOES NOT INDEPENDENTLY COVER THE MAP CONSTRUCTION, and the two
+// cannot be separated by this fixture — a `__proto__` value shaped like a VALID
+// state cannot install a per-path lookup entry, because a state is not a
+// path -> state map. Isolating prototype safety would need a different record
+// shape than the one this finding describes, so it stays uncovered rather than
+// falsely claimed.
+//
+// WHAT IT DOES PIN, which is the security property finding 4(b) asked for: a
+// real pre-dirty path with no OWN record entry cannot resolve a state through
+// the prototype and must hit the absent-entry deny. Red under: the state shape
+// validation removed AND the lookup built with `Object.assign(map, parsed)` or a
+// `map[k] = parsed[k]` loop — both route an own `__proto__` through [[Set]] and
+// really do move the map's prototype. (JSON.parse alone creates `__proto__` as
+// an own data property and does not pollute, which is why the copy step is the
+// mutation that matters.)
 // =========================================================================
 
 test('PIN-RECORD-PROTO: a record carrying a `__proto__` key must not let a real pre-dirty path resolve its state through the PROTOTYPE — that path still DENIES', { skip: GIT_SKIP }, () => {
@@ -1793,6 +1891,15 @@ test('PIN-RECORD-PROTO: a record carrying a `__proto__` key must not let a real 
 // base64 bytes — the record immediately exceeds the budget. The budget is
 // deliberately ~100x above what per-path digests need and ~100x below base64 of
 // BIG_SIZE, so it cannot fire on incidental record growth.
+//
+// LOAD-BEARING DEPENDENCY, named because this pin is NOT SAFE ALONE (review
+// finding, 2026-08-22): a size bound is satisfied just as well by omitting byte
+// state ENTIRELY as by digesting it, so on its own this pin would license
+// deleting the bytes term — the opposite of what finding 5 intends. It is safe
+// only in company: PIN-LARGE-MIDFILE-FLIP (a whole-file digest, not a prefix)
+// and PIN-UTF8-CHANGED (raw bytes, not a decoded string) are what forbid the
+// no-bytes-at-all reading. Never move or skip this pin without them; the three
+// are one oracle in three parts.
 // =========================================================================
 
 test('PIN-RECORD-NO-BYTES-BLOAT: a 4 MiB pre-dirty file does not make the per-call record grow proportionally — the record holds a per-path DIGEST, not the bytes', { skip: GIT_SKIP }, () => {
@@ -1839,6 +1946,14 @@ test('PIN-RECORD-NO-BYTES-BLOAT: a 4 MiB pre-dirty file does not make the per-ca
 // CATCHES SABOTAGE: the digest computed over a bounded prefix
 // (`createHash('sha256').update(buf.subarray(0, 65536))`), a read capped at N
 // bytes, or a comparison that falls back to size+mtime above a size threshold.
+// Measured 2026-08-22: it caught a digest truncated to a 64 KiB prefix.
+//
+// THE OTHER HALF OF PIN-RECORD-NO-BYTES-BLOAT'S DEPENDENCY (stated in both
+// directions on a review finding): that pin's size budget is also satisfied by
+// omitting byte state entirely, so THIS pin — together with PIN-UTF8-CHANGED —
+// is what makes the budget mean "digest the bytes" rather than "drop the bytes".
+// Removing either of these two silently converts the size budget into a licence
+// to delete the term finding 5 exists to preserve.
 // =========================================================================
 
 test('PIN-LARGE-MIDFILE-FLIP: ONE byte flipped 3 MiB into a 4 MiB pre-dirty file (length identical) is still CHANGED — DENIES', { skip: GIT_SKIP }, () => {
