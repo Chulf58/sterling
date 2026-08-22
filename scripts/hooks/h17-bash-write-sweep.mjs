@@ -365,6 +365,76 @@ function validateStateKey(cwd, key) {
   return fwd;
 }
 
+// ANCESTOR-AWARE MEMBERSHIP in the recorded pre-dirty set (board 7dd39b85).
+// `git status --porcelain` COLLAPSES an untracked directory into ONE entry
+// (`?? hooks/newdir/`), so the recorded set holds `hooks/newdir` and never a
+// single one of its children. An EXACT-match membership test therefore read a
+// child that the audited command merely STAGED (`git add -A` gives the child
+// its own `A  hooks/newdir/a.mjs` porcelain entry) as a write BY this command:
+// it took the clean-at-Pre arm and — the child not being in HEAD — was DELETED,
+// destroying the conductor's brand-new untracked enforcement file and blaming
+// the agent for it. Coverage is computed HERE, per swept path, and deliberately
+// NOT by expanding the recorded set into every child at Pre: that unbounded
+// enumeration is the resource shape review finding 5 removed, and bringing it
+// back would let a big dirty tree kill the guard OUTSIDE its own fail-closed
+// control flow, where AC9 cannot reach it. Returns the recorded path COVERING
+// `rel` (`rel` itself when it is recorded), or null when nothing covers it.
+function coveringPreDirtyPath(preDirty, rel) {
+  if (typeof rel !== 'string' || !rel) return null;
+  if (preDirty.has(rel)) return rel; // exact match first — today's test, unchanged
+  // Only a well-formed repo-relative POSIX path may be climbed: '', '.', a
+  // leading or trailing '/', or an empty segment would produce prefixes that
+  // mean the REPO ROOT, and a "recorded root" would cover — i.e. exempt from
+  // restore — every path in the tree. Refuse them rather than give them root
+  // semantics. (`split('/').includes('')` catches all four at once.)
+  if (rel === '.' || rel.split('/').includes('')) return null;
+  // Walk up on '/' BOUNDARIES only. A bare `startsWith` is precisely the bug to
+  // avoid: `hooks/newdir2/x` must NOT be covered by a recorded `hooks/newdir`.
+  // `i > 0` so the loop can never manufacture '' (the repo root) as a candidate.
+  for (let i = rel.lastIndexOf('/'); i > 0; i = rel.lastIndexOf('/', i - 1)) {
+    const candidate = rel.slice(0, i);
+    if (preDirty.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+// The state RECORDED at Pre for a path covered by (but not equal to) a recorded
+// pre-dirty ancestor. `pathState` keys a directory's `children` map by FULL
+// repo-relative child paths at EVERY level (`${rel}/${name}`, see pathState),
+// so this descends from the ancestor's recorded state along the successive path
+// PREFIXES of `rel` — `hooks/newdir/sub`, then `hooks/newdir/sub/deep.mjs`.
+// Returns the recorded state; returns null when the recorded children map has
+// NO ENTRY for the path (the caller treats that as RECORDED-ABSENT, never as
+// "this command created it"); THROWS when the recorded topology disagrees with
+// the path being resolved — a non-directory node en route means the record
+// cannot speak for this path at all, which is unverifiable -> AC9 fail-closed,
+// the same posture as the record-disagreement throw in the sweep below.
+function recordedDescendantState(ancestorState, ancestor, rel) {
+  let node = ancestorState;
+  let at = ancestor;
+  let i = ancestor.length; // rel[i] is the '/' boundary right after the ancestor
+  while (i < rel.length) {
+    if (!isStateObject(node) || node.type !== 'dir' || !isStateObject(node.children)) {
+      throw new Error(
+        `per-call Pre-STATE record has '${at}' as a NON-DIRECTORY while resolving '${rel}' under the recorded pre-dirty path '${ancestor}' — ` +
+          `the recorded topology and the swept path disagree, so this command's writes cannot be told from pre-existing ones`
+      );
+    }
+    const next = rel.indexOf('/', i + 1);
+    const childKey = next === -1 ? rel : rel.slice(0, next);
+    // hasOwnProperty, never a bare `in` or a truthiness test: the record is
+    // JSON-parsed agent-writable data, and an INHERITED entry must never
+    // satisfy the lookup (finding 4(b), the same hazard the top-level Map
+    // closes). An absent OWN entry returns null — a distinct outcome from a
+    // recorded state, decided by the caller, never silently "unchanged".
+    if (!Object.prototype.hasOwnProperty.call(node.children, childKey)) return null;
+    node = node.children[childKey];
+    at = childKey;
+    i = next === -1 ? rel.length : next;
+  }
+  return node;
+}
+
 // What a path IS, WITHOUT ever following a link (review finding 3). 'absent' is
 // kept distinct from 'error' so a stamped deletion attests only on a genuine
 // ENOENT — an EACCES must never read as "gone, as attested".
@@ -805,14 +875,61 @@ try {
         )
       );
     }
+    let recordedDirty;
     try {
-      preDirty = new Set(JSON.parse(readFileSync(dPath, 'utf8')));
+      recordedDirty = JSON.parse(readFileSync(dPath, 'utf8'));
     } catch {
       deny(
         environmentDefectDenial('H17', `attribution record '${dPath}' corrupt/unparseable — cannot attribute writes; failing closed (P5).`, {
           agentId: input.agent_id,
         })
       );
+    }
+    // VALIDATE AND NORMALIZE EVERY ENTRY before the set is trusted — the same
+    // posture the per-call STATE record's keys already get (validateStateKey),
+    // and it became load-bearing when coverage went ancestor-aware (board
+    // 7dd39b85): the recorded set no longer answers only "is this exact path
+    // dirty" but "does a recorded ancestor PROTECT this path from restore", so
+    // an entry that fails to match is no longer inert — it is a conductor's
+    // file DELETED. A trailing slash is the measured shape: `hooks/newdir/`
+    // does not cover `hooks/newdir/a.mjs`, because every candidate the walk
+    // builds is a boundary slice with no trailing slash. Pre always strips
+    // (dirtyTrackedRels), so a divergent entry means a corrupt or tampered
+    // record, and a record that cannot be trusted denies rather than quietly
+    // protecting less than it claims to (P5).
+    if (!Array.isArray(recordedDirty)) {
+      deny(
+        environmentDefectDenial('H17', `attribution record '${dPath}' is not an array of paths — cannot attribute writes; failing closed (P5).`, {
+          agentId: input.agent_id,
+        })
+      );
+    }
+    for (const entry of recordedDirty) {
+      const norm = typeof entry === 'string' ? entry.replace(/\/+$/, '') : '';
+      // EVERY SEGMENT, not just the trailing slash. `hooks/newdir/.` and
+      // `hooks//newdir` are non-empty strings that survive the strip and then
+      // match nothing the boundary walk builds, which withdraws coverage just
+      // as silently as the trailing-slash shape did — and the deny that the
+      // unmatched entry eventually triggers arrives AFTER the sweep has already
+      // deleted the child, because the sweep visits current porcelain entries
+      // first. Refusing HERE is what makes the refusal safe: it lands before
+      // the sweep runs, so nothing has been restored yet. `..` is rejected for
+      // the ordinary traversal reason. NOT rejected: a backslash — on POSIX it
+      // is an ordinary filename character, and normalizing it (as
+      // validateStateKey does for the state record's keys) would produce a key
+      // that no longer matches preState's and wedge every sweep touching such
+      // a file.
+      const segments = norm ? norm.split('/') : [];
+      const malformed = !norm || segments.some((s) => s === '' || s === '.' || s === '..');
+      if (malformed) {
+        deny(
+          `H17: crafted attribution record entry rejected (${JSON.stringify(entry)} — not a well-formed repo-relative path: empty, '.', '..' or an empty segment). ` +
+            `An entry that cannot be matched silently withdraws restore protection from everything under it, so it is refused BEFORE the sweep runs; ` +
+            `no write performed, failing closed (P5). NOTE the limit of this check: it rejects malformed SHAPES, and cannot detect a tampered entry that ` +
+            `names a different WELL-FORMED path — that residual is the forged-record class decision 2422e76a already accepts.`
+        );
+      }
+      preDirty.add(norm);
     }
 
     // The PER-CALL Pre-STATE record (7021526c). Present and valid -> the
@@ -929,7 +1046,36 @@ try {
       matchesGlob(rel, 'hooks/**') ||
       (brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny);
     if (isViolation) {
-      if (preDirty.has(rel)) {
+      // MEMBERSHIP IS ANCESTOR-AWARE (board 7dd39b85): the recorded set holds a
+      // dirty untracked DIRECTORY as one collapsed path, so a swept path may be
+      // covered by a recorded ANCESTOR rather than recorded itself. See
+      // coveringPreDirtyPath for why coverage is computed per swept path here
+      // and never expanded into the record at Pre.
+      //
+      // ORDERING HAZARD, and the rule that closes it. The sweep Map holds the
+      // CURRENT porcelain entries BEFORE the recorded-only ancestors, so a
+      // descendant is visited FIRST: were a covered descendant ever
+      // destructively restored, the deletion would land before the ancestor's
+      // own recursive comparison ran, and that comparison would then be
+      // observing state H17 ITSELF mutated (it would report the ancestor as
+      // changed because of the hook's own write, and the agent would be blamed
+      // for it). THE RULE, stated so it is explicit rather than true by
+      // accident: NO PATH COVERED BY A RECORDED DIRTY ANCESTOR IS EVER
+      // DESTRUCTIVELY RESTORED — every arm inside this branch either continues
+      // or pushes onto `changedPreDirty`, and none of them calls
+      // restoreTracked. Anything that wants to restore must first prove no
+      // recorded ancestor covers it, i.e. take the clean-at-Pre arm below.
+      //
+      // THAT RULE IS CONDITIONAL ON A WORKING STORE, and the condition is
+      // stated because a reader will otherwise take it as absolute (the same
+      // conditionality AC12 already carries for "a pre-dirty path is never
+      // restored"). Under `storeErr` there is no runId to key the attribution
+      // record on, so `preDirty` stays EMPTY by design (see the comment above
+      // it): nothing is covered, and every enforcement-surface dirty path —
+      // a covered descendant included — is restored to HEAD before the deny.
+      // Coverage protects work only as far as the record can be read at all.
+      const coveringPre = coveringPreDirtyPath(preDirty, rel);
+      if (coveringPre) {
           // Already dirty at Pre — not this command's write, and never reverted:
           // reverting here is what destroyed a conductor's uncommitted
           // enforcement-surface work and reported it as the agent's (f76d7c5c).
@@ -956,17 +1102,38 @@ try {
           preExisting.push(rel);
           continue;
         }
-        if (!preState.has(rel)) {
-          // The attribution record says this path was dirty at Pre and the
-          // state record has no entry for it — the two disagree, so the write
-          // is unattributable. Fail closed (AC9); an absent entry must NEVER
-          // read as "unchanged", and must never be satisfiable through a
-          // prototype (finding 4(b): the lookup is a Map for exactly that).
+        if (!preState.has(coveringPre)) {
+          // The attribution record says this path (or the ancestor covering it)
+          // was dirty at Pre and the state record has no entry for it — the two
+          // disagree, so the write is unattributable. Fail closed (AC9); an
+          // absent entry must NEVER read as "unchanged", and must never be
+          // satisfiable through a prototype (finding 4(b): the lookup is a Map
+          // for exactly that).
           throw new Error(
-            `per-call Pre-STATE record has no entry for the pre-dirty path '${rel}' — the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
+            `per-call Pre-STATE record has no entry for the pre-dirty path '${coveringPre}'` +
+              (coveringPre === rel ? '' : ` (the recorded ancestor covering the swept path '${rel}')`) +
+              ` — the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
           );
         }
-        const wasState = preState.get(rel);
+        let wasState = preState.get(coveringPre);
+        if (coveringPre !== rel) {
+          // Covered by a recorded ancestor: resolve the child's OWN recorded
+          // state out of the ancestor's recursive children map (throws when the
+          // recorded topology disagrees — AC9).
+          const recordedChild = recordedDescendantState(wasState, coveringPre, rel);
+          // RECORDED-ABSENT, not "created by this command". An absent entry in
+          // the children map does NOT prove the audited command created the
+          // path: pathState recurses but is not ATOMIC, so a conductor's
+          // concurrent creation can predate the command and still be missing
+          // from the map; and an agent that edits the temp record can delete a
+          // child entry while leaving a structurally valid record. Restoring
+          // under that ambiguity is exactly what this branch's overlapping-
+          // window rule forbids (see the comment above). So synthesize the
+          // absent state and run the SAME comparison: it compares CHANGED, and
+          // stampCouldAttest refuses an absent -> present flip, so it lands in
+          // `changedPreDirty` — DENIED and NOT restored.
+          wasState = recordedChild ?? { exists: false, index: null };
+        }
         const nowState = pathState(cwd, rel, postIndex);
         if (sameState(wasState, nowState)) continue; // (1) verified by observation
         // (2) conductor-attested — but ONLY where a stamp can actually speak
@@ -982,7 +1149,8 @@ try {
         continue;
       }
       // FIX-A (h17-stamp-honor-loud-restore, 4d9b76e8): an IN-WINDOW change
-      // (not in the Pre dirty-set) gets one fresh-stamp chance before the
+      // (no recorded pre-dirty path covers it — neither itself nor any
+      // ancestor, board 7dd39b85) gets one fresh-stamp chance before the
       // restore — a stamped conductor edit landing inside an agent's Bash
       // window used to be silently HEAD-restored (the measured defect). Read
       // the stamp NOW, hash the CURRENT bytes: an exact match exempts this
@@ -1151,7 +1319,15 @@ try {
       parts.push(
         environmentDefectDenial(
           'H17',
-          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
+          // "or inside one that was" is load-bearing since coverage became
+          // ancestor-aware (board 7dd39b85): a path here may be a DESCENDANT of
+          // a recorded dirty directory rather than recorded itself, and for a
+          // file the command genuinely created inside such a directory the bare
+          // claim "already dirty before this command" is false. The disposition
+          // is unchanged and still correct — not attributed, not reverted —
+          // but a denial that states a falsehood about the agent's own write is
+          // exactly the misdirection the discriminator rule forbids.
+          `PRE-EXISTING change(s), already dirty before this command (or inside a directory that was) and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
             `Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside ` +
             `(the conductor's own work, e.g. a mid-run bundle rebuild).` +
             // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record

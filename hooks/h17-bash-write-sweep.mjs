@@ -7021,6 +7021,35 @@ function validateStateKey(cwd2, key) {
   if (abs !== root && !abs.startsWith(root + sep)) return null;
   return fwd;
 }
+function coveringPreDirtyPath(preDirty, rel) {
+  if (typeof rel !== "string" || !rel) return null;
+  if (preDirty.has(rel)) return rel;
+  if (rel === "." || rel.split("/").includes("")) return null;
+  for (let i = rel.lastIndexOf("/"); i > 0; i = rel.lastIndexOf("/", i - 1)) {
+    const candidate = rel.slice(0, i);
+    if (preDirty.has(candidate)) return candidate;
+  }
+  return null;
+}
+function recordedDescendantState(ancestorState, ancestor, rel) {
+  let node = ancestorState;
+  let at = ancestor;
+  let i = ancestor.length;
+  while (i < rel.length) {
+    if (!isStateObject(node) || node.type !== "dir" || !isStateObject(node.children)) {
+      throw new Error(
+        `per-call Pre-STATE record has '${at}' as a NON-DIRECTORY while resolving '${rel}' under the recorded pre-dirty path '${ancestor}' \u2014 the recorded topology and the swept path disagree, so this command's writes cannot be told from pre-existing ones`
+      );
+    }
+    const next = rel.indexOf("/", i + 1);
+    const childKey = next === -1 ? rel : rel.slice(0, next);
+    if (!Object.prototype.hasOwnProperty.call(node.children, childKey)) return null;
+    node = node.children[childKey];
+    at = childKey;
+    i = next === -1 ? rel.length : next;
+  }
+  return node;
+}
 function lstatKind(abs) {
   try {
     const st = lstatSync(abs);
@@ -7299,14 +7328,33 @@ try {
         )
       );
     }
+    let recordedDirty;
     try {
-      preDirty = new Set(JSON.parse(readFileSync2(dPath, "utf8")));
+      recordedDirty = JSON.parse(readFileSync2(dPath, "utf8"));
     } catch {
       deny(
         environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`, {
           agentId: input.agent_id
         })
       );
+    }
+    if (!Array.isArray(recordedDirty)) {
+      deny(
+        environmentDefectDenial("H17", `attribution record '${dPath}' is not an array of paths \u2014 cannot attribute writes; failing closed (P5).`, {
+          agentId: input.agent_id
+        })
+      );
+    }
+    for (const entry of recordedDirty) {
+      const norm = typeof entry === "string" ? entry.replace(/\/+$/, "") : "";
+      const segments = norm ? norm.split("/") : [];
+      const malformed = !norm || segments.some((s2) => s2 === "" || s2 === "." || s2 === "..");
+      if (malformed) {
+        deny(
+          `H17: crafted attribution record entry rejected (${JSON.stringify(entry)} \u2014 not a well-formed repo-relative path: empty, '.', '..' or an empty segment). An entry that cannot be matched silently withdraws restore protection from everything under it, so it is refused BEFORE the sweep runs; no write performed, failing closed (P5). NOTE the limit of this check: it rejects malformed SHAPES, and cannot detect a tampered entry that names a different WELL-FORMED path \u2014 that residual is the forged-record class decision 2422e76a already accepts.`
+        );
+      }
+      preDirty.add(norm);
     }
     const key = callKey(input.tool_use_id);
     if (!key) {
@@ -7381,17 +7429,22 @@ try {
   for (const [rel, p] of sweep) {
     const isViolation = isEnforcementSurface(rel) || matchesGlob(rel, "hooks/**") || brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny;
     if (isViolation) {
-      if (preDirty.has(rel)) {
+      const coveringPre = coveringPreDirtyPath(preDirty, rel);
+      if (coveringPre) {
         if (!preState) {
           preExisting.push(rel);
           continue;
         }
-        if (!preState.has(rel)) {
+        if (!preState.has(coveringPre)) {
           throw new Error(
-            `per-call Pre-STATE record has no entry for the pre-dirty path '${rel}' \u2014 the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
+            `per-call Pre-STATE record has no entry for the pre-dirty path '${coveringPre}'` + (coveringPre === rel ? "" : ` (the recorded ancestor covering the swept path '${rel}')`) + ` \u2014 the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
           );
         }
-        const wasState = preState.get(rel);
+        let wasState = preState.get(coveringPre);
+        if (coveringPre !== rel) {
+          const recordedChild = recordedDescendantState(wasState, coveringPre, rel);
+          wasState = recordedChild ?? { exists: false, index: null };
+        }
         const nowState = pathState(cwd, rel, postIndex);
         if (sameState(wasState, nowState)) continue;
         if (stampCouldAttest(wasState, nowState)) {
@@ -7492,7 +7545,15 @@ try {
       parts.push(
         environmentDefectDenial(
           "H17",
-          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
+          // "or inside one that was" is load-bearing since coverage became
+          // ancestor-aware (board 7dd39b85): a path here may be a DESCENDANT of
+          // a recorded dirty directory rather than recorded itself, and for a
+          // file the command genuinely created inside such a directory the bare
+          // claim "already dirty before this command" is false. The disposition
+          // is unchanged and still correct — not attributed, not reverted —
+          // but a denial that states a falsehood about the agent's own write is
+          // exactly the misdirection the discriminator rule forbids.
+          `PRE-EXISTING change(s), already dirty before this command (or inside a directory that was) and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
           // landed, this blanket denial fires ONLY when there is no record to
           // compare against — so it must say which input it lacked, or the
           // degrade is silent and indistinguishable from the old behaviour.
