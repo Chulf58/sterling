@@ -30,8 +30,22 @@ import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
+import { probeCodex, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// Test-isolation seam (mirrors STERLING_REGISTRY_DB/STERLING_WIN_NODE): the
+// plugin-repo branch below (codex probe + .claude-plugin/sterling-mcp*.json
+// ensure) only fires when target === pluginRoot — running init with
+// --target <the real pluginRoot> for real would write into THIS live repo's
+// generated, gitignored MCP config (the one this very session's connection
+// may be using), which is unsafe to exercise from an automated test. A test
+// instead sets STERLING_PLUGIN_ROOT_MATCH to its own --target temp dir, so
+// the branch's ensure logic runs against a disposable directory while every
+// OTHER pluginRoot-derived path (templates, dist, hooks) still resolves to
+// the REAL plugin root. Unset in every real run — behavior is unchanged.
+// '' must behave as unset too (matches STERLING_CODEX_PROBE's falsy convention) —
+// ?? alone would let '' survive and silently disable the plugin-repo branch.
+const pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
 const target = resolve(arg('--target') ?? process.cwd());
 const projectNameFlag = arg('--project-name');
 const stackTagsFlag = (arg('--stack-tags') ?? '').split(',').filter(Boolean);
@@ -413,20 +427,76 @@ const readMcp = () => {
     return undefined;
   }
 };
-if (fwd(target) === fwd(pluginRoot)) {
+if (fwd(target) === fwd(pluginRootMatch)) {
   // THE source/plugin repo: the plugin manifest references this generated MCP config.
-  const desired = { mcpServers: { sterling: pluginMcpEntry } };
+  // Sparring-partner auto-wire (decision sparring-partner-partnership-shape): probe for
+  // the official codex mcp-server (binary on PATH + `codex login status` exit 0) and, on
+  // success, wire it beside `sterling` in the SAME generated config — the probe result is
+  // machine-truth, so it belongs here (gitignored), never in committed config. On failure
+  // (binary absent, not logged in, or a timeout), report a loud skip line and wire nothing
+  // — never blocking the rest of init (P5 degraded-loud, same pattern as the
+  // sterling-windows.bat skip below). NOTE: the native-Windows sterling-mcp-win.json is
+  // DELIBERATELY untouched by this probe — its codex story needs its own Windows-node
+  // probe and is out of scope for this slice.
+  // STERLING_CODEX_PROBE: test-isolation seam mirroring STERLING_WIN_NODE — honored
+  // at THIS call site (not inside probeCodex), same precedent as `winNode` above.
+  // unset/'' -> real probe; 'ok' -> force success; 'absent' -> force binary-absent;
+  // 'not-logged-in' -> force not-logged-in. Any other value fails loud (unknown
+  // signals halt, P5) rather than silently falling back to a real probe.
+  const codexProbeOverride = process.env.STERLING_CODEX_PROBE;
+  const codexProbe = !codexProbeOverride
+    ? probeCodex()
+    : codexProbeOverride === 'ok'
+      ? { ok: true }
+      : codexProbeOverride === 'absent'
+        ? { ok: false, reason: 'binary-absent' }
+        : codexProbeOverride === 'not-logged-in'
+          ? { ok: false, reason: 'not-logged-in' }
+          : fail(`STERLING_CODEX_PROBE must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeOverride}')`, 2);
+  if (!codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason));
+  const desired = { mcpServers: withCodexEntry({ sterling: pluginMcpEntry }, codexProbe) };
   if (!existsSync(pluginMcpConfigPath)) {
     mkdirSync(dirname(pluginMcpConfigPath), { recursive: true });
     writeFileSync(pluginMcpConfigPath, JSON.stringify(desired, null, 2));
-    items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'created', detail: 'plugin MCP config (referenced by plugin.json mcpServers) — binds each project to its own store via ${CLAUDE_PROJECT_DIR}' });
+    items.push({
+      item: '.claude-plugin/sterling-mcp.json',
+      status: 'created',
+      detail: `plugin MCP config (referenced by plugin.json mcpServers) — binds each project to its own store via \${CLAUDE_PROJECT_DIR}${codexProbe.ok ? '; codex mcp-server wired (probe succeeded)' : ''}`,
+    });
   } else {
     let existing;
     try { existing = JSON.parse(readFileSync(pluginMcpConfigPath, 'utf8')); } catch { existing = undefined; }
     if (existing && canonical(existing) === canonical(desired)) {
       items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'matches', detail: 'plugin MCP config as generated' });
     } else {
-      items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
+      // Managed refresh (mirrors sterling-init's universal-stack-tag re-init add):
+      // an EXISTING config whose sterling entry — and every OTHER key — already
+      // matches what init would generate, missing ONLY the codex entry this probe
+      // just proved wire-eligible, is a pure ADDITIVE delta. Never-overwrite guards
+      // against clobbering content init cannot prove it generated, not against
+      // adding a key init just verified is its own. Any OTHER difference (a
+      // hand-edited sterling entry, unknown keys, a missing sterling entry) still
+      // reports 'differs — left untouched'.
+      const desiredMinusCodex = {
+        mcpServers: Object.fromEntries(Object.entries(desired.mcpServers).filter(([k]) => k !== 'codex')),
+      };
+      const isManagedCodexAdd =
+        codexProbe.ok &&
+        existing &&
+        typeof existing === 'object' &&
+        existing.mcpServers &&
+        !('codex' in existing.mcpServers) &&
+        canonical(existing) === canonical(desiredMinusCodex);
+      if (isManagedCodexAdd) {
+        writeFileSync(pluginMcpConfigPath, JSON.stringify(desired, null, 2));
+        items.push({
+          item: '.claude-plugin/sterling-mcp.json',
+          status: 'refreshed',
+          detail: 'refreshed — added generated codex entry (probe succeeded; sterling entry and all other keys unchanged)',
+        });
+      } else {
+        items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
+      }
     }
   }
   // ALSO the native-claude Windows MCP config (option B, decision a756e5d9 family):
@@ -442,6 +512,10 @@ if (fwd(target) === fwd(pluginRoot)) {
   // store, 2026-06-24). The documented idiom is the ${CLAUDE_PROJECT_DIR:-.} default: '.'
   // resolves against the server's cwd = the project dir. The PLUGIN config (above) keeps the
   // bare form — plugin-scope configs substitute it unconditionally, no default needed.
+  // NOTE: codex is DELIBERATELY NOT added to this Windows-native config in this slice
+  // (sparring-partner-partnership-shape) — the win config's codex story needs its own
+  // probe on Windows node (native `codex.exe`/login state differ from the WSL probe
+  // above) and is out of scope here. Leave this file WSL-codex-free until that's built.
   const winMcpConfigPath = join(target, '.claude-plugin', 'sterling-mcp-win.json');
   if (winNode) {
     const desiredWin = { mcpServers: { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'] } } };
@@ -503,7 +577,7 @@ const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, '
 const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
-if (fwd(target) === fwd(pluginRoot)) entries.push('.claude-plugin/sterling-mcp.json', '.claude-plugin/sterling-mcp-win.json');
+if (fwd(target) === fwd(pluginRootMatch)) entries.push('.claude-plugin/sterling-mcp.json', '.claude-plugin/sterling-mcp-win.json');
 if (eff.backupPath) {
   const root = fwd(target);
   if (eff.backupPath === root || eff.backupPath.startsWith(root + '/')) {

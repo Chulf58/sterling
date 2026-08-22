@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
-import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect } from './state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect } from './state.js';
 import { bannerLines } from './banner.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
@@ -98,6 +98,28 @@ function readInstalledModelEffort(name: string): { model: string; effort: string
   }
 }
 
+// Sparring partner (board a0714d0b, article sparring-partner interaction h):
+// this repo's own plugin manifest, resolved relative to THIS file's own
+// location — same technique as the setInstalledModelEffort dynamic import
+// below, and for the same reason: src/main.ts, dist/main.js, and the esbuild
+// bundle all sit at the same depth under packages/tui/, so one relative
+// offset resolves from any of the three layouts. Presence of a `codex` key
+// under mcpServers = wired on THIS MACHINE (a per-clone fact, not per-project
+// — the manifest lives in the Sterling clone that ships the TUI bundle,
+// regardless of which project's store it is observing).
+function probeCodexWired(): boolean {
+  try {
+    const url = new URL('../../../.claude-plugin/sterling-mcp.json', import.meta.url);
+    const raw = JSON.parse(readFileSync(url, 'utf8')) as { mcpServers?: Record<string, unknown> };
+    return Boolean(raw.mcpServers && Object.prototype.hasOwnProperty.call(raw.mcpServers, 'codex'));
+  } catch {
+    // missing/unparsable manifest reads as "not wired" — never a thrown probe
+    // failure that would crash tab activation (P5: degrade loud via the row
+    // marker itself, not a notice — the absence IS the visible state here).
+    return false;
+  }
+}
+
 /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
  *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
  *  a deduped refresh when the catalog is stale (decision 98064d77). */
@@ -109,8 +131,14 @@ function loadRoster(): AgentRosterSnapshot {
   } catch {
     config = { models: {}, models_catalog: { staleness_days: 45 } };
   }
-  const cfg = config as { models?: Record<string, { model: string; effort: string }>; models_catalog?: { staleness_days?: number } };
+  const cfg = config as {
+    models?: Record<string, { model: string; effort: string }>;
+    models_catalog?: { staleness_days?: number };
+    sparring_partner?: { enabled?: boolean; model?: string };
+  };
   const configModels = cfg.models ?? {};
+  const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
+  const codexWired = probeCodexWired();
   const agents: RosterAgent[] = Object.keys(AGENT_MODEL_KEY)
     .filter((name) => existsSync(join(agentsDir, `${name}.md`)))
     .map((name) => {
@@ -136,7 +164,38 @@ function loadRoster(): AgentRosterSnapshot {
     // (audit finding 41/43) — surface it as a visible System-tab notice instead.
     ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
   }
-  return { agents, configModels, catalog };
+  return { agents, configModels, catalog, sparringPartner, codexWired };
+}
+
+/** Execute a sparring_toggle effect: config.sparring_partner.enabled write
+ *  only (advisory-only surface, article interaction a — never gates, so
+ *  there is no downstream projection or decision record the way a model swap
+ *  has). Preserves the model field untouched. */
+function applySparringToggle(e: SparringToggleEffect): void {
+  try {
+    const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { sparring_partner?: { enabled?: boolean; model?: string } };
+    raw.sparring_partner = { ...raw.sparring_partner, enabled: e.enabled };
+    writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+  } catch (err) {
+    ui = { ...ui, notice: `sparring partner toggle failed — ${(err as Error).message}` };
+  }
+}
+
+/** Execute a sparring_model effect: config.sparring_partner.model write. An
+ *  empty committed value CLEARS the field (unset = Codex CLI default) rather
+ *  than writing an empty string, so the System-tab '(CLI default)' rendering
+ *  and the schema's optional-field absence stay the same thing. */
+function applySparringModel(e: SparringModelEffect): void {
+  try {
+    const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { sparring_partner?: { enabled?: boolean; model?: string } };
+    const sp: { enabled?: boolean; model?: string } = { ...raw.sparring_partner };
+    if (e.model) sp.model = e.model;
+    else delete sp.model;
+    raw.sparring_partner = sp;
+    writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+  } catch (err) {
+    ui = { ...ui, notice: `sparring partner model update failed — ${(err as Error).message}` };
+  }
 }
 
 /** Execute a model_swap effect (the impure seam): config.models write
@@ -228,7 +287,14 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   // roster so the swap's new values + any residual drift are reflected
   const swaps = result.effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
   for (const e of swaps) await applySwap(e);
-  if (swaps.length) roster = loadRoster();
+  // sparring-partner toggle/model writes (board a0714d0b) — same activation
+  // refresh pattern as a model swap, so the row reflects the new value and
+  // (for the toggle) the unchanged codexWired probe.
+  const sparringToggles = result.effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
+  for (const e of sparringToggles) applySparringToggle(e);
+  const sparringModels = result.effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
+  for (const e of sparringModels) applySparringModel(e);
+  if (swaps.length || sparringToggles.length || sparringModels.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {
     restoreTerminal();
     process.exit(0);

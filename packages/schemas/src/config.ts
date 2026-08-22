@@ -339,6 +339,25 @@ export const configSchema = z.object({
       payload_char_cap: z.number().int().positive().default(2400),
     })
     .default({}),
+  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
+  // whether the automatic consult moments (design/review/gate second opinions via
+  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
+  // additive advisory-block pattern of delegation_watch — a project without the
+  // Codex CLI installed still parses and defaults to true; the TUI System tab
+  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
+  // — this field never stands in for that absence, only for a deliberate OFF.
+  sparring_partner: z
+    .object({
+      enabled: z.boolean().default(true),
+      // TUI System-tab model selector (article sparring-partner interaction i,
+      // board a0714d0b): the model argument sent on every consult. Absent/empty
+      // = the Codex CLI's own default. Deliberately a FREE string, no enum —
+      // codex validates model names server-side with a loud 400, so a client-
+      // side allowlist would only drift from what the CLI actually accepts.
+      model: z.string().optional(),
+    })
+    .default({}),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;
