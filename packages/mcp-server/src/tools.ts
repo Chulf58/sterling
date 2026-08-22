@@ -245,6 +245,16 @@ const PLANNED_CREDIBLE_BYTES = 2000;
 export class UnresolvedIdentifierError extends Error {}
 
 /**
+ * WHICH RUNG of the id-resolution ladder answered (decision
+ * id-ladder-extends-to-board-tools-with-collision-guard): 'uuid' = the exact
+ * full id resolved directly, 'slug' = an exact slug, 'prefix' = an unambiguous
+ * 8-char citation prefix. The first two are unambiguous BY CONSTRUCTION; only
+ * a prefix is an abbreviation, and only an abbreviation can silently retarget
+ * once a board row is hard-deleted.
+ */
+export type ResolvedIdRung = 'uuid' | 'slug' | 'prefix';
+
+/**
  * Thrown by the id-resolution ladder when an identifier resolves through
  * record_aliases — a HISTORICAL (pre-migration) id whose record was collapsed
  * into a canonical one ([stable-identity-design-v2] contract 3).
@@ -2165,15 +2175,36 @@ export class SterlingTools {
    * callers outside this file already match on that distinction.
    */
   private resolveRecordId(id: string, toolName: string, noun: 'record' | 'target record' = 'record'): DurableRecord {
+    return this.resolveRecordIdWithRung(id, toolName, noun).record;
+  }
+
+  /**
+   * resolveRecordId, plus WHICH RUNG resolved the identifier (decision
+   * id-ladder-extends-to-board-tools-with-collision-guard). The body is
+   * resolveRecordId's, unchanged — resolveRecordId is now a thin wrapper, so
+   * every existing caller keeps identical behavior including all three throw
+   * paths (slug collision, prefix ambiguity, historical id).
+   *
+   * ONE caller needs the rung: the destructive board tools' collision guard.
+   * 'uuid' (a direct store.get hit, i.e. the exact full id) and 'slug' are
+   * unambiguous by construction and are guarded by nothing; only 'prefix' —
+   * an abbreviation that could have named something already hard-deleted —
+   * triggers the extra drain-log check.
+   */
+  private resolveRecordIdWithRung(
+    id: string,
+    toolName: string,
+    noun: 'record' | 'target record' = 'record'
+  ): { record: DurableRecord; rung: ResolvedIdRung } {
     const direct = this.store.get(id);
-    if (direct) return direct;
+    if (direct) return { record: direct, rung: 'uuid' };
     // SLUG resolution before prefix resolution (board 1e639f32): an exact slug
     // is an IDENTITY, deterministic across the fan, and — unlike an id — it
     // names the concept, so it serves the live HEAD after any number of
     // supersessions. Slugs are unique at create, so >1 hit means a legacy or
     // cross-store clash: refuse rather than pick (P5).
     const bySlug = this.store.recordsBySlug(id);
-    if (bySlug.length === 1) return bySlug[0];
+    if (bySlug.length === 1) return { record: bySlug[0], rung: 'slug' };
     if (bySlug.length > 1) {
       // NOT an UnresolvedIdentifierError: the slug matched — more than one
       // record — so this is a genuine collision (e.g. a project record plus
@@ -2225,7 +2256,7 @@ export class SterlingTools {
     // NOT an UnresolvedIdentifierError: the index DID resolve the id; the
     // inconsistency is in the store, not the citation.
     if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
-    return record;
+    return { record, rung: 'prefix' };
   }
 
   /**
@@ -3612,6 +3643,53 @@ export class SterlingTools {
     );
   }
 
+  /**
+   * PREFIX-RUNG COLLISION GUARD — the mechanism that made it safe to extend the
+   * id-resolution ladder to the DESTRUCTIVE board tools (decision
+   * id-ladder-extends-to-board-tools-with-collision-guard, superseding decision
+   * 2debab53's final clause "board_remove, where rows ARE hard-deleted, still
+   * demands the exact full id").
+   *
+   * THE HAZARD, precisely. Knowledge rows are never deleted, so a stale prefix
+   * there can only turn AMBIGUOUS — a loud refusal from the ladder itself.
+   * Board rows ARE hard-deleted: cite prefix P for item A, A is removed, and if
+   * a live item B also starts with P, the prefix now resolves to B and B is
+   * destroyed. Silent and irreversible. The asymmetry makes it worse than it
+   * looks — for the board, "the cited item is gone" is the NORMAL case (items
+   * churn constantly), so only the collision half is rare.
+   *
+   * SO: when — and only when — the PREFIX rung resolved the id, the removal
+   * trail is additionally consulted (store.removedIdsByPrefix, which spans the
+   * system drain log AND the activity log — a removed USER board item leaves a
+   * trace only in the latter). A removed item sharing that prefix means the
+   * citation is ambiguous ACROSS TIME, and the call refuses instead of removing.
+   * A full uuid or an exact slug is unambiguous by construction: no lookup, no
+   * behavior change (that is the acceptance bar for this addition).
+   *
+   * NOT APPLIED to board_update or validateResolveClaim (user-ruled 2026-08-22):
+   * an in-place edit's wrong-target result is visible and fixable forward, so
+   * guarding it would be cost without matching risk. Do not "improve" on that.
+   *
+   * DISCLOSED RESIDUAL: each removal trail keeps only the newest 50 entries, so
+   * a collision with an item removed long ago is not caught. That requires an
+   * 8-hex-character prefix collision AND a citation staler than 50 removals; it
+   * is accepted, not overlooked.
+   */
+  private assertNoDrainedPrefixCollision(op: string, citedId: string, rung: ResolvedIdRung, record: DurableRecord): void {
+    if (rung !== 'prefix') return;
+    // The resolved record's OWN id is not a collision with itself — the hazard
+    // is a DIFFERENT, already-destroyed item that answered to the same prefix.
+    const drained = this.store.removedIdsByPrefix(citedId).filter((drainedId) => drainedId !== record.id);
+    if (drained.length === 0) return;
+    throw new Error(
+      `${op}: '${citedId}' resolved by 8-char citation prefix to the live item '${record.id}', but the drain log also holds ` +
+        `${drained.length} already-removed item(s) with that same prefix: ${drained.join('; ')}. ` +
+        `Board rows are HARD-DELETED, so this citation is ambiguous ACROSS TIME — it may have been written for an item that is ` +
+        `now gone, in which case removing '${record.id}' would destroy the wrong item irreversibly. NOTHING WAS REMOVED. ` +
+        `Re-issue with the FULL uuid of the item you mean.`
+    );
+  }
+
   boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     // Resolves through the SAME ladder as board_get (resolveRecordId, decision
     // 2debab53): a raw store.get(id) here previously refused an unresolved
@@ -3622,14 +3700,18 @@ export class SterlingTools {
     // a GENUINE miss (UnresolvedIdentifierError — too-short or no-prefix-match)
     // falls through to the drain-log check; an ambiguous prefix or a historical
     // id propagates its own refusal unchanged, never mislabeled as "no record".
-    let record: DurableRecord;
+    let resolved: { record: DurableRecord; rung: ResolvedIdRung };
     try {
-      record = this.resolveRecordId(id, 'board_remove');
+      resolved = this.resolveRecordIdWithRung(id, 'board_remove');
     } catch (err) {
       if (err instanceof UnresolvedIdentifierError) throw this.removedItemError('board_remove', id);
       throw err;
     }
+    const record = resolved.record;
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
+    // Hard delete ahead: an abbreviated citation gets the across-time ambiguity
+    // check before anything is destroyed (see assertNoDrainedPrefixCollision).
+    this.assertNoDrainedPrefixCollision('board_remove', id, resolved.rung, record);
     const evidence = this.removalArtifactEvidence(record);
     this.store.remove(record.id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: record.id, ...evidence };
@@ -3664,14 +3746,14 @@ export class SterlingTools {
     // Only a GENUINE miss (UnresolvedIdentifierError) falls through to the
     // already-drained / drain-log check below; an ambiguous prefix or a
     // historical id propagates its own refusal unchanged.
-    let record: DurableRecord | undefined;
+    let resolved: { record: DurableRecord; rung: ResolvedIdRung } | undefined;
     try {
-      record = this.resolveRecordId(id, 'maintenance_remove');
+      resolved = this.resolveRecordIdWithRung(id, 'maintenance_remove');
     } catch (err) {
       if (!(err instanceof UnresolvedIdentifierError)) throw err;
-      record = undefined;
+      resolved = undefined;
     }
-    if (!record) {
+    if (!resolved) {
       // IDEMPOTENT ALREADY-DRAINED (board 83478fc6, extending 97d773ef): a
       // drain-log trace naming a SYSTEM item (system_reason set, per the store's
       // `record.system_reason ?? ''` write) means this id was a maintenance-queue
@@ -3689,6 +3771,7 @@ export class SterlingTools {
       }
       throw this.removedItemError('maintenance_remove', id);
     }
+    const record = resolved.record;
     if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
     const source = (record as unknown as { source?: string }).source;
     if (source !== 'system') {
@@ -3698,6 +3781,9 @@ export class SterlingTools {
           `If you are the conductor and this item is genuinely fulfilled, use board_remove.`
       );
     }
+    // Same hard-delete guard board_remove runs, for the same reason — this tool
+    // destroys a row too (see assertNoDrainedPrefixCollision).
+    this.assertNoDrainedPrefixCollision('maintenance_remove', id, resolved.rung, record);
     const evidence = this.removalArtifactEvidence(record);
     this.store.remove(record.id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
     return { removed: record.id, ...evidence };

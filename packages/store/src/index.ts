@@ -369,6 +369,11 @@ export type ToolStore = Pick<
   // board_remove/maintenance_remove distinguish 'already removed' from 'never
   // existed' through the drain-log trace (board 97d773ef).
   | 'drainLogEntry'
+  // The prefix-rung collision guard on the two DESTRUCTIVE board tools
+  // (decision id-ladder-extends-to-board-tools-with-collision-guard) needs the
+  // already-REMOVED ids sharing a citation prefix, which drainLogEntry's
+  // exact-id lookup cannot answer.
+  | 'removedIdsByPrefix'
   | 'addLink'
   | 'getRun'
   | 'casTransition'
@@ -1663,6 +1668,64 @@ export class SterlingStore {
       // else — including the same failure on a v2 store, which would be a real
       // defect — still propagates.
       if (this.legacySchemaVersion !== undefined && /record_id/.test(String((e as Error).message))) return undefined;
+      throw e;
+    }
+  }
+
+  /**
+   * REMOVED record ids sharing a citation PREFIX, newest first — the prefix-rung
+   * collision guard on board_remove / maintenance_remove (decision
+   * id-ladder-extends-to-board-tools-with-collision-guard).
+   *
+   * drainLogEntry above answers "is THIS exact id already gone?"; this answers
+   * the question the guard actually needs, which drainLogEntry cannot: "is this
+   * 8-char prefix ALSO the prefix of something already hard-deleted?" Board rows
+   * are hard-deleted, so a stale prefix can silently retarget a live item — the
+   * one case that must fail loud (P5).
+   *
+   * SPANS BOTH REMOVAL TRAILS, because neither alone covers the board. remove()
+   * writes queue_drain_log for SYSTEM-source todos only ("user todos are never
+   * logged" — see its doc); a removed USER board item's only trace is the
+   * activity log's verb='removed' row. A guard reading the drain log alone would
+   * therefore protect maintenance_remove and silently miss board_remove's own
+   * user items, which are the majority of what board_remove destroys. The verb
+   * filter is load-bearing: activity_log also records created/updated, and
+   * matching those would refuse removals over records that are merely alive.
+   *
+   * Both trails are capped at the newest 50, so an empty result means "no RECENT
+   * collision", never proof there was none (the residual the decision discloses).
+   */
+  removedIdsByPrefix(prefix: string): string[] {
+    if (!prefix) return [];
+    // The prefix is CALLER-SUPPLIED and lands in a LIKE pattern, where % and _
+    // are wildcards: escape them (and the escape character itself) so a
+    // citation containing one matches literally instead of fanning out over
+    // the log. Bound as a parameter, never interpolated.
+    const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const pattern = `${escaped}%`;
+    const seen = new Set<string>();
+    const collect = (sql: string): void => {
+      // NOT SELECT DISTINCT: SQLite refuses an ORDER BY term outside a DISTINCT
+      // result set, and newest-first is the useful order, so dedup happens here
+      // over the ordered rows.
+      const rows = this.db.prepare(sql).all(pattern) as { record_id: string | null }[];
+      for (const row of rows) {
+        if (typeof row.record_id === 'string' && row.record_id) seen.add(row.record_id);
+      }
+    };
+    try {
+      collect("SELECT record_id FROM queue_drain_log WHERE record_id LIKE ? ESCAPE '\\' ORDER BY seq DESC");
+      collect("SELECT record_id FROM activity_log WHERE verb = 'removed' AND record_id LIKE ? ESCAPE '\\' ORDER BY seq DESC");
+      return [...seen];
+    } catch (e) {
+      // Same legacy-schema degradation as drainLogEntry: a pre-v2 store can
+      // predate the additive record_id column (or the activity log itself), and
+      // "no recent trace" is the honest answer for a read (reads stay allowed
+      // pre-migration, AC3). The same failure on a v2 store is a real defect and
+      // still propagates.
+      if (this.legacySchemaVersion !== undefined && /record_id|activity_log|queue_drain_log/.test(String((e as Error).message))) {
+        return [...seen];
+      }
       throw e;
     }
   }
