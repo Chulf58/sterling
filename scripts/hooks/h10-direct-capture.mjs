@@ -18,9 +18,11 @@
 // debug_scope events, MINUS any covered by a no_capture declaration (board
 // 7bbec3bd) — an explicit "nothing durable" event satisfies the duty for every
 // touch/debug_scope event EARLIER than it; work arriving after re-arms it.
-// Research duty: research_tool ∪ configured agent_dispatch events not followed
-// by a durable capture → nag once (shared marker), then research_owed on
-// release. Concept duty (decision 7208729b): concept_designed events (detail
+// Research duty: research_tool ∪ configured agent_dispatch events, MINUS any
+// covered by a no_capture declaration (same cutoff as the capture lane above —
+// item 353416a9), not followed by a durable capture → nag once (shared
+// marker), then research_owed on release.
+// Concept duty (decision 7208729b): concept_designed events (detail
 // = family slug) not followed by that family's concept article
 // (feature_article.concept_family) → shared nag, then one
 // concept_article_missing item per family on release.
@@ -542,12 +544,20 @@ try {
   );
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
   const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
+  // Item 353416a9 (measured 2026-08-22): the no_capture cutoff discharged only the
+  // capture lane, so a no_capture declared AFTER research events still left them
+  // re-nagging on the next Stop — the nag's own "state nothing durable was learned"
+  // route was never actually wired to the research check. Symmetric with
+  // activeDebugEvents above: a research event AT OR BEFORE the latest no_capture
+  // cutoff is discharged; one arriving AFTER it re-arms the duty as usual.
+  const activeResearchEvents = latestNoCapture ? researchEvents.filter((e) => e.at && e.at > latestNoCapture) : researchEvents;
 
   // Capture duty: triggered by file-touching work OR debug-scope events not
   // already covered by a no-capture declaration.
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
-  // Research duty: triggered by research events (research_tool or configured agent).
-  const hasResearchDuty = researchEvents.length > 0;
+  // Research duty: triggered by research events not covered by a no-capture
+  // declaration (research_tool or configured agent).
+  const hasResearchDuty = activeResearchEvents.length > 0;
   // Concept duty: a settled design must produce/refresh its concept article.
   const hasConceptDuty = conceptFamilies.size > 0;
 
@@ -568,11 +578,12 @@ try {
     .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000, include_unconfirmed: true })
     .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
 
-  // Research duty satisfaction: research_finding|decision|anti_pattern since earliest research event.
+  // Research duty satisfaction: research_finding|decision|anti_pattern since earliest
+  // ACTIVE research event (no_capture-discharged events excluded — item 353416a9).
   let researchSatisfied = true;
   let earliestResearch = null;
   if (hasResearchDuty) {
-    const rts = researchEvents.map((e) => e.at).filter(Boolean).sort();
+    const rts = activeResearchEvents.map((e) => e.at).filter(Boolean).sort();
     earliestResearch = rts.length ? rts[0] : now;
     researchSatisfied = store
       .query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
@@ -590,6 +601,17 @@ try {
   // article predating the WHOLE session still demands. General capture does
   // NOT satisfy it — only the family's concept article does (mirrors the
   // article-demand semantics).
+  //
+  // PRE-EVENT WINDOW (item c520be20, adjudicated 2026-08-22): the natural
+  // ordering is write the article, THEN register concept_designed — so a lone
+  // registration with no other earlier session event anchors windowStart to
+  // the event's OWN timestamp, making the article that preceded it by seconds
+  // look like it predates the window and raising a FALSE demand (measured:
+  // article 08:19:30, event registered 08:19:57). Strictly additive on top of
+  // the since-the-event path above: an article created/updated within
+  // CONCEPT_PRE_EVENT_WINDOW_MS BEFORE the family's own event `at` also
+  // satisfies.
+  const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 60_000;
   let unmetFamilies = [];
   if (hasConceptDuty) {
     // FIX L2 (upgrade-polish review, 2026-08-21): a non-ISO `at` sorts
@@ -608,9 +630,19 @@ try {
     unmetFamilies = [...conceptFamilies.entries()]
       .filter(([family, since]) => {
         const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
-        return !articles.some(
-          (a) => a.concept_family === family && (a.created_at >= windowStart || a.updated_at >= windowStart)
-        );
+        const sinceMs = Date.parse(since);
+        const preStart = Number.isFinite(sinceMs) ? sinceMs - CONCEPT_PRE_EVENT_WINDOW_MS : null;
+        return !articles.some((a) => {
+          if (a.concept_family !== family) return false;
+          if (a.created_at >= windowStart || a.updated_at >= windowStart) return true;
+          if (preStart === null) return false;
+          const created = Date.parse(a.created_at);
+          const updated = Date.parse(a.updated_at);
+          return (
+            (Number.isFinite(created) && created >= preStart && created <= sinceMs) ||
+            (Number.isFinite(updated) && updated >= preStart && updated <= sinceMs)
+          );
+        });
       })
       .map(([family]) => family);
   }
@@ -762,10 +794,14 @@ try {
     }
 
     // Research duty nag: cite queries/agents verbatim (interface slice 2).
+    // Item 353416a9: name the TOOL that actually discharges this lane (the
+    // no_capture cutoff now covers research events too — see activeResearchEvents
+    // above) instead of the vague "state nothing durable was learned", which
+    // named a route the check never consulted.
     if (hasResearchDuty && !researchSatisfied) {
-      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join(', ');
+      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(', ');
       parts.push(
-        `• research: ${researchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) → knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or state nothing durable was learned`
+        `• research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) → knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool (${noCaptureCmd} --reason "<why>")`
       );
     }
 
@@ -889,7 +925,7 @@ try {
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'research_owed');
     if (!open) {
-      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join('; ');
+      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join('; ');
       store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',

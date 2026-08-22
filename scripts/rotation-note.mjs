@@ -59,5 +59,6 @@ process.stdout.write(
   `rotation note written (single slot — this supersedes any prior note).\n` +
     `next_slice: ${note.next_slice}\n` +
     (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? '?'}\n` : 'anchored: no git (drift disclosure unavailable)\n') +
-    `Tell the user READY TO CLEAR — on /clear, H1 restores and consumes this note automatically.\n`
+    `Tell the user READY TO CLEAR — on /clear, H1 restores and consumes this note automatically.\n` +
+    `If server/hook CODE changed since this session started (migration, update, rebuild), /clear alone will not reload it — EXIT AND RELAUNCH the Claude Code CLI first, THEN /clear.\n`
 );
