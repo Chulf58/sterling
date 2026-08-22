@@ -64,37 +64,64 @@ function rawTableNames(path: string): string[] {
   }
 }
 
-test('A1: a freshly created store stamps PRAGMA user_version = 1 at open', () => {
+// test-repair 2026-08-22 [stable-identity-design-v2]: A1/A2 pinned the S1-era
+// contract (marker = 1; legacy stores auto-stamped forward on open). Schema v2
+// advances the marker to 2, and refuse-until-migrated REPLACES the auto-stamp:
+// a pre-v2 store with data must never be stamped forward without the data
+// migration actually running (S4's journaled runner) — it opens readable and
+// refuses writes loudly instead.
+
+test('A1: a freshly created store stamps PRAGMA user_version = 2 at open', () => {
   const { dir, path } = tempDbPath();
   try {
     const store = new SterlingStore(path);
     store.close();
-    assert.equal(rawUserVersion(path), 1, 'a brand-new store file is stamped to the currently-supported schema version (1)');
+    assert.equal(rawUserVersion(path), 2, 'a brand-new store file is stamped to the currently-supported schema version (2)');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('A2: a legacy store (user_version = 0, pre-marker) is stamped to 1 on open — idempotent across repeated opens', () => {
+test('A2: a pre-v2 store is NOT stamped forward on open — it opens read-only-pre-migration: reads work, writes refuse naming the migration, marker unchanged across repeated opens', () => {
   const { dir, path } = tempDbPath();
   try {
-    // Create a real, fully-initialized store, then roll its marker back to 0
-    // to SIMULATE a pre-marker legacy file (we cannot literally travel back
-    // to before this feature existed, so we force the one observable
-    // difference — the marker — back to the legacy value on an otherwise
-    // real, valid schema).
+    // Create a real, fully-initialized store, then roll its marker back to
+    // SIMULATE a pre-v2 legacy file on an otherwise real schema.
     const seed = new SterlingStore(path);
     seed.close();
-    rawSetUserVersion(path, 0);
-    assert.equal(rawUserVersion(path), 0, 'precondition: the file now looks like a legacy pre-marker store');
+    rawSetUserVersion(path, 1);
+    assert.equal(rawUserVersion(path), 1, 'precondition: the file now looks like a pre-v2 (S1-era) store');
 
     const first = new SterlingStore(path);
+    assert.doesNotThrow(() => first.query({}), 'reads are allowed pre-migration');
+    assert.throws(
+      () =>
+        first.create({
+          id: '00000000-0000-4000-8000-000000000000',
+          type: 'decision',
+          created_at: '2026-08-22T00:00:00.000Z',
+          updated_at: '2026-08-22T00:00:00.000Z',
+          author: 'conductor',
+          status: 'active',
+          superseded_by: null,
+          links: [],
+          scope: 'project',
+          stack_tags: ['node'],
+          title: 'probe',
+          statement: 'write probe against a pre-v2 store',
+          alternatives_rejected: [],
+          rationale: 'must refuse',
+          file_keys: [],
+        } as never),
+      /migrat/i,
+      'a write against a pre-v2 store refuses loudly, naming the required migration'
+    );
     first.close();
-    assert.equal(rawUserVersion(path), 1, 'first open of a legacy store stamps the marker forward to 1');
+    assert.equal(rawUserVersion(path), 1, 'the marker was NOT stamped forward — refuse-until-migrated, never auto-migrate');
 
     const second = new SterlingStore(path);
     second.close();
-    assert.equal(rawUserVersion(path), 1, 'a second open is idempotent — the marker does not advance past 1 on repeat opens');
+    assert.equal(rawUserVersion(path), 1, 'a second open still does not advance the marker');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
