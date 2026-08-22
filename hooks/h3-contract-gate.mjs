@@ -4393,7 +4393,15 @@ var SYSTEM_REASONS = [
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
-  "article_oversize"
+  "article_oversize",
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  "restore_performed"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),

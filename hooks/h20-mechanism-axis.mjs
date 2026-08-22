@@ -4353,7 +4353,15 @@ var SYSTEM_REASONS = [
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
-  "article_oversize"
+  "article_oversize",
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  "restore_performed"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -6541,6 +6549,7 @@ var input = readStdin();
 var outgoing = outgoingProposalText(input.tool_input);
 if (!outgoing) allow();
 var isQuestion = Array.isArray(input.tool_input?.questions);
+var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
 var store = openStore(input.cwd);
 if (!store) allow();
 try {
@@ -6574,7 +6583,7 @@ try {
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
-  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
+  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
   const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
