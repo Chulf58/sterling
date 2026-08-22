@@ -7151,6 +7151,8 @@ try {
     releaseWithPressure();
   }
   const paths = touchedExisting.filter((p) => !isDeferred(p));
+  const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
+  const isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
   const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
   const researchEvents = sessionEvents.filter(
@@ -7159,22 +7161,26 @@ try {
   const conceptEvents = sessionEvents.filter((e) => e.kind === "concept_designed" && e.detail);
   const conceptFamilies = /* @__PURE__ */ new Map();
   for (const e of conceptEvents) {
-    const at = e.at ?? now;
-    if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
+    const at = isValidAt(e.at) ? e.at : null;
+    if (!conceptFamilies.has(e.detail)) {
+      conceptFamilies.set(e.detail, at);
+      continue;
+    }
+    const prior = conceptFamilies.get(e.detail);
+    if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
   }
   const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
-  const latestNoCapture = noCaptureEvents.length ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1) : null;
+  const latestNoCapture = noCaptureEvents.map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
+  const dischargedByNoCapture = (at) => latestNoCapture !== null && isValidAt(at) && at <= latestNoCapture;
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && e.at);
   const coveredByTestRepair = (t) => t.at && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
-  const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
-    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t)
-  );
+  const activeTouches = touches.filter((t) => !dischargedByNoCapture(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
-  const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
-  const activeResearchEvents = latestNoCapture ? researchEvents.filter((e) => e.at && e.at > latestNoCapture) : researchEvents;
+  const activeDebugEvents = debugEvents.filter((e) => !dischargedByNoCapture(e.at));
+  const activeResearchEvents = researchEvents.filter((e) => !dischargedByNoCapture(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
@@ -7195,11 +7201,11 @@ try {
   const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 6e4;
   let unmetFamilies = [];
   if (hasConceptDuty) {
-    const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
-    const sessionAts = sessionEvents.map((e) => e.at).filter((a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a))).sort();
+    const sessionAts = sessionEvents.map((e) => e.at).filter(isValidAt).sort();
     const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
     const articles = store.query({ types: ["feature_article"], cap: 1e3, include_unconfirmed: true });
     unmetFamilies = [...conceptFamilies.entries()].filter(([family, since]) => {
+      if (since === null) return true;
       const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
       const sinceMs = Date.parse(since);
       const preStart = Number.isFinite(sinceMs) ? sinceMs - CONCEPT_PRE_EVENT_WINDOW_MS : null;
