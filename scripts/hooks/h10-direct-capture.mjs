@@ -18,9 +18,11 @@
 // debug_scope events, MINUS any covered by a no_capture declaration (board
 // 7bbec3bd) — an explicit "nothing durable" event satisfies the duty for every
 // touch/debug_scope event EARLIER than it; work arriving after re-arms it.
-// Research duty: research_tool ∪ configured agent_dispatch events not followed
-// by a durable capture → nag once (shared marker), then research_owed on
-// release. Concept duty (decision 7208729b): concept_designed events (detail
+// Research duty: research_tool ∪ configured agent_dispatch events, MINUS any
+// covered by a no_capture declaration (same cutoff as the capture lane above —
+// item 353416a9), not followed by a durable capture → nag once (shared
+// marker), then research_owed on release.
+// Concept duty (decision 7208729b): concept_designed events (detail
 // = family slug) not followed by that family's concept article
 // (feature_article.concept_family) → shared nag, then one
 // concept_article_missing item per family on release.
@@ -475,6 +477,37 @@ try {
   // deferral partition needs it too).
   const paths = touchedExisting.filter((p) => !isDeferred(p));
 
+  // Canonical-timestamp guard, shared by EVERY register-`at` comparison below —
+  // the no_capture cutoff, the test-repair cutoff, the capture/research window
+  // anchors and the concept window (FIX L2, upgrade-polish review 2026-08-21;
+  // extended 2026-08-22). (The dispatch register's `at` above is the one
+  // exception by design: ageMs compares it NUMERICALLY through Date.parse and
+  // already treats an unparseable value as stale, i.e. defers nothing.)
+  //
+  // Register timestamps are compared LEXICALLY, so a non-ISO value is not merely
+  // unparseable — it sorts arbitrarily against real stamps ('n/a' above every ISO
+  // stamp, '0' below every one of them). Date.parse alone is NOT the right
+  // validity test — V8 parses '0' as year 2000 (finite!) while the string '0'
+  // still sorts below every ISO stamp.
+  //
+  // The shape is therefore the FULL canonical `Date#toISOString()` form, not a
+  // loose ISO prefix (outside re-review 2026-08-22): a prefix test admits values
+  // whose lexical order is NOT chronological order, which every comparison here
+  // silently assumes. Two concrete inversions it let through — an offset stamp
+  // '2026-08-22T08:00:00.000-05:00' happened at 13:00Z, i.e. AFTER
+  // '2026-08-22T12:00:00.000Z', yet sorts before it; and variable precision puts
+  // '…T12:00:00.500Z' BELOW '…T12:00:00Z' ('.' < 'Z'). Pinning UTC + fixed
+  // milliseconds makes lexical order chronological BY CONSTRUCTION.
+  //
+  // Verified 2026-08-22 that this rejects no live data: every writer of both
+  // registers stamps `new Date().toISOString()` — scripts/hooks/h7-file-touch.mjs
+  // (touches), scripts/hooks/h16-event-register.mjs, scripts/debug-scope.mjs,
+  // scripts/no-capture.mjs, scripts/concept-designed.mjs, scripts/test-repair.mjs,
+  // and the MCP tool surface's own appender (packages/mcp-server/src/tools.ts,
+  // whose injectable `now` defaults to the same call).
+  const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const isValidAt = (a) => typeof a === 'string' && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
+
   // Classify session events.
   const debugEvents = sessionEvents.filter((e) => e.kind === 'debug_scope');
   const researchAgents = new Set(config.session_events?.research_agents ?? ['researcher', 'claude-code-guide']);
@@ -483,24 +516,52 @@ try {
   );
   // Concept duty (decision 7208729b): concept_designed events, deduped to the
   // EARLIEST event per family — detail is the concept FAMILY slug.
+  // FAIL-CLOSED on a missing/malformed `at` (2026-08-22): the old `e.at ?? now`
+  // invented an anchor. A literal '0' sank the family's window below every
+  // article timestamp, so an article written months earlier satisfied the duty;
+  // and `?? now` handed a MISSING `at` the 15-minute pre-event grace window
+  // below, letting an article written minutes before an event of unknown time
+  // satisfy it. An event whose time is unknown anchors NOTHING: it is ignored in
+  // favour of the family's earliest VALID `at` (ignoring it can only move the
+  // window LATER — the strict direction), and a family with no valid `at` at all
+  // carries a null anchor and is demanded unconditionally below.
   const conceptEvents = sessionEvents.filter((e) => e.kind === 'concept_designed' && e.detail);
-  const conceptFamilies = new Map(); // family -> earliest at
+  const conceptFamilies = new Map(); // family -> earliest VALID at, or null when the family has none
   for (const e of conceptEvents) {
-    const at = e.at ?? now;
-    if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
+    const at = isValidAt(e.at) ? e.at : null;
+    if (!conceptFamilies.has(e.detail)) {
+      conceptFamilies.set(e.detail, at);
+      continue;
+    }
+    const prior = conceptFamilies.get(e.detail);
+    if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
   }
 
   // No-capture declaration (board 7bbec3bd): scripts/no-capture.mjs appends a
   // no_capture event the moment the conductor judges a Stop produced nothing
-  // durable. It SATISFIES the capture duty for every touch/debug_scope event
+  // durable. It SATISFIES the capture duty for every touch/debug_scope event —
+  // and, since item 353416a9, the research duty for every research event —
   // EARLIER than the LATEST such declaration; work arriving AFTER it re-arms
   // the duty (a declaration cannot cover work that hasn't happened yet). A
   // missing/malformed `at` is treated as arriving AFTER the cutoff — the safe
   // direction, since it keeps the duty armed rather than silently clearing it.
+  // That promise binds all THREE registers uniformly (touches, debug events,
+  // research events): each one is tested through dischargedByNoCapture below,
+  // so none of them can discharge itself on a timestamp it cannot compare.
+  //
+  // The CUTOFF itself must be a canonical stamp before it can discharge anything
+  // (2026-08-22): a declaration carrying 'n/a' sorts ABOVE every ISO stamp
+  // ('n' > '2') and, taken as the cutoff, discharged every event in the session.
+  // With no VALID declaration the cutoff is null and nothing is discharged.
   const noCaptureEvents = sessionEvents.filter((e) => e.kind === 'no_capture');
-  const latestNoCapture = noCaptureEvents.length
-    ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1)
-    : null;
+  const latestNoCapture = noCaptureEvents.map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
+  // The discharge test, applied per touch and per event: covered only when its
+  // OWN `at` is a canonical stamp at or before the cutoff. A missing or
+  // malformed `at` is therefore NOT covered — it arrives after the cutoff by
+  // construction, which is what the paragraph above promises (the earlier
+  // `x.at && x.at > latestNoCapture` idiom filtered such a record OUT, i.e.
+  // silently treated the duty it carried as discharged).
+  const dischargedByNoCapture = (at) => latestNoCapture !== null && isValidAt(at) && at <= latestNoCapture;
 
   // Capture-pending declaration (board 1af5d630, decision follows e23f38f8):
   // the capture EXISTS and its write is in flight on a named target (detail =
@@ -525,9 +586,17 @@ try {
   // `<path> — <evidence>`) and must match the touch EXACTLY — a substring
   // match would let the free-text evidence, or a longer sibling path, silently
   // discharge the wrong file's duty (review finding 2026-08-21).
-  const testRepairEvents = sessionEvents.filter((e) => e.kind === 'test_repair' && e.detail && e.at);
+  // Both sides of the `>` go through isValidAt (outside re-review 2026-08-22).
+  // This is a DISCHARGE cutoff exactly like no_capture's, so it inherits the same
+  // fail-closed rule: a truthy-but-uncomparable stamp was accepted and compared
+  // raw, and a corrupted event {at:'n/a'} sorts above EVERY ISO stamp ('n' > '2')
+  // — it removed the touch from activeTouches and silently discharged its capture
+  // duty. A repair event whose time cannot be read covers nothing, and a touch
+  // whose own time cannot be read is never covered (it arrives after every
+  // cutoff by construction) — both keep the duty ARMED.
+  const testRepairEvents = sessionEvents.filter((e) => e.kind === 'test_repair' && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) =>
-    t.at && testRepairEvents.some((e) => String(e.detail).split(' — ')[0].trim() === t.path && e.at > t.at);
+    isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(' — ')[0].trim() === t.path && e.at > t.at);
   // Touch-noise precision (board 05e298f0): reading an image/binary file is
   // inspection, not knowledge-producing work — excluded from the CAPTURE
   // duty's touch set only (never the article-demand `paths` below, which
@@ -537,17 +606,26 @@ try {
   // ec9eacaa) — dropped here rather than at activePaths so it cannot backdate
   // `earliest` either, which would anchor the captured-set window to work whose
   // duty is not owed yet.
-  const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
-    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t)
-  );
+  const activeTouches = touches
+    .filter((t) => !dischargedByNoCapture(t.at))
+    .filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
-  const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
+  const activeDebugEvents = debugEvents.filter((e) => !dischargedByNoCapture(e.at));
+  // Item 353416a9 (measured 2026-08-22): the no_capture cutoff discharged only the
+  // capture lane, so a no_capture declared AFTER research events still left them
+  // re-nagging on the next Stop — the nag's own "state nothing durable was learned"
+  // route was never actually wired to the research check. Symmetric with
+  // activeDebugEvents above: a research event AT OR BEFORE the latest no_capture
+  // cutoff is discharged; one arriving AFTER it — or one whose `at` is missing
+  // or malformed, which is never trusted as comparable — re-arms the duty.
+  const activeResearchEvents = researchEvents.filter((e) => !dischargedByNoCapture(e.at));
 
   // Capture duty: triggered by file-touching work OR debug-scope events not
   // already covered by a no-capture declaration.
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
-  // Research duty: triggered by research events (research_tool or configured agent).
-  const hasResearchDuty = researchEvents.length > 0;
+  // Research duty: triggered by research events not covered by a no-capture
+  // declaration (research_tool or configured agent).
+  const hasResearchDuty = activeResearchEvents.length > 0;
   // Concept duty: a settled design must produce/refresh its concept article.
   const hasConceptDuty = conceptFamilies.size > 0;
 
@@ -560,7 +638,22 @@ try {
 
   // Earliest timestamp across the ACTIVE touches ∪ debug events (the
   // captured-set window anchor) — a no-capture declaration moves this forward.
-  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
+  // Only VALID stamps anchor it (outside re-review 2026-08-22): the old
+  // `.filter(Boolean)` kept truthy-but-uncomparable values, so a single touch or
+  // debug event stamped '0' — which correctly SURVIVES dischargedByNoCapture,
+  // staying active — then became the earliest anchor, and every knowledge record
+  // ever written compares >= '0'. That flipped `captured` true and cleared the
+  // duty one layer below the guard it had just passed.
+  // FALLBACK DIRECTION, when an active item has no usable stamp: `now`, the
+  // LATEST anchor available at this Stop. It is the conservative choice —
+  // no pre-existing record can satisfy a window that opens at the Stop itself,
+  // so the duty stays ARMED, which is the whole point of failing closed here.
+  // (An invented EARLY anchor is the failure being fixed; an early anchor is
+  // exactly what lets any historical record discharge the duty.) It is also
+  // byte-identical to what this line already did when the list was empty.
+  // Dropping an invalid stamp while OTHER valid ones remain can only move the
+  // anchor LATER — the strict direction, same rule the concept lane states.
+  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
 
   // Widened captured set: decision|anti_pattern|feature_article|research_finding|disconfirmed_hypothesis
@@ -568,11 +661,16 @@ try {
     .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000, include_unconfirmed: true })
     .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
 
-  // Research duty satisfaction: research_finding|decision|anti_pattern since earliest research event.
+  // Research duty satisfaction: research_finding|decision|anti_pattern since earliest
+  // ACTIVE research event (no_capture-discharged events excluded — item 353416a9).
   let researchSatisfied = true;
   let earliestResearch = null;
   if (hasResearchDuty) {
-    const rts = researchEvents.map((e) => e.at).filter(Boolean).sort();
+    // Same valid-stamps-only anchor and same `now` fallback as `earliest` above,
+    // for the same reason: a research event stamped '0' survives the no_capture
+    // guard and would otherwise anchor this window below every record in the
+    // store, satisfying the duty with knowledge written months ago.
+    const rts = activeResearchEvents.map((e) => e.at).filter(isValidAt).sort();
     earliestResearch = rts.length ? rts[0] : now;
     researchSatisfied = store
       .query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
@@ -590,27 +688,47 @@ try {
   // article predating the WHOLE session still demands. General capture does
   // NOT satisfy it — only the family's concept article does (mirrors the
   // article-demand semantics).
+  //
+  // PRE-EVENT WINDOW (item c520be20, adjudicated 2026-08-22): the natural
+  // ordering is write the article, THEN register concept_designed — so a lone
+  // registration with no other earlier session event anchors windowStart to
+  // the event's OWN timestamp, making the article that preceded it by seconds
+  // look like it predates the window and raising a FALSE demand (measured:
+  // article 08:19:30, event registered 08:19:57). Strictly additive on top of
+  // the since-the-event path above: an article created/updated within
+  // CONCEPT_PRE_EVENT_WINDOW_MS BEFORE the family's own event `at` also
+  // satisfies.
+  const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 60_000;
   let unmetFamilies = [];
   if (hasConceptDuty) {
-    // FIX L2 (upgrade-polish review, 2026-08-21): a non-ISO `at` sorts
-    // lexically below every real timestamp and would drag windowStart
-    // arbitrarily back. Date.parse alone is NOT the right validity test —
-    // V8 parses '0' as year 2000 (finite!) while the string '0' still sorts
-    // below every ISO stamp — so validity here is ISO SHAPE (the only form
-    // the register's writers emit) plus parseability.
-    const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
-    const sessionAts = sessionEvents
-      .map((e) => e.at)
-      .filter((a) => typeof a === 'string' && ISO_AT.test(a) && Number.isFinite(Date.parse(a)))
-      .sort();
+    // FIX L2 (upgrade-polish review, 2026-08-21): a non-canonical `at` sorts
+    // ARBITRARILY against real timestamps — '0' below every one of them (which
+    // drags windowStart back until any stale article satisfies), 'n/a' above
+    // every one of them — so it is excluded here, not merely parsed. Shares the
+    // isValidAt guard above.
+    const sessionAts = sessionEvents.map((e) => e.at).filter(isValidAt).sort();
     const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
     const articles = store.query({ types: ['feature_article'], cap: 1000, include_unconfirmed: true });
     unmetFamilies = [...conceptFamilies.entries()]
       .filter(([family, since]) => {
+        // No valid `at` anywhere in the family's events: the window is
+        // unresolvable, so the duty stays demanded rather than being measured
+        // against an invented anchor (fail-closed).
+        if (since === null) return true;
         const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
-        return !articles.some(
-          (a) => a.concept_family === family && (a.created_at >= windowStart || a.updated_at >= windowStart)
-        );
+        const sinceMs = Date.parse(since);
+        const preStart = Number.isFinite(sinceMs) ? sinceMs - CONCEPT_PRE_EVENT_WINDOW_MS : null;
+        return !articles.some((a) => {
+          if (a.concept_family !== family) return false;
+          if (a.created_at >= windowStart || a.updated_at >= windowStart) return true;
+          if (preStart === null) return false;
+          const created = Date.parse(a.created_at);
+          const updated = Date.parse(a.updated_at);
+          return (
+            (Number.isFinite(created) && created >= preStart && created <= sinceMs) ||
+            (Number.isFinite(updated) && updated >= preStart && updated <= sinceMs)
+          );
+        });
       })
       .map(([family]) => family);
   }
@@ -762,10 +880,14 @@ try {
     }
 
     // Research duty nag: cite queries/agents verbatim (interface slice 2).
+    // Item 353416a9: name the TOOL that actually discharges this lane (the
+    // no_capture cutoff now covers research events too — see activeResearchEvents
+    // above) instead of the vague "state nothing durable was learned", which
+    // named a route the check never consulted.
     if (hasResearchDuty && !researchSatisfied) {
-      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join(', ');
+      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(', ');
       parts.push(
-        `• research: ${researchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) → knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or state nothing durable was learned`
+        `• research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) → knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool (${noCaptureCmd} --reason "<why>")`
       );
     }
 
@@ -889,7 +1011,7 @@ try {
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'research_owed');
     if (!open) {
-      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join('; ');
+      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join('; ');
       store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',

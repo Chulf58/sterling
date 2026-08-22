@@ -7151,6 +7151,8 @@ try {
     releaseWithPressure();
   }
   const paths = touchedExisting.filter((p) => !isDeferred(p));
+  const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
   const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
   const researchEvents = sessionEvents.filter(
@@ -7159,49 +7161,62 @@ try {
   const conceptEvents = sessionEvents.filter((e) => e.kind === "concept_designed" && e.detail);
   const conceptFamilies = /* @__PURE__ */ new Map();
   for (const e of conceptEvents) {
-    const at = e.at ?? now;
-    if (!conceptFamilies.has(e.detail) || at < conceptFamilies.get(e.detail)) conceptFamilies.set(e.detail, at);
+    const at = isValidAt(e.at) ? e.at : null;
+    if (!conceptFamilies.has(e.detail)) {
+      conceptFamilies.set(e.detail, at);
+      continue;
+    }
+    const prior = conceptFamilies.get(e.detail);
+    if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
   }
   const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
-  const latestNoCapture = noCaptureEvents.length ? noCaptureEvents.map((e) => e.at).filter(Boolean).sort().at(-1) : null;
+  const latestNoCapture = noCaptureEvents.map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
+  const dischargedByNoCapture = (at) => latestNoCapture !== null && isValidAt(at) && at <= latestNoCapture;
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
-  const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && e.at);
-  const coveredByTestRepair = (t) => t.at && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
+  const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
+  const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
-  const activeTouches = (latestNoCapture ? touches.filter((t) => t.at && t.at > latestNoCapture) : touches).filter(
-    (t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t)
-  );
+  const activeTouches = touches.filter((t) => !dischargedByNoCapture(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
-  const activeDebugEvents = latestNoCapture ? debugEvents.filter((e) => e.at && e.at > latestNoCapture) : debugEvents;
+  const activeDebugEvents = debugEvents.filter((e) => !dischargedByNoCapture(e.at));
+  const activeResearchEvents = researchEvents.filter((e) => !dischargedByNoCapture(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
-  const hasResearchDuty = researchEvents.length > 0;
+  const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     clearRegisters();
     releaseWithPressure();
   }
-  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
+  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
   const captured = store.query({ types: ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis"], cap: 1e3, include_unconfirmed: true }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
   let researchSatisfied = true;
   let earliestResearch = null;
   if (hasResearchDuty) {
-    const rts = researchEvents.map((e) => e.at).filter(Boolean).sort();
+    const rts = activeResearchEvents.map((e) => e.at).filter(isValidAt).sort();
     earliestResearch = rts.length ? rts[0] : now;
     researchSatisfied = store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }).some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
   }
+  const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 6e4;
   let unmetFamilies = [];
   if (hasConceptDuty) {
-    const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
-    const sessionAts = sessionEvents.map((e) => e.at).filter((a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a))).sort();
+    const sessionAts = sessionEvents.map((e) => e.at).filter(isValidAt).sort();
     const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
     const articles = store.query({ types: ["feature_article"], cap: 1e3, include_unconfirmed: true });
     unmetFamilies = [...conceptFamilies.entries()].filter(([family, since]) => {
+      if (since === null) return true;
       const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
-      return !articles.some(
-        (a) => a.concept_family === family && (a.created_at >= windowStart || a.updated_at >= windowStart)
-      );
+      const sinceMs = Date.parse(since);
+      const preStart = Number.isFinite(sinceMs) ? sinceMs - CONCEPT_PRE_EVENT_WINDOW_MS : null;
+      return !articles.some((a) => {
+        if (a.concept_family !== family) return false;
+        if (a.created_at >= windowStart || a.updated_at >= windowStart) return true;
+        if (preStart === null) return false;
+        const created = Date.parse(a.created_at);
+        const updated = Date.parse(a.updated_at);
+        return Number.isFinite(created) && created >= preStart && created <= sinceMs || Number.isFinite(updated) && updated >= preStart && updated <= sinceMs;
+      });
     }).map(([family]) => family);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
@@ -7288,9 +7303,9 @@ try {
       }
     }
     if (hasResearchDuty && !researchSatisfied) {
-      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join(", ");
+      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(", ");
       parts.push(
-        `\u2022 research: ${researchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) \u2192 knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or state nothing durable was learned`
+        `\u2022 research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) \u2192 knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool (${noCaptureCmd} --reason "<why>")`
       );
     }
     if (!conceptSatisfied) {
@@ -7377,7 +7392,7 @@ ${parts.join("\n\n")}`);
   if (hasResearchDuty && !researchSatisfied) {
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "research_owed");
     if (!open) {
-      const queryTexts = researchEvents.map((e) => e.detail).filter(Boolean).join("; ");
+      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
         id: randomUUID2(),
         type: "todo",

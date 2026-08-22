@@ -7023,10 +7023,10 @@ try {
         }
         const behind = Number.parseInt(git(["rev-list", "--count", `HEAD..origin/${defaultBranch}`]) ?? "", 10);
         if (Number.isFinite(behind) && behind > 0) {
-          currencyWarning = `\u26A0 Sterling is ${behind} update(s) behind \u2014 double-click sterling-update.bat (or run /sterling:update), then restart the session. `;
+          currencyWarning = `\u26A0 Sterling is ${behind} update(s) behind \u2014 double-click sterling-update.bat (or run /sterling:update), then restart the session. A /clear is NOT enough \u2014 MCP servers survive it, so EXIT AND RELAUNCH the Claude Code CLI. `;
           currencyContext = `
 
-STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it \u2014 fast-forward-or-refuse, decision e6240afe), and remind them a session RESTART follows a successful update.`;
+STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it \u2014 fast-forward-or-refuse, decision e6240afe), and remind them a session RESTART follows a successful update \u2014 that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
         }
       }
     }
@@ -7061,7 +7061,7 @@ try {
 
 ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
 ${fields}
-Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold.`;
+Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.`;
     }
   }
 } catch {
@@ -7228,7 +7228,7 @@ try {
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
   if (verdict.state === "stale") {
-    staleWarning = `\u26A0 Sterling MCP server is STALE \u2014 running build ${verdict.running}, current ${verdict.current}. RESTART THE SESSION to load the current server (a stale server silently mis-stores domain writes). `;
+    staleWarning = `\u26A0 Sterling MCP server is STALE \u2014 running build ${verdict.running}, current ${verdict.current}. RESTART THE SESSION to load the current server (a stale server silently mis-stores domain writes) \u2014 that means EXIT AND RELAUNCH the Claude Code CLI; a /clear is NOT enough, the MCP server survives it. `;
   }
 } catch {
 }
