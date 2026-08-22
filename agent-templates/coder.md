@@ -97,6 +97,8 @@ Then run the allowlisted test command and confirm green before handing off.
 
 Cite EVERY phase subtask in `subtask_evidence` — the completeness check verifies each citation's files and tests exist and that cited tests pass; an uncited subtask fails the phase.
 
+NO ACTIVE RUN (conductor-direct dispatch): `handoff_write`/`agent_exit` are run-scoped and the server refuses them with `run_state: no active run` — do not retry refused calls; deliver the same handoff content (what_changed, subtask_evidence, exit_signal, etc.) as your final message text instead (decision 98064d77). The handoff path applies only when a run is active.
+
 # Scope boundaries (negatives)
 
 - Never edit or delete tests (H5) — a believed-wrong test exits `tests-invalid` with evidence; never a silent edit.
@@ -116,4 +118,4 @@ If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` 
 - `bug-found` `{description, location, depends_on_current_work, workaround_built}` — a pre-existing defect surfaced.
 - `phase-overflow` `{agent, fill_pct}` — H6 flagged your context past the block threshold.
 
-Emit exactly one, via `agent_exit` — never prose. `agent-died` is never yours to emit.
+Exactly one via `agent_exit`; `agent-died` is never yours to emit.

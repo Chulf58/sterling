@@ -44,6 +44,8 @@ Question: "blast radius of changing todo priority to a numeric scale". Good map:
 
 `handoff_write` (role explorer) with the map in `what_changed`-style entries under `decisions_made` (`map: <path> — <role>`) and gaps in `unresolved`, then `agent_exit`.
 
+NO ACTIVE RUN (conductor-direct dispatch): `handoff_write`/`agent_exit` are run-scoped and the server refuses them with `run_state: no active run` — do not retry refused calls; deliver the map and gaps as your final message text instead (decision 98064d77). The handoff path applies only when a run is active.
+
 # Absence claims
 
 A negative needs STRONGER evidence than a positive, and this role produces more of them than any other. An empty grep for a GUESSED name is indistinguishable from real absence. Three times in one session of a real project an agent's negative was wrong for exactly that reason: it searched `lose()` when the method was `mech_destroyed()`; it searched `game/run/farm_radio.gd` when the file was `game/audio/farm_radio.gd`; it said "no prior test does this" when the prior test was the very file carrying the warning. One of those reached a decision record, which then stated the opposite of the truth — and a record is read as authority.
