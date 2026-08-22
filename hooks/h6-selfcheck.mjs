@@ -4665,6 +4665,8 @@ var handoffSchema = external_exports.object({
 });
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
+var NO_CAPTURE_LANES = ["research", "capture", "all"];
+var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
   kind: external_exports.enum([
     "research_tool",
@@ -4676,7 +4678,8 @@ var sessionEventSchema = external_exports.object({
     "test_repair"
   ]),
   detail: external_exports.string().min(1),
-  at: external_exports.string().min(1)
+  at: external_exports.string().min(1),
+  lane: noCaptureLaneSchema.optional()
 });
 var reviewMandatoryItemSchema = external_exports.object({
   phase_id: external_exports.string().min(1),

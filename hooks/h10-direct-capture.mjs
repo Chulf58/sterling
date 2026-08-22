@@ -4696,6 +4696,8 @@ var handoffSchema = external_exports.object({
 });
 var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
 var machineState = external_exports.enum(MACHINE_STATES);
+var NO_CAPTURE_LANES = ["research", "capture", "all"];
+var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
   kind: external_exports.enum([
     "research_tool",
@@ -4707,7 +4709,8 @@ var sessionEventSchema = external_exports.object({
     "test_repair"
   ]),
   detail: external_exports.string().min(1),
-  at: external_exports.string().min(1)
+  at: external_exports.string().min(1),
+  lane: noCaptureLaneSchema.optional()
 });
 var reviewMandatoryItemSchema = external_exports.object({
   phase_id: external_exports.string().min(1),
@@ -7169,18 +7172,30 @@ try {
     const prior = conceptFamilies.get(e.detail);
     if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
   }
+  const NO_CAPTURE_LANES2 = ["research", "capture", "all"];
+  const laneOf = (e) => {
+    if (e.lane === void 0 || e.lane === null) return "capture";
+    return NO_CAPTURE_LANES2.includes(e.lane) ? e.lane : null;
+  };
   const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
-  const latestNoCapture = noCaptureEvents.map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
-  const dischargedByNoCapture = (at) => latestNoCapture !== null && isValidAt(at) && at <= latestNoCapture;
+  const cutoffForLane = (lane) => noCaptureEvents.filter((e) => {
+    const declared = laneOf(e);
+    return declared === lane || declared === "all";
+  }).map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
+  const captureLaneCutoff = cutoffForLane("capture");
+  const researchLaneCutoff = cutoffForLane("research");
+  const dischargedByCutoff = (at, cutoff) => cutoff !== null && isValidAt(at) && at <= cutoff;
+  const dischargedOnCaptureLane = (at) => dischargedByCutoff(at, captureLaneCutoff);
+  const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
-  const activeTouches = touches.filter((t) => !dischargedByNoCapture(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
+  const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
-  const activeDebugEvents = debugEvents.filter((e) => !dischargedByNoCapture(e.at));
-  const activeResearchEvents = researchEvents.filter((e) => !dischargedByNoCapture(e.at));
+  const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
+  const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
@@ -7305,7 +7320,7 @@ try {
     if (hasResearchDuty && !researchSatisfied) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(", ");
       parts.push(
-        `\u2022 research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) \u2192 knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool (${noCaptureCmd} --reason "<why>")`
+        `\u2022 research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) \u2192 knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool with lane "research" (${noCaptureCmd} --reason "<why>" --lane research) \u2014 a BARE declaration covers the capture lane only`
       );
     }
     if (!conceptSatisfied) {

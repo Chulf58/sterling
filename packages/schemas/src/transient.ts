@@ -129,6 +129,23 @@ export type MachineState = z.infer<typeof machineState>;
 // path plus the evidence for why the TEST, not the code, was wrong; written
 // by scripts/test-repair.mjs (a CLI, not a hook — mirrors no-capture.mjs's
 // append shape). Never a durable store record.
+//
+// LANE (decision no-capture-discharge-is-lane-scoped,
+// 51ebe0dd-099e-40a9-abc5-d3c8cc767883; USER-RULED 2026-08-22): a no_capture
+// declaration is scoped to the duty lane it actually claims. OPTIONAL because a
+// BARE declaration is the pre-ruling behavior — it covers the CAPTURE lane only
+// — and because every no_capture event written BEFORE this field existed must
+// read the same way: field-absent means 'capture', NEVER 'all'. A legacy event
+// cannot silently gain research-clearing power it never had, since a locally
+// true "typo fix, nothing durable" would then silently discharge an unrelated
+// earlier research duty (P5 fail-loud / P2 the KB is the product: silent
+// knowledge loss is the severe direction). Both producers — scripts/no-capture.mjs
+// (--lane) and the no_capture MCP tool — refuse an unrecognized value LOUDLY,
+// naming this set, rather than coercing it to a lane the human did not claim.
+export const NO_CAPTURE_LANES = ['research', 'capture', 'all'] as const;
+export const noCaptureLaneSchema = z.enum(NO_CAPTURE_LANES);
+export type NoCaptureLane = z.infer<typeof noCaptureLaneSchema>;
+
 export const sessionEventSchema = z.object({
   kind: z.enum([
     'research_tool',
@@ -141,6 +158,7 @@ export const sessionEventSchema = z.object({
   ]),
   detail: z.string().min(1),
   at: z.string().min(1),
+  lane: noCaptureLaneSchema.optional(),
 });
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
 

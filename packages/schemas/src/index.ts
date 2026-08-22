@@ -50,8 +50,10 @@ export {
   machineState,
   runRecordSchema,
   sessionEventSchema,
+  NO_CAPTURE_LANES,
+  noCaptureLaneSchema,
 } from './transient.js';
-export type { Signal, SpineSignal, Handoff, MachineState, RunRecord, SessionEvent } from './transient.js';
+export type { Signal, SpineSignal, Handoff, MachineState, RunRecord, SessionEvent, NoCaptureLane } from './transient.js';
 export { configSchema, parseConfig } from './config.js';
 export type { SterlingConfig } from './config.js';
 export { projectRegistrationSchema } from './registry.js';

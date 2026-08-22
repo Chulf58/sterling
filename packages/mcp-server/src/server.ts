@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z } from 'zod';
-import { parseConfig } from '@sterling/schemas';
+import { parseConfig, NO_CAPTURE_LANES } from '@sterling/schemas';
 import { MountedStores, resolveDomainMounts } from '@sterling/store';
 import { SterlingTools } from './tools.js';
 
@@ -344,10 +344,10 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'no_capture',
     {
       description:
-        "Declare that this session's direct-mode work produced NOTHING durable — satisfies H10's capture duty for every touch/debug event EARLIER than the declaration (later work re-arms it). A false declaration is drift, not a bypass: the reason is register-recorded. If a capture EXISTS and is merely landing later, use capture_pending instead. Replaces hunting for scripts/no-capture.mjs in the plugin clone; the script remains the no-server fallback.",
-      inputSchema: strict({ reason: z.string() }),
+        "Declare that this session's direct-mode work produced NOTHING durable — satisfies H10's duty for every touch/debug/research event EARLIER than the declaration, ON THE LANE YOU DECLARE (later work re-arms it). LANE-SCOPED since 2026-08-22 (decision no-capture-discharge-is-lane-scoped): OMITTING lane declares the CAPTURE lane only — discharging the RESEARCH duty requires lane 'research' (or 'all' for both), because a locally-true 'typo fix, nothing durable' must never silently clear an unrelated earlier research duty. An unrecognized lane is refused, never coerced. A false declaration is drift, not a bypass: the reason is register-recorded. If a capture EXISTS and is merely landing later, use capture_pending instead. Replaces hunting for scripts/no-capture.mjs in the plugin clone; the script remains the no-server fallback (--lane there).",
+      inputSchema: strict({ reason: z.string(), lane: z.enum(NO_CAPTURE_LANES).optional() }),
     },
-    ({ reason }) => json(tools.noCapture(reason))
+    ({ reason, lane }) => json(tools.noCapture(reason, lane))
   );
 
   server.registerTool(
