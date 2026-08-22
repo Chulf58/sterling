@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS record_aliases (
   archived_version INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+-- remove() deletes aliases by canonical_id.
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON record_aliases(canonical_id);
 -- record_relations: the AUTHORITATIVE home of typed edges (supersedes,
 -- cites, ...). Replaces record_links: served links[] materializes from here,
 -- and supersession is a relation rather than a column value a caller sets.

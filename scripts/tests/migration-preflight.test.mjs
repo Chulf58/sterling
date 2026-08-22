@@ -105,54 +105,78 @@ function decision(over = {}) {
   };
 }
 
-/** Introspects record_links' real columns at runtime rather than guessing the
- *  schema — fills any NOT NULL column without a default with a sane
- *  placeholder so the dangling-link fixture works regardless of exact shape. */
-function insertDanglingLink(store, sourceId, missingTargetId, rel = 'cites') {
-  const cols = store.db.prepare("PRAGMA table_info('record_links')").all();
-  const pkCount = cols.filter((c) => c.pk).length;
-  const values = {};
-  for (const c of cols) {
-    // Only a single-column pk is a rowid alias sqlite can assign; every
-    // column of a composite pk (source_id, rel, target_id) still needs a value.
-    if (c.pk && pkCount === 1) continue;
-    if (c.name === 'source_id') { values[c.name] = sourceId; continue; }
-    if (c.name === 'target_id') { values[c.name] = missingTargetId; continue; }
-    if (/rel/i.test(c.name)) { values[c.name] = rel; continue; }
-    if (c.notnull && c.dflt_value == null) {
-      if (/(at|date|time)$/i.test(c.name)) values[c.name] = NOW;
-      else if (/id$/i.test(c.name)) values[c.name] = randomUUID();
-      else values[c.name] = '';
-    }
-  }
-  const names = Object.keys(values);
-  const placeholders = names.map(() => '?').join(', ');
-  store.db.prepare(`INSERT INTO record_links (${names.join(', ')}) VALUES (${placeholders})`).run(...names.map((n) => values[n]));
+// test-repair 2026-08-22: the fixture previously built its store through the
+// LIVE SterlingStore, whose schema moved to v2 in the stable-identity S2 slice
+// (record_links replaced by record_relations; supersede/retire now write
+// relations) — insertDanglingLink's PRAGMA table_info('record_links') came
+// back empty and produced invalid SQL (B1/B2 red at HEAD, pre-existing).
+// Preflight's whole subject is a PRE-MIGRATION v1 store, so the fixture now
+// builds the raw v1 shape directly (real v1 DDL from git 6f443e8, the same
+// source the migration-runner fixture uses). [stable-identity-design-v2]
+const V1_DDL = `
+CREATE TABLE IF NOT EXISTS records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS record_links (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
+`;
+
+function insertV1Record(db, rec) {
+  db.prepare(
+    'INSERT INTO records (id, type, status, superseded_by, scope, created_at, updated_at, author, derived_unconfirmed, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)'
+  ).run(rec.id, rec.type, rec.status, rec.superseded_by, rec.scope, rec.created_at, rec.updated_at, rec.author, JSON.stringify(rec));
+  db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(rec.id, rec.title ?? '');
 }
 
-/** Builds the exact B1 fixture: a 3-node supersede() chain (A->B->C), one
- *  retireInFavorOf duplicate (D->E, no supersedes link), one record (F)
- *  carrying a links[] entry at a never-created id, and two ids engineered to
- *  share an 8-char prefix (A and D) to exercise the collision counter. */
+function insertV1Link(db, sourceId, rel, targetId) {
+  db.prepare('INSERT INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)').run(sourceId, rel, targetId);
+}
+
+/** Builds the exact B1 fixture as a raw pre-migration v1 store: a 3-node
+ *  legacy supersede chain (A->B->C, reciprocal record_links edges), one
+ *  retire-shaped duplicate (D->E via superseded_by column, no supersedes
+ *  link), one record (F) carrying a links[] entry at a never-created id, and
+ *  two ids sharing an 8-char prefix (A and D) for the collision counter. */
 function buildB1Fixture(path) {
-  const store = new SterlingStore(path);
+  const db = new DatabaseSync(path);
+  db.exec(V1_DDL);
+  db.exec('PRAGMA user_version = 1');
   const idA = 'aaaaaaaa-1111-4111-8111-111111111111';
   const idD = 'aaaaaaaa-2222-4222-8222-222222222222';
-
-  const a = store.create(decision({ id: idA, title: 'A' }));
-  const b = store.supersede(a.id, decision({ title: 'B' }));
-  const c = store.supersede(b.id, decision({ title: 'C' }));
-
-  const d = store.create(decision({ id: idD, title: 'D (duplicate)' }));
-  const e = store.create(decision({ title: 'E (survivor)' }));
-  store.retireInFavorOf(d.id, e.id, NOW);
-
-  const f = store.create(decision({ title: 'F (dangling link source)' }));
+  const idB = randomUUID();
+  const idC = randomUUID();
+  const idE = randomUUID();
+  const idF = randomUUID();
   const missingTargetId = randomUUID();
-  insertDanglingLink(store, f.id, missingTargetId);
 
-  store.close();
-  return { idA, idB: b.id, idC: c.id, idD, idE: e.id, idF: f.id, missingTargetId };
+  insertV1Record(db, decision({ id: idC, title: 'C' }));
+  insertV1Record(db, decision({ id: idB, title: 'B', status: 'superseded', superseded_by: idC }));
+  insertV1Record(db, decision({ id: idA, title: 'A', status: 'superseded', superseded_by: idB }));
+  insertV1Link(db, idB, 'supersedes', idA);
+  insertV1Link(db, idC, 'supersedes', idB);
+
+  insertV1Record(db, decision({ id: idE, title: 'E (survivor)' }));
+  insertV1Record(db, decision({ id: idD, title: 'D (duplicate)', status: 'superseded', superseded_by: idE }));
+
+  insertV1Record(db, decision({ id: idF, title: 'F (dangling link source)', links: [{ rel: 'cites', target_id: missingTargetId }] }));
+  insertV1Link(db, idF, 'cites', missingTargetId);
+
+  db.close();
+  return { idA, idB, idC, idD, idE, idF, missingTargetId };
 }
 
 function run(args) {

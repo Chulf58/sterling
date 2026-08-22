@@ -18,7 +18,8 @@
 // refusal matrix and the step ordering are unit-testable without a network, an
 // npm install, or a 90-second test battery. scripts/update.mjs is the thin CLI.
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 // builtins-only module — safe at load time on an unbuilt clone (see the
 // bootstrap-independence note in scripts/update.mjs).
@@ -233,6 +234,34 @@ export function currencyLine(c) {
   return `sterling: ${id} on ${c.branch} · ${c.upstream ?? 'no upstream'} · ${gap}`;
 }
 
+/** Existing project + domain stores, without opening any database connection. */
+function machineStores(cwd) {
+  const stores = [join(cwd, '.sterling', 'sterling.db')];
+  const domains = join(homedir(), '.sterling', 'domains');
+  if (existsSync(domains)) {
+    for (const name of readdirSync(domains).sort()) {
+      stores.push(join(domains, name, 'sterling.db'));
+    }
+  }
+  return stores.filter((store) => existsSync(store));
+}
+
+/** SQLite's application-owned user_version is the big-endian u32 at header offset 60. */
+function probeSchemaVersion(dbPath) {
+  const fd = openSync(dbPath, 'r');
+  const header = Buffer.alloc(100);
+  let bytesRead;
+  try {
+    bytesRead = readSync(fd, header, 0, header.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  if (bytesRead < header.length || header.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') {
+    throw new Error(`'${dbPath}' is not a valid SQLite database file`);
+  }
+  return header.readUInt32BE(60);
+}
+
 /**
  * The update sequence. Returns { exit, currency, steps, projects, refusal }.
  * exit: 0 ok · 1 a step failed · 2 refused (nothing mutated) or an agent sync refusal.
@@ -348,6 +377,32 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     log('\n▸ test battery — SKIPPED (--no-test)');
   }
 
+  let stores;
+  try {
+    stores = machineStores(cwd);
+  } catch (err) {
+    log(`\n✗ store enumeration FAILED — stopping. The fast-forward stands; ${err?.message ?? err}`);
+    report.exit = 1;
+    return report;
+  }
+  for (const store of stores) {
+    let version;
+    try {
+      version = probeSchemaVersion(store);
+    } catch (err) {
+      log(`\n✗ store schema probe FAILED for '${store}' — stopping. The fast-forward stands; ${err?.message ?? err}`);
+      report.exit = 1;
+      return report;
+    }
+    if (version < 2) {
+      if (!step(`migrate store schema v${version} → v2 (${store})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', store], { show: true }).ok) return report;
+      // Review fix H2: an already-open MCP server keeps the schema verdict it
+      // read at open, so a session that was live during migration refuses
+      // writes until restarted — say so instead of leaving a mystery refusal.
+      log(`  ▸ migrated: any Sterling session already open on this store must be RESTARTED before it can write again`);
+    }
+  }
+
   // Re-bake this machine's generated artifacts against the new templates. The
   // ensure pass never overwrites what it cannot prove it generated, so a
   // hand-edited launcher is reported as `differs`, not clobbered.
@@ -371,6 +426,30 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // Resolved HERE, not at startup: on a fresh clone the registry cannot be read
   // until the build above has run (see the projects param note).
   const projectList = opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+  // Review fix H1: the machine-store loop above covers this clone + the domain
+  // stores, but every OTHER registered project on this machine has its own
+  // .sterling store that the new code refuses to write until migrated — and
+  // those projects never run /sterling:update themselves. Migrate them here,
+  // where the registry is finally resolvable; a refusal stops the update
+  // loudly, same contract as the machine-store loop.
+  if (opts.projects !== false && projectList.length) {
+    for (const p of projectList) {
+      const projStore = join(p.repo_path, '.sterling', 'sterling.db');
+      if (!existsSync(projStore)) continue;
+      let projVersion;
+      try {
+        projVersion = probeSchemaVersion(projStore);
+      } catch (err) {
+        log(`\n✗ store schema probe FAILED for '${projStore}' — stopping. The fast-forward stands; ${err?.message ?? err}`);
+        report.exit = 1;
+        return report;
+      }
+      if (projVersion < 2) {
+        if (!step(`migrate store schema v${projVersion} → v2 (${projStore})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', projStore], { show: true }).ok) return report;
+        log(`  ▸ migrated: any Sterling session already open on this store must be RESTARTED before it can write again`);
+      }
+    }
+  }
   if (opts.projects !== false && projectList.length) {
     log(`\n▸ syncing agents across ${projectList.length} registered project(s)`);
     for (const p of projectList) {
