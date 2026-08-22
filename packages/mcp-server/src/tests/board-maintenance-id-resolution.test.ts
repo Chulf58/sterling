@@ -1,61 +1,44 @@
 // ---------------------------------------------------------------------------
 // Id-resolution ladder parity for the BOARD/MAINTENANCE tool surface
-// (decision 2debab53 — full uuid -> exact slug -> unambiguous 8-char citation
-// prefix). knowledge_get and the five knowledge WRITE tools already carry
-// this ladder (see id-resolution.test.ts, sibling file). This file extends
-// the SAME contract to three more tools, per the work order:
 //
-//   1. board_update(<8-char prefix>, patch)        — resolves and updates.
-//   2. board_remove(<8-char prefix>)                — resolves and removes.
-//   3. maintenance_remove(<8-char prefix>)          — resolves and removes.
-//   4. an AMBIGUOUS 8-char prefix (two records sharing it) is refused naming
-//      the ambiguity — never resolves to either record, never a coin-flip —
-//      for all three tools above.
-//   5. a genuinely unknown id/prefix is refused saying no such record
-//      exists; the refusal must NOT assert the item "aged out of the drain
-//      log" or otherwise misdiagnose an unresolved prefix as a missing
-//      record — this is maintenance_remove's own sharp edge (see below).
+// REWRITTEN 2026-08-22 — DELIBERATE RULING REVERSAL, NOT A CODE-REGRESSION FIX.
+// This file was 10/10 green under the ORIGINAL ruling (decision
+// [one-id-resolution-ladder-for-the-whole-knowledge-surface-app] / 2debab53-d329-477c-8126-71916c238cd5,
+// v3): board_update, board_remove AND maintenance_remove all resolved an
+// unambiguous 8-char prefix, guarded on the two destructive tools by a
+// removal-trail collision check. That guard was RETRACTED THE SAME DAY by
+// decision [id-ladder-extends-to-board-tools-with-collision-guard] / 6d5a6719-bc6a-4139-8ae4-dc6a026e72bb
+// (v5) after two INDEPENDENT reviews (the roster reviewer-correctness agent
+// and Codex, different model families, same conclusion) proved the guard
+// does not make prefix-addressed deletion safe:
+//   1. CRITICAL — validateResolveClaim (the resolves:[] claim validator used
+//      by knowledge_update/append/edit) was exempted from the guard on a
+//      FALSE "in-place edit" rationale — every claim it returns is actually
+//      HARD-DELETED. See board-remove-prefix-collision-guard.test.ts (this
+//      file's sibling, now repurposed) for that pin.
+//   2. The removal trails the guard consulted are capped at 50 rows each and
+//      evicted by ANY created/updated/removed activity, not just removals —
+//      so the guard is frequently just ABSENT, and an absent trail reads as
+//      permission to delete.
+//   3. Prefix resolution spans every mounted store while the guard read only
+//      the project store.
+// THE NEW, STANDING CONTRACT (decision 6d5a6719, superseding 2debab53's
+// "board_remove... still demands the exact full id" clause back into force
+// for board_remove, maintenance_remove AND validateResolveClaim):
+//   - board_remove and maintenance_remove accept an EXACT ID ONLY. An 8-char
+//     prefix — ambiguous or not, matching a real record or not — is REFUSED,
+//     naming the full-uuid requirement and WHY: board/maintenance rows are
+//     HARD-DELETED, and a stale prefix could silently retarget to a
+//     different item. Never a bare "no record"; never the drain-log/aged-out
+//     misdiagnosis wording (that was a separately-fixed defect and must stay
+//     fixed).
+//   - board_update KEEPS prefix resolution — an in-place edit is recoverable
+//     and visible, unlike a hard delete, so the hazard the guard existed for
+//     does not apply to it. This file's board_update cases are UNCHANGED
+//     from the original ruling and are kept passing throughout.
 //
-// Written SPEC-ONLY, blind to tools.ts's in-flight diff. Existing tests in
-// tools.test.ts / board-objective.test.ts / idempotent-remove.test.ts /
-// domain-routing.test.ts already pin: board_update's full-uuid form, the
-// unknown-fields/empty-patch/not-a-task refusals, and board_update's
-// "no record" wording for an unknown FULL uuid; board_remove's full-id
-// removal shape (`.removed`); and maintenance_remove's full-id removal,
-// idempotent already-drained success, and the drain-log wording for a
-// genuinely-unknown FULL UUID. None of those are touched or duplicated here
-// — this file is additive, targeting only the PREFIX-shaped forms decision
-// 2debab53 introduces.
-//
-// EXPECTED FAILURE SHAPES on current code (none of these three tools
-// resolve a prefix today — each does a plain exact-id lookup):
-//   - the "accepts a prefix" tests (SPEC 1/2/3) fail because the tool throws
-//     a plain "no record '<prefix>'"-style refusal (an 8-char string is
-//     never a real stored id) before the update/removal can happen, so the
-//     post-call assertions (id preserved, item updated/gone) are never
-//     reached — the thrown error IS the red.
-//   - the "ambiguous prefix" tests (SPEC 4) fail for the same root cause:
-//     no resolution is attempted at all, so no ambiguity is ever detected —
-//     the /ambiguous|multiple matches/i match fails against whatever plain
-//     not-found message the tool currently throws instead.
-//   - the maintenance_remove misdiagnosis test (SPEC 5) fails today because
-//     an unresolvable prefix, never having matched any current OR historical
-//     record, falls through into maintenance_remove's idempotent-drain-log
-//     fallback (board 83478fc6 / idempotent-remove.test.ts), which checks
-//     the drain log and reports "no trace of it in the drain log" — reading
-//     as "this WAS a real maintenance item, now gone" when the identifier
-//     was never resolvable to begin with. The fix must short-circuit on the
-//     ladder's own "cannot resolve" outcome with a plain unresolved-identifier
-//     refusal, before ever reaching that fallback.
-//
-// Ambiguity construction: identical convention to id-resolution.test.ts's
-// seedPrefixTwin — a raw DECISION record forced (via store.create) to share
-// the target record's 8-char id prefix. The ladder resolves prefixes across
-// every record type in the store (recordIdIndex serves the whole mounted
-// fan, at any status — sqlite-store AC7/AC8), so a decision-shaped twin is a
-// genuine ambiguity for a board/maintenance item's prefix too; ids are
-// server-minted, so a collision cannot be produced through the public
-// create/add tools alone.
+// This file therefore now specifies TWO DIFFERENT CONTRACTS on ONE ladder:
+// board_update resolves a prefix; board_remove/maintenance_remove never do.
 // ---------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -111,18 +94,27 @@ function seedPrefixTwin(store: SterlingStore, tools: SterlingTools, primaryId: s
 // hex id) — the same constant id-resolution.test.ts uses.
 const UNRESOLVABLE = 'zzz-totally-unresolvable-identifier-ffff';
 
-// A SHORT (8-char) unresolvable form specifically for maintenance_remove's
-// misdiagnosis test: exactly the SHAPE a real prefix would have, but
-// guaranteed never to be a substring of any hex-uuid id ('z' is not a hex
-// digit), so it is guaranteed to resolve to zero records rather than
-// accidentally colliding with a seeded id.
+// A SHORT (8-char) identifier, exactly the SHAPE a real prefix would have,
+// but guaranteed never to be a substring of any hex-uuid id ('z' is not a
+// hex digit) — used to prove the exact-id-only refusal fires uniformly for
+// prefix-shaped input regardless of whether it would ever have matched
+// anything under the old ladder.
 const UNRESOLVABLE_PREFIX = 'zzzzzzzz';
 
+// The new contract's required refusal content (decision 6d5a6719): names the
+// full-uuid requirement, and names WHY (hard-delete / silent-retarget risk).
+// Flexible alternation, not an exact string match — the precise wording is
+// the implementer's to choose; the SUBSTANCE is what the ruling pins.
+const FULL_UUID_REQUIRED = /full uuid|full id/i;
+const HARD_DELETE_REASON = /hard.?delet|permanent(ly)? delet|irreversib|retarget/i;
+
 // ---------------------------------------------------------------------------
-// SPEC 1 — board_update resolves an unambiguous 8-char prefix
+// UNCHANGED — board_update keeps the ladder (recoverable in-place edit).
+// These three cases were true under the original ruling and remain true
+// unchanged under the reversal; they are NOT touched by decision 6d5a6719.
 // ---------------------------------------------------------------------------
 
-test('board_update: an unambiguous 8-char prefix of an existing board item resolves and updates it (SPEC 1, decision 2debab53)', () => {
+test('board_update: an unambiguous 8-char prefix of an existing board item resolves and updates it (KEPT — board_update is not a destructive path, decision 6d5a6719 leaves it on the ladder)', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user', priority: 'low' }) as unknown as {
@@ -145,14 +137,10 @@ test('board_update: an unambiguous 8-char prefix of an existing board item resol
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 4 (board_update variant) — ambiguous prefix refused, writes nothing
-// ---------------------------------------------------------------------------
-
-test('board_update: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity — never resolves to either record, writes nothing (SPEC 4)', () => {
+test('board_update: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity — never resolves to either record, writes nothing (KEPT, unchanged by decision 6d5a6719)', () => {
   const { store, tools, cleanup } = harness();
   try {
-    const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user', priority: 'low' }) as unknown as {
+    const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user' }) as unknown as {
       record: { id: string; text: string };
     };
     const prefix = seedPrefixTwin(store, tools, original.id);
@@ -160,7 +148,7 @@ test('board_update: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity 
     assert.throws(
       () => tools.boardUpdate(prefix, { text: 'should never land' }),
       /ambiguous|multiple matches/i,
-      `EXPECTED FAILURE on current code: board_update does no prefix resolution — it throws "no record '${prefix}'" instead, so this /ambiguous|multiple matches/i match fails`
+      `EXPECTED FAILURE if this ever regresses: board_update stops resolving prefixes at all and throws "no record '${prefix}'" instead, so this /ambiguous|multiple matches/i match fails`
     );
 
     const [unchanged] = tools.boardQuery({ source: 'user' }) as unknown as { id: string; text: string }[];
@@ -171,11 +159,7 @@ test('board_update: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity 
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 5 (board_update boundary) — a genuinely unresolvable identifier
-// ---------------------------------------------------------------------------
-
-test('board_update: a genuinely unresolvable identifier is refused naming it, never a silent no-op', () => {
+test('board_update: a genuinely unresolvable identifier is refused naming it, never a silent no-op (KEPT, unchanged by decision 6d5a6719)', () => {
   const { tools, cleanup } = harness();
   try {
     tools.boardAdd({ text: 'untouched item', source: 'user' });
@@ -196,10 +180,11 @@ test('board_update: a genuinely unresolvable identifier is refused naming it, ne
 });
 
 // ---------------------------------------------------------------------------
-// SPEC 2 — board_remove resolves an unambiguous 8-char prefix
+// FLIPPED — board_remove is now exact-id-only (decision 6d5a6719 retracts
+// the collision guard AND the prefix rung for this destructive tool).
 // ---------------------------------------------------------------------------
 
-test('board_remove: an unambiguous 8-char prefix of an existing board item resolves and removes it (SPEC 2, decision 2debab53)', () => {
+test('board_remove: an 8-char prefix that WOULD have resolved unambiguously is now REFUSED — RULING REVERSAL (decision id-ladder-extends-to-board-tools-with-collision-guard / 6d5a6719): the refusal names the full-uuid requirement and the hard-delete/silent-retarget reason, and the item SURVIVES', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user' }) as unknown as {
@@ -207,20 +192,34 @@ test('board_remove: an unambiguous 8-char prefix of an existing board item resol
     };
     const prefix = original.id.slice(0, 8);
 
-    const result = tools.boardRemove(prefix) as unknown as { removed?: string; id?: string };
-    const removedId = result.removed ?? result.id;
-    assert.equal(removedId, original.id, 'the prefix resolves to and removes the SAME item board_get already resolves it to');
-    assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'the item is gone from the board');
+    assert.throws(
+      () => tools.boardRemove(prefix),
+      (err: Error) => {
+        assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement — got: "${err.message}"`);
+        assert.match(
+          err.message,
+          HARD_DELETE_REASON,
+          `refusal must name WHY: board rows are hard-deleted and a stale prefix could silently retarget — got: "${err.message}"`
+        );
+        assert.ok(!/aged out|drain log/i.test(err.message), 'must not be the drain-log/aged-out misdiagnosis wording');
+        return true;
+      },
+      'EXPECTED FAILURE on current (pre-reversal, guard-based) code: an unambiguous, non-colliding prefix resolves fine under the ladder+guard and the item is REMOVED — assert.throws reports "Missing expected exception" here'
+    );
+
+    const remaining = tools.boardQuery({ source: 'user' }) as unknown as { id: string }[];
+    assert.equal(
+      remaining.length,
+      1,
+      'EXPECTED FAILURE on current code too: on guard-based code the item was actually removed by the call above, so it does not survive'
+    );
+    assert.equal(remaining[0].id, original.id, 'the item is untouched — addressable again only by its full uuid');
   } finally {
     cleanup();
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 4 (board_remove variant) — ambiguous prefix refused
-// ---------------------------------------------------------------------------
-
-test('board_remove: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity — never removes either record (SPEC 4)', () => {
+test('board_remove: an AMBIGUOUS 8-char prefix is refused the same exact-id-only way — nothing is removed either way (regression pin; exact refusal wording for the ambiguous case is not independently verifiable without reading tools.ts, see report)', () => {
   const { store, tools, cleanup } = harness();
   try {
     const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user' }) as unknown as {
@@ -230,8 +229,7 @@ test('board_remove: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity 
 
     assert.throws(
       () => tools.boardRemove(prefix),
-      /ambiguous|multiple matches/i,
-      `EXPECTED FAILURE on current code: board_remove does no prefix resolution — it throws "no record '${prefix}'" (or, worse, removes on an accidental match) instead, so this /ambiguous|multiple matches/i match fails`
+      'a prefix must still be refused when it happens to be ambiguous — the exact-id-only rule does not carve out an exception for this case'
     );
 
     const remaining = tools.boardQuery({ source: 'user' }) as unknown as { id: string }[];
@@ -242,11 +240,7 @@ test('board_remove: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity 
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 5 (board_remove boundary) — a genuinely unresolvable identifier
-// ---------------------------------------------------------------------------
-
-test('board_remove: a genuinely unresolvable identifier is refused naming it, item pool untouched', () => {
+test('board_remove: a genuinely unresolvable (non-prefix-shaped) identifier is refused naming it, item pool untouched (KEPT, unchanged by decision 6d5a6719 — this was never about a prefix candidate)', () => {
   const { tools, cleanup } = harness();
   try {
     tools.boardAdd({ text: 'untouched item', source: 'user' });
@@ -262,11 +256,27 @@ test('board_remove: a genuinely unresolvable identifier is refused naming it, it
   }
 });
 
+test('board_remove: a FULL uuid still succeeds and removes the item — the exact-id path is unaffected by the ruling reversal (ADDED, regression pin, expected GREEN before and after)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user' }) as unknown as {
+      record: { id: string };
+    };
+
+    const result = tools.boardRemove(original.id) as unknown as { removed?: string; id?: string };
+    const removedId = result.removed ?? result.id;
+    assert.equal(removedId, original.id, 'the full uuid removes the item directly, no resolution needed');
+    assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'the item is gone');
+  } finally {
+    cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
-// SPEC 3 — maintenance_remove resolves an unambiguous 8-char prefix
+// FLIPPED — maintenance_remove is now exact-id-only, same as board_remove.
 // ---------------------------------------------------------------------------
 
-test('maintenance_remove: an unambiguous 8-char prefix of an existing maintenance item resolves and removes it (SPEC 3, decision 2debab53)', () => {
+test('maintenance_remove: an 8-char prefix that WOULD have resolved unambiguously is now REFUSED — RULING REVERSAL (decision 6d5a6719): names the full-uuid requirement and the hard-delete reason, item SURVIVES, and the refusal is NEVER the drain-log/aged-out wording (that misdiagnosis was a separately-fixed defect and must stay fixed)', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: item } = tools.maintenanceEnqueue({
@@ -276,21 +286,24 @@ test('maintenance_remove: an unambiguous 8-char prefix of an existing maintenanc
     }) as unknown as { record: { id: string } };
     const prefix = item.id.slice(0, 8);
 
-    const result = tools.maintenanceRemove(prefix) as { removed?: string; id?: string; already_drained?: boolean };
-    const removedId = result.removed ?? result.id;
-    assert.equal(removedId, item.id, 'the prefix resolves to and removes the SAME maintenance item');
-    assert.notEqual(result.already_drained, true, 'a genuine live removal must not be marked already_drained');
-    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 0, 'gone from the open queue');
+    assert.throws(
+      () => tools.maintenanceRemove(prefix),
+      (err: Error) => {
+        assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement — got: "${err.message}"`);
+        assert.match(err.message, HARD_DELETE_REASON, `refusal must name WHY — got: "${err.message}"`);
+        assert.ok(!/aged out|drain log/i.test(err.message), 'must not be the drain-log/aged-out misdiagnosis wording — that defect stays fixed');
+        return true;
+      },
+      'EXPECTED FAILURE on current (pre-reversal, guard-based) code: an unambiguous, non-colliding prefix resolves fine and the item is REMOVED — assert.throws reports "Missing expected exception" here'
+    );
+
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 1, 'EXPECTED FAILURE on current code too: on guard-based code the item was actually removed, so it does not survive');
   } finally {
     cleanup();
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 4 (maintenance_remove variant) — ambiguous prefix refused
-// ---------------------------------------------------------------------------
-
-test('maintenance_remove: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity — never removes either record (SPEC 4)', () => {
+test('maintenance_remove: an AMBIGUOUS 8-char prefix is refused the same exact-id-only way — nothing is removed either way (regression pin; exact refusal wording for the ambiguous case is not independently verifiable without reading tools.ts, see report)', () => {
   const { store, tools, cleanup } = harness();
   try {
     const { record: item } = tools.maintenanceEnqueue({
@@ -302,8 +315,7 @@ test('maintenance_remove: an AMBIGUOUS 8-char prefix is refused, naming the ambi
 
     assert.throws(
       () => tools.maintenanceRemove(prefix),
-      /ambiguous|multiple matches/i,
-      `EXPECTED FAILURE on current code: maintenance_remove does no prefix resolution — it throws "no record '${prefix}'" (or falls into the drain-log fallback) instead, so this /ambiguous|multiple matches/i match fails`
+      'a prefix must still be refused when it happens to be ambiguous — the exact-id-only rule does not carve out an exception for this case'
     );
 
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 1, 'the item was NOT removed by the ambiguous-prefix call');
@@ -312,19 +324,7 @@ test('maintenance_remove: an AMBIGUOUS 8-char prefix is refused, naming the ambi
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 5 — the sharp edge: maintenance_remove must not misdiagnose an
-// unresolved prefix as an item that "aged out of the drain log". This is
-// distinct from (and does not touch) idempotent-remove.test.ts's own
-// regression pin that a genuinely-unknown FULL UUID keeps the drain-log
-// wording ("no trace of it in the drain log") — that pin covers a
-// full-uuid-shaped identifier that really was checked against the log. This
-// test covers the NEW case decision 2debab53 introduces: a PREFIX-shaped
-// identifier that never resolves to any candidate id in the first place, so
-// there is nothing meaningful to check the drain log against at all.
-// ---------------------------------------------------------------------------
-
-test('maintenance_remove: a genuinely unresolvable 8-char prefix is refused as "no such record" — NEVER misdiagnosed as an item that aged out of the drain log (SPEC 5)', () => {
+test('maintenance_remove: an 8-char-SHAPED identifier that would not have matched any record under the old ladder is STILL refused via the full-uuid-required message — not a bare "no such record", and never the drain-log/aged-out wording (FLIPPED from the old "no such record" oracle)', () => {
   const { tools, cleanup } = harness();
   try {
     // an open item stays in the queue throughout, so a naive "the queue
@@ -334,23 +334,23 @@ test('maintenance_remove: a genuinely unresolvable 8-char prefix is refused as "
     assert.throws(
       () => tools.maintenanceRemove(UNRESOLVABLE_PREFIX),
       (err: Error) => {
-        assert.match(err.message, /no such record|no record|not found/i, 'names the miss plainly, as an unresolved identifier');
+        assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement even for a non-matching prefix — got: "${err.message}"`);
         assert.ok(
           !/aged out|drain log/i.test(err.message),
-          `EXPECTED FAILURE on current code: an unresolved prefix falls through to the idempotent-remove fallback and is reported via drain-log wording ("no trace of it in the drain log") instead of a clean unresolved-identifier refusal — got: "${err.message}"`
+          `must not be misdiagnosed via drain-log wording — got: "${err.message}"`
         );
         return true;
       },
-      'a genuinely unresolvable prefix must be refused as "no such record", not as "already drained"'
+      'EXPECTED FAILURE on current (pre-reversal) code: today an 8-char-shaped, non-matching identifier is refused via the FIXED plain "no such record" wording (the historical drain-log misdiagnosis was already patched separately) — that message does not mention the full-uuid requirement, so this assertion is red until the new exact-id-only contract lands'
     );
 
-    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 1, 'the genuinely-open item is untouched by the refused call');
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 1, 'the genuinely-open unrelated item is untouched by the refused call');
   } finally {
     cleanup();
   }
 });
 
-test('maintenance_remove: a genuinely unresolvable (non-prefix-shaped) identifier is refused naming it, never via drain-log wording (SPEC 5)', () => {
+test('maintenance_remove: a genuinely unresolvable (non-prefix-shaped) identifier is refused naming it, never via drain-log wording (KEPT, unchanged by decision 6d5a6719 — this was never about a prefix candidate)', () => {
   const { tools, cleanup } = harness();
   try {
     assert.throws(
@@ -364,6 +364,25 @@ test('maintenance_remove: a genuinely unresolvable (non-prefix-shaped) identifie
         return true;
       }
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('maintenance_remove: a FULL uuid still succeeds and removes the item — the exact-id path is unaffected by the ruling reversal (ADDED, regression pin, expected GREEN before and after)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'article_missing',
+      text: 'no article owns src/v.ts',
+      file_keys: ['src/v.ts'],
+    }) as unknown as { record: { id: string } };
+
+    const result = tools.maintenanceRemove(item.id) as { removed?: string; id?: string; already_drained?: boolean };
+    const removedId = result.removed ?? result.id;
+    assert.equal(removedId, item.id, 'the full uuid removes the item directly, no resolution needed');
+    assert.notEqual(result.already_drained, true, 'a genuine live removal must not be marked already_drained');
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 0, 'gone from the open queue');
   } finally {
     cleanup();
   }

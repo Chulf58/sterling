@@ -343,10 +343,6 @@ export class MountedStores {
   drainLogEntry(...args: Parameters<SterlingStore['drainLogEntry']>): ReturnType<SterlingStore['drainLogEntry']> {
     return this.project.drainLogEntry(...args);
   }
-  /** Project-local for the same reason as drainLogEntry — board items never live in a domain mount. */
-  removedIdsByPrefix(...args: Parameters<SterlingStore['removedIdsByPrefix']>): ReturnType<SterlingStore['removedIdsByPrefix']> {
-    return this.project.removedIdsByPrefix(...args);
-  }
   readHandoffs(...args: Parameters<SterlingStore['readHandoffs']>): ReturnType<SterlingStore['readHandoffs']> {
     return this.project.readHandoffs(...args);
   }

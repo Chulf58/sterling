@@ -1,60 +1,45 @@
 // ---------------------------------------------------------------------------
-// board_remove / maintenance_remove — drained-vs-live PREFIX COLLISION guard
+// REPLACED 2026-08-22 — this file's original subject (the drained-vs-live
+// removal-trail collision guard on board_remove/maintenance_remove) was
+// RETRACTED, not merely superseded-by-a-better-guard. Decision
+// [id-ladder-extends-to-board-tools-with-collision-guard] / 6d5a6719-bc6a-4139-8ae4-dc6a026e72bb
+// (v5) found, via two INDEPENDENT reviews (the roster reviewer-correctness
+// agent and Codex — different model families, same conclusion):
+//   1. CRITICAL — validateResolveClaim (the resolves:[] claim validator
+//      shared by knowledge_update/append/edit) was exempted from the guard
+//      on a FALSE "in-place edit" rationale: every claim it returns is
+//      actually HARD-DELETED. A prefix reaching `resolves:[]` was therefore
+//      exactly as dangerous as one reaching board_remove, through the one
+//      exemption the guard's own author granted himself.
+//   2. The removal trails the guard consulted (queue_drain_log,
+//      activity_log) are capped at 50 rows EACH and evicted by ANY
+//      created/updated/removed activity, not just removals — so the guard
+//      was frequently just ABSENT, and an absent trail reads as permission
+//      to delete.
+//   3. Prefix resolution spans every mounted store while the guard read
+//      only the project store.
+// The general lesson (quoted in the ruling): "a bounded, evictable audit
+// trail cannot make a forgiving addressing form safe for an operation that
+// destroys." The fix is not a better guard — it is no guard: board_remove,
+// maintenance_remove and validateResolveClaim now accept an EXACT ID ONLY
+// (decision one-id-resolution-ladder-for-the-whole-knowledge-surface-app /
+// 2debab53's original clause, restored). board_get/board_update/board_edit
+// keep the ladder — a wrong target there is recoverable, not destroyed.
 //
-// Sibling to board-maintenance-id-resolution.test.ts (frozen at 10/10 — NOT
-// edited here). That file pins the id-resolution ladder itself (full uuid ->
-// exact slug -> unambiguous 8-char prefix) landing on board_remove and
-// maintenance_remove. THIS file specifies a narrower, sharper problem that
-// the ladder's own landing creates:
-//
-//   Board rows are HARD-DELETED (unlike knowledge rows, which are only ever
-//   superseded/retired, never deleted — decision 9948475b). A caller cites an
-//   8-char prefix P for item A; A is removed; if a LIVE item B also starts
-//   with P, the prefix now silently retargets to B on the next citation, and
-//   B is destroyed by a caller who believes they are still talking about A.
-//   This window is invisible to the ambiguous-prefix refusal the ladder
-//   already has, because at the moment of the SECOND call there is only ONE
-//   live candidate (B) — nothing about the live table alone looks ambiguous.
-//   The guard this file specifies closes that window by also checking
-//   whatever removal trail the previously-drained item A left behind: if a
-//   drained id and a live id share the resolving prefix, the call must
-//   refuse rather than silently retarget.
-//
-// Written SPEC-ONLY, blind to tools.ts's in-flight diff (H4). Reuses the
-// sibling file's harness and its seedPrefixTwin CONVENTION (force a second
-// record to a chosen 8-char prefix via store.create on a JSON-cloned real
-// record, since ids are server-minted and a collision cannot be produced
-// through the public tools alone) — adapted here to BOARD/MAINTENANCE shapes
-// instead of a decision-shaped twin, because what must collide is a genuine
-// drained board/maintenance removal, not a merely-ambiguous knowledge record.
-//
-// Collision construction (seedBoardDrainedCollision / seedMaintenanceDrainedCollision):
-//   1. add the LIVE item B through the normal tool — its server-minted id
-//      fixes the prefix P under test.
-//   2. add a throwaway "shape donor" item through the same normal tool, then
-//      remove it by ITS OWN full id immediately (a full-uuid removal is
-//      pre-existing, already-working behavior on both old and new code —
-//      see SPEC 3 below — so this setup step never itself goes red). This
-//      is cleanup only: it keeps the donor's real-id row from lingering on
-//      the board/queue as an unrelated extra item.
-//   3. clone the donor's shape via store.create with id forced to
-//      `${P}-0000-4000-8000-000000000000` — a genuine, fully-shaped live
-//      board/maintenance row that happens to share B's prefix.
-//   4. remove THAT forced-id row by its own full id (again, pre-existing
-//      full-uuid removal) — this is the drained item A the guard must find:
-//      an id sharing prefix P, with a removal trail, while B is still live.
-//
-// EXPECTED FAILURE SHAPES on current code (no drained-vs-live guard exists
-// yet — the ladder pinned by the sibling file resolves a prefix against the
-// LIVE table alone):
-//   - SPEC 1 / SPEC 2: `board_remove(P)` / `maintenance_remove(P)` do not
-//     throw at all — P resolves unambiguously to the still-live B (A is
-//     already gone from the live table, so today's resolver sees exactly one
-//     candidate) and REMOVES it. `assert.throws` reports "Missing expected
-//     exception" as the first failure; the follow-on "B must still exist"
-//     assertion fails too, for the same reason — B really was destroyed.
-//   - SPEC 3 / 4 / 5 / 6 are regression/boundary pins and are expected GREEN
-//     today AND after the guard lands (see each test for why).
+// DISPOSITION CHOICE (test-writer, 2026-08-22): the old guard-collision
+// machinery (seedBoardDrainedCollision / seedMaintenanceDrainedCollision) is
+// KEPT and REPURPOSED here, rather than folded into
+// board-maintenance-id-resolution.test.ts, because this file's charter is
+// now the CROSS-CUTTING invariant the retracted guard's absence leaves in
+// its place — "no prefix reaches ANY destructive path, on any tool, under
+// any construction" — spanning board_remove, maintenance_remove AND
+// validateResolveClaim's resolves:[] parameter. The sibling file's charter
+// is narrower and tool-local: what the ladder DOES vs DOES NOT resolve on
+// each of board_update/board_remove/maintenance_remove individually. Folding
+// the resolves:[] (knowledge-surface) cases into a board/maintenance-shaped
+// harness file would blur that line for no benefit; a dedicated file keeps
+// the "nothing destructive is prefix-addressable, full stop" property
+// legible as ONE property proven across THREE call sites.
 // ---------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -79,6 +64,13 @@ function harness() {
   return { store, tools, cleanup };
 }
 
+// The new contract's required refusal content (decision 6d5a6719): names the
+// full-uuid requirement, and names WHY (hard-delete / silent-retarget risk).
+// Flexible alternation, not an exact string — the precise wording is the
+// implementer's to choose; the SUBSTANCE is what the ruling pins.
+const FULL_UUID_REQUIRED = /full uuid|full id/i;
+const HARD_DELETE_REASON = /hard.?delet|permanent(ly)? delet|irreversib|retarget/i;
+
 function withForcedId(record: Loose, forcedId: string): Loose {
   return { ...(JSON.parse(JSON.stringify(record)) as Loose), id: forcedId };
 }
@@ -88,8 +80,10 @@ function prefixedId(prefix: string): string {
 }
 
 // Builds: a LIVE user-source board item, plus a drained item sharing its
-// 8-char prefix (see file header for the construction steps). Returns the
-// live id, the drained id, and the shared prefix.
+// 8-char prefix — the EXACT scenario the retracted guard existed to catch.
+// Uses full-uuid removals for setup steps (those are pre-existing, always
+// worked behavior, before and after this ruling — see the regression pins
+// below).
 function seedBoardDrainedCollision(
   store: SterlingStore,
   tools: SterlingTools,
@@ -104,13 +98,11 @@ function seedBoardDrainedCollision(
 
   const drainedId = prefixedId(prefix);
   store.create(withForcedId(donorShape, drainedId));
-  tools.boardRemove(drainedId); // the removal that must leave a trail under `prefix`
+  tools.boardRemove(drainedId); // the removal that leaves a trail under `prefix`
 
   return { liveId, drainedId, prefix };
 }
 
-// Same idea for a system-source maintenance item (maintenance_remove's own
-// source scoping — see idempotent-remove.test.ts AC4).
 function seedMaintenanceDrainedCollision(
   store: SterlingStore,
   tools: SterlingTools,
@@ -139,13 +131,20 @@ function seedMaintenanceDrainedCollision(
 }
 
 // ---------------------------------------------------------------------------
-// SPEC 1 — board_remove refuses on a drained-vs-live prefix collision
+// PROPERTY — the retracted guard's own hardest trigger case is STILL caught,
+// but now by the simpler blanket rule rather than by surveilling removal
+// trails. These two are CONTINUITY pins, not red discriminators: the old
+// guard ALSO refused in exactly this scenario (that was this file's own
+// SPEC 1/2 before the rewrite), so this is expected GREEN before and after —
+// the discriminating red for "prefix bypass on a destructive path" lives in
+// board-maintenance-id-resolution.test.ts's NON-colliding-prefix cases,
+// where old (guard) code had no reason to refuse at all.
 // ---------------------------------------------------------------------------
 
-test('SPEC 1: board_remove refuses a prefix that collides between a LIVE item and a previously-drained item sharing the same prefix — naming both ids, directing re-issue by full uuid — and the live item survives', () => {
+test('board_remove refuses a prefix that collides between a LIVE item and a previously-drained item sharing the same prefix — via the plain exact-id-only rule, not by consulting a removal trail — live item survives (continuity pin: expected GREEN before and after, since the retracted guard also refused here)', () => {
   const { store, tools, cleanup } = harness();
   try {
-    const { liveId, drainedId, prefix } = seedBoardDrainedCollision(store, tools, {
+    const { liveId, prefix } = seedBoardDrainedCollision(store, tools, {
       liveText: 'live item B — must survive the refused call',
       donorText: 'drained item A — hard-deleted under the same prefix',
     });
@@ -153,34 +152,24 @@ test('SPEC 1: board_remove refuses a prefix that collides between a LIVE item an
     assert.throws(
       () => tools.boardRemove(prefix),
       (err: Error) => {
-        assert.ok(err.message.includes(liveId), `refusal must name the live candidate id (${liveId}) — got: "${err.message}"`);
-        assert.ok(err.message.includes(drainedId), `refusal must name the drained candidate id (${drainedId}) — got: "${err.message}"`);
-        assert.match(err.message, /full uuid|full id/i, 'refusal directs the caller to re-issue with the full uuid');
+        assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement — got: "${err.message}"`);
         return true;
       },
-      'EXPECTED FAILURE on current code: board_remove has no drained-vs-live collision guard — it resolves `prefix` against the live table alone, finds `liveId` as the sole candidate, and REMOVES it; assert.throws reports "Missing expected exception" here'
+      'expected to throw both before (guard-based refusal) and after (blanket exact-id-only refusal) this ruling'
     );
 
     const remaining = tools.boardQuery({ source: 'user' }) as unknown as { id: string }[];
-    assert.equal(
-      remaining.length,
-      1,
-      'EXPECTED FAILURE on current code too: on unguarded code the live item was actually removed by the call above, so exactly one item does not remain'
-    );
-    assert.equal(remaining[0]?.id, liveId, 'the surviving item is exactly the live one — never coin-flipped or silently retargeted');
+    assert.equal(remaining.length, 1, 'the live item was not removed');
+    assert.equal(remaining[0]?.id, liveId, 'and it is exactly the live one');
   } finally {
     cleanup();
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 2 — same guard on maintenance_remove (system-source scoping)
-// ---------------------------------------------------------------------------
-
-test('SPEC 2: maintenance_remove refuses a prefix that collides between a LIVE system-source item and a previously-drained item sharing the same prefix — naming both ids, directing re-issue by full uuid — and the live item survives', () => {
+test('maintenance_remove refuses a prefix that collides between a LIVE item and a previously-drained item sharing the same prefix — via the plain exact-id-only rule — live item survives (continuity pin: expected GREEN before and after)', () => {
   const { store, tools, cleanup } = harness();
   try {
-    const { liveId, drainedId, prefix } = seedMaintenanceDrainedCollision(store, tools, {
+    const { liveId, prefix } = seedMaintenanceDrainedCollision(store, tools, {
       liveText: 'live maintenance item B — must survive the refused call',
       donorText: 'drained maintenance item A — hard-deleted under the same prefix',
     });
@@ -188,31 +177,29 @@ test('SPEC 2: maintenance_remove refuses a prefix that collides between a LIVE s
     assert.throws(
       () => tools.maintenanceRemove(prefix),
       (err: Error) => {
-        assert.ok(err.message.includes(liveId), `refusal must name the live candidate id (${liveId}) — got: "${err.message}"`);
-        assert.ok(err.message.includes(drainedId), `refusal must name the drained candidate id (${drainedId}) — got: "${err.message}"`);
-        assert.match(err.message, /full uuid|full id/i, 'refusal directs the caller to re-issue with the full uuid');
+        assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement — got: "${err.message}"`);
         return true;
       },
-      'EXPECTED FAILURE on current code: maintenance_remove has no drained-vs-live collision guard — it resolves `prefix` against the live queue alone, finds `liveId` as the sole candidate, and REMOVES it; assert.throws reports "Missing expected exception" here'
+      'expected to throw both before (guard-based refusal) and after (blanket exact-id-only refusal) this ruling'
     );
 
     const remaining = tools.maintenanceQuery({ cap: 1000 }) as unknown as { id: string }[];
-    assert.equal(
-      remaining.length,
-      1,
-      'EXPECTED FAILURE on current code too: on unguarded code the live item was actually removed by the call above, so exactly one item does not remain'
-    );
-    assert.equal(remaining[0]?.id, liveId, 'the surviving item is exactly the live one — never coin-flipped or silently retargeted');
+    assert.equal(remaining.length, 1, 'the live item was not removed');
+    assert.equal(remaining[0]?.id, liveId, 'and it is exactly the live one');
   } finally {
     cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// SPEC 3 — a full uuid is NEVER guarded (unambiguous by construction)
+// REGRESSION — a full uuid is NEVER subject to this rule (unambiguous and
+// exact by construction); board_update is DELIBERATELY never subject to it
+// either (recoverable in-place edit, not a destroy). Both expected GREEN
+// before and after — neither was ever guarded, so the ruling reversal does
+// not touch them.
 // ---------------------------------------------------------------------------
 
-test('SPEC 3: board_remove(full uuid) succeeds and removes the live item even amid an identical drained/live prefix collision — the guard must not apply to a full uuid (regression pin, expected GREEN before and after the guard lands)', () => {
+test('board_remove(full uuid) succeeds and removes the live item even amid an identical drained/live prefix collision — a full uuid is never subject to the exact-id-only refusal because it already IS an exact id (regression pin, expected GREEN before and after)', () => {
   const { store, tools, cleanup } = harness();
   try {
     const { liveId } = seedBoardDrainedCollision(store, tools, {
@@ -222,77 +209,14 @@ test('SPEC 3: board_remove(full uuid) succeeds and removes the live item even am
 
     const result = tools.boardRemove(liveId) as unknown as { removed?: string; id?: string };
     const removedId = result.removed ?? result.id;
-    assert.equal(
-      removedId,
-      liveId,
-      'a full uuid is unambiguous by construction — the drained-vs-live collision guard must never refuse it, regardless of any colliding prefix elsewhere'
-    );
+    assert.equal(removedId, liveId, 'a full uuid removes unconditionally, regardless of any colliding prefix elsewhere');
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'the live item is actually gone');
   } finally {
     cleanup();
   }
 });
 
-// ---------------------------------------------------------------------------
-// SPEC 4 — non-colliding drain log entries never over-fire the guard
-// ---------------------------------------------------------------------------
-
-test('SPEC 4 (regression): a drain log containing removals under a DIFFERENT prefix does not block a live prefix removal (expected GREEN before and after the guard lands)', () => {
-  const { tools, cleanup } = harness();
-  try {
-    // an unrelated item, removed by its own full id — a drain trail exists,
-    // but under a prefix that does not match the one resolved below.
-    const { record: unrelated } = tools.boardAdd({ text: 'unrelated drained item', source: 'user' }) as unknown as {
-      record: { id: string };
-    };
-    tools.boardRemove(unrelated.id);
-
-    const { record: live } = tools.boardAdd({ text: 'live item resolved by prefix', source: 'user' }) as unknown as {
-      record: { id: string };
-    };
-    const prefix = live.id.slice(0, 8);
-    assert.notEqual(
-      prefix,
-      unrelated.id.slice(0, 8),
-      'sanity precondition: the drained item does not share the prefix under test'
-    );
-
-    const result = tools.boardRemove(prefix) as unknown as { removed?: string; id?: string };
-    const removedId = result.removed ?? result.id;
-    assert.equal(removedId, live.id, 'a non-colliding drain log entry must not make the guard over-fire on an unrelated prefix');
-    assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'the live item was actually removed');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// SPEC 5 — an empty drain log never over-fires the guard
-// ---------------------------------------------------------------------------
-
-test('SPEC 5 (regression): an empty drain log does not block a live prefix removal (expected GREEN before and after the guard lands)', () => {
-  const { tools, cleanup } = harness();
-  try {
-    const { record: live } = tools.boardAdd({ text: 'only item on the board', source: 'user' }) as unknown as {
-      record: { id: string };
-    };
-    const prefix = live.id.slice(0, 8);
-
-    const result = tools.boardRemove(prefix) as unknown as { removed?: string; id?: string };
-    const removedId = result.removed ?? result.id;
-    assert.equal(removedId, live.id, 'prefix resolution still works with no drain log entries at all');
-    assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'the live item was actually removed');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// SPEC 6 — board_update is deliberately NOT guarded (recoverable in-place
-// edit, not an irreversible delete — user ruling)
-// ---------------------------------------------------------------------------
-
-test('SPEC 6: board_update succeeds and updates the live item amid an identical drained/live prefix collision — deliberately not guarded (user ruling: in-place edit is recoverable, unlike delete; pins against a future over-correction, expected GREEN before and after)', () => {
+test('board_update succeeds and updates the live item amid an identical drained/live prefix collision — board_update is DELIBERATELY not subject to the exact-id-only rule (user ruling: in-place edit is recoverable, unlike delete) — pins against a future over-correction, expected GREEN before and after', () => {
   const { store, tools, cleanup } = harness();
   try {
     const { liveId, prefix } = seedBoardDrainedCollision(store, tools, {
@@ -312,8 +236,73 @@ test('SPEC 6: board_update succeeds and updates the live item amid an identical 
     assert.equal(
       onBoard.text,
       'live item B — updated text',
-      'pin: a future over-correction that guards board_update the same way as board_remove must be caught by this test'
+      'pin: a future attempt to extend the exact-id-only rule to board_update must be caught by this test'
     );
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CRITICAL FINDING (item 2 of the rewrite brief) — validateResolveClaim, the
+// resolves:[] claim validator shared by knowledge_update/append/edit, hard-
+// deletes every claim it returns. It was exempted from the (now-retracted)
+// guard on a FALSE "in-place edit" rationale. Fixture modeled on
+// resolves-claim.test.ts's own AC1/refusal shapes.
+// ---------------------------------------------------------------------------
+
+const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
+  tools.knowledgeCreate('feature_article', {
+    slug,
+    title: slug,
+    what_it_does: 'does',
+    intended_behavior: 'b',
+    files: [{ path, role: 'impl' }],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+  }).record as unknown as { id: string };
+
+type Resolving = {
+  knowledgeUpdate(id: string, patch: Record<string, unknown>, resolves?: string[]): unknown;
+};
+const widen = (tools: SterlingTools) => tools as unknown as Resolving;
+
+function openIds(tools: SterlingTools): string[] {
+  return (tools.maintenanceQuery({ cap: 1000 }) as unknown as { id: string }[]).map((t) => t.id);
+}
+
+test('CRITICAL: knowledge_update\'s resolves:[] parameter refuses an 8-char prefix — validateResolveClaim hard-deletes every claim it returns, so a prefix there is exactly as dangerous as one handed to board_remove — refusal names the full-uuid requirement, and the maintenance item the prefix names is STILL OPEN afterwards (survival asserted explicitly — the whole defect was SILENT deletion, not merely "did it throw")', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed',
+      text: `reconcile 'thing'`,
+      file_keys: ['src/thing.ts'],
+      feature_link: article.id,
+    }) as unknown as { record: { id: string } };
+    const prefix = item.id.slice(0, 8);
+    const before = tools.knowledgeGet(article.id) as unknown as { version: number };
+
+    assert.throws(
+      () => widen(tools).knowledgeUpdate(article.id, { what_it_does: 'reconciled' }, [prefix]),
+      (err: Error) => {
+        assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement — got: "${err.message}"`);
+        return true;
+      },
+      'EXPECTED FAILURE on current (pre-reversal) code: validateResolveClaim was exempted from the (now-retracted) guard on a false "in-place edit" rationale — it resolves the prefix via the same base ladder as everything else, finds `item.id` unambiguously (fresh store, no twin), and HARD-DELETES it inside the same transaction as the write; assert.throws reports "Missing expected exception" here, since current code does not refuse a resolves:[] prefix at all'
+    );
+
+    assert.ok(
+      openIds(tools).includes(item.id),
+      'EXPECTED FAILURE on current code too: the item was actually hard-deleted by the unrefused prefix claim, so it does NOT survive — this is the exact silent-deletion hazard the ruling closes'
+    );
+    const after = tools.knowledgeGet(article.id) as unknown as { version: number };
+    assert.equal(after.version, before.version, 'no version minted by the refused call — the write itself must not land either');
   } finally {
     cleanup();
   }
