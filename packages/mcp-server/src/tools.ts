@@ -1912,6 +1912,19 @@ export class SterlingTools {
   private static readonly CITATION_PREFIX_LEN = 8;
 
   /**
+   * FULL-UUID SHAPE (canonical 8-4-4-4-12 hex, as this.newId/randomUUID mint):
+   * the queue_drain_log table is keyed by exact full record id (`WHERE
+   * record_id = ?`, no prefix matching), so consulting it is only a
+   * meaningful check for an identifier shaped like the thing it is keyed on.
+   * Gates removedItemError's drain-log clause (2026-08-22 adjudicated fix):
+   * an 8-char prefix or any other non-uuid-shaped citation was NEVER going to
+   * be a drain-log key, so offering "it may have aged out of the log" for one
+   * sends the caller down a false trail — the honest answer is that the
+   * id-resolution ladder itself found nothing, full stop.
+   */
+  private static readonly FULL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+  /**
    * Fields knowledge_schema reports as SERVER-OWNED rather than caller-supplied
    * ([stable-identity-design-v2]): `version` is the counter this surface owns,
    * `status`/`superseded_by` are derived from lifecycle + the supersedes
@@ -2471,8 +2484,19 @@ export class SterlingTools {
    * matching feature_link nor a restriction to knowledgeUpdate's two lanes.
    */
   private validateResolveClaim(id: string, chain: Set<string>, options?: { splitMarker: string }): DurableRecord {
-    const record = this.store.get(id);
-    if (!record) {
+    // Resolves through the SAME ladder as board_get/board_remove/
+    // maintenance_remove (resolveRecordId, decision 2debab53): a raw
+    // store.get(id) here refused an unresolved 8-char prefix in `resolves`
+    // even though board_get resolved the same citation fine — the identical
+    // defect class the board/maintenance audit found. Only a GENUINE miss
+    // (UnresolvedIdentifierError) falls through to the never-existed-vs-
+    // already-removed drain-log distinction below; an ambiguous prefix or a
+    // historical id propagates its own refusal unchanged, never mislabeled.
+    let record: DurableRecord;
+    try {
+      record = this.resolveRecordId(id, 'resolves');
+    } catch (err) {
+      if (!(err instanceof UnresolvedIdentifierError)) throw err;
       // Distinguish "never existed" from "already removed" the same way
       // removedItemError does for maintenance_remove — a closed item cannot
       // be re-claimed, and that is a different refusal than a bogus id.
@@ -3344,8 +3368,14 @@ export class SterlingTools {
   private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective'] as const;
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
-    const old = this.store.get(id);
-    if (!old) throw new Error(`board_update: no record '${id}'`);
+    // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
+    // exact slug, 8-char citation prefix — resolveRecordId, decision 2debab53):
+    // board_update previously used a raw store.get(id), so an unresolved
+    // prefix that board_get resolved fine threw a bare "no record" here
+    // (measured 2026-08-22 friction). A HistoricalIdError is deliberately left
+    // to propagate unchanged — a write must address the live record, never a
+    // version-pinned dead id.
+    const old = this.resolveRecordId(id, 'board_update');
     if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a task — board_update only edits board/queue items`);
     const updatable: readonly string[] = SterlingTools.BOARD_UPDATABLE_FIELDS;
     const unknown = Object.keys(patch).filter((k) => !updatable.includes(k));
@@ -3364,7 +3394,10 @@ export class SterlingTools {
     // 'standalone' clears the grouping to absent (decision a8d2ce6c) — the same
     // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
     if (next.objective === 'standalone') delete next.objective;
-    return this.store.updateTodo(id, next as typeof old);
+    // old.id (the resolved canonical id), not the caller's possibly-short
+    // citation — a mounted domain store's routing (storeHolding) keys off the
+    // real id, and a bare prefix would not resolve there.
+    return this.store.updateTodo(old.id, next as typeof old);
   }
 
   /**
@@ -3544,8 +3577,28 @@ export class SterlingTools {
    * board_query round-trip to tell the two apart; the drain-log trace answers
    * it directly. The log keeps only the newest 50 rows, so a missing trace is
    * "no recent trace", never proof of non-existence — the message says so.
+   *
+   * SHAPE-GATED (2026-08-22 adjudicated fix, board-maintenance-id-resolution
+   * SPEC 5): the drain log is keyed by exact FULL record id (FULL_UUID_RE), so
+   * consulting it — and offering "it may have aged out" — is only honest for
+   * an identifier that could actually have been a drain-log key. An 8-char
+   * citation prefix or any other non-uuid-shaped identifier was NEVER going
+   * to appear there, whatever its history, so it gets a clean
+   * unresolved-identifier refusal instead: the ladder (slug + prefix) already
+   * ran (in every caller of this method) and found nothing, and that is the
+   * whole, honest answer — no drain-log clause, no "aged out" false trail.
    */
   private removedItemError(op: string, id: string): Error {
+    if (!SterlingTools.FULL_UUID_RE.test(id)) {
+      // Deliberately never mentions the removal log or "aged" — that clause
+      // is only honest for a full-uuid-shaped citation (see doc comment
+      // above); a shorter or non-hex identifier was never a candidate key
+      // for it, whatever the item's actual history.
+      return new UnresolvedIdentifierError(
+        `${op}: no record '${id}' — it resolves to no record via the id-resolution ladder (no slug match, no prefix match). ` +
+          `This identifier's shape rules it out as a full record id, so there is nothing further to check it against.`
+      );
+    }
     const trace = this.store.drainLogEntry(id);
     if (trace) {
       return new Error(
@@ -3560,12 +3613,26 @@ export class SterlingTools {
   }
 
   boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
-    const record = this.store.get(id);
-    if (!record) throw this.removedItemError('board_remove', id);
+    // Resolves through the SAME ladder as board_get (resolveRecordId, decision
+    // 2debab53): a raw store.get(id) here previously refused an unresolved
+    // 8-char prefix with the ALREADY-REMOVED wording below, even though the
+    // prefix was never a "gone" id — it simply never got a chance to resolve
+    // (measured 2026-08-22 friction: board_remove('8662956c') refused while
+    // board_get('8662956c') resolved the same item in the same session). Only
+    // a GENUINE miss (UnresolvedIdentifierError — too-short or no-prefix-match)
+    // falls through to the drain-log check; an ambiguous prefix or a historical
+    // id propagates its own refusal unchanged, never mislabeled as "no record".
+    let record: DurableRecord;
+    try {
+      record = this.resolveRecordId(id, 'board_remove');
+    } catch (err) {
+      if (err instanceof UnresolvedIdentifierError) throw this.removedItemError('board_remove', id);
+      throw err;
+    }
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
     const evidence = this.removalArtifactEvidence(record);
-    this.store.remove(id, this.now()); // system todos land in the §3.2.7 drain log
-    return { removed: id, ...evidence };
+    this.store.remove(record.id, this.now()); // system todos land in the §3.2.7 drain log
+    return { removed: record.id, ...evidence };
   }
 
   /**
@@ -3591,7 +3658,19 @@ export class SterlingTools {
   maintenanceRemove(
     id: string
   ): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[]; already_drained?: boolean } {
-    const record = this.store.get(id);
+    // Resolves through the SAME ladder as board_get/board_remove
+    // (resolveRecordId, decision 2debab53) rather than a raw store.get(id) —
+    // see boardRemove's comment above for the measured friction this closes.
+    // Only a GENUINE miss (UnresolvedIdentifierError) falls through to the
+    // already-drained / drain-log check below; an ambiguous prefix or a
+    // historical id propagates its own refusal unchanged.
+    let record: DurableRecord | undefined;
+    try {
+      record = this.resolveRecordId(id, 'maintenance_remove');
+    } catch (err) {
+      if (!(err instanceof UnresolvedIdentifierError)) throw err;
+      record = undefined;
+    }
     if (!record) {
       // IDEMPOTENT ALREADY-DRAINED (board 83478fc6, extending 97d773ef): a
       // drain-log trace naming a SYSTEM item (system_reason set, per the store's
@@ -3620,8 +3699,8 @@ export class SterlingTools {
       );
     }
     const evidence = this.removalArtifactEvidence(record);
-    this.store.remove(id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
-    return { removed: id, ...evidence };
+    this.store.remove(record.id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
+    return { removed: record.id, ...evidence };
   }
 
   /**
