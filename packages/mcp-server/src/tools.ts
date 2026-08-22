@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, recordSizes, type DurableRecord, type FieldShape, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -3177,7 +3177,7 @@ export class SterlingTools {
    * append the SAME sessionEventSchema shape to the same register, so H10
    * cannot tell them apart — one shape, one consumer (invariant 1).
    */
-  private appendSessionEvents(entries: { kind: SessionEvent['kind']; detail: string }[]): { at: string } {
+  private appendSessionEvents(entries: { kind: SessionEvent['kind']; detail: string; lane?: NoCaptureLane }[]): { at: string } {
     if (!this.repoRoot) {
       throw new Error(
         'session-event write: no project root is known to this server, so the transient register location cannot be resolved — use the script fallback (scripts/no-capture.mjs / scripts/concept-designed.mjs in the plugin clone)'
@@ -3196,18 +3196,45 @@ export class SterlingTools {
       }
     }
     const at = this.now();
+    // `lane` rides through only when present: an entry without it is written
+    // byte-identical to a pre-lane (legacy) event, which H10 reads as the
+    // capture lane (decision no-capture-discharge-is-lane-scoped).
     for (const e of entries) events.push({ ...e, at });
     writeFileSync(eventsPath, JSON.stringify(events));
     return { at };
   }
 
-  /** no_capture (§10): the explicit nothing-durable-was-learned declaration (board 7bbec3bd shape, MCP-served since board 75b1a05f). */
-  noCapture(reason: string): { declared: string; at: string } {
+  /**
+   * no_capture (§10): the explicit nothing-durable-was-learned declaration
+   * (board 7bbec3bd shape, MCP-served since board 75b1a05f).
+   *
+   * LANE-SCOPED (decision no-capture-discharge-is-lane-scoped,
+   * 51ebe0dd-099e-40a9-abc5-d3c8cc767883; USER-RULED 2026-08-22): the
+   * declaration discharges only the duty lane it CLAIMS. Omitted `lane` is the
+   * BARE declaration — the capture lane only, exactly its pre-2026-08-22
+   * behavior — so clearing the research duty takes lane 'research' or 'all'.
+   * Mirrors scripts/no-capture.mjs --lane (one contract, two producers). An
+   * unrecognized value is REFUSED naming the valid set, never coerced to
+   * 'capture' or 'all': a discharge must be no broader than the human's claim,
+   * and the silent-loss direction (a truthful "typo fix" clearing an unrelated
+   * earlier research duty) is the one that loses knowledge with no trace.
+   */
+  noCapture(reason: string, lane?: string): { declared: string; at: string; lane: NoCaptureLane } {
     if (!reason || !reason.trim()) {
       throw new Error(`no_capture: 'reason' is required — a false declaration is drift, so say why there is nothing durable`);
     }
-    const { at } = this.appendSessionEvents([{ kind: 'no_capture', detail: reason }]);
-    return { declared: reason, at };
+    if (lane !== undefined && !(NO_CAPTURE_LANES as readonly string[]).includes(lane)) {
+      throw new Error(
+        `no_capture: lane '${lane}' is not a valid duty lane — use one of ${NO_CAPTURE_LANES.join(' | ')}. ` +
+          `Omitting lane declares the 'capture' lane only; discharging the research duty requires lane 'research' or 'all'. ` +
+          `Nothing was written (decision no-capture-discharge-is-lane-scoped).`
+      );
+    }
+    const declaredLane = lane as NoCaptureLane | undefined;
+    const { at } = this.appendSessionEvents([
+      declaredLane ? { kind: 'no_capture', detail: reason, lane: declaredLane } : { kind: 'no_capture', detail: reason },
+    ]);
+    return { declared: reason, at, lane: declaredLane ?? 'capture' };
   }
 
   /** concept_designed (§10): a domain concept family's design settled — H10 will demand the family's concept article (decision 7208729b). */

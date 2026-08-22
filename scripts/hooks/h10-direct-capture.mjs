@@ -537,31 +537,76 @@ try {
     if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
   }
 
-  // No-capture declaration (board 7bbec3bd): scripts/no-capture.mjs appends a
-  // no_capture event the moment the conductor judges a Stop produced nothing
-  // durable. It SATISFIES the capture duty for every touch/debug_scope event —
-  // and, since item 353416a9, the research duty for every research event —
-  // EARLIER than the LATEST such declaration; work arriving AFTER it re-arms
-  // the duty (a declaration cannot cover work that hasn't happened yet). A
-  // missing/malformed `at` is treated as arriving AFTER the cutoff — the safe
-  // direction, since it keeps the duty armed rather than silently clearing it.
-  // That promise binds all THREE registers uniformly (touches, debug events,
-  // research events): each one is tested through dischargedByNoCapture below,
-  // so none of them can discharge itself on a timestamp it cannot compare.
+  // No-capture declaration (board 7bbec3bd): scripts/no-capture.mjs and the
+  // no_capture MCP tool append a no_capture event the moment the conductor
+  // judges a Stop produced nothing durable. It SATISFIES the duty for every
+  // touch/debug_scope/research event EARLIER than the LATEST such declaration
+  // ON THAT EVENT'S LANE; work arriving AFTER it re-arms the duty (a
+  // declaration cannot cover work that hasn't happened yet). A missing/malformed
+  // `at` is treated as arriving AFTER the cutoff — the safe direction, since it
+  // keeps the duty armed rather than silently clearing it. That promise binds
+  // all THREE registers uniformly (touches, debug events, research events):
+  // each one is tested through the lane-scoped discharge helpers below, which
+  // share ONE comparison, so none of them can discharge itself on a timestamp
+  // it cannot compare.
+  //
+  // LANE SCOPING (decision no-capture-discharge-is-lane-scoped,
+  // 51ebe0dd-099e-40a9-abc5-d3c8cc767883; USER-RULED 2026-08-22, superseding the
+  // single global cutoff item 353416a9's first fix introduced). A declaration's
+  // `lane` says WHICH duty it claims: 'capture' covers touches + debug events,
+  // 'research' covers research events, 'all' covers both. There are therefore
+  // TWO cutoffs, one per lane, each the latest declaration COVERING that lane.
+  // WHY: one global cutoff made a locally-TRUE declaration a globally-FALSE one
+  // — genuine research at 10:00 whose write-up is deferred, a trivial touch at
+  // 11:00, then a truthful `--reason "typo fix, nothing durable"` at 11:05
+  // silently cleared the 10:00 research duty, dropped the research_owed enqueue
+  // and lost the knowledge with no trace (P5 fail-loud, P2 the KB is the
+  // product: silent knowledge loss is the severe direction, so an ambiguous
+  // scope leaves the duty ARMED).
+  //
+  // A no-lane event reads as 'capture' — the bare declaration's pre-2026-08-22
+  // behavior, and the ONLY safe reading of a LEGACY event written before the
+  // field existed: it must not silently gain research-clearing power it never
+  // had. An event carrying an UNRECOGNIZED lane covers NOTHING (null): both
+  // producers refuse an invalid lane before writing, so such a value on disk is
+  // corruption, and the same fail-closed rule that governs an uncomparable `at`
+  // governs an unreadable scope — never widen a discharge on data you cannot
+  // read.
+  const NO_CAPTURE_LANES = ['research', 'capture', 'all'];
+  const laneOf = (e) => {
+    if (e.lane === undefined || e.lane === null) return 'capture';
+    return NO_CAPTURE_LANES.includes(e.lane) ? e.lane : null;
+  };
   //
   // The CUTOFF itself must be a canonical stamp before it can discharge anything
   // (2026-08-22): a declaration carrying 'n/a' sorts ABOVE every ISO stamp
   // ('n' > '2') and, taken as the cutoff, discharged every event in the session.
-  // With no VALID declaration the cutoff is null and nothing is discharged.
+  // With no VALID declaration covering a lane its cutoff is null and nothing on
+  // that lane is discharged.
   const noCaptureEvents = sessionEvents.filter((e) => e.kind === 'no_capture');
-  const latestNoCapture = noCaptureEvents.map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
-  // The discharge test, applied per touch and per event: covered only when its
-  // OWN `at` is a canonical stamp at or before the cutoff. A missing or
-  // malformed `at` is therefore NOT covered — it arrives after the cutoff by
-  // construction, which is what the paragraph above promises (the earlier
-  // `x.at && x.at > latestNoCapture` idiom filtered such a record OUT, i.e.
-  // silently treated the duty it carried as discharged).
-  const dischargedByNoCapture = (at) => latestNoCapture !== null && isValidAt(at) && at <= latestNoCapture;
+  const cutoffForLane = (lane) =>
+    noCaptureEvents
+      .filter((e) => {
+        const declared = laneOf(e);
+        return declared === lane || declared === 'all';
+      })
+      .map((e) => e.at)
+      .filter(isValidAt)
+      .sort()
+      .at(-1) ?? null;
+  const captureLaneCutoff = cutoffForLane('capture');
+  const researchLaneCutoff = cutoffForLane('research');
+  // The discharge test, applied per touch and per event AGAINST ITS OWN LANE'S
+  // cutoff: covered only when its OWN `at` is a canonical stamp at or before
+  // that cutoff. A missing or malformed `at` is therefore NOT covered — it
+  // arrives after every cutoff by construction, which is what the paragraph
+  // above promises (the earlier `x.at && x.at > latestNoCapture` idiom filtered
+  // such a record OUT, i.e. silently treated the duty it carried as discharged).
+  // ONE comparison, two bound helpers: lane scoping changes WHICH cutoff a duty
+  // is measured against, never HOW the stamps are compared.
+  const dischargedByCutoff = (at, cutoff) => cutoff !== null && isValidAt(at) && at <= cutoff;
+  const dischargedOnCaptureLane = (at) => dischargedByCutoff(at, captureLaneCutoff);
+  const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
 
   // Capture-pending declaration (board 1af5d630, decision follows e23f38f8):
   // the capture EXISTS and its write is in flight on a named target (detail =
@@ -607,18 +652,19 @@ try {
   // `earliest` either, which would anchor the captured-set window to work whose
   // duty is not owed yet.
   const activeTouches = touches
-    .filter((t) => !dischargedByNoCapture(t.at))
+    .filter((t) => !dischargedOnCaptureLane(t.at))
     .filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
-  const activeDebugEvents = debugEvents.filter((e) => !dischargedByNoCapture(e.at));
-  // Item 353416a9 (measured 2026-08-22): the no_capture cutoff discharged only the
-  // capture lane, so a no_capture declared AFTER research events still left them
-  // re-nagging on the next Stop — the nag's own "state nothing durable was learned"
-  // route was never actually wired to the research check. Symmetric with
-  // activeDebugEvents above: a research event AT OR BEFORE the latest no_capture
-  // cutoff is discharged; one arriving AFTER it — or one whose `at` is missing
-  // or malformed, which is never trusted as comparable — re-arms the duty.
-  const activeResearchEvents = researchEvents.filter((e) => !dischargedByNoCapture(e.at));
+  const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
+  // Item 353416a9 (measured 2026-08-22): research events had NO discharge route at
+  // all, so a no_capture declared after them still left them re-nagging on the next
+  // Stop — the nag's own "state nothing durable was learned" route was never wired
+  // to the research check. The route now exists, but on the RESEARCH lane only
+  // (decision no-capture-discharge-is-lane-scoped): a research event at or before
+  // the latest `--lane research`/`--lane all` declaration is discharged; one
+  // arriving AFTER it, one whose `at` is missing or malformed (never trusted as
+  // comparable), or one facing only a capture-lane declaration keeps the duty armed.
+  const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
 
   // Capture duty: triggered by file-touching work OR debug-scope events not
   // already covered by a no-capture declaration.
@@ -880,14 +926,17 @@ try {
     }
 
     // Research duty nag: cite queries/agents verbatim (interface slice 2).
-    // Item 353416a9: name the TOOL that actually discharges this lane (the
-    // no_capture cutoff now covers research events too — see activeResearchEvents
-    // above) instead of the vague "state nothing durable was learned", which
-    // named a route the check never consulted.
+    // Item 353416a9: name the TOOL that actually discharges this lane instead of
+    // the vague "state nothing durable was learned", which named a route the
+    // check never consulted. The route is LANE-SCOPED (decision
+    // no-capture-discharge-is-lane-scoped) so the nag must print the lane too —
+    // a bare declaration discharges the capture lane only, and naming a command
+    // that cannot clear the duty it is offered for is exactly the false
+    // affordance this line was rewritten to remove.
     if (hasResearchDuty && !researchSatisfied) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(', ');
       parts.push(
-        `• research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) → knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool (${noCaptureCmd} --reason "<why>")`
+        `• research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) → knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool with lane "research" (${noCaptureCmd} --reason "<why>" --lane research) — a BARE declaration covers the capture lane only`
       );
     }
 

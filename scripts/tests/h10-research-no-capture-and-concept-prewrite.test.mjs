@@ -20,15 +20,26 @@
 // edits or weakens those existing ones.
 //
 // ===========================================================================
-// SPEC 1 — the RESEARCH lane honors the no_capture declaration cutoff
-// (symmetry with the CAPTURE lane's existing no_capture handling: a
-// declaration at/after an earlier event discharges it; work arriving AFTER
-// the declaration re-arms the duty; see hooks-full.test.mjs "no-capture
-// duty" tests for the capture-lane precedent this mirrors).
+// SPEC 1 — the RESEARCH lane honors the no_capture declaration cutoff, but
+// ONLY when the declaration's SCOPE covers the research lane (decision
+// `no-capture-discharge-is-lane-scoped`, 51ebe0dd, user-ruled 2026-08-22): a
+// BARE no_capture declaration (no `--lane` given) covers the CAPTURE lane
+// ONLY — discharging the RESEARCH duty requires an explicit
+// `--lane research` (or `--lane all`) claim. This is a deliberate reversal
+// of the earlier symmetry assumption (a locally-true "nothing durable"
+// declaration must not silently clear an unrelated earlier research duty).
+// Given a declaration whose scope DOES cover research: at/after an earlier
+// research event it discharges the duty; work arriving AFTER the
+// declaration re-arms it. See hooks-full.test.mjs "no-capture duty" tests
+// for the capture-lane precedent this mirrors, and
+// scripts/tests/h10-no-capture-lane-scope.test.mjs for the bare-declaration
+// (capture-only, does NOT cover research) coverage.
 //
-//   1a — a research event followed by a no_capture declaration whose cutoff
-//        COVERS it (declaration at/after the event) discharges the research
-//        duty: no nag, register clears, nothing owed.
+//   1a — a research event followed by an explicit `--lane research`
+//        no_capture declaration whose cutoff COVERS it (declaration at/after
+//        the event) discharges the research duty: no nag, register clears,
+//        nothing owed. (A BARE declaration in the same shape does NOT
+//        discharge research — see h10-no-capture-lane-scope.test.mjs L2.)
 //   1b — a research event occurring AFTER the latest no_capture cutoff still
 //        triggers the research-duty demand: the declaration never
 //        pre-forgives future events.
@@ -141,7 +152,14 @@ function seedEventsConfig(dir, research_agents = ['researcher', 'claude-code-gui
 }
 
 const rEvent = (detail, at) => ({ kind: 'research_tool', detail, at });
-const ncEvent = (reason, at) => ({ kind: 'no_capture', detail: reason, at });
+// `lane` is an OPTIONAL third argument (added 2026-08-22 per decision
+// `no-capture-discharge-is-lane-scoped`, 51ebe0dd — see SPEC1a below): when
+// omitted the produced event is byte-identical to the pre-ruling bare shape
+// (no `lane` key at all), so every existing call site (SPEC1b) is
+// unaffected. Mirrors the identical minimal-change pattern already used in
+// the sibling file scripts/tests/h10-no-capture-lane-scope.test.mjs.
+const ncEvent = (reason, at, lane) =>
+  lane === undefined ? { kind: 'no_capture', detail: reason, at } : { kind: 'no_capture', detail: reason, at, lane };
 const cEvent = (family, at) => ({ kind: 'concept_designed', detail: family, at });
 
 function researchFinding(store, at) {
@@ -179,7 +197,22 @@ const owed = (store, reason) => store.query({ types: ['todo'], cap: 100 }).filte
 // SPEC 1 — research lane honors the no_capture cutoff
 // ===========================================================================
 
-test('SPEC1a: a no_capture declaration AT/AFTER the research event discharges the research duty — symmetry with the capture lane', () => {
+// REVISED 2026-08-22 per decision `no-capture-discharge-is-lane-scoped`
+// (51ebe0dd, user-ruled the same day) — this reverses the premise SPEC1a
+// was originally written on. It used to declare a BARE no_capture and
+// assert the research duty was discharged by it; under the ruling a bare
+// declaration covers the CAPTURE lane ONLY, and discharging the RESEARCH
+// duty now requires an explicit `--lane research` (or `--lane all`) claim
+// — the old bare-declaration assertion pinned exactly the defect the
+// ruling closes (a locally-true "nothing durable" declaration silently
+// clearing an unrelated earlier research duty). Rewritten below to declare
+// `--lane research` so the test's real intent survives unchanged: a
+// declaration whose scope COVERS the earlier research event still
+// discharges it. The bare-declaration case this test used to cover now
+// lives in scripts/tests/h10-no-capture-lane-scope.test.mjs as L2,
+// asserting the OPPOSITE outcome (bare does NOT discharge research) —
+// coverage of the bare case moved and inverted, it was not dropped.
+test('SPEC1a (revised per decision 51ebe0dd, no-capture-discharge-is-lane-scoped): an explicit `--lane research` no_capture declaration AT/AFTER the research event discharges the research duty — symmetry with the capture lane', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     seedEventsConfig(dir);
@@ -187,11 +220,11 @@ test('SPEC1a: a no_capture declaration AT/AFTER the research event discharges th
     const NC_AT = '2026-06-10T11:30:00.000Z'; // after the research event — covers it
     writeSessionEvents(dir, [
       rEvent('genesys webhook signature validation', R_EVENT_AT),
-      ncEvent('read-only investigation, nothing durable', NC_AT),
+      ncEvent('read-only investigation, nothing durable', NC_AT, 'research'),
     ]);
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(r.code, 0, 'a no_capture declaration at/after the research event discharges the research duty immediately, mirroring the capture-lane no_capture cutoff — no soft-block phase at all');
-    assert.doesNotMatch(r.stderr, /research duty|nothing was researched/i, 'no research nag when discharged by no_capture');
+    assert.equal(r.code, 0, 'an explicit `--lane research` declaration at/after the research event discharges the research duty immediately, mirroring the capture-lane no_capture cutoff — no soft-block phase at all');
+    assert.doesNotMatch(r.stderr, /research duty|nothing was researched/i, 'no research nag when discharged by an explicit research-lane no_capture');
     assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared on the discharged terminal path');
     assert.equal(owed(store, 'research_owed').length, 0, 'nothing owed — the duty was discharged, not deferred');
   } finally {

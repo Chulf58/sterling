@@ -148,7 +148,15 @@ function seedEventsConfig(dir, research_agents = ['researcher', 'claude-code-gui
 // these fixtures simulate a MISSING `at` key, as opposed to a malformed-but-
 // present string like 'n/a' or '0'.
 const rEvent = (detail, at) => ({ kind: 'research_tool', detail, at });
-const ncEvent = (reason, at) => ({ kind: 'no_capture', detail: reason, at });
+// `lane` is an OPTIONAL third argument (added 2026-08-22 per decision
+// `no-capture-discharge-is-lane-scoped`, 51ebe0dd — see SPEC G1 below): when
+// omitted the produced event is byte-identical to the pre-ruling bare shape
+// (no `lane` key at all), so every existing bare call site in this file
+// (SPEC A/B/C/D/E/F/H) is unaffected. Mirrors the identical minimal-change
+// pattern already used in scripts/tests/h10-research-no-capture-and-concept-
+// prewrite.test.mjs.
+const ncEvent = (reason, at, lane) =>
+  lane === undefined ? { kind: 'no_capture', detail: reason, at } : { kind: 'no_capture', detail: reason, at, lane };
 const cEvent = (family, at) => ({ kind: 'concept_designed', detail: family, at });
 const dEvent = (detail, at) => ({ kind: 'debug_scope', detail, at });
 
@@ -206,9 +214,19 @@ test('SPEC A: a research event with a MISSING `at` is never discharged by a no_c
     // sorting BEFORE this cutoff (e.g. an unguarded `|| 0` epoch fallback),
     // the declaration would wrongly appear to cover it.
     const NC_AT = '2026-06-10T23:00:00.000Z';
+    // Explicit `--lane research` (added 2026-08-22, decision
+    // no-capture-discharge-is-lane-scoped/51ebe0dd): a BARE declaration's
+    // research cutoff is `null`, and `dischargedByCutoff` short-circuits on
+    // `cutoff !== null` before `isValidAt` is ever reached — so a bare
+    // declaration here would make this test pass vacuously (no cutoff to
+    // discharge against) rather than because the timestamp guard rejected a
+    // missing `at`. The explicit lane is what keeps this test pinned to the
+    // guard, not to lane-scoping's unrelated null-cutoff behavior (that
+    // property is pinned separately, with well-formed timestamps, by L2 in
+    // scripts/tests/h10-no-capture-lane-scope.test.mjs).
     writeSessionEvents(dir, [
       rEvent('queue backpressure threshold check', undefined),
-      ncEvent('read-only investigation, nothing durable', NC_AT),
+      ncEvent('read-only investigation, nothing durable', NC_AT, 'research'),
     ]);
     const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
 
@@ -233,9 +251,13 @@ test('SPEC B: a research event with a MALFORMED-but-truthy `at` ("n/a") is never
   try {
     seedEventsConfig(dir);
     const NC_AT = '2026-06-10T23:00:00.000Z';
+    // Explicit `--lane research`, same reasoning as SPEC A: a bare
+    // declaration's research cutoff is `null` and the `cutoff !== null`
+    // short-circuit in `dischargedByCutoff` would skip `isValidAt` entirely,
+    // making this pass vacuously instead of via the timestamp guard.
     writeSessionEvents(dir, [
       rEvent('genesys retry backoff cap', 'n/a'),
-      ncEvent('read-only investigation, nothing durable', NC_AT),
+      ncEvent('read-only investigation, nothing durable', NC_AT, 'research'),
     ]);
     const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
 
@@ -260,9 +282,16 @@ test('SPEC C: a MALFORMED no_capture `at` ("n/a") must not become the cutoff —
   try {
     seedEventsConfig(dir);
     const R_EVENT_AT = '2026-06-10T11:00:00.000Z';
+    // Explicit `--lane research`: this is the case the whole spec is named
+    // for — the malformed `at` must poison the RESEARCH cutoff selection,
+    // which only exists when the declaration claims the research lane. A
+    // bare declaration has no research cutoff at all (`null`), so
+    // `dischargedByCutoff`'s `cutoff !== null` short-circuit would make this
+    // pass vacuously — the malformed stamp would never be compared against
+    // anything.
     writeSessionEvents(dir, [
       rEvent('idempotency key retry window', R_EVENT_AT),
-      ncEvent('malformed declaration', 'n/a'),
+      ncEvent('malformed declaration', 'n/a', 'research'),
     ]);
     const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
 
@@ -367,7 +396,21 @@ test('SPEC F: a concept_designed event with a MISSING `at` must not be satisfied
 // become an OVER-correction that nags on valid, well-ordered input.
 // ===========================================================================
 
-test('SPEC G1 (regression): a valid no_capture declaration AT/AFTER a valid research event still discharges the research duty', () => {
+// REVISED 2026-08-22 per decision `no-capture-discharge-is-lane-scoped`
+// (51ebe0dd, user-ruled the same day) — this reverses the premise SPEC G1
+// was originally written on. It used to declare a BARE no_capture and
+// assert the research duty was discharged by it; under the ruling a bare
+// declaration covers the CAPTURE lane ONLY, and discharging the RESEARCH
+// duty now requires an explicit `--lane research` (or `--lane all`) claim.
+// The test is failing (fires 2, expects 0) because the SPEC changed under
+// it by a later user ruling, not because code regressed — same disposition
+// class as scripts/tests/h10-research-no-capture-and-concept-prewrite
+// .test.mjs's SPEC1a. Rewritten below to declare `--lane research` so the
+// test's real intent survives unchanged: a declaration whose SCOPE covers
+// the earlier research event still discharges it, and — this file's own
+// point — still does so through the fail-closed timestamp guard (a valid,
+// well-ordered timestamp must not be over-corrected into a nag).
+test('SPEC G1 (regression, revised per decision 51ebe0dd, no-capture-discharge-is-lane-scoped): an explicit `--lane research` no_capture declaration AT/AFTER a valid research event still discharges the research duty', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     seedEventsConfig(dir);
@@ -375,7 +418,7 @@ test('SPEC G1 (regression): a valid no_capture declaration AT/AFTER a valid rese
     const NC_AT = '2026-06-10T11:30:00.000Z'; // after the research event — covers it
     writeSessionEvents(dir, [
       rEvent('genesys webhook signature validation', R_EVENT_AT),
-      ncEvent('read-only investigation, nothing durable', NC_AT),
+      ncEvent('read-only investigation, nothing durable', NC_AT, 'research'),
     ]);
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(r.code, 0, 'OVER-CORRECTION SHAPE if this fires as 2: a well-formed, covering no_capture declaration stopped discharging the research duty once the fail-closed guards were added');
@@ -425,6 +468,128 @@ test('SPEC H: a file-touch register entry with a MISSING `at` is never discharge
 
     const nag = stop();
     assert.equal(nag.code, 2, 'FAIL-OPEN SHAPE if this fires as 0: a file-touch register entry with no `at` at all was silently discharged by a later-looking no_capture cutoff instead of staying armed — the same defect class as SPEC A/D, on the touches lane\'s comparison site');
+    assert.match(nag.stderr, /nothing was captured/, 'the standard capture-duty nag fires, proving the touches lane — not silence — is what triggered');
+
+    const release = stop();
+    assert.equal(release.code, 0, 'second Stop releases');
+    assert.equal(owed(store, 'capture_owed').length, 1, 'the re-armed capture duty still enqueues on release');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// SPEC I/J/K — the LOW-SORTING mirror of A/B/D/H, added after a mutation test
+// (the conductor swapped isValidAt for `(a) => true` and reran this file)
+// showed SPEC A, B, D, F and H still passed with the guard fully disabled.
+// Those five pass on the strength of the LEXICAL COMPARISON alone: their
+// malformed `at` values (`undefined`, "n/a") happen to out-sort any real ISO
+// cutoff string ("n" > "2" in "n/a" vs "2026-...", and `undefined` is dropped
+// by JSON.stringify entirely, which the comparison site also treats as
+// sorting late) — so `event_at <= cutoff` is false REGARDLESS of whether
+// isValidAt does anything at all. isValidAt is therefore UNPINNED on the
+// event side by this file's original suite: SPEC C and E are the only two
+// that actually depend on it (C on the no_capture cutoff's own `at`, E on the
+// concept event's own `at`), and both use "n/a"/"0" specifically because
+// their comparison site treats "the cutoff itself is garbage" as the
+// dangerous direction, not "the event sorts late".
+//
+// A malformed `at` that sorts BELOW the cutoff — "0" is used here — inverts
+// that: "0" <= "2026-06-10T23:00:00.000Z" is TRUE by plain string comparison
+// (the character '0' precedes '2' in ASCII), so a lexical-only implementation
+// would treat the event as having happened before the cutoff and DISCHARGE
+// the duty — the exact fail-open outcome this whole file exists to prevent.
+// Only isValidAt actually rejecting "0" (it fails the canonical-ISO shape
+// test) keeps the duty armed. These three tests are what actually pin
+// isValidAt on the event-side comparison for the research, debug and touch
+// lanes; do not delete them as "redundant" with A/B/D/H — the two shapes
+// (high-sorting and low-sorting malformed values) exercise different halves
+// of the same comparison and only the low-sorting half depends on the guard.
+// ===========================================================================
+
+test("SPEC I (research lane): a malformed `at` that sorts BELOW the cutoff ('0') is never discharged — the guard, not the comparison, is what rejects it", () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const NC_AT = '2026-06-10T23:00:00.000Z';
+    // High-sorting sibling: SPEC B ("n/a"). "n/a" > NC_AT lexically, so SPEC B
+    // passes even with isValidAt stubbed to always-true. "0" < NC_AT
+    // lexically, so a lexical-only comparison would discharge this event —
+    // only isValidAt rejecting "0" keeps the research duty armed. Explicit
+    // `--lane research`, same reasoning as SPEC A/B/C: a bare declaration's
+    // research cutoff is `null` and the `cutoff !== null` short-circuit in
+    // `dischargedByCutoff` would skip isValidAt entirely, making this pass
+    // vacuously instead of via the timestamp guard.
+    writeSessionEvents(dir, [
+      rEvent('cache eviction policy check', '0'),
+      ncEvent('read-only investigation, nothing durable', NC_AT, 'research'),
+    ]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'FAIL-OPEN SHAPE if this fires as 0: a research event whose `at` is the low-sorting malformed value "0" was silently discharged because "0" <= the cutoff lexically — the guard, not the comparison, must be what rejects it');
+    assert.match(nag.stderr, /cache eviction policy check/, 'the nag cites the actual query, proving the research duty (not some other lane) is what fired');
+
+    const release = stop();
+    assert.equal(release.code, 0, 'second Stop releases');
+    assert.equal(owed(store, 'research_owed').length, 1, 'the re-armed research duty still enqueues on release');
+  } finally {
+    cleanup();
+  }
+});
+
+test("SPEC J (capture/debug lane): a malformed `at` that sorts BELOW the cutoff ('0') is never discharged — the guard, not the comparison, is what rejects it", () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const NC_AT = '2026-06-10T23:00:00.000Z';
+    // High-sorting sibling: SPEC D (`undefined`, dropped by JSON.stringify),
+    // which passes even with isValidAt stubbed to always-true because a
+    // missing `at` sorts late at this comparison site. "0" < NC_AT lexically,
+    // so a lexical-only comparison would discharge this event — only
+    // isValidAt rejecting "0" keeps the capture duty armed here. Bare
+    // (capture-lane) declaration, mirroring SPEC D.
+    writeSessionEvents(dir, [
+      dEvent('src/probe2.mjs', '0'),
+      ncEvent('read-only investigation, nothing durable', NC_AT),
+    ]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'FAIL-OPEN SHAPE if this fires as 0: a debug_scope event whose `at` is the low-sorting malformed value "0" was silently discharged because "0" <= the cutoff lexically — the guard, not the comparison, must be what rejects it, the same defect class as SPEC I on the capture lane\'s comparison site');
+    assert.match(nag.stderr, /disconfirmed_hypothesis/, 'the capture-duty nag fires (names the debug capture types), proving the capture lane — not silence — is what triggered');
+
+    const release = stop();
+    assert.equal(release.code, 0, 'second Stop releases');
+    assert.equal(owed(store, 'capture_owed').length, 1, 'the re-armed capture duty still enqueues on release');
+  } finally {
+    cleanup();
+  }
+});
+
+test("SPEC K (touch lane): a malformed `at` that sorts BELOW the cutoff ('0') is never discharged — the guard, not the comparison, is what rejects it", () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    const NC_AT = '2026-06-10T23:00:00.000Z';
+    // High-sorting sibling: SPEC H (`undefined`, dropped by JSON.stringify),
+    // which passes even with isValidAt stubbed to always-true because a
+    // missing `at` sorts late at this comparison site. "0" < NC_AT lexically,
+    // so a lexical-only comparison would discharge this entry — only
+    // isValidAt rejecting "0" keeps the capture duty armed here. Bare
+    // (capture-lane) declaration, mirroring SPEC H. The touched path is
+    // written for real to disk by writeTouches (a distinct path from SPEC
+    // H's, to keep the two fixtures visibly independent) — H10 only acts on
+    // touches whose path still `existsSync`, per the sibling touch tests, so
+    // an entry pointing at a path that was never created would never arm the
+    // capture duty in the first place and this test would pass for the wrong
+    // reason.
+    writeTouches(dir, [{ path: 'src/real-touch2.mjs', at: '0' }]);
+    writeSessionEvents(dir, [ncEvent('read-only investigation, nothing durable', NC_AT)]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    const nag = stop();
+    assert.equal(nag.code, 2, 'FAIL-OPEN SHAPE if this fires as 0: a file-touch register entry whose `at` is the low-sorting malformed value "0" was silently discharged because "0" <= the cutoff lexically — the guard, not the comparison, must be what rejects it, the same defect class as SPEC I/J on the touches lane\'s comparison site');
     assert.match(nag.stderr, /nothing was captured/, 'the standard capture-duty nag fires, proving the touches lane — not silence — is what triggered');
 
     const release = stop();
