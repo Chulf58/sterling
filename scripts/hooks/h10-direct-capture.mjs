@@ -477,15 +477,35 @@ try {
   // deferral partition needs it too).
   const paths = touchedExisting.filter((p) => !isDeferred(p));
 
-  // Canonical-timestamp guard, shared by EVERY `at` comparison below (FIX L2,
-  // upgrade-polish review 2026-08-21; extended to the no_capture cutoff and the
-  // concept window 2026-08-22). Register timestamps are compared LEXICALLY, so a
-  // non-ISO value is not merely unparseable — it sorts arbitrarily against real
-  // stamps ('n/a' above every ISO stamp, '0' below every one of them). Date.parse
-  // alone is NOT the right validity test — V8 parses '0' as year 2000 (finite!)
-  // while the string '0' still sorts below every ISO stamp — so validity here is
-  // ISO SHAPE (the only form the register's writers emit) plus parseability.
-  const ISO_AT = /^\d{4}-\d{2}-\d{2}T/;
+  // Canonical-timestamp guard, shared by EVERY register-`at` comparison below —
+  // the no_capture cutoff, the test-repair cutoff, the capture/research window
+  // anchors and the concept window (FIX L2, upgrade-polish review 2026-08-21;
+  // extended 2026-08-22). (The dispatch register's `at` above is the one
+  // exception by design: ageMs compares it NUMERICALLY through Date.parse and
+  // already treats an unparseable value as stale, i.e. defers nothing.)
+  //
+  // Register timestamps are compared LEXICALLY, so a non-ISO value is not merely
+  // unparseable — it sorts arbitrarily against real stamps ('n/a' above every ISO
+  // stamp, '0' below every one of them). Date.parse alone is NOT the right
+  // validity test — V8 parses '0' as year 2000 (finite!) while the string '0'
+  // still sorts below every ISO stamp.
+  //
+  // The shape is therefore the FULL canonical `Date#toISOString()` form, not a
+  // loose ISO prefix (outside re-review 2026-08-22): a prefix test admits values
+  // whose lexical order is NOT chronological order, which every comparison here
+  // silently assumes. Two concrete inversions it let through — an offset stamp
+  // '2026-08-22T08:00:00.000-05:00' happened at 13:00Z, i.e. AFTER
+  // '2026-08-22T12:00:00.000Z', yet sorts before it; and variable precision puts
+  // '…T12:00:00.500Z' BELOW '…T12:00:00Z' ('.' < 'Z'). Pinning UTC + fixed
+  // milliseconds makes lexical order chronological BY CONSTRUCTION.
+  //
+  // Verified 2026-08-22 that this rejects no live data: every writer of both
+  // registers stamps `new Date().toISOString()` — scripts/hooks/h7-file-touch.mjs
+  // (touches), scripts/hooks/h16-event-register.mjs, scripts/debug-scope.mjs,
+  // scripts/no-capture.mjs, scripts/concept-designed.mjs, scripts/test-repair.mjs,
+  // and the MCP tool surface's own appender (packages/mcp-server/src/tools.ts,
+  // whose injectable `now` defaults to the same call).
+  const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
   const isValidAt = (a) => typeof a === 'string' && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
 
   // Classify session events.
@@ -566,9 +586,17 @@ try {
   // `<path> — <evidence>`) and must match the touch EXACTLY — a substring
   // match would let the free-text evidence, or a longer sibling path, silently
   // discharge the wrong file's duty (review finding 2026-08-21).
-  const testRepairEvents = sessionEvents.filter((e) => e.kind === 'test_repair' && e.detail && e.at);
+  // Both sides of the `>` go through isValidAt (outside re-review 2026-08-22).
+  // This is a DISCHARGE cutoff exactly like no_capture's, so it inherits the same
+  // fail-closed rule: a truthy-but-uncomparable stamp was accepted and compared
+  // raw, and a corrupted event {at:'n/a'} sorts above EVERY ISO stamp ('n' > '2')
+  // — it removed the touch from activeTouches and silently discharged its capture
+  // duty. A repair event whose time cannot be read covers nothing, and a touch
+  // whose own time cannot be read is never covered (it arrives after every
+  // cutoff by construction) — both keep the duty ARMED.
+  const testRepairEvents = sessionEvents.filter((e) => e.kind === 'test_repair' && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) =>
-    t.at && testRepairEvents.some((e) => String(e.detail).split(' — ')[0].trim() === t.path && e.at > t.at);
+    isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(' — ')[0].trim() === t.path && e.at > t.at);
   // Touch-noise precision (board 05e298f0): reading an image/binary file is
   // inspection, not knowledge-producing work — excluded from the CAPTURE
   // duty's touch set only (never the article-demand `paths` below, which
@@ -610,7 +638,22 @@ try {
 
   // Earliest timestamp across the ACTIVE touches ∪ debug events (the
   // captured-set window anchor) — a no-capture declaration moves this forward.
-  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(Boolean).sort();
+  // Only VALID stamps anchor it (outside re-review 2026-08-22): the old
+  // `.filter(Boolean)` kept truthy-but-uncomparable values, so a single touch or
+  // debug event stamped '0' — which correctly SURVIVES dischargedByNoCapture,
+  // staying active — then became the earliest anchor, and every knowledge record
+  // ever written compares >= '0'. That flipped `captured` true and cleared the
+  // duty one layer below the guard it had just passed.
+  // FALLBACK DIRECTION, when an active item has no usable stamp: `now`, the
+  // LATEST anchor available at this Stop. It is the conservative choice —
+  // no pre-existing record can satisfy a window that opens at the Stop itself,
+  // so the duty stays ARMED, which is the whole point of failing closed here.
+  // (An invented EARLY anchor is the failure being fixed; an early anchor is
+  // exactly what lets any historical record discharge the duty.) It is also
+  // byte-identical to what this line already did when the list was empty.
+  // Dropping an invalid stamp while OTHER valid ones remain can only move the
+  // anchor LATER — the strict direction, same rule the concept lane states.
+  const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
 
   // Widened captured set: decision|anti_pattern|feature_article|research_finding|disconfirmed_hypothesis
@@ -623,7 +666,11 @@ try {
   let researchSatisfied = true;
   let earliestResearch = null;
   if (hasResearchDuty) {
-    const rts = activeResearchEvents.map((e) => e.at).filter(Boolean).sort();
+    // Same valid-stamps-only anchor and same `now` fallback as `earliest` above,
+    // for the same reason: a research event stamped '0' survives the no_capture
+    // guard and would otherwise anchor this window below every record in the
+    // store, satisfying the duty with knowledge written months ago.
+    const rts = activeResearchEvents.map((e) => e.at).filter(isValidAt).sort();
     earliestResearch = rts.length ? rts[0] : now;
     researchSatisfied = store
       .query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
@@ -654,9 +701,11 @@ try {
   const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 60_000;
   let unmetFamilies = [];
   if (hasConceptDuty) {
-    // FIX L2 (upgrade-polish review, 2026-08-21): a non-ISO `at` sorts
-    // lexically below every real timestamp and would drag windowStart
-    // arbitrarily back — see the isValidAt guard above, which this shares.
+    // FIX L2 (upgrade-polish review, 2026-08-21): a non-canonical `at` sorts
+    // ARBITRARILY against real timestamps — '0' below every one of them (which
+    // drags windowStart back until any stale article satisfies), 'n/a' above
+    // every one of them — so it is excluded here, not merely parsed. Shares the
+    // isValidAt guard above.
     const sessionAts = sessionEvents.map((e) => e.at).filter(isValidAt).sort();
     const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
     const articles = store.query({ types: ['feature_article'], cap: 1000, include_unconfirmed: true });
