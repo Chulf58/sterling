@@ -34,7 +34,19 @@
 // brief may mention a tool in a prohibition ('do NOT run Bash') or as
 // context rather than a requirement, so a hard block would false-positive —
 // the dispatcher sees the warning at the moment it can still cancel.
-import { readStdin, allow, warnNonBlocking } from './lib/common.mjs';
+//
+// SECOND ADVISORY (board 2f57ec84): test-authoring dispatch-time lint (spec
+// scripts/tests/h25-test-authoring-lint.test.mjs). Same entry, same
+// warn-only posture, independent trigger: a PIPELINE_AGENT_TYPES agent that
+// is NOT test-writer, briefed to author tests either by a VERB TRIGGER
+// (write/author/add/create tests, or TDD-first phrasing — negation-guarded so
+// a prohibition never fires) or a PATH TRIGGER (a concrete path in the brief
+// matching a declared toolchain test_glob). Doer/checker separation: test
+// authoring belongs to the test-writer role, and H5 will deny a test-path
+// edit mid-work if the dispatch proceeds anyway — this catches the
+// misdispatch before the spawn, exactly like the capability advisory above.
+import { readStdin, allow, warnNonBlocking, loadConfig } from './lib/common.mjs';
+import { PIPELINE_AGENT_TYPES, matchesGlob } from '@sterling/schemas';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -107,6 +119,106 @@ function parseToolsLine(content) {
   return line[1].trim();
 }
 
+// ---------------------------------------------------------------------------
+// SECOND ADVISORY: test-authoring dispatch-time lint (board 2f57ec84).
+// ---------------------------------------------------------------------------
+
+// Authoring verbs that, together with a NOUN-FORM test mention in the same
+// clause, instruct test authoring. The noun form is deliberately narrower
+// than bare \btests?\b (review fix C2): the plural 'tests', 'test
+// case(s)/file(s)/suite(s)', or an articled singular ('a (failing) test').
+// A bare singular 'test' used as a VERB ("then test the endpoint manually")
+// satisfies none of these, so it never combines with a preceding trigger
+// verb to fire — the false-positive class this guards against. 'testing' — a
+// homograph of 'test' — still never matches, since it fails every branch.
+const TEST_NOUN_RE_SRC = String.raw`(?:\btests\b|\btest\s+(?:cases?|files?|suites?)\b|\ba\s+(?:failing\s+)?test\b)`;
+const VERB_TRIGGER_RE = new RegExp(String.raw`\b(?:write|author|add|create)\b[^.!?\n]{0,40}` + TEST_NOUN_RE_SRC, 'i');
+// TDD trigger requires test-FIRST phrasing (review fix C3), not a bare
+// mention: 'TDD-first'/'TDD first' (the {0,20} gap already covers the single
+// hyphen-or-space between the two words), or TDD within a short bounded
+// distance of an authoring-context word (start/begin/first) or the phrase
+// 'with the test(s)'. Deliberately NOT a bare \btest\b proximity check: that
+// would let 'TDD: the test-writer already froze the suite' false-fire on the
+// 'test' fragment inside the compound 'test-writer' — requiring the fuller
+// 'with the test(s)' phrase (or start/begin/first) means that fragment alone
+// can never satisfy it.
+const TDD_TRIGGER_RE = /\bTDD\b[^.!?\n]{0,20}\b(?:start(?:ing)?|begin(?:ning)?|first|with\s+the\s+tests?)\b/i;
+
+// Negation guard: a prohibition aimed at the tests must never fire the verb
+// trigger, even when it names a trigger verb ('do not write tests') or the
+// enforcing hook itself ('never edit the tests — H5 will deny you' is
+// already the warning, said by the dispatcher — this hook must stay silent).
+const NEGATION_RE = /\b(?:do\s*not|don't|don’t|never)\b[^.!?\n]{0,40}\btests?\b/i;
+const LEAVE_ALONE_RE = /\bleave\b[^.!?\n]{0,40}\btests?\b[^.!?\n]{0,20}\balone\b/i;
+
+// Clause-scoped negation (review fix C1): a whole-brief negation match used
+// to silence every trigger in the ENTIRE prompt, even a later, unrelated
+// instruction in the same brief ("Don't touch the existing tests; write new
+// tests for the new module" wrongly stayed silent). Splitting on sentence/
+// segment boundaries — '.', '!', '?', ';', newline, and em/en dash — and
+// evaluating the negation guard PER CLAUSE means only the clause actually
+// containing the prohibition is silenced; any other clause with its own verb
+// or TDD trigger still warns. A comma is deliberately NOT a boundary here —
+// "don't touch the tests, just fix the bug" is one prohibition spanning a
+// comma, not two independent clauses.
+const CLAUSE_SPLIT_RE = /[.!?;\n–—]/;
+
+function hasVerbOrTddTrigger(text) {
+  const clauses = String(text ?? '').split(CLAUSE_SPLIT_RE);
+  for (const clause of clauses) {
+    if (NEGATION_RE.test(clause) || LEAVE_ALONE_RE.test(clause)) continue; // this clause is a prohibition — silent
+    if (VERB_TRIGGER_RE.test(clause) || TDD_TRIGGER_RE.test(clause)) return true;
+  }
+  return false;
+}
+
+// Concrete path tokens in the brief: word/dot/dash/slash runs ending in an
+// extension, trimmed of trailing sentence punctuation prose tends to leave
+// attached ('tests/export.test.mjs;', 'tests/export.test.mjs.').
+function extractPathCandidates(text) {
+  const matches = String(text ?? '').match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.[A-Za-z0-9]+/g) ?? [];
+  return matches.map((m) => m.replace(/[.,;:]+$/, ''));
+}
+
+// A concrete path matching any declared toolchain test_glob — the same
+// classification loop H5/H18 use (config.toolchains[].test_globs, matchesGlob).
+// The loadConfig call is guarded (review fix C4): a present-but-malformed
+// .sterling/config.json throws, and this function's caller sits inside the
+// SAME outer try as the pre-existing capability advisory below it — an
+// unguarded throw here would be caught by the outer catch and lose that
+// unrelated, already-working advisory too. A corrupt config degrades only
+// the path trigger (falls back to 'no path trigger'), never the rest of the
+// hook.
+function hasPathTrigger(text, cwd) {
+  let config;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    return false;
+  }
+  const globs = (config?.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
+  if (!globs.length) return false;
+  const candidates = extractPathCandidates(text);
+  return candidates.some((path) => globs.some((glob) => matchesGlob(path, glob)));
+}
+
+// Null when this lint does not apply or does not trigger: non-pipeline types,
+// test-writer itself (exempt — it IS the doer), and briefs with neither
+// trigger all fall through silently, matching the capability advisory's own
+// posture (never a claim it cannot support).
+function testAuthoringAdvisory(subagentType, prompt, cwd) {
+  if (!subagentType || !PIPELINE_AGENT_TYPES.has(subagentType) || subagentType === 'test-writer') return null;
+  const text = String(prompt ?? '');
+  if (!text) return null;
+  if (!hasVerbOrTddTrigger(text) && !hasPathTrigger(text, cwd)) return null;
+  return (
+    `H25 TEST-AUTHORING ADVISORY — you are about to dispatch '${subagentType}', and the brief appears to instruct ` +
+      `test authoring. Test authoring belongs to the test-writer role (doer/checker separation); if this dispatch ` +
+      `proceeds and it edits a test path, H5 will deny that edit mid-work. This is a warning, not a denial — ` +
+      `re-target the dispatch to test-writer, or state explicitly why this agent needs to touch tests.`
+  );
+}
+
 let input;
 try {
   input = readStdin();
@@ -126,17 +238,29 @@ try {
   const subagentType = input.tool_input?.subagent_type;
   if (!subagentType) allow(); // nothing to resolve capability against
 
+  // Computed once, independent of the capability checks below (it needs
+  // neither an installed agent file nor a parsed grant) — combined with
+  // whichever capability-advisory text (if any) `finish` is called with, so
+  // the two advisories never clobber each other when both apply.
+  const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
+  function finish(capabilityMessage) {
+    const parts = [];
+    if (capabilityMessage) parts.push(capabilityMessage);
+    if (taAdvisory) parts.push(taAdvisory);
+    if (parts.length) emit(parts.join('\n\n'));
+    allow();
+  }
+
   const agentPath = join(input.cwd ?? '.', '.claude', 'agents', `${subagentType}.md`);
   if (!existsSync(agentPath)) {
     // DISTINCT shape from the missing-tool warning: capability cannot be
     // checked at all, and this must not read like a claim about a specific
     // grant it has no way to know.
-    emit(
+    finish(
       `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked — no installed agent ` +
         `definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct ` +
         `before relying on this dispatch, or install the agent definition.`
     );
-    allow();
   }
 
   let content;
@@ -147,7 +271,7 @@ try {
   }
 
   const toolsRaw = parseToolsLine(content);
-  if (toolsRaw === undefined) allow(); // no tools: line — all-tools default, silent
+  if (toolsRaw === undefined) finish(); // no tools: line — all-tools default, capability-silent
 
   // Grant parsing (review D1): strip a flow-style [ ... ] wrapper so
   // `tools: [Read, Bash]` grants Read and Bash rather than '[read'/'bash]'.
@@ -161,16 +285,16 @@ try {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  if (!grantList.length) allow();
+  if (!grantList.length) finish();
 
   const mentioned = findMentionedTools(input.tool_input?.prompt);
-  if (!mentioned.length) allow();
+  if (!mentioned.length) finish();
 
   const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
-  if (!missing.length) allow();
+  if (!missing.length) finish();
 
   const missingLines = missing.map((tool) => `  - '${tool}' — not held by this agent's grant`).join('\n');
-  emit(
+  finish(
     `H25 DISPATCH CAPABILITY ADVISORY — you are about to dispatch '${subagentType}', and the brief mentions ` +
       `tool(s) its installed grant does not hold:\n${missingLines}\n` +
       `Agent '${subagentType}' actual grant (frontmatter tools:): ${toolsRaw}\n` +
@@ -178,7 +302,6 @@ try {
       `context can read identically). Remedy: re-target the dispatch to an agent holding ${missing.join(', ')}, ` +
       `re-scope the brief so it is not needed, or state explicitly why the mention is not a requirement.`
   );
-  allow();
 } catch (e) {
   // Advisory only, never a gate: loud but non-blocking (P5 without AC7 harm).
   warnNonBlocking(`H25: dispatch-capability advisory failed: ${(e && e.message) || e}`);

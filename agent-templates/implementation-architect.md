@@ -13,12 +13,12 @@ hooks:
     - matcher: "*"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h6-context-watch.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
   PostToolUse:
     - matcher: "*"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h6-context-watch.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
 ---
 
 # Role & owned judgment

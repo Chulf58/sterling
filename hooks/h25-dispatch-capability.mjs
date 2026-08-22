@@ -4081,6 +4081,33 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
+function matchesGlob(path, glob) {
+  const g = glob.replace(/\\/g, "/");
+  let re = "";
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === "*") {
+      if (g[i + 1] === "*") {
+        i++;
+        if (g[i + 1] === "/") {
+          re += "(?:[^/]*/)*";
+          i++;
+        } else {
+          re += ".*";
+        }
+      } else {
+        re += "[^/]*";
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else if (".+^${}()|[]\\".includes(c)) {
+      re += "\\" + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
@@ -4353,7 +4380,15 @@ var SYSTEM_REASONS = [
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
-  "article_oversize"
+  "article_oversize",
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  "restore_performed"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4859,7 +4894,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -4973,6 +5008,10 @@ function warnNonBlocking(message) {
   process.stderr.write(message);
   process.exit(1);
 }
+function loadConfig(cwd) {
+  const p = join(cwd, ".sterling", "config.json");
+  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
 
 // scripts/hooks/h25-dispatch-capability.mjs
 import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
@@ -5046,6 +5085,43 @@ function parseToolsLine(content) {
   if (!line) return void 0;
   return line[1].trim();
 }
+var TEST_NOUN_RE_SRC = String.raw`(?:\btests\b|\btest\s+(?:cases?|files?|suites?)\b|\ba\s+(?:failing\s+)?test\b)`;
+var VERB_TRIGGER_RE = new RegExp(String.raw`\b(?:write|author|add|create)\b[^.!?\n]{0,40}` + TEST_NOUN_RE_SRC, "i");
+var TDD_TRIGGER_RE = /\bTDD\b[^.!?\n]{0,20}\b(?:start(?:ing)?|begin(?:ning)?|first|with\s+the\s+tests?)\b/i;
+var NEGATION_RE = /\b(?:do\s*not|don't|don’t|never)\b[^.!?\n]{0,40}\btests?\b/i;
+var LEAVE_ALONE_RE = /\bleave\b[^.!?\n]{0,40}\btests?\b[^.!?\n]{0,20}\balone\b/i;
+var CLAUSE_SPLIT_RE = /[.!?;\n–—]/;
+function hasVerbOrTddTrigger(text) {
+  const clauses = String(text ?? "").split(CLAUSE_SPLIT_RE);
+  for (const clause of clauses) {
+    if (NEGATION_RE.test(clause) || LEAVE_ALONE_RE.test(clause)) continue;
+    if (VERB_TRIGGER_RE.test(clause) || TDD_TRIGGER_RE.test(clause)) return true;
+  }
+  return false;
+}
+function extractPathCandidates(text) {
+  const matches = String(text ?? "").match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.[A-Za-z0-9]+/g) ?? [];
+  return matches.map((m) => m.replace(/[.,;:]+$/, ""));
+}
+function hasPathTrigger(text, cwd) {
+  let config;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    return false;
+  }
+  const globs = (config?.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
+  if (!globs.length) return false;
+  const candidates = extractPathCandidates(text);
+  return candidates.some((path) => globs.some((glob) => matchesGlob(path, glob)));
+}
+function testAuthoringAdvisory(subagentType, prompt, cwd) {
+  if (!subagentType || !PIPELINE_AGENT_TYPES.has(subagentType) || subagentType === "test-writer") return null;
+  const text = String(prompt ?? "");
+  if (!text) return null;
+  if (!hasVerbOrTddTrigger(text) && !hasPathTrigger(text, cwd)) return null;
+  return `H25 TEST-AUTHORING ADVISORY \u2014 you are about to dispatch '${subagentType}', and the brief appears to instruct test authoring. Test authoring belongs to the test-writer role (doer/checker separation); if this dispatch proceeds and it edits a test path, H5 will deny that edit mid-work. This is a warning, not a denial \u2014 re-target the dispatch to test-writer, or state explicitly why this agent needs to touch tests.`;
+}
 var input;
 try {
   input = readStdin();
@@ -5060,14 +5136,21 @@ function emit(additionalContext) {
   );
 }
 try {
+  let finish = function(capabilityMessage) {
+    const parts = [];
+    if (capabilityMessage) parts.push(capabilityMessage);
+    if (taAdvisory) parts.push(taAdvisory);
+    if (parts.length) emit(parts.join("\n\n"));
+    allow();
+  };
   const subagentType = input.tool_input?.subagent_type;
   if (!subagentType) allow();
+  const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
   const agentPath = join2(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
   if (!existsSync2(agentPath)) {
-    emit(
+    finish(
       `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
     );
-    allow();
   }
   let content;
   try {
@@ -5076,21 +5159,20 @@ try {
     warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
   }
   const toolsRaw = parseToolsLine(content);
-  if (toolsRaw === void 0) allow();
+  if (toolsRaw === void 0) finish();
   const grantList = toolsRaw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (!grantList.length) allow();
+  if (!grantList.length) finish();
   const mentioned = findMentionedTools(input.tool_input?.prompt);
-  if (!mentioned.length) allow();
+  if (!mentioned.length) finish();
   const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
-  if (!missing.length) allow();
+  if (!missing.length) finish();
   const missingLines = missing.map((tool) => `  - '${tool}' \u2014 not held by this agent's grant`).join("\n");
-  emit(
+  finish(
     `H25 DISPATCH CAPABILITY ADVISORY \u2014 you are about to dispatch '${subagentType}', and the brief mentions tool(s) its installed grant does not hold:
 ${missingLines}
 Agent '${subagentType}' actual grant (frontmatter tools:): ${toolsRaw}
 This is advisory only, never a block \u2014 a mention is not proof of a requirement (a prohibition or passing context can read identically). Remedy: re-target the dispatch to an agent holding ${missing.join(", ")}, re-scope the brief so it is not needed, or state explicitly why the mention is not a requirement.`
   );
-  allow();
 } catch (e) {
   warnNonBlocking(`H25: dispatch-capability advisory failed: ${e && e.message || e}`);
 }

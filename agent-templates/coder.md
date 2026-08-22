@@ -15,36 +15,36 @@ hooks:
     - matcher: "Edit|Write|MultiEdit"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h3-contract-gate.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h3-contract-gate.mjs"'
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h5-frozen-tests.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h5-frozen-tests.mjs"'
     - matcher: "Bash"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h14-bash-allowlist.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h14-bash-allowlist.mjs"'
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h17-bash-write-sweep.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h17-bash-write-sweep.mjs"'
     - matcher: "*"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h6-context-watch.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
   PostToolUse:
     - matcher: "Read"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h13-reads-ledger.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h13-reads-ledger.mjs"'
     - matcher: "Edit|Write|MultiEdit"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h7-file-touch.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h7-file-touch.mjs"'
     - matcher: "Bash"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h17-bash-write-sweep.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h17-bash-write-sweep.mjs"'
     - matcher: "*"
       hooks:
         - type: command
-          command: '{{NODE}} "{{HOOKS_DIR}}/h6-context-watch.mjs"'
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
 ---
 
 # Role & owned judgment

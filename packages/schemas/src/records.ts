@@ -295,6 +295,14 @@ export const SYSTEM_REASONS = [
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
   'article_oversize',
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  'restore_performed',
 ] as const;
 
 // §11 queue drain verbs: draining means the fulfilling artifact was written,
@@ -321,6 +329,9 @@ export const DRAIN_VERBS = {
   // The deed is splitting the article (concept-article granularity rubric) —
   // or, if a re-measure shows it back under threshold, confirming that.
   article_oversize: 'split',
+  // The deed is closing the loop with the conductor on why the path keeps
+  // getting reverted — a stamp attesting it up front, or the change dropped.
+  restore_performed: 'resolved',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:

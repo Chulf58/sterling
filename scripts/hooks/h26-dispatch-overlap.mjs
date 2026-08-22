@@ -32,10 +32,14 @@
 // design) is labeled with the 'agent' fallback, never dropped.
 //
 // KNOWN IMPRECISION (disclosed, not fixed here): the prompt extraction only
-// APPROXIMATES write territory (free-form prose, not a declared file list),
-// and parallel dispatches fired in one conductor message never see each
-// other here — H22 only registers an entry at SubagentStart, which happens
-// AFTER every PreToolUse in that same message has already fired.
+// APPROXIMATES write territory (free-form prose, not a declared file list).
+// This hook compares only dispatches ALREADY PRESENT IN THE LIVE REGISTER
+// when this PreToolUse fires — it never claims parallel dispatches fired in
+// one message can't see each other; per-block attribution (decision
+// 5d3747c1, slug h22-per-block-attribution) is what makes that comparison
+// safe: an imprecise ('union'-attributed, or legacy entries with no
+// `attribution` field at all) register entry is suppressed below rather than
+// surfaced as a caveated warning that would cry wolf on every batch.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel } from './lib/common.mjs';
@@ -94,6 +98,15 @@ try {
     // type gets the same 'agent' fallback label the script-side reader uses
     // (scripts/lib/dispatch-register.mjs inFlightAdvisory).
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
+    // IMPRECISE ATTRIBUTION IS SUPPRESSED, NOT CAVEATED (decision 5d3747c1):
+    // an entry H22 could only union across several/zero type-matching blocks
+    // (attribution:'union') may not actually name this dispatch's territory,
+    // and a legacy entry with no `attribution` field at all predates this
+    // mechanism and carries the same old union-of-everything imprecision —
+    // both are skipped outright so a warning never fires on files that may
+    // not belong to the sibling it names. Only attribution:'block' entries
+    // (a provable single type-matching source block) still warn.
+    if (e.attribution !== 'block') continue;
     const matched = e.files.filter((f) => candidateSet.has(f));
     if (matched.length) {
       overlaps.push({ agentType: e.agent_type ?? 'agent', agentId: e.agent_id, files: matched });
@@ -107,10 +120,10 @@ try {
   emit(
     `H26 DISPATCH OVERLAP ADVISORY — this dispatch's brief names file(s) that overlap a LIVE in-flight ` +
       `dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is ` +
-      `warn-only, never a block — the prompt extraction only approximates write territory, and parallel ` +
-      `dispatches fired in one message never see each other here since H22 registers at SubagentStart, which ` +
-      `happens after this PreToolUse fires. Remedy: keep lanes file-disjoint — await the in-flight agent, or ` +
-      `re-scope this dispatch's territory so it does not overlap.`
+      `warn-only, never a block — the prompt extraction only approximates write territory, and this hook ` +
+      `compares only dispatches already present in the live register when this PreToolUse fires. Remedy: ` +
+      `keep lanes file-disjoint — await the in-flight agent, or re-scope this dispatch's territory so it does ` +
+      `not overlap.`
   );
   allow();
 } catch (e) {

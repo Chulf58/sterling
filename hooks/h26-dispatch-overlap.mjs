@@ -4369,7 +4369,15 @@ var SYSTEM_REASONS = [
   // the only moment anyone is looking; deduped per article via file_keys (a
   // feature_article's id changes on every version, so id-keyed dedup would not
   // survive the next reconcile — the article's owned files do).
-  "article_oversize"
+  "article_oversize",
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  "restore_performed"
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
@@ -4875,7 +4883,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5066,6 +5074,7 @@ try {
   const overlapPaths = /* @__PURE__ */ new Set();
   for (const e of live) {
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
+    if (e.attribution !== "block") continue;
     const matched = e.files.filter((f) => candidateSet.has(f));
     if (matched.length) {
       overlaps.push({ agentType: e.agent_type ?? "agent", agentId: e.agent_id, files: matched });
@@ -5076,7 +5085,7 @@ try {
   const pathList = [...overlapPaths].map((p) => `'${p}'`).join(", ");
   const entryList = overlaps.map((o) => `${o.agentType}:${o.agentId} (${o.files.join(", ")})`).join("; ");
   emit(
-    `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap a LIVE in-flight dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is warn-only, never a block \u2014 the prompt extraction only approximates write territory, and parallel dispatches fired in one message never see each other here since H22 registers at SubagentStart, which happens after this PreToolUse fires. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
+    `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap a LIVE in-flight dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is warn-only, never a block \u2014 the prompt extraction only approximates write territory, and this hook compares only dispatches already present in the live register when this PreToolUse fires. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
   );
   allow();
 } catch (e) {

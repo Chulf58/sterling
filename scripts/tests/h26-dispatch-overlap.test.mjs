@@ -94,8 +94,17 @@ function agoISO(minutesAgo) {
   return new Date(Date.now() - minutesAgo * 60_000).toISOString();
 }
 
-function liveEntry(agentId, agentType, files, { sessionId = 's1', minutesAgo = 0 } = {}) {
-  return { agent_id: agentId, agent_type: agentType, session_id: sessionId, files, at: agoISO(minutesAgo) };
+// Per decision h22-per-block-attribution (5d3747c1): H26 now warns only on
+// entries provably matched to their starting agent's own dispatch block
+// (attribution:'block'); imprecise unions and legacy pre-attribution entries
+// are suppressed. Every fixture in THIS file exercises overlap detection
+// itself (liveness, staleness, path exclusion, path normalization, malformed
+// entries) rather than the attribution mechanism (which is pinned exclusively
+// in scripts/tests/h22-attribution.test.mjs) — so the default here is the
+// precise 'block' shape, overridable per-call for a test that needs to
+// exercise a specific attribution value.
+function liveEntry(agentId, agentType, files, { sessionId = 's1', minutesAgo = 0, attribution = 'block' } = {}) {
+  return { agent_id: agentId, agent_type: agentType, session_id: sessionId, files, at: agoISO(minutesAgo), attribution };
 }
 
 // Input shape per the task: PreToolUse, tool_name Task|Agent,
@@ -440,12 +449,16 @@ test('H26 robustness: a malformed entry (missing `files`) inside the register ar
 
 // A null agent_type is NOT malformed — H22 writes `agent_type ?? null` by
 // design, so the entry must still warn, labeled with the same 'agent'
-// fallback the script-side reader uses (review finding 2026-08-21).
+// fallback the script-side reader uses (review finding 2026-08-21). This
+// fixture carries attribution:'block' deliberately: the case under test is
+// the null-agent_type label fallback, not attribution suppression (that is
+// pinned separately in scripts/tests/h22-attribution.test.mjs), so the entry
+// must be the precise shape that is eligible to warn at all.
 test('H26 robustness: a live entry with agent_type null still warns, labeled with the "agent" fallback — never dropped, never "null:<id>"', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [
-      { agent_id: 'sub-1', agent_type: null, session_id: 's1', files: ['src/shared/util.mjs'], at: agoISO(0) },
+      { agent_id: 'sub-1', agent_type: null, session_id: 's1', files: ['src/shared/util.mjs'], at: agoISO(0), attribution: 'block' },
     ]);
     const r = runHook(taskInput(dir, { prompt: 'please modify src/shared/util.mjs today' }), dir);
     assertOverlapWarning(r, { paths: ['src/shared/util.mjs'], entries: [['agent', 'sub-1']] });

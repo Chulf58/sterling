@@ -599,3 +599,146 @@ test('H1 (source=startup): no dispatch-register.json present is a silent no-op, 
     cleanup();
   }
 });
+
+// ===========================================================================
+// PER-BLOCK ATTRIBUTION — adopted review-finding pins (decision
+// h22-per-block-attribution 5d3747c1). These tests are authored BLIND to
+// scripts/hooks/h22-dispatch-register.mjs from the spec alone, while a fixer
+// implements per-block attribution in parallel. TODAY (pre-fix) h22 writes no
+// `attribution` field at all and only ever looks at the LAST dispatch-bearing
+// message — every RED assertion below is red against that today-behavior;
+// every test is expected to go green once the fix lands.
+//
+// Real Task/Agent tool_use blocks carry `subagent_type` in `input` alongside
+// `prompt` (mirrors scripts/tests/h22-attribution.test.mjs's taskBlock, kept
+// local here since the file's own `taskBlock` helper above has no
+// subagent_type field and is left untouched).
+// ===========================================================================
+
+const taskBlockTyped = (name, subagent_type, prompt) => ({ type: 'tool_use', name, input: { subagent_type, prompt } });
+
+// --------------------------- PIN A: null-path never 'block' ---------------------------
+// PIN A (decision h22-per-block-attribution 5d3747c1): stdin.agent_type
+// absent/null/non-string must mint attribution:'union', never 'block' — even
+// when the last dispatching message contains exactly one Task block that
+// itself lacks input.subagent_type (undefined must not match undefined).
+//
+// EXPECTED RED today: h22 writes no `attribution` field at all, so
+// `entry.attribution` is `undefined` in every case below, failing
+// `assert.equal(entry.attribution, 'union', ...)`.
+
+test("H22 PIN A (null-path never 'block', agent_type absent): a sole last-message block lacking subagent_type never wins attribution:block when stdin.agent_type is absent", () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinA-absent.mjs')])]);
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinA-absent', agent_type: undefined }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-pinA-absent');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(entry.attribution, 'union', 'absent stdin.agent_type must never mint attribution:block, even against a lone type-less block');
+    assert.deepEqual(entry.files, ['src/pinA-absent.mjs'], 'the union fallback still recovers the last message\'s block files');
+  } finally {
+    cleanup();
+  }
+});
+
+test("H22 PIN A (null-path never 'block', agent_type null): a sole last-message block lacking subagent_type never wins attribution:block when stdin.agent_type is null", () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinA-null.mjs')])]);
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinA-null', agent_type: null }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-pinA-null');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(entry.attribution, 'union', 'null stdin.agent_type must never mint attribution:block, even against a lone type-less block');
+    assert.deepEqual(entry.files, ['src/pinA-null.mjs'], 'the union fallback still recovers the last message\'s block files');
+  } finally {
+    cleanup();
+  }
+});
+
+test("H22 PIN A (null-path never 'block', agent_type non-string): a sole last-message block lacking subagent_type never wins attribution:block when stdin.agent_type is a non-string value", () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinA-nonstring.mjs')])]);
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinA-nonstring', agent_type: 42 }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-pinA-nonstring');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(entry.attribution, 'union', 'a non-string stdin.agent_type must never mint attribution:block, even against a lone type-less block');
+    assert.deepEqual(entry.files, ['src/pinA-nonstring.mjs'], 'the union fallback still recovers the last message\'s block files');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- PIN B: block without subagent_type never matches ---------------------------
+// PIN B (decision h22-per-block-attribution 5d3747c1): a tool_use block whose
+// input lacks subagent_type must never produce attribution:'block' for any
+// starting agent; with stdin.agent_type a real string and no string-equal
+// block match anywhere, the entry falls back to attribution:'union' over the
+// last message's blocks.
+//
+// EXPECTED RED today: h22 writes no `attribution` field at all, so
+// `entry.attribution` is `undefined`, failing
+// `assert.equal(entry.attribution, 'union', ...)`.
+
+test("H22 PIN B (block without subagent_type never matches): a real stdin.agent_type with a sole last-message block lacking subagent_type falls back to attribution:union, never 'block'", () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinB.mjs')])]);
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinB', agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-pinB');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(entry.attribution, 'union', 'a block lacking subagent_type can never produce attribution:block, even as the sole block in the last message');
+    assert.deepEqual(entry.files, ['src/pinB.mjs'], 'the union fallback still recovers the last message\'s block files');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------- PIN C: prompt-less message does not truncate the walk ---------------------------
+// PIN C (decision h22-per-block-attribution 5d3747c1): when the LAST
+// dispatching assistant message has zero type-matching blocks, an
+// INTERMEDIATE earlier dispatching assistant message exists whose Task
+// blocks all lack a string prompt, and a still-earlier dispatching message
+// contains exactly one block whose subagent_type string-equals
+// stdin.agent_type — the backward walk must reach that still-earlier
+// message: the entry gets that block's files and attribution:'block'.
+//
+// EXPECTED RED today: h22 only ever looks at the LAST dispatching message
+// (no backward walk exists yet), so `entry.files` would be
+// ['src/pinC-last.mjs'] (extracted from the last message, unioning all its
+// blocks regardless of type) instead of ['src/pinC-early.mjs'], failing the
+// `assert.deepEqual(entry.files, ['src/pinC-early.mjs'], ...)` assertion; and
+// `entry.attribution` is `undefined`, failing the attribution assertion too.
+
+test('H22 PIN C (prompt-less intermediate message does not truncate the backward walk): zero matches in the last message + a prompt-less intermediate dispatching message + a still-earlier single type-matching block — the walk reaches the still-earlier block', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeParentTranscript(dir, [
+      taskLine([taskBlockTyped('Task', 'coder', 'M1: fix up src/pinC-early.mjs')]), // M1 — still-earlier, sole type match for stdin.agent_type='coder'
+      textLine('conductor narrates between dispatches'),
+      taskLine([{ type: 'tool_use', name: 'Task', input: { subagent_type: 'test-writer' } }]), // M2 — intermediate, mismatched type AND no prompt field at all
+      textLine('conductor narrates again'),
+      taskLine([taskBlockTyped('Task', 'reviewer', 'M3: review src/pinC-last.mjs')]), // M3 — last dispatching message, zero coder matches
+    ]);
+
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinC', agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-pinC');
+    assert.ok(entry, 'entry was appended');
+    assert.deepEqual(entry.files, ['src/pinC-early.mjs'], "the walk reaches M1's matching block, skipping past M2's prompt-less non-match and M3's non-match");
+    assert.ok(!entry.files.includes('src/pinC-last.mjs'), 'M3 (the last message, zero type matches) never contributes files here');
+    assert.equal(entry.attribution, 'block', 'a single type-matching block found by walking back past a prompt-less intermediate message is still precise block attribution');
+  } finally {
+    cleanup();
+  }
+});

@@ -109,6 +109,7 @@ const input = readStdin();
 const outgoing = outgoingProposalText(input.tool_input);
 if (!outgoing) allow(); // nothing readable on this surface
 const isQuestion = Array.isArray(input.tool_input?.questions);
+const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');
 
 const store = openStore(input.cwd);
 if (!store) allow(); // not a Sterling project — no ceremony (P1)
@@ -198,6 +199,10 @@ try {
       `Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them ` +
       `already decides the question, the pick just manufactured a contradiction with a settled ruling — ` +
       `disclose the record to the user and re-affirm before acting on the answer.`
+    : isConsult
+    ? `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to CONSULT the sparring partner (codex). ` +
+      `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
+      `Path-scoped delivery cannot find these. Check them BEFORE the consult goes out — a bad premise sent to an external model is still a bad premise.`
     : `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to dispatch '${input.tool_input?.subagent_type ?? 'an agent'}'. ` +
       `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
       `Path-scoped delivery cannot find these. Check them BEFORE the brief goes out — a fan-out multiplies a bad premise by N.`;
