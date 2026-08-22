@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync4, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync } from "node:fs";
+import { existsSync as existsSync4, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, rmdirSync, rmSync, statSync as statSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -4875,7 +4875,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5051,6 +5051,36 @@ function lastDispatchPrompts(transcriptPath) {
 }
 
 // scripts/hooks/h22-dispatch-register.mjs
+function withLedgerLock(sterlingDir, run) {
+  const lockPath = join2(sterlingDir, "review-ledger.lock");
+  let acquired = false;
+  for (let i = 0; i < 200 && !acquired; i++) {
+    try {
+      mkdirSync(lockPath);
+      acquired = true;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        if (Date.now() - statSync2(lockPath).mtimeMs > 1e4) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+  if (!acquired) {
+    process.stderr.write("H22: review-ledger lock timed out \u2014 proceeding UNLOCKED (degraded-loud); a concurrent writer may lose this update\n");
+    return run();
+  }
+  try {
+    return run();
+  } finally {
+    rmdirSync(lockPath);
+  }
+}
 var input = readStdin();
 try {
   if (!existsSync4(join2(input.cwd, ".sterling", "sterling.db"))) allow();
@@ -5087,6 +5117,26 @@ try {
       at: (/* @__PURE__ */ new Date()).toISOString()
     });
   } else {
+    const departing = entries.find((e) => e.agent_id === input.agent_id);
+    if (departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-")) {
+      const sterlingDir = join2(input.cwd, ".sterling");
+      withLedgerLock(sterlingDir, () => {
+        const ledgerPath = join2(sterlingDir, "review-ledger.json");
+        let ledger = [];
+        try {
+          if (existsSync4(ledgerPath)) {
+            const raw = JSON.parse(readFileSync2(ledgerPath, "utf8"));
+            if (Array.isArray(raw)) ledger = raw;
+          }
+        } catch {
+          ledger = [];
+        }
+        ledger.push({ agent_type: departing.agent_type, files: departing.files, at: departing.at });
+        const ledgerTmpPath = join2(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
+        writeFileSync(ledgerTmpPath, JSON.stringify(ledger));
+        renameSync(ledgerTmpPath, ledgerPath);
+      });
+    }
     entries = entries.filter((e) => e.agent_id !== input.agent_id);
   }
   const transient = join2(input.cwd, ".sterling", "transient");
@@ -5096,6 +5146,6 @@ try {
   renameSync(tmpPath, registerPath);
   allow();
 } catch (e) {
-  const consequence = input.hook_event_name === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;
+  const consequence = input.hook_event_name === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start \u2014 and if this was a reviewer-class dispatch, its receipt may never have reached the durable review ledger, so a later scripts/commit-reviewed.mjs invocation may wrongly refuse for lack of review evidence` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;
   warnNonBlocking(`H22: dispatch register update failed: ${e && e.message || e} \u2014 ${consequence}`);
 }
