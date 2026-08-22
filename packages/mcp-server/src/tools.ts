@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
+import { ZodError } from 'zod';
 import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
@@ -590,6 +591,64 @@ export class SterlingTools {
   }
 
   /**
+   * Caller-facing field path for a zod issue: numeric segments render as
+   * `[n]` (array indices), string segments join with '.' — 'history[19]',
+   * 'dependencies.relies_on[0]'. Never the raw ["history",19] zod form.
+   */
+  private static renderIssuePath(path: (string | number)[]): string {
+    let out = '';
+    for (const seg of path) {
+      out = typeof seg === 'number' ? `${out}[${seg}]` : out ? `${out}.${seg}` : String(seg);
+    }
+    return out || '(root)';
+  }
+
+  /**
+   * Render a zod schema-validation failure in this surface's own idiom
+   * (board 03c92e2a; decision d0b88e27 — a refusal names its DISCRIMINATOR,
+   * not just its rule) instead of leaking the raw issue array. Per issue:
+   * the caller-facing field path (renderIssuePath), what was RECEIVED vs
+   * EXPECTED, and — when the failing element itself should have been an
+   * object (an array-of-objects entry, e.g. a bad history/files/current_ac
+   * element) — that element's expected shape enumerated by name/type/
+   * required-ness. The shape and any enum's permitted values are pulled
+   * from schemaFor(type) — the SAME schema-walk knowledge_schema projects
+   * (decision 9948475b) — never a second hand-written description, so this
+   * cannot drift from what knowledge_schema itself reports.
+   */
+  private renderValidationFailure(err: ZodError, type: string, op: string): Error {
+    const described = schemaFor(type);
+    const fieldsByName = new Map((described?.fields ?? []).map((f) => [f.name, f]));
+    const parts = err.issues.map((issue) => {
+      const path = SterlingTools.renderIssuePath(issue.path as (string | number)[]);
+      if (issue.code === 'invalid_enum_value') {
+        const topField = typeof issue.path[0] === 'string' ? fieldsByName.get(issue.path[0] as string) : undefined;
+        const options = topField?.enum_values && topField.enum_values.length ? topField.enum_values : (issue.options as unknown[] | undefined)?.map(String) ?? [];
+        return `${path}: received '${String(issue.received)}', expected one of: ${options.join(', ')}`;
+      }
+      if (issue.code === 'invalid_type') {
+        let text = `${path}: received ${issue.received}, expected ${issue.expected}`;
+        if (issue.expected === 'object' && issue.path.length >= 2) {
+          const ownerName = issue.path[issue.path.length - 2];
+          const owner = typeof ownerName === 'string' ? fieldsByName.get(ownerName) : undefined;
+          if (owner?.element_fields?.length) {
+            const shape = owner.element_fields
+              .map(
+                (ef) =>
+                  `${ef.name}: ${ef.type}${ef.enum_values?.length ? ` (one of: ${ef.enum_values.join(', ')})` : ''} (${ef.required ? 'required' : 'optional'})`
+              )
+              .join(', ');
+            text += ` — expected shape: {${shape}}`;
+          }
+        }
+        return text;
+      }
+      return `${path}: ${issue.message}`;
+    });
+    return new Error(`${op}: '${type}' failed validation — ${parts.join('; ')}`);
+  }
+
+  /**
    * knowledge_schema — ask what a type requires instead of guessing (board
    * 7acfbe48). Read-only, derived from the registered zod schema, so it cannot
    * drift from what a write will actually accept. Listing the registered type
@@ -755,7 +814,13 @@ export class SterlingTools {
     // location). Checked BEFORE schema.parse so the error names the actual
     // mistake instead of a required field that went missing because of it.
     this.refuseUnknownFields(type, candidate);
-    const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_create');
+      throw err;
+    }
     const skipped: SkippedCheck[] = [];
 
     if (type === 'anti_pattern') {
@@ -2729,43 +2794,53 @@ export class SterlingTools {
     // feature_link matching, already-drained traces) — the store's own check is
     // the transactional backstop, not the explanation.
     let updated: DurableRecord;
-    if (replaced) {
-      // The attestation path keeps expected_version meaningful by checking it
-      // here: store.supersede has no CAS token of its own, and silently
-      // ignoring a caller's token would be the exact failure the token exists
-      // to prevent.
-      if (expectedVersion !== undefined && previousVersion !== undefined && expectedVersion !== previousVersion) {
-        throw new Error(
-          `${toolName}: stale expected_version — the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ` +
-            `${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`
-        );
+    // The store's own validateRecord re-parses the merged record (`next`) and,
+    // on a caller-supplied bad element (e.g. a history entry passed as a bare
+    // string), throws zod's raw ZodError across the store boundary — the
+    // knowledge_append/knowledge_create shared refusal-shape contract (board
+    // 03c92e2a) applies here too, so it is caught and re-rendered the same way.
+    try {
+      if (replaced) {
+        // The attestation path keeps expected_version meaningful by checking it
+        // here: store.supersede has no CAS token of its own, and silently
+        // ignoring a caller's token would be the exact failure the token exists
+        // to prevent.
+        if (expectedVersion !== undefined && previousVersion !== undefined && expectedVersion !== previousVersion) {
+          throw new Error(
+            `${toolName}: stale expected_version — the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ` +
+              `${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`
+          );
+        }
+        updated = this.store.supersede(old.id, next);
+        for (const claim of claims) {
+          this.store.remove(claim.id, ts);
+        }
+      } else {
+        // EVERY in-place write is CAS-GUARDED, not only the ones that passed a
+        // token (review finding): this tool layer is a READ-MODIFY-WRITE — `next`
+        // is merged from the `old` read at the top of this call — so the version
+        // that read observed IS the write's precondition. Without it two writers
+        // against one store (MCP server + TUI, both importing packages/store) can
+        // each merge from version n and the second silently overwrites the first's
+        // fields: a LOST UPDATE nobody sees, rather than a conflict. Covers
+        // knowledge_append and knowledge_edit too, whose merge is entirely
+        // server-side and had no token to pass.
+        //
+        // A caller-supplied expected_version still WINS — it is a stricter
+        // statement about what the CALLER read, and a mismatch between the two is
+        // itself a conflict worth refusing. A conflict surfaces as the store's own
+        // version-conflict refusal, naming both versions with nothing written; no
+        // retry loop, deliberately (a silent retry would re-merge onto a body the
+        // caller never saw, which is the lost update by another route).
+        const cas = expectedVersion ?? previousVersion;
+        updated = this.store.updateRecord(old.id, next, {
+          ...(cas !== undefined ? { expected_version: cas } : {}),
+          ...(claims.length ? { resolves: claims.map((claim) => claim.id) } : {}),
+        });
       }
-      updated = this.store.supersede(old.id, next);
-      for (const claim of claims) {
-        this.store.remove(claim.id, ts);
-      }
-    } else {
-      // EVERY in-place write is CAS-GUARDED, not only the ones that passed a
-      // token (review finding): this tool layer is a READ-MODIFY-WRITE — `next`
-      // is merged from the `old` read at the top of this call — so the version
-      // that read observed IS the write's precondition. Without it two writers
-      // against one store (MCP server + TUI, both importing packages/store) can
-      // each merge from version n and the second silently overwrites the first's
-      // fields: a LOST UPDATE nobody sees, rather than a conflict. Covers
-      // knowledge_append and knowledge_edit too, whose merge is entirely
-      // server-side and had no token to pass.
-      //
-      // A caller-supplied expected_version still WINS — it is a stricter
-      // statement about what the CALLER read, and a mismatch between the two is
-      // itself a conflict worth refusing. A conflict surfaces as the store's own
-      // version-conflict refusal, naming both versions with nothing written; no
-      // retry loop, deliberately (a silent retry would re-merge onto a body the
-      // caller never saw, which is the lost update by another route).
-      const cas = expectedVersion ?? previousVersion;
-      updated = this.store.updateRecord(old.id, next, {
-        ...(cas !== undefined ? { expected_version: cas } : {}),
-        ...(claims.length ? { resolves: claims.map((claim) => claim.id) } : {}),
-      });
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, old.type, toolName);
+      throw err;
     }
     this.repointPromotionReview(chain, updated.id, ts);
     // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
