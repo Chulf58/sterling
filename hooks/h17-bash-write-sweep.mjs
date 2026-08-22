@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, realpathSync } from "node:fs";
-import { join as join2, dirname as dirname3, relative } from "node:path";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { join as join2, dirname as dirname3, relative, resolve as resolve2, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -6869,6 +6869,97 @@ function dirtyTrackedRels(cwd2) {
   }
   return rels;
 }
+function callKey(toolUseId) {
+  if (typeof toolUseId !== "string") return null;
+  const trimmed = toolUseId.trim();
+  if (!trimmed) return null;
+  return createHash("sha256").update(trimmed).digest("hex").slice(0, 32);
+}
+function stateFile(cwd2, runId, key) {
+  return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}-call-${key}.json`);
+}
+function indexEntriesFor(cwd2, rels) {
+  const map = /* @__PURE__ */ new Map();
+  if (!rels.length) return map;
+  const r = spawnSync("git", ["-C", cwd2, "ls-files", "--stage", "-z", "--", ...rels], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (r.error || r.status !== 0) {
+    throw new Error(`git ls-files --stage -z failed (status ${r.status}: ${r.stderr || r.error})`);
+  }
+  const staged = /* @__PURE__ */ new Map();
+  for (const tok of (r.stdout || "").split("\0")) {
+    if (!tok) continue;
+    const tab = tok.indexOf("	");
+    if (tab < 0) throw new Error(`git ls-files --stage -z produced an unparseable entry ('${tok.slice(0, 60)}')`);
+    const p = tok.slice(tab + 1);
+    const list = staged.get(p) ?? [];
+    list.push(tok.slice(0, tab).trim().replace(/\s+/g, ":"));
+    staged.set(p, list);
+  }
+  for (const [p, list] of staged) map.set(p, list.sort().join(","));
+  return map;
+}
+function pathState(cwd2, rel, idx) {
+  const abs = join2(cwd2, rel);
+  const index = idx.get(rel) ?? null;
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return { exists: false, index };
+    throw e;
+  }
+  const mode = st.mode & 4095;
+  if (st.isSymbolicLink()) return { exists: true, type: "symlink", mode, index, target: readlinkSync(abs) };
+  if (st.isFile()) return { exists: true, type: "file", mode, index, bytes: readFileSync2(abs).toString("base64") };
+  if (st.isDirectory()) {
+    const children = {};
+    for (const name of readdirSync(abs)) {
+      const childRel = `${rel}/${name}`;
+      children[childRel] = pathState(cwd2, childRel, idx);
+    }
+    return { exists: true, type: "dir", mode, index, children };
+  }
+  throw new Error(`unsupported file type at '${rel}' \u2014 cannot snapshot its state, so this command's writes are unverifiable`);
+}
+function sameState(a, b) {
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (a.exists !== b.exists) return false;
+  if (a.index !== b.index) return false;
+  if (!a.exists) return true;
+  if (a.type !== b.type) return false;
+  if (a.mode !== b.mode) return false;
+  if (a.type === "symlink") return a.target === b.target;
+  if (a.type === "file") return a.bytes === b.bytes;
+  if (a.type === "dir") {
+    const ak = Object.keys(a.children ?? {}).sort();
+    const bk = Object.keys(b.children ?? {}).sort();
+    if (ak.length !== bk.length) return false;
+    for (let i = 0; i < ak.length; i++) {
+      if (ak[i] !== bk[i]) return false;
+      if (!sameState(a.children[ak[i]], b.children[bk[i]])) return false;
+    }
+    return true;
+  }
+  return false;
+}
+function validateStateKey(cwd2, key) {
+  if (typeof key !== "string" || key.length === 0) return null;
+  if (key.includes("\0")) return null;
+  const fwd = key.replace(/\\/g, "/");
+  if (fwd.startsWith("/") || /^[A-Za-z]:/.test(fwd)) return null;
+  if (fwd.split("/").includes("..")) return null;
+  const root = resolve2(cwd2);
+  const abs = resolve2(root, fwd);
+  if (abs !== root && !abs.startsWith(root + sep)) return null;
+  return fwd;
+}
+function isDirectoryAt(cwd2, rel) {
+  try {
+    return statSync(join2(cwd2, rel)).isDirectory();
+  } catch {
+    return false;
+  }
+}
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
 }
@@ -7050,7 +7141,15 @@ if (event === "PreToolUse") {
       store?.close();
     }
     writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
-    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyTrackedRels(cwd)));
+    const dirtyRels = dirtyTrackedRels(cwd);
+    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyRels));
+    const key = callKey(input.tool_use_id);
+    if (key) {
+      const idx = indexEntriesFor(cwd, dirtyRels);
+      const states = {};
+      for (const rel of dirtyRels) states[rel] = pathState(cwd, rel, idx);
+      writeFileSync(stateFile(cwd, runId, key), JSON.stringify(states));
+    }
     allow();
   } catch (e) {
     deny(environmentDefectDenial("H17", `[pre] Baseline snapshot failed (${e && e.message || e}) \u2014 failing closed (P5).`, { agentId: input.agent_id }));
@@ -7098,8 +7197,11 @@ try {
   store?.close();
   const violations = [];
   const preExisting = [];
+  const changedPreDirty = [];
   const restoredPaths = [];
   let preDirty = /* @__PURE__ */ new Set();
+  let preState = null;
+  let degradedReason = null;
   if (!storeErr) {
     const dPath = dirtyFile(cwd, runId);
     if (!existsSync3(dPath)) {
@@ -7120,29 +7222,92 @@ try {
         })
       );
     }
+    const key = callKey(input.tool_use_id);
+    if (!key) {
+      degradedReason = "this hook call carries no usable `tool_use_id` (absent, empty, or not a string), so there is no per-call Pre-STATE record to compare against \u2014 and H17 will NOT fall back to a per-run key, because one shared record lets a second lane adopt the first lane's tampered bytes as its own baseline";
+    } else {
+      const sPath = stateFile(cwd, runId, key);
+      if (!existsSync3(sPath)) {
+        deny(
+          environmentDefectDenial(
+            "H17",
+            `per-call Pre-STATE record '${sPath}' absent at Post \u2014 the pre-existing dirt cannot be compared against its state at Pre; failing closed (P5). Same causes as a missing attribution record, plus one more: the tool_use_id carried at Pre and at Post must be the SAME Bash call's.`,
+            { agentId: input.agent_id }
+          )
+        );
+      }
+      let recorded;
+      try {
+        recorded = JSON.parse(readFileSync2(sPath, "utf8"));
+      } catch {
+        deny(
+          environmentDefectDenial("H17", `per-call Pre-STATE record '${sPath}' corrupt/unparseable \u2014 cannot compare pre-existing dirt; failing closed (P5).`, {
+            agentId: input.agent_id
+          })
+        );
+      }
+      if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) {
+        deny(
+          environmentDefectDenial("H17", `per-call Pre-STATE record '${sPath}' is not a path->state object \u2014 cannot compare pre-existing dirt; failing closed (P5).`, {
+            agentId: input.agent_id
+          })
+        );
+      }
+      preState = {};
+      for (const k of Object.keys(recorded)) {
+        const norm = validateStateKey(cwd, k);
+        if (!norm) {
+          deny(
+            `H17: crafted per-call Pre-STATE record key rejected ('${k}' \u2014 not a repo-relative path inside the project); no write performed, failing closed (P5).`
+          );
+        }
+        preState[norm] = recorded[k];
+      }
+      try {
+        rmSync(sPath, { force: true });
+      } catch {
+      }
+    }
   }
   const status = spawnSync("git", ["-C", cwd, "status", "--porcelain", "-z"], { encoding: "utf8" });
   if (status.error || status.status !== 0) {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
   }
-  for (const entry of parsePorcelainZ(status.stdout)) {
+  const postEntries = parsePorcelainZ(status.stdout);
+  let postIndex = /* @__PURE__ */ new Map();
+  if (preState) {
+    const postRels = [];
+    for (const entry of postEntries) {
+      for (const p of entry.paths) {
+        const rel = p.replace(/\/+$/, "");
+        if (rel) postRels.push(rel);
+      }
+    }
+    postIndex = indexEntriesFor(cwd, postRels);
+  }
+  for (const entry of postEntries) {
     for (const p of entry.paths) {
       const rel = p.replace(/\/+$/, "");
       if (!rel) continue;
       const isViolation = isEnforcementSurface(rel) || matchesGlob(rel, "hooks/**") || brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny;
       if (isViolation) {
         if (preDirty.has(rel)) {
-          preExisting.push(rel);
+          if (!preState) {
+            preExisting.push(rel);
+            continue;
+          }
+          const wasState = preState[rel];
+          if (wasState === void 0) {
+            throw new Error(
+              `per-call Pre-STATE record has no entry for the pre-dirty path '${rel}' \u2014 the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
+            );
+          }
+          if (sameState(wasState, pathState(cwd, rel, postIndex))) continue;
+          if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
+          changedPreDirty.push(rel);
           continue;
         }
-        const isDir = (() => {
-          try {
-            return statSync(join2(cwd, rel)).isDirectory();
-          } catch {
-            return false;
-          }
-        })();
-        if (isDir ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
+        if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
         restoreTracked(cwd, p);
         violations.push(rel);
         restoredPaths.push(rel);
@@ -7217,8 +7382,15 @@ try {
       stampFailedPath = verdict.failedPath;
     }
   }
-  if (violations.length || preExisting.length) {
+  if (violations.length || preExisting.length || changedPreDirty.length) {
     const parts = [];
+    if (changedPreDirty.length) {
+      parts.push(
+        `H17: PRE-EXISTING dirty path(s) whose state CHANGED inside this command's window, and which are therefore NOT verifiable as untouched: ${changedPreDirty.join(
+          ", "
+        )}. The state recorded at PreToolUse (existence, file type, mode, symlink target, index entry, bytes) differs from the state now, and no fresh conductor stamp attests the current state. These paths are deliberately NOT reverted \u2014 restoring a pre-image could clobber a concurrent lane's legitimate write \u2014 so the bytes stand as they are; exit contract-violated, never route around.`
+      );
+    }
     if (violations.length) {
       parts.push(
         `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
@@ -7228,7 +7400,11 @@ try {
       parts.push(
         environmentDefectDenial(
           "H17",
-          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + (stampFailedPath ? ` A conductor-attested stamp exists but does not attest '${stampFailedPath}' \u2014 no exemption.` : ""),
+          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
+          // landed, this blanket denial fires ONLY when there is no record to
+          // compare against — so it must say which input it lacked, or the
+          // degrade is silent and indistinguishable from the old behaviour.
+          (degradedReason ? ` This blanket denial is a DEGRADED FALLBACK: ${degradedReason}.` : "") + (stampFailedPath ? ` A conductor-attested stamp exists but does not attest '${stampFailedPath}' \u2014 no exemption.` : ""),
           { agentId: input.agent_id }
         )
       );

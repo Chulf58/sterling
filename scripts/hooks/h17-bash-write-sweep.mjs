@@ -21,8 +21,20 @@
 // resolved no longer skips the (A) restore sweep entirely — it is deferred
 // (captured, not thrown) so the tracked-restore + mint attempt still run on
 // what git alone can tell it, and the original deny still fires after.
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync, realpathSync } from 'node:fs';
-import { join, dirname, relative } from 'node:path';
+// v3.3 (decision h17-pre-state-snapshot-closes-false-denial-not-the-restore-
+// hole, 7021526c): Pre also snapshots per-path STATE for everything git reports
+// dirty, into a PER-CALL record keyed by sha256(tool_use_id), and Post COMPARES
+// it. A pre-dirty path therefore no longer denies merely for being dirty —
+// (1) state UNCHANGED -> allow, verified by OBSERVATION, no stamp consulted;
+// (2) CHANGED -> the fresh stamp is consulted per path against the CURRENT
+// state (4d9b76e8's rule is general) -> exact match allows; (3) otherwise deny.
+// NEITHER arm restores: a pre-image restore across overlapping Bash windows
+// would clobber a concurrent lane's legitimate write (board 0b848342 finding 1,
+// deliberately deferred). No usable tool_use_id -> DEGRADED-LOUD: today's
+// blanket pre-existing denial, naming tool_use_id as the reason, never a
+// silent per-run key (which would let one lane adopt another's tampered bytes).
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync, lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { join, dirname, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -79,6 +91,150 @@ function dirtyTrackedRels(cwd) {
     }
   }
   return rels;
+}
+
+// ---------------------------------------------------------------------------
+// The (A) PER-CALL Pre-STATE record (decision h17-pre-state-snapshot-closes-
+// false-denial-not-the-restore-hole, 7021526c). The paths-only record above let
+// Post see only THAT a path was dirty at Pre, never whether the audited command
+// touched it — which is the whole (and only) warrant for the blanket
+// pre-existing denial. This record carries each dirty path's STATE so Post can
+// compare, and the denial's warrant dissolves for a path it can verify itself.
+// ---------------------------------------------------------------------------
+
+// KEYED PER BASH CALL, never per run: if lane B's Pre lands after lane A's
+// command already tampered, a shared per-run record adopts the tampered bytes
+// as B's baseline and Post A then compares them against themselves and ALLOWS a
+// real tamper. sha256 of the platform's tool_use_id is the per-call
+// discriminator. Returns null when the id is UNUSABLE — absent, not a string,
+// or empty/whitespace (a presence check would hash a constant, i.e. a per-run
+// key under another name, reopening exactly that false allow). A null key is a
+// degraded-LOUD fallback at the call site, never a silent per-run key.
+function callKey(toolUseId) {
+  if (typeof toolUseId !== 'string') return null;
+  const trimmed = toolUseId.trim();
+  if (!trimmed) return null;
+  return createHash('sha256').update(trimmed).digest('hex').slice(0, 32);
+}
+
+function stateFile(cwd, runId, key) {
+  return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}-call-${key}.json`);
+}
+
+// Current INDEX entries (`mode:oid:stage`, conflict stages joined) for the given
+// repo-relative paths, as a Map path -> string. Its own term in the comparison
+// because a staged-index-only change (`git add`) moves nothing in the worktree:
+// bytes, type and mode all still compare equal, and the porcelain XY code can be
+// held constant, so without this term the change is invisible. Any git failure
+// throws -> AC9 fail-closed.
+function indexEntriesFor(cwd, rels) {
+  const map = new Map();
+  if (!rels.length) return map;
+  const r = spawnSync('git', ['-C', cwd, 'ls-files', '--stage', '-z', '--', ...rels], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (r.error || r.status !== 0) {
+    throw new Error(`git ls-files --stage -z failed (status ${r.status}: ${r.stderr || r.error})`);
+  }
+  const staged = new Map();
+  for (const tok of (r.stdout || '').split('\0')) {
+    if (!tok) continue;
+    const tab = tok.indexOf('\t');
+    if (tab < 0) throw new Error(`git ls-files --stage -z produced an unparseable entry ('${tok.slice(0, 60)}')`);
+    const p = tok.slice(tab + 1);
+    const list = staged.get(p) ?? [];
+    list.push(tok.slice(0, tab).trim().replace(/\s+/g, ':')); // "<mode> <oid> <stage>" -> "mode:oid:stage"
+    staged.set(p, list);
+  }
+  for (const [p, list] of staged) map.set(p, list.sort().join(','));
+  return map;
+}
+
+// One path's STATE. "State" is deliberately NOT bytes alone: each term below is
+// an escape a bytes-only comparison would miss and today's blanket denial does
+// catch — a mode flip with identical bytes; a regular file replaced by a symlink
+// whose target holds identical bytes; a symlink re-pointed at another
+// identical-content target; a staged-index-only change. BYTES ARE BASE64, never
+// a UTF-8 string: two different invalid-UTF-8 sequences can decode to the same
+// U+FFFD, so a text snapshot is lossy exactly where tampering hides. A symlink's
+// target is read with readlink and NEVER followed. An unsupported file type
+// (fifo, socket, device) throws -> AC9 fail-closed, never a silent "unchanged".
+function pathState(cwd, rel, idx) {
+  const abs = join(cwd, rel);
+  const index = idx.get(rel) ?? null;
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { exists: false, index };
+    throw e; // any OTHER lstat error is unverifiable -> AC9 fail-closed
+  }
+  const mode = st.mode & 0o7777; // PERMISSION bits only; the type is its own term
+  if (st.isSymbolicLink()) return { exists: true, type: 'symlink', mode, index, target: readlinkSync(abs) };
+  if (st.isFile()) return { exists: true, type: 'file', mode, index, bytes: readFileSync(abs).toString('base64') };
+  if (st.isDirectory()) {
+    // An untracked directory reaches the sweep as its COLLAPSED path (`?? dir/`),
+    // so comparing the directory alone would let a write to a file inside it pass
+    // as unchanged. Recurse: every child is a state of its own.
+    const children = {};
+    for (const name of readdirSync(abs)) {
+      const childRel = `${rel}/${name}`;
+      children[childRel] = pathState(cwd, childRel, idx);
+    }
+    return { exists: true, type: 'dir', mode, index, children };
+  }
+  throw new Error(`unsupported file type at '${rel}' — cannot snapshot its state, so this command's writes are unverifiable`);
+}
+
+// Term-by-term equality. Each term is checked SEPARATELY and observably (never
+// folded into one opaque digest) so that a defect in any single term is
+// diagnosable — and so the mutation battery this slice is verified by can tell
+// the terms apart. Anything unrecognized is NOT equal (fail-closed).
+function sameState(a, b) {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (a.exists !== b.exists) return false; // EXISTENCE
+  if (a.index !== b.index) return false; // INDEX ENTRY (stage, mode, blob OID)
+  if (!a.exists) return true;
+  if (a.type !== b.type) return false; // FILE TYPE
+  if (a.mode !== b.mode) return false; // MODE
+  if (a.type === 'symlink') return a.target === b.target; // SYMLINK TARGET (readlink)
+  if (a.type === 'file') return a.bytes === b.bytes; // BYTES (base64, lossless)
+  if (a.type === 'dir') {
+    const ak = Object.keys(a.children ?? {}).sort();
+    const bk = Object.keys(b.children ?? {}).sort();
+    if (ak.length !== bk.length) return false;
+    for (let i = 0; i < ak.length; i++) {
+      if (ak[i] !== bk[i]) return false;
+      if (!sameState(a.children[ak[i]], b.children[bk[i]])) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+// Validate a per-call record key BEFORE the record is trusted: repo-relative
+// POSIX only, no absolute path, no drive prefix, no NUL, no `..` traversal, and
+// containment under the project root PROVEN by resolution. The record is not a
+// restore source in this slice and must never become one by accident — same
+// posture as validateBaselineKey (AC10), and the same reasoning: the audited
+// agent can write arbitrary bytes into os.tmpdir(), so a crafted record is
+// conduct, not environment.
+function validateStateKey(cwd, key) {
+  if (typeof key !== 'string' || key.length === 0) return null;
+  if (key.includes('\0')) return null;
+  const fwd = key.replace(/\\/g, '/');
+  if (fwd.startsWith('/') || /^[A-Za-z]:/.test(fwd)) return null; // absolute / drive prefix
+  if (fwd.split('/').includes('..')) return null; // traversal
+  const root = resolve(cwd);
+  const abs = resolve(root, fwd);
+  if (abs !== root && !abs.startsWith(root + sep)) return null; // containment
+  return fwd;
+}
+
+function isDirectoryAt(cwd, rel) {
+  try {
+    return statSync(join(cwd, rel)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function toRel(cwd, abs) {
@@ -151,6 +307,12 @@ function parsePorcelainZ(out) {
 // attested work-in-flight rather than an unverifiable defect. FAIL-CLOSED:
 // any error reading/parsing the stamp, any unlisted path, or any hash mismatch
 // yields no exemption — never partial credit for a subset that DID match.
+// NARROWED by decision 7021526c: `preExistingRels` is now populated ONLY on the
+// degraded fallback (no per-call Pre-STATE record to compare against), so this
+// all-or-nothing consult governs the degraded path alone. A pre-dirty path whose
+// state genuinely CHANGED is attested PER PATH by stampAttestsCurrentBytes /
+// stampAttestsDirectory in the sweep, because one unstamped unchanged path must
+// never collapse attestation for a changed stamped one.
 function verifyStampAttestation(cwd, preExistingRels) {
   try {
     const stampPath = join(cwd, '.sterling', 'transient', 'enforcement-stamp.json');
@@ -330,7 +492,22 @@ if (event === 'PreToolUse') {
     writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
     // Attribution record for the (A) branch: without it, Post can only see that a
     // tracked path is dirty NOW, not whether this command made it so.
-    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyTrackedRels(cwd)));
+    const dirtyRels = dirtyTrackedRels(cwd);
+    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyRels));
+    // PER-CALL Pre-STATE record (7021526c): the STATE of every dirty path, so
+    // Post can compare rather than deny the whole result for being unable to.
+    // Written ONLY when tool_use_id is usable — a null key degrades LOUDLY at
+    // Post (the blanket pre-existing denial, naming the reason), never silently
+    // to a per-run key. Derived from the SAME git status as the attribution
+    // record above, so the two records can never disagree about which paths
+    // were dirty.
+    const key = callKey(input.tool_use_id);
+    if (key) {
+      const idx = indexEntriesFor(cwd, dirtyRels);
+      const states = {};
+      for (const rel of dirtyRels) states[rel] = pathState(cwd, rel, idx);
+      writeFileSync(stateFile(cwd, runId, key), JSON.stringify(states));
+    }
     allow();
   } catch (e) {
     // A snapshot failure during an active agent run cannot be verified later —
@@ -405,6 +582,9 @@ try {
   // its only other write vector is Bash — which this very branch reverts, so a
   // previous command's dirt is already gone by the next Pre.
   const preExisting = [];
+  // Pre-dirty paths whose recorded STATE CHANGED inside this command's window
+  // (7021526c step 3): denied and NAMED, and deliberately NOT restored.
+  const changedPreDirty = [];
   // Paths this Post ACTUALLY restored (FIX-B, 4d9b76e8) — one deduped
   // restore_performed maintenance item is minted per path here, once every
   // restore attempt below has run.
@@ -414,6 +594,11 @@ try {
   // `preDirty` stays empty: unverifiable attribution is never treated as
   // pre-existing (P5) — every glob-matched tracked violation restores.
   let preDirty = new Set();
+  // The per-call Pre-STATE map (7021526c), or null when this command has no
+  // comparable record — in which case the pre-dirty branch keeps the OLD blanket
+  // denial and `degradedReason` says why (degraded LOUD, never silent).
+  let preState = null;
+  let degradedReason = null;
   if (!storeErr) {
     const dPath = dirtyFile(cwd, runId);
     if (!existsSync(dPath)) {
@@ -438,6 +623,67 @@ try {
         })
       );
     }
+
+    // The PER-CALL Pre-STATE record (7021526c). Present and valid -> the
+    // pre-dirty branch below COMPARES instead of denying blindly. Absent or
+    // corrupt -> AC9 fail-closed (a pre-dirty path whose Pre state cannot be
+    // read is exactly as unverifiable as it ever was). No usable tool_use_id ->
+    // the record was never written, so the OLD blanket denial stands and says so.
+    const key = callKey(input.tool_use_id);
+    if (!key) {
+      degradedReason =
+        'this hook call carries no usable `tool_use_id` (absent, empty, or not a string), so there is no per-call Pre-STATE record to compare against — ' +
+        'and H17 will NOT fall back to a per-run key, because one shared record lets a second lane adopt the first lane\'s tampered bytes as its own baseline';
+    } else {
+      const sPath = stateFile(cwd, runId, key);
+      if (!existsSync(sPath)) {
+        deny(
+          environmentDefectDenial(
+            'H17',
+            `per-call Pre-STATE record '${sPath}' absent at Post — the pre-existing dirt cannot be compared against its state at Pre; failing closed (P5). ` +
+              `Same causes as a missing attribution record, plus one more: the tool_use_id carried at Pre and at Post must be the SAME Bash call's.`,
+            { agentId: input.agent_id }
+          )
+        );
+      }
+      let recorded;
+      try {
+        recorded = JSON.parse(readFileSync(sPath, 'utf8'));
+      } catch {
+        deny(
+          environmentDefectDenial('H17', `per-call Pre-STATE record '${sPath}' corrupt/unparseable — cannot compare pre-existing dirt; failing closed (P5).`, {
+            agentId: input.agent_id,
+          })
+        );
+      }
+      if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) {
+        deny(
+          environmentDefectDenial('H17', `per-call Pre-STATE record '${sPath}' is not a path->state object — cannot compare pre-existing dirt; failing closed (P5).`, {
+            agentId: input.agent_id,
+          })
+        );
+      }
+      // Validate EVERY key before the record is trusted (AC10 posture): the
+      // audited agent can write arbitrary bytes into os.tmpdir(), so a crafted
+      // record is conduct, not environment.
+      preState = {};
+      for (const k of Object.keys(recorded)) {
+        const norm = validateStateKey(cwd, k);
+        if (!norm) {
+          deny(
+            `H17: crafted per-call Pre-STATE record key rejected ('${k}' — not a repo-relative path inside the project); no write performed, failing closed (P5).`
+          );
+        }
+        preState[norm] = recorded[k];
+      }
+      // Lifecycle-bound (P4): the record's life ends with the Post that consumed
+      // it. Best-effort — a failed unlink must never change the verdict.
+      try {
+        rmSync(sPath, { force: true });
+      } catch {
+        /* leaked temp record only; the comparison already happened in memory */
+      }
+    }
   }
 
   // --- (A) TRACKED writes via git ---
@@ -445,7 +691,23 @@ try {
   if (status.error || status.status !== 0) {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
   }
-  for (const entry of parsePorcelainZ(status.stdout)) {
+  const postEntries = parsePorcelainZ(status.stdout);
+  // Current INDEX entries for everything git reports dirty, in ONE call — the
+  // index term of the state comparison. Skipped entirely when there is no
+  // record to compare against, so the degraded path keeps exactly today's
+  // behaviour and gains no new failure mode. A git failure throws -> deny (AC9).
+  let postIndex = new Map();
+  if (preState) {
+    const postRels = [];
+    for (const entry of postEntries) {
+      for (const p of entry.paths) {
+        const rel = p.replace(/\/+$/, '');
+        if (rel) postRels.push(rel);
+      }
+    }
+    postIndex = indexEntriesFor(cwd, postRels);
+  }
+  for (const entry of postEntries) {
     for (const p of entry.paths) {
       const rel = p.replace(/\/+$/, '');
       if (!rel) continue;
@@ -455,10 +717,40 @@ try {
         (brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny);
       if (isViolation) {
         if (preDirty.has(rel)) {
-          // Already dirty at Pre — not this command's write. Reverting here is
-          // what destroyed a conductor's uncommitted enforcement-surface work and
-          // reported it as the agent's.
-          preExisting.push(rel);
+          // Already dirty at Pre — not this command's write, and never reverted:
+          // reverting here is what destroyed a conductor's uncommitted
+          // enforcement-surface work and reported it as the agent's (f76d7c5c).
+          //
+          // Decision 7021526c: it is no longer DENIED merely for being dirty
+          // either. The order is exactly (1) compare the recorded Pre STATE with
+          // the CURRENT state — unchanged means the surface is verified BY
+          // OBSERVATION and no stamp is consulted or needed; (2) changed ->
+          // consult the stamp FRESH against the CURRENT state, PER PATH
+          // (4d9b76e8's rule is general, not confined to the clean-at-Pre arm:
+          // a stamp can only be written by a deliberate conductor-run CLI,
+          // 6e132e19, so a match means the change is conductor-attested);
+          // (3) otherwise deny. No arm restores — a pre-image restore across
+          // overlapping Bash windows would clobber a concurrent lane's
+          // legitimate write (board 0b848342 finding 1, deferred by decision).
+          if (!preState) {
+            // DEGRADED-LOUD: nothing to compare against, so the old blanket
+            // pre-existing denial stands and names its reason below.
+            preExisting.push(rel);
+            continue;
+          }
+          const wasState = preState[rel];
+          if (wasState === undefined) {
+            // The attribution record says this path was dirty at Pre and the
+            // state record has no entry for it — the two disagree, so the write
+            // is unattributable. Fail closed (AC9); an absent entry must NEVER
+            // read as "unchanged".
+            throw new Error(
+              `per-call Pre-STATE record has no entry for the pre-dirty path '${rel}' — the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
+            );
+          }
+          if (sameState(wasState, pathState(cwd, rel, postIndex))) continue; // (1) verified by observation
+          if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue; // (2) conductor-attested
+          changedPreDirty.push(rel); // (3) denied, and still not restored
           continue;
         }
         // FIX-A (h17-stamp-honor-loud-restore, 4d9b76e8): an IN-WINDOW change
@@ -468,14 +760,7 @@ try {
         // the stamp NOW, hash the CURRENT bytes: an exact match exempts this
         // path from both the restore and the deny; no match falls straight
         // through to the restore+deny exactly as before.
-        const isDir = (() => {
-          try {
-            return statSync(join(cwd, rel)).isDirectory();
-          } catch {
-            return false;
-          }
-        })();
-        if (isDir ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
+        if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
         restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
         violations.push(rel);
         restoredPaths.push(rel); // FIX-B: mints a restore_performed item below
@@ -583,7 +868,8 @@ try {
   }
 
   // Decision h17-enforcement-stamp-conductor-attested-dirt (6e132e19): before
-  // firing the enforcement-surface-dirty denial for the PRE-EXISTING set, give
+  // firing the enforcement-surface-dirty denial for the PRE-EXISTING set (which
+  // since 7021526c only fills on the degraded fallback — see above), give
   // a conductor-written stamp its one sanctioned exemption chance. Attested in
   // full → the pre-existing dirt is conductor-work-in-flight, not an
   // unverifiable defect; drop it from `preExisting` entirely so it composes no
@@ -601,8 +887,21 @@ try {
     }
   }
 
-  if (violations.length || preExisting.length) {
+  if (violations.length || preExisting.length || changedPreDirty.length) {
     const parts = [];
+    if (changedPreDirty.length) {
+      // Decision 7021526c step 3. NOT the environment-defect class: the state
+      // moved INSIDE this command's window, so it is attributable — and not the
+      // "reverted" class either, because a pre-image restore stays out of scope.
+      parts.push(
+        `H17: PRE-EXISTING dirty path(s) whose state CHANGED inside this command's window, and which are therefore NOT verifiable as untouched: ${changedPreDirty.join(
+          ', '
+        )}. ` +
+          `The state recorded at PreToolUse (existence, file type, mode, symlink target, index entry, bytes) differs from the state now, and no fresh conductor stamp attests the current state. ` +
+          `These paths are deliberately NOT reverted — restoring a pre-image could clobber a concurrent lane's legitimate write — so the bytes stand as they are; ` +
+          `exit contract-violated, never route around.`
+      );
+    }
     if (violations.length) {
       parts.push(
         `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(', ')} — exit contract-violated, never route around. ` +
@@ -625,6 +924,11 @@ try {
           `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
             `Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside ` +
             `(the conductor's own work, e.g. a mid-run bundle rebuild).` +
+            // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
+            // landed, this blanket denial fires ONLY when there is no record to
+            // compare against — so it must say which input it lacked, or the
+            // degrade is silent and indistinguishable from the old behaviour.
+            (degradedReason ? ` This blanket denial is a DEGRADED FALLBACK: ${degradedReason}.` : '') +
             (stampFailedPath ? ` A conductor-attested stamp exists but does not attest '${stampFailedPath}' — no exemption.` : ''),
           { agentId: input.agent_id }
         )
