@@ -5026,11 +5026,12 @@ function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
 }
-function lastDispatchPrompts(transcriptPath) {
+function lastDispatchBlocks(transcriptPath, skip = 0) {
   if (!transcriptPath || !existsSync3(transcriptPath)) return [];
   const tail = readTail(transcriptPath);
   if (tail === null) return [];
   const lines = tail.split("\n");
+  let remaining = skip;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -5045,12 +5046,37 @@ function lastDispatchPrompts(transcriptPath) {
     if (!Array.isArray(content)) continue;
     const blocks = content.filter((b) => b?.type === "tool_use" && (b.name === "Task" || b.name === "Agent"));
     if (!blocks.length) continue;
-    return blocks.map((b) => b.input?.prompt).filter((p) => typeof p === "string");
+    if (remaining > 0) {
+      remaining--;
+      continue;
+    }
+    return blocks.map((b) => ({ subagent_type: b.input?.subagent_type, prompt: b.input?.prompt })).filter((b) => typeof b.prompt === "string");
   }
   return [];
 }
 
 // scripts/hooks/h22-dispatch-register.mjs
+var MAX_WALK_BACK = 20;
+function attributeBlocks(transcriptPath, agentType) {
+  const lastBlocks = lastDispatchBlocks(transcriptPath, 0);
+  if (typeof agentType !== "string" || agentType === "") {
+    return { blocks: lastBlocks, attribution: "union" };
+  }
+  let matched = lastBlocks.filter((b) => typeof b.subagent_type === "string" && b.subagent_type === agentType);
+  if (matched.length === 1) return { blocks: matched, attribution: "block" };
+  if (matched.length > 1) return { blocks: matched, attribution: "union" };
+  for (let skip = 1; skip <= MAX_WALK_BACK; skip++) {
+    const blocks = lastDispatchBlocks(transcriptPath, skip);
+    if (!blocks.length) continue;
+    matched = blocks.filter((b) => typeof b.subagent_type === "string" && b.subagent_type === agentType);
+    if (matched.length === 1) return { blocks: matched, attribution: "block" };
+    if (matched.length > 1) return { blocks: matched, attribution: "union" };
+  }
+  return { blocks: lastBlocks, attribution: "union" };
+}
+function candidatesFromBlocks(blocks) {
+  return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
+}
 function withLedgerLock(sterlingDir, run) {
   const lockPath = join2(sterlingDir, "review-ledger.lock");
   let acquired = false;
@@ -5104,8 +5130,8 @@ try {
   }
   entries = entries.filter((e) => e && e.session_id === input.session_id);
   if (event === "SubagentStart") {
-    const prompts = lastDispatchPrompts(input.transcript_path);
-    const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+    const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
+    const candidates = candidatesFromBlocks(matchedBlocks);
     const files = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
       (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
     );
@@ -5114,7 +5140,8 @@ try {
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
       files,
-      at: (/* @__PURE__ */ new Date()).toISOString()
+      at: (/* @__PURE__ */ new Date()).toISOString(),
+      attribution
     });
   } else {
     const departing = entries.find((e) => e.agent_id === input.agent_id);

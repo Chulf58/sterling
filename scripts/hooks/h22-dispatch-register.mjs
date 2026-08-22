@@ -52,7 +52,49 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel } from './lib/common.mjs';
-import { lastDispatchPrompts, extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { lastDispatchBlocks, extractPathCandidates } from './lib/dispatch-prompt.mjs';
+
+// PER-BLOCK ATTRIBUTION (decision 5d3747c1, slug h22-per-block-attribution) —
+// replaces the old union-of-every-block-regardless-of-type extraction. Match
+// this SubagentStart's stdin.agent_type against each Task/Agent block's
+// declared subagent_type in the LAST dispatching assistant message: exactly
+// one match is a precise 'block' attribution; several same-type siblings are
+// a 'union' of just that type (H10's deferral asymmetry prefers bounded
+// over-defer to under-defer, never unrelated types); zero matches walks
+// BACKWARD through recent dispatching messages (bounded — the cross-batch
+// race where a later batch's message lands before an earlier batch's
+// SubagentStarts fire) for a type-match, and only once that bounded walk
+// finds nothing does it fall back to a 'union' of the last message's blocks.
+const MAX_WALK_BACK = 20;
+
+function attributeBlocks(transcriptPath, agentType) {
+  const lastBlocks = lastDispatchBlocks(transcriptPath, 0);
+  // A missing/empty stdin.agent_type must never be matched against a block
+  // whose own subagent_type is also missing — undefined === undefined would
+  // mint a false 'block' attribution (the label H26 warns on). Require a real
+  // string on BOTH sides before treating it as a match.
+  if (typeof agentType !== 'string' || agentType === '') {
+    return { blocks: lastBlocks, attribution: 'union' };
+  }
+  let matched = lastBlocks.filter((b) => typeof b.subagent_type === 'string' && b.subagent_type === agentType);
+  if (matched.length === 1) return { blocks: matched, attribution: 'block' };
+  if (matched.length > 1) return { blocks: matched, attribution: 'union' };
+  for (let skip = 1; skip <= MAX_WALK_BACK; skip++) {
+    const blocks = lastDispatchBlocks(transcriptPath, skip);
+    if (!blocks.length) continue; // this dispatching message had no blocks with a string prompt — keep walking, the loop is still bounded by MAX_WALK_BACK
+    matched = blocks.filter((b) => typeof b.subagent_type === 'string' && b.subagent_type === agentType);
+    if (matched.length === 1) return { blocks: matched, attribution: 'block' };
+    if (matched.length > 1) return { blocks: matched, attribution: 'union' };
+  }
+  // Bounded walk found no type-match anywhere: fall back to the union of the
+  // last dispatching message's blocks, same as the pre-fix behavior, but now
+  // explicitly marked imprecise.
+  return { blocks: lastBlocks, attribution: 'union' };
+}
+
+function candidatesFromBlocks(blocks) {
+  return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
+}
 
 // Tiny shared-convention lock guarding the review-ledger read-modify-write
 // (duplicated here and in scripts/commit-reviewed.mjs — hooks stay
@@ -138,8 +180,8 @@ try {
   entries = entries.filter((e) => e && e.session_id === input.session_id);
 
   if (event === 'SubagentStart') {
-    const prompts = lastDispatchPrompts(input.transcript_path);
-    const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+    const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
+    const candidates = candidatesFromBlocks(matchedBlocks);
     // THE EXTRACTOR'S PERMISSIVENESS COSTS MORE HERE THAN IN H19. There a false
     // candidate cost one store query that found nothing; here it enters the
     // register, so it SUPPRESSES a real duty and holds H10's releases
@@ -165,6 +207,7 @@ try {
       session_id: input.session_id,
       files,
       at: new Date().toISOString(),
+      attribution,
     });
   } else {
     // Stop: promote a reviewer-class entry into the durable review ledger

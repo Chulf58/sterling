@@ -59,3 +59,47 @@ export function lastDispatchPrompts(transcriptPath) {
   }
   return [];
 }
+
+/** Per-block {subagent_type, prompt} for every Task/Agent tool_use block in a
+ *  DISPATCHING assistant message read from the transcript tail — the
+ *  per-block sibling of lastDispatchPrompts() above, which stays
+ *  byte-identical because h19-dispatch-staging consumes it (decision
+ *  5d3747c1, slug h22-per-block-attribution). `skip` (default 0) skips that
+ *  many dispatching messages, most-recent-first, before returning the next
+ *  match's blocks — the mechanism a caller uses to walk BACKWARD through
+ *  recent dispatching messages (H22's cross-batch race: batch B's message
+ *  can land in the transcript before batch A's SubagentStarts fire). Returns
+ *  [] on anything short of a clean read, or once `skip` runs past the number
+ *  of dispatching messages present in the tail window — recovery degrades to
+ *  silence rather than a throw a caller must special-case, same posture as
+ *  lastDispatchPrompts(). */
+export function lastDispatchBlocks(transcriptPath, skip = 0) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return [];
+  const tail = readTail(transcriptPath);
+  if (tail === null) return [];
+  const lines = tail.split('\n');
+  let remaining = skip;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // first line of the tail window may be truncated
+    }
+    if (entry.type !== 'assistant') continue;
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+    const blocks = content.filter((b) => b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent'));
+    if (!blocks.length) continue; // this assistant turn dispatched nothing — keep scanning backward
+    if (remaining > 0) {
+      remaining--;
+      continue; // this dispatching message is being skipped over for the walk-back
+    }
+    return blocks
+      .map((b) => ({ subagent_type: b.input?.subagent_type, prompt: b.input?.prompt }))
+      .filter((b) => typeof b.prompt === 'string');
+  }
+  return [];
+}

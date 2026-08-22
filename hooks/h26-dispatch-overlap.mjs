@@ -5066,6 +5066,7 @@ try {
   const overlapPaths = /* @__PURE__ */ new Set();
   for (const e of live) {
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
+    if (e.attribution !== "block") continue;
     const matched = e.files.filter((f) => candidateSet.has(f));
     if (matched.length) {
       overlaps.push({ agentType: e.agent_type ?? "agent", agentId: e.agent_id, files: matched });
@@ -5076,7 +5077,7 @@ try {
   const pathList = [...overlapPaths].map((p) => `'${p}'`).join(", ");
   const entryList = overlaps.map((o) => `${o.agentType}:${o.agentId} (${o.files.join(", ")})`).join("; ");
   emit(
-    `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap a LIVE in-flight dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is warn-only, never a block \u2014 the prompt extraction only approximates write territory, and parallel dispatches fired in one message never see each other here since H22 registers at SubagentStart, which happens after this PreToolUse fires. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
+    `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap a LIVE in-flight dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is warn-only, never a block \u2014 the prompt extraction only approximates write territory, and this hook compares only dispatches already present in the live register when this PreToolUse fires. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
   );
   allow();
 } catch (e) {
