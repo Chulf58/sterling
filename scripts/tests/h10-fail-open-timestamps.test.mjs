@@ -513,7 +513,7 @@ test("SPEC I (research lane): a malformed `at` that sorts BELOW the cutoff ('0')
     seedEventsConfig(dir);
     const NC_AT = '2026-06-10T23:00:00.000Z';
     // High-sorting sibling: SPEC B ("n/a"). "n/a" > NC_AT lexically, so SPEC B
-    // passes even with isValidAt stubbed to always-true. "0" < NC_AT
+    // passes even with the guard weakened to accept anything. "0" < NC_AT
     // lexically, so a lexical-only comparison would discharge this event —
     // only isValidAt rejecting "0" keeps the research duty armed. Explicit
     // `--lane research`, same reasoning as SPEC A/B/C: a bare declaration's
@@ -544,7 +544,7 @@ test("SPEC J (capture/debug lane): a malformed `at` that sorts BELOW the cutoff 
     seedEventsConfig(dir);
     const NC_AT = '2026-06-10T23:00:00.000Z';
     // High-sorting sibling: SPEC D (`undefined`, dropped by JSON.stringify),
-    // which passes even with isValidAt stubbed to always-true because a
+    // which passes even with the guard weakened to accept anything because a
     // missing `at` sorts late at this comparison site. "0" < NC_AT lexically,
     // so a lexical-only comparison would discharge this event — only
     // isValidAt rejecting "0" keeps the capture duty armed here. Bare
@@ -573,7 +573,7 @@ test("SPEC K (touch lane): a malformed `at` that sorts BELOW the cutoff ('0') is
     seedEventsConfig(dir);
     const NC_AT = '2026-06-10T23:00:00.000Z';
     // High-sorting sibling: SPEC H (`undefined`, dropped by JSON.stringify),
-    // which passes even with isValidAt stubbed to always-true because a
+    // which passes even with the guard weakened to accept anything because a
     // missing `at` sorts late at this comparison site. "0" < NC_AT lexically,
     // so a lexical-only comparison would discharge this entry — only
     // isValidAt rejecting "0" keeps the capture duty armed here. Bare
