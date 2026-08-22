@@ -293,9 +293,16 @@ test('knowledge_retire (e): in_favor_of naming an already-superseded (tombstoned
   const { tools, cleanup } = harness();
   try {
     const a = mkDecision(tools, 'retire-e-tombstone-a', 'a record that will itself be superseded');
-    // Supersede A via an ordinary knowledge_update — A's OLD id is now a
-    // tombstone (status: 'superseded'), forwarding to a NEW active id.
-    tools.knowledgeUpdate(a.id as string, { rationale: 'v2 via an ordinary knowledge_update' });
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 and no longer tombstones — A's OLD id is made
+    // a tombstone via a real knowledge_supersede instead, forwarding to a NEW
+    // active id. The refusal assertion is unchanged. [stable-identity-design-v2]
+    (tools as unknown as { knowledgeSupersede: (id: string, fields: Loose) => Loose }).knowledgeSupersede(a.id as string, {
+      title: 'retire-e-tombstone-a-v2',
+      statement: 'a record that will itself be superseded, v2',
+      alternatives_rejected: [],
+      rationale: 'v2 via a real knowledge_supersede',
+    });
     assert.equal(get(tools, a.id as string).status, 'superseded', "precondition: A's old id is now a tombstone");
 
     const b = mkDecision(tools, 'retire-e-tombstone-b', 'a separate record attempting to retire into a tombstone');

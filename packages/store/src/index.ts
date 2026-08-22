@@ -350,12 +350,17 @@ export type ToolStore = Pick<
   // where a superseded record's chain currently ends.
   | 'resolveTerminus'
   | 'supersede'
-  // NOT here yet: the generalized in-place write triad + its version reader
-  // (updateRecord / editRecordField / appendRecordField / getRecordVersion,
-  // stable-identity S2). They exist on SterlingStore AND MountedStores, but
-  // this Pick is "exactly the methods SterlingTools calls" — S3 adds them
-  // here together with the call sites that drive them, so the surface never
-  // advertises a capability no tool uses yet.
+  // The generalized in-place write triad + its version reader (stable-identity
+  // S3, the call sites promised by S2's note): knowledge_update/edit/append all
+  // land through updateRecord, and knowledge_get's `version` parameter reads
+  // archived snapshots through getRecordVersion.
+  | 'updateRecord'
+  | 'editRecordField'
+  | 'appendRecordField'
+  | 'getRecordVersion'
+  // knowledge_get's legacy_resolution + the write tools' historical-id refusal
+  // (stable-identity S3) resolve dead ids through this index.
+  | 'recordAliases'
   | 'updateTodo'
   | 'retireInFavorOf'
   | 'remove'
@@ -740,6 +745,25 @@ export class SterlingStore {
       .prepare('SELECT body FROM record_versions WHERE record_id = ? AND version = ?')
       .get(id, version) as { body: string } | undefined;
     return row ? (JSON.parse(row.body) as Record<string, unknown>) : undefined;
+  }
+
+  /**
+   * The dead-id INDEX, whole ([stable-identity-design-v2] contract 3): every
+   * record_aliases row as (historical_id, canonical_id, archived_version). The
+   * shape mirrors recordIdIndex — no body fetch, the full set, so the id
+   * resolution ladder above the store can match an exact historical id AND a
+   * citation PREFIX of one in the same pass it already makes over live ids.
+   *
+   * READ-ONLY and empty-tolerant by design: nothing writes to this table after
+   * the migration, and a PRE-MIGRATION store (where the table does not exist)
+   * returns [] rather than refusing — a legacy store is readable (AC3), and it
+   * has no historical ids to resolve because nothing has been collapsed yet.
+   */
+  recordAliases(): { historical_id: string; canonical_id: string; archived_version: number }[] {
+    if (this.legacySchemaVersion !== undefined) return [];
+    return this.db
+      .prepare('SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY rowid')
+      .all() as { historical_id: string; canonical_id: string; archived_version: number }[];
   }
 
   /**

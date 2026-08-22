@@ -120,7 +120,16 @@ test("AC3: citing a SUPERSEDED record's id resolves (tombstones are legitimate c
   const { tools, cleanup } = harness();
   try {
     const v1 = mkDecision(tools, 'to be superseded', 'v1 statement');
-    tools.knowledgeUpdate(v1.id as string, { rationale: 'updated rationale — this supersedes v1' });
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 and no longer tombstones — the superseded
+    // precondition this citation test needs is built via a real
+    // knowledge_supersede instead. Resolution assertions unchanged. [stable-identity-design-v2]
+    (tools as unknown as { knowledgeSupersede: (id: string, fields: Loose) => Loose }).knowledgeSupersede(v1.id as string, {
+      title: 'to be superseded v2',
+      statement: 'v2 statement',
+      alternatives_rejected: [],
+      rationale: 'updated rationale — this supersedes v1',
+    });
     // sanity: v1 really is a tombstone now, not merely renamed
     assert.equal((tools.knowledgeGet(v1.id as string) as unknown as Loose).status, 'superseded', 'precondition: v1 is now a tombstone');
 

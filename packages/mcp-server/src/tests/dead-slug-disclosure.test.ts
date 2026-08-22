@@ -174,10 +174,25 @@ test('newest-carrier rule: a dead slug carried by several superseded rows in one
     const slug = a.slug as string;
     assert.ok(slug, 'precondition: origin auto-minted a slug');
 
-    const b = tools.knowledgeUpdate(a.id as string, { statement: 'v2 body.' }) as unknown as Loose;
-    assert.equal(b.slug, slug, 'precondition: knowledge_update carries the slug forward when fields omit it (parity with knowledge_supersede AC9)');
-    const c = tools.knowledgeUpdate(b.id as string, { statement: 'v3 body.' }) as unknown as Loose;
-    assert.equal(c.slug, slug, 'precondition: the second update also carries the slug forward');
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 (id stable) — a multi-row lineage of several
+    // DISTINCT superseded ids sharing one dead slug can only be built via
+    // real knowledge_supersede calls now (an update no longer mints the
+    // rows). The newest-carrier rule assertion is unchanged. [stable-identity-design-v2]
+    const b = tools.knowledgeSupersede(a.id as string, {
+      title: 'Newest carrier origin decision v2',
+      statement: 'v2 body.',
+      alternatives_rejected: [],
+      rationale: 'r2',
+    }) as unknown as Loose;
+    assert.equal(b.slug, slug, 'precondition: knowledge_supersede carries the slug forward when fields omit it (parity with knowledge_supersede AC9)');
+    const c = tools.knowledgeSupersede(b.id as string, {
+      title: 'Newest carrier origin decision v3',
+      statement: 'v3 body.',
+      alternatives_rejected: [],
+      rationale: 'r2',
+    }) as unknown as Loose;
+    assert.equal(c.slug, slug, 'precondition: the second supersede also carries the slug forward');
 
     tools.knowledgeSupersede(c.id as string, {
       title: 'Newest carrier replacement decision',

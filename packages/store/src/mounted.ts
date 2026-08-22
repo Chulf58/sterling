@@ -169,6 +169,16 @@ export class MountedStores {
     return this.all().flatMap((s) => s.recordIdIndex());
   }
 
+  /** Project-first concatenation of every mounted store's dead-id alias index
+   *  ([stable-identity-design-v2] contract 3) — same reasoning as
+   *  recordIdIndex: a historical id cited anywhere may have belonged to a
+   *  record that now lives in a domain store, so resolution MUST span mounts.
+   *  A historical id is unique across the fan (it was one record's id), so no
+   *  dedup is needed. */
+  recordAliases(): ReturnType<SterlingStore['recordAliases']> {
+    return this.all().flatMap((s) => s.recordAliases());
+  }
+
   /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
    *  3db7095f's deterministic lookup, mounted). Feature articles are always
    *  project-scoped and never promote (AC7), so in practice this reads the project

@@ -49,6 +49,16 @@ function terminusOf(record: unknown): TerminusField | undefined {
   return (record as Record<string, unknown>).terminus as TerminusField | undefined;
 }
 
+// test-repair 2026-08-22: shared helper for the supersede-built chains below —
+// knowledge_update no longer mints a new id under stable-identity-design-v2,
+// so the multi-hop chains this terminus-disclosure suite needs are built via
+// real knowledge_supersede calls. [stable-identity-design-v2]
+function supersedeDecision(tools: SterlingTools, id: string, fields: Record<string, unknown>): Record<string, unknown> {
+  return (
+    tools as unknown as { knowledgeSupersede: (old_id: string, f: Record<string, unknown>) => Record<string, unknown> }
+  ).knowledgeSupersede(id, fields);
+}
+
 test('AC5: knowledge_get on a SUPERSEDED record adds a terminus field for the chain end; the pinned record\'s own fields are unchanged', () => {
   const { tools, cleanup } = harness();
   try {
@@ -58,8 +68,22 @@ test('AC5: knowledge_get on a SUPERSEDED record adds a terminus field for the ch
       alternatives_rejected: [],
       rationale: 'v1 rationale',
     });
-    const b = tools.knowledgeUpdate(a.id, { statement: 'v2 statement' });
-    const c = tools.knowledgeUpdate(b.id, { statement: 'v3 statement' });
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 and no longer chains distinct ids — the
+    // two-hop chain this terminus disclosure test needs is built via real
+    // knowledge_supersede calls instead. Disclosure assertions unchanged. [stable-identity-design-v2]
+    const b = supersedeDecision(tools, a.id as string, {
+      title: 'origin decision v2',
+      statement: 'v2 statement',
+      alternatives_rejected: [],
+      rationale: 'v2 rationale',
+    });
+    const c = supersedeDecision(tools, b.id as string, {
+      title: 'origin decision v3',
+      statement: 'v3 statement',
+      alternatives_rejected: [],
+      rationale: 'v3 rationale',
+    });
 
     const pinned = tools.knowledgeGet(a.id) as unknown as Record<string, unknown>;
     assert.equal(pinned.id, a.id, 'knowledge_get(a) still returns the PINNED a — never silently redirected (decision de1a7329)');
@@ -103,8 +127,20 @@ test("AC7 (retro 2026-08-15-1520 §3.2, the exact feedback defect): a two-hop ch
       alternatives_rejected: [],
       rationale: 'r',
     });
-    const mid = tools.knowledgeUpdate(origin.id, { statement: 'mid body' });
-    const end = tools.knowledgeUpdate(mid.id, { statement: 'end body' });
+    // test-repair 2026-08-22: chain built via knowledge_supersede — ordinary
+    // knowledge_update no longer mints a new id under stable-identity-design-v2. [stable-identity-design-v2]
+    const mid = supersedeDecision(tools, origin.id as string, {
+      title: 'mid',
+      statement: 'mid body',
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
+    const end = supersedeDecision(tools, mid.id as string, {
+      title: 'end',
+      statement: 'end body',
+      alternatives_rejected: [],
+      rationale: 'r',
+    });
 
     const pinned = tools.knowledgeGet(origin.id) as unknown as Record<string, unknown>;
     const terminus = terminusOf(pinned);
@@ -132,12 +168,20 @@ test('AC5 truncation passthrough: a chain deeper than the traversal cap disclose
       rationale: 'r',
     });
     const headId = head.id;
-    let current = head;
-    // 40 supersessions — comfortably past a 32-hop traversal cap.
+    let currentId = head.id as string;
+    // test-repair 2026-08-22: 40 supersessions — comfortably past a 32-hop
+    // traversal cap — built via knowledge_supersede (ordinary knowledge_update
+    // no longer mints a new id under stable-identity-design-v2). [stable-identity-design-v2]
     for (let i = 1; i <= 40; i += 1) {
-      current = tools.knowledgeUpdate(current.id, { statement: `s${i}` });
+      const next = supersedeDecision(tools, currentId, {
+        title: `chain head v${i}`,
+        statement: `s${i}`,
+        alternatives_rejected: [],
+        rationale: 'r',
+      });
+      currentId = next.id as string;
     }
-    const trueEndId = current.id;
+    const trueEndId = currentId;
 
     const pinned = tools.knowledgeGet(headId) as unknown as Record<string, unknown>;
     const terminus = terminusOf(pinned);

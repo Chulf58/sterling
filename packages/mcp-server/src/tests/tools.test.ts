@@ -47,6 +47,17 @@ function startRun(store: SterlingStore, phases = ['p1', 'p2']) {
   });
 }
 
+// test-repair 2026-08-22: stable-identity-design-v2 landed — knowledge_update/
+// append/edit mutate the record IN PLACE (id stable, version bumps); the prior
+// snapshot is archived in record_versions and read back via knowledge_get(id,
+// { version }) rather than by resolving a separately-minted superseded id.
+// [stable-identity-design-v2]
+function knowledgeGetAtVersion(tools: SterlingTools, id: string, version: number): Record<string, unknown> {
+  return (
+    tools as unknown as { knowledgeGet: (id: string, opts?: { version: number }) => Record<string, unknown> }
+  ).knowledgeGet(id, { version });
+}
+
 test('knowledge_create assembles the envelope server-side and emits check_skipped (never silent — §16.1.9)', () => {
   const { tools, cleanup } = harness();
   try {
@@ -68,7 +79,11 @@ test('knowledge_create assembles the envelope server-side and emits check_skippe
   }
 });
 
-test('knowledge_update writes a new version and supersedes the prior; article version auto-bumps', () => {
+// test-repair 2026-08-22: knowledge_update mutates in place under
+// stable-identity-design-v2 — id stays stable, version bumps, and the prior
+// snapshot is archived (not tombstoned under a new id); re-based to assert
+// that shape instead of the old auto-supersede/re-mint behavior. [stable-identity-design-v2]
+test('knowledge_update writes a new version in place, archiving the prior; article version auto-bumps', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: v1 } = tools.knowledgeCreate('feature_article', {
@@ -85,9 +100,10 @@ test('knowledge_update writes a new version and supersedes the prior; article ve
       live_test_refs: [],
     });
     const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'Exports the board with headers.' });
+    assert.equal((v2 as { id: string }).id, v1.id, 'id stays stable across the write — no re-mint');
     assert.equal((v2 as { version: number }).version, 2, 'version auto-bumped');
-    assert.equal(tools.knowledgeGet(v1.id).status, 'superseded', 'prior retained and flagged');
-    assert.ok(v2.links.some((l) => l.rel === 'supersedes' && l.target_id === v1.id));
+    const archived = knowledgeGetAtVersion(tools, v1.id, 1);
+    assert.equal(archived.what_it_does, 'Exports the board.', 'the prior snapshot is archived in record_versions and readable by version');
     assert.equal(tools.knowledgeQuery({ types: ['feature_article'] }).length, 1, 'only current version retrieved');
   } finally {
     cleanup();
@@ -130,19 +146,24 @@ test('knowledge_append extends an array without retransmitting it, and inherits 
     );
     assert.equal(v2.what_it_does, 'Exports the board.', 'untouched fields carry over as with any update');
 
-    // It must be the SAME write path, not a second one: version bump, prior
-    // retained + supersede link, and only the head served.
+    // test-repair 2026-08-22: append inherits the update path whole, and that
+    // path now mutates in place (id stable, version bump, prior archived) —
+    // re-based off the old auto-supersede/re-mint assertions. [stable-identity-design-v2]
+    // It must be the SAME write path, not a second one: id stable, version bump,
+    // prior snapshot archived and readable by version, and only the head served.
+    assert.equal(v2.id, v1.id, 'append inherits the stable-id write path — no re-mint');
     assert.equal(v2.version, 2, 'version auto-bumped exactly as knowledge_update does');
-    assert.equal(tools.knowledgeGet(v1.id).status, 'superseded', 'prior version retained');
-    assert.ok(v2.links.some((l) => l.rel === 'supersedes' && l.target_id === v1.id));
+    const archivedV1 = knowledgeGetAtVersion(tools, v1.id, 1);
+    assert.equal(archivedV1.what_it_does, 'Exports the board.', 'prior version archived and readable via the version param');
     assert.equal(tools.knowledgeQuery({ types: ['feature_article'] }).length, 1, 'only the head is served');
 
-    // Any array field, not just history — and note the id CHANGED with the append,
-    // which is the identity half of the problem this tool only half-solves.
+    // Any array field, not just history — and the id stays stable across every
+    // subsequent append (stable-identity-design-v2: no re-mint on write).
     const v3 = tools.knowledgeAppend(v2.id, 'current_ac', [{ ac_id: 'AC2', text: 'header row included', verifiable_at: 'final' }]).record as unknown as {
       id: string;
       current_ac: { ac_id: string }[];
     };
+    assert.equal(v3.id, v1.id, 'id remains stable across the second append too');
     assert.deepEqual(
       v3.current_ac.map((a) => a.ac_id),
       ['AC1', 'AC2'],
@@ -206,7 +227,13 @@ const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
     live_test_refs: [],
   }).record;
 
-test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review still RE-POINTS rather than draining (unaffected by this flip), and an unrelated article\'s debt stays untouched (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
+// test-repair 2026-08-22: under stable-identity-design-v2 knowledge_update no
+// longer mints a new id, so the promotion_review "re-point" mechanism is
+// correctly a NO-OP — the item was never pointed at a superseded id to begin
+// with because the id never changes. Re-based to assert the item stays put on
+// the SAME (stable) id, still open, rather than asserting a re-point that no
+// longer has anything to do. [stable-identity-design-v2]
+test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review stays anchored to the stable id, a correct NO-OP (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -222,34 +249,37 @@ test('knowledge_update leaves the article\'s drift maintenance items OPEN on an 
     // NO resolves named — decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1: a
     // write is not a claim, so nothing here is discharged by writing alone.
     const updated = tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
+    assert.equal(updated.id, article.id, 'stable-identity-design-v2: no re-mint on write, id unchanged');
 
     const open = tools.maintenanceQuery({ cap: 1000 });
     const has = (reason: string, link: string) =>
       open.some((t) => (t as { system_reason?: string }).system_reason === reason && (t as { feature_link?: string }).feature_link === link);
     assert.equal(has('reconcile_needed', article.id), true, 'reconcile_needed stays OPEN — the old implicit drain is dead');
     assert.equal(has('refresh_reference', article.id), true, 'refresh_reference stays OPEN — same reason, still owed until claimed');
-    assert.equal(has('promotion_review', article.id), false, 'promotion_review no longer points at the now-superseded id — its re-pointing mechanism is untouched by this flip');
-    assert.equal(has('promotion_review', updated.id), true, 'promotion_review re-pointed to the superseding version — same review, same lineage, still owed');
-    assert.equal(open.length, 4, 'nothing drained by an unclaimed write: both `thing` items, the re-pointed review, and the unrelated `other` debt all remain');
+    assert.equal(has('promotion_review', article.id), true, 'promotion_review stays anchored to the SAME stable id — nothing to re-point to, and it was never drained');
+    assert.equal(open.length, 4, 'nothing drained by an unclaimed write: both `thing` items, the still-anchored review, and the unrelated `other` debt all remain');
     assert.equal(has('reconcile_needed', other.id), true, "an unrelated article's debt is untouched");
-    assert.equal(tools.maintenanceQuery({ cap: 1000 }).find((t) => t.id === review.record.id)?.id, review.record.id, 'same item id — re-pointed in place, not replaced');
+    assert.equal(tools.maintenanceQuery({ cap: 1000 }).find((t) => t.id === review.record.id)?.id, review.record.id, 'same item id — untouched, not replaced');
   } finally {
     cleanup();
   }
 });
 
-test('knowledge_update re-points a promotion_review through the whole supersede CHAIN, and leaves other lanes/records untouched (todo 6202a0f5)', () => {
+test('knowledge_update keeps a promotion_review anchored to the SAME stable id across repeated writes, and leaves other lanes/records untouched (todo 6202a0f5)', () => {
   const { tools, cleanup } = harness();
   try {
     const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
     const review = tools.maintenanceEnqueue({ reason: 'promotion_review', text: `promote 'thing'`, feature_link: v1.id });
     const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'v2' });
-    // the review now points at v2 — reconcile again (v2 -> v3) and it must follow
-    // via the chain, exactly as reconcile_needed already does for ancestor links.
+    // stable-identity-design-v2: repeated updates mutate the SAME id in place
+    // (version bumps only) — there is no longer a chain of distinct ids for the
+    // review to be re-pointed along, so it stays correctly anchored throughout.
     const v3 = tools.knowledgeUpdate(v2.id, { what_it_does: 'v3' });
+    assert.equal(v2.id, v1.id, 'no re-mint on the first update');
+    assert.equal(v3.id, v1.id, 'no re-mint on the second update either — id stable throughout');
     const item = tools.maintenanceQuery({ cap: 1000 }).find((t) => t.id === review.record.id) as unknown as { feature_link?: string } | undefined;
     assert.ok(item, 'the review item still exists — never drained');
-    assert.equal(item?.feature_link, v3.id, 'followed the chain to the CURRENT version, not just the immediate successor');
+    assert.equal(item?.feature_link, v1.id, 'anchored to the one stable id across both writes — nothing to chain-follow');
   } finally {
     cleanup();
   }
@@ -694,23 +724,64 @@ test('knowledge_query PROJECTS version history out of results; knowledge_get sta
     rmSync(dir, { recursive: true, force: true });
   };
   try {
-    let article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
     assert.ok(
       Object.keys((article as unknown as { file_baselines: Record<string, string> }).file_baselines).length > 0,
       'precondition: the article really does carry a server-computed baseline'
     );
-    const firstId = article.id;
-    for (let i = 0; i < 3; i++) article = tools.knowledgeUpdate(article.id, { what_it_does: `does ${i}` });
+    const headId = article.id as string;
+    // test-repair 2026-08-22 (round 2): knowledge_supersede refuses
+    // feature_article (articles evolve in place), so a superseded-article
+    // CHAIN is a legacy, pre-migration shape — built here as raw legacy rows
+    // via store.create (the dead-slug suites' pattern), successor-first so
+    // every superseded_by target exists: A -> B -> C -> live head. The
+    // projection contract under test is unchanged. [stable-identity-design-v2]
+    const rawLegacy = (behavior: string, version: number, supersededBy: string) =>
+      store.create({
+        id: randomUUID(),
+        type: 'feature_article',
+        created_at: NOW,
+        updated_at: NOW,
+        author: 'conductor',
+        status: 'superseded',
+        superseded_by: supersededBy,
+        links: [],
+        scope: 'project',
+        stack_tags: ['node'],
+        slug: 'thing',
+        title: 'thing',
+        what_it_does: behavior,
+        intended_behavior: 'b',
+        files: [{ path: 'src/thing.ts', role: 'impl' }],
+        current_ac: [],
+        dependencies: { relies_on: [], relied_by: [] },
+        state: 'active',
+        version,
+        history: [{ date: NOW, event: 'seed' }],
+        live_test_refs: [],
+      } as never) as unknown as Record<string, unknown>;
+    const c = rawLegacy('does c', 3, headId);
+    const b = rawLegacy('does b', 2, c.id as string);
+    const a = rawLegacy('does a', 1, b.id as string);
+    const firstId = a.id as string;
 
     const [projected] = tools.knowledgeQueryResult({ types: ['feature_article'] }).records;
-    assert.equal(projected.supersedes_count, 3, 'chain DEPTH stays visible without the uuids');
+    assert.equal(projected.id, headId, 'only the live head is served');
+    // test-repair 2026-08-22 (round 2): supersedes_count counts the record's
+    // OWN supersedes edges. The old update path accumulated copied links on
+    // every re-mint (3 after 3 updates) — exactly the churn the wave removes;
+    // under relations each record carries its one hop, so the live head
+    // projects 1 and the walk continues on each predecessor. [stable-identity-design-v2]
+    assert.equal(projected.supersedes_count, 1, 'the head\'s own chain edge stays visible without the uuids');
     assert.deepEqual(projected.links, [], 'the supersedes chain is gone from query results');
     assert.ok(!('file_baselines' in projected), 'server-owned baseline hashes are gone from query results');
-    assert.equal(projected.what_it_does, 'does 2', 'the readable content is untouched');
 
     // Nothing became unreachable — it just stopped being paid for on every hit.
-    const full = tools.knowledgeGet(article.id) as unknown as Record<string, unknown>;
-    assert.equal((full.links as unknown[]).length, 3, 'knowledge_get keeps the full chain');
+    const full = tools.knowledgeGet(headId) as unknown as Record<string, unknown>;
+    assert.ok(
+      (full.links as { rel: string; target_id: string }[]).some((l) => l.rel === 'supersedes' && l.target_id === (c.id as string)),
+      'knowledge_get keeps the chain edge (one hop per record under relations — walk continues on each predecessor)'
+    );
     assert.ok('file_baselines' in full, 'knowledge_get keeps the baselines');
     assert.equal(tools.knowledgeGet(firstId).status, 'superseded', 'and the superseded versions remain retrievable by id');
   } finally {
@@ -1800,7 +1871,15 @@ test('knowledge_get resolves the 8-char citation prefix, at any status, and refu
 
     // A SUPERSEDED record must stay reachable by prefix: citing the version that
     // was live at the time is legitimate and common (history entries do it).
-    const next = tools.knowledgeUpdate(rec.id, { rationale: 'r2' });
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 and no longer tombstones — build the tombstone
+    // via knowledge_supersede instead; the prefix assertions are unchanged. [stable-identity-design-v2]
+    const next = tools.knowledgeSupersede(rec.id, {
+      title: 'a choice v2',
+      statement: 's2',
+      alternatives_rejected: [],
+      rationale: 'r2',
+    }) as unknown as DurableRecord;
     assert.equal(tools.knowledgeGet(rec.id.slice(0, 8)).status, 'superseded', 'tombstones resolve by prefix too');
     assert.equal(tools.knowledgeGet(next.id.slice(0, 8)).id, next.id);
 
@@ -1933,11 +2012,32 @@ test('knowledge_create slug refusal is scoped: a different slug passes, and non-
 });
 
 test('a superseded slug does NOT block a create — only a live one does', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
-    const { record: v1 } = tools.knowledgeCreate('feature_article', articleFields('gamma'));
-    tools.knowledgeUpdate(v1.id, { what_it_does: 'revised' }); // v1 becomes superseded
-    // The live head still holds the slug, so a create is still refused.
+    // test-repair 2026-08-22 (round 2): the update-built tombstone became
+    // vacuous under stable ids (update mutates in place, the LIVE head kept
+    // blocking, so the test only proved live-blocking). Build the actual
+    // claim: a slug held ONLY by a superseded legacy row must not block a
+    // create. [stable-identity-design-v2]
+    const { record: successor } = tools.knowledgeCreate('feature_article', articleFields('gamma-successor'));
+    store.create({
+      id: randomUUID(),
+      type: 'feature_article',
+      created_at: NOW,
+      updated_at: NOW,
+      author: 'conductor',
+      status: 'superseded',
+      superseded_by: successor.id,
+      links: [],
+      scope: 'project',
+      stack_tags: ['node'],
+      ...articleFields('gamma'),
+    } as never);
+    assert.doesNotThrow(
+      () => tools.knowledgeCreate('feature_article', articleFields('gamma')),
+      'a slug held only by a superseded row does not block the create'
+    );
+    // And the live-blocking half still holds:
     assert.throws(() => tools.knowledgeCreate('feature_article', articleFields('gamma')), /already exists/);
   } finally {
     cleanup();
@@ -1961,11 +2061,19 @@ test('knowledge_schema reports required vs optional, types and closed enums (§2
     assert.ok(vol, 'volatility_hint is reported');
     assert.deepEqual(vol?.enum_values, ['fast', 'medium', 'stable'], "so 'low' is visibly not an option");
 
-    // feature_article's four undocumented-required fields.
+    // feature_article's undocumented-required fields.
     const art = tools.knowledgeSchema('feature_article');
-    for (const f of ['slug', 'version', 'history', 'live_test_refs']) {
+    for (const f of ['slug', 'history', 'live_test_refs']) {
       assert.ok(art.required.includes(f), `${f} reported required`);
     }
+    // test-repair 2026-08-22: version/status/superseded_by are server-owned
+    // under stable-identity-design-v2 — never caller-required (mirrors pin
+    // S3-10a/S3-10b in stable-identity-tools.test.ts). version is still a
+    // reported field, just not in `required`. [stable-identity-design-v2]
+    assert.ok(!art.required.includes('version'), 'version is server-owned — never caller-required');
+    assert.ok(art.fields.some((f) => f.name === 'version'), 'version is still reported as a field');
+    assert.ok(!art.required.includes('status'), 'status is server/lifecycle-derived — never caller-required');
+    assert.ok(!art.required.includes('superseded_by'), 'superseded_by is server/relation-derived — never caller-required');
     assert.ok(art.optional.includes('concept_family'), 'concept_family is an optional STRING, not a boolean mark');
     assert.equal(art.fields.find((f) => f.name === 'concept_family')?.type, 'string');
 
@@ -2580,7 +2688,11 @@ test('history rotation: knowledge_append past the cap keeps genesis + newest, wa
     assert.match(appended.warnings[0], /history rotated/, 'names the rotation');
     assert.match(appended.warnings[0], /3 of 4/, 'names kept-of-attempted counts');
     assert.match(appended.warnings[0], /superseded/, 'points the reader at the retained prior versions');
-    const prior = tools.knowledgeGet(v1.id) as unknown as { history: { event: string }[] };
+    // test-repair 2026-08-22: knowledge_update/append mutate in place now — the
+    // pre-append snapshot lives in record_versions under the SAME id, read
+    // back via knowledge_get(id, { version }), not by resolving to a
+    // separately-minted superseded id. [stable-identity-design-v2]
+    const prior = knowledgeGetAtVersion(tools, v1.id, 1) as unknown as { history: { event: string }[] };
     assert.deepEqual(
       prior.history.map((h) => h.event),
       ['seed'],
@@ -2718,7 +2830,17 @@ test('stable handle: a decision auto-mints a slug from its title, knowledge_get 
 
     assert.equal(tools.knowledgeGet(slug!).id, v1.id, 'knowledge_get resolves the slug');
 
-    const v2 = tools.knowledgeUpdate(v1.id, { rationale: 'revised' });
+    // test-repair 2026-08-22 (round 2): knowledge_update no longer supersedes
+    // (v1.id === v2.id made both assertions compare the same id to itself) —
+    // the slug-follows-supersession claim needs a REAL supersession.
+    // [stable-identity-design-v2]
+    const v2 = tools.knowledgeSupersede(v1.id, {
+      title: 'Write echoes: default to the digest receipt!',
+      statement: 's2',
+      alternatives_rejected: [],
+      rationale: 'revised',
+    }) as unknown as { id: string };
+    assert.notEqual(v2.id, v1.id, 'precondition: supersession minted a genuine successor');
     assert.equal(tools.knowledgeGet(slug!).id, v2.id, 'the slug names the CONCEPT — it follows supersession to the live head');
     assert.equal(tools.knowledgeGet(v1.id).id, v1.id, 'the old id still resolves PINNED to its version (history citations stay correct)');
   } finally {

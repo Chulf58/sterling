@@ -223,9 +223,23 @@ test('AC3 SELF-LINEAGE-EXCLUDED: knowledge_update on a decision names a differen
     const recA = mkDecision(tools, TITLE_A, STATEMENT_A, RATIONALE_A);
     const recB = mkDecision(tools, TITLE_B, STATEMENT_B, RATIONALE_B);
 
-    const updated = tools.knowledgeUpdate(recA.id as string, { rationale: 'small tweak, subject unchanged' }) as unknown as Loose;
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 and no longer tombstones its own address (no
+    // re-mint) — a genuine prior-lineage id can only be manufactured via a
+    // real knowledge_supersede. Build that precondition first, then exercise
+    // the actual knowledge_update behavior under test on the new head; the
+    // self-lineage-exclusion assertions are unchanged. [stable-identity-design-v2]
+    const recA2 = tools.knowledgeSupersede(recA.id as string, {
+      title: `${TITLE_A} (v2)`,
+      statement: STATEMENT_A,
+      alternatives_rejected: [],
+      rationale: 'v2 rationale, subject unchanged',
+    }) as unknown as Loose;
+    assert.equal(get(tools, recA.id as string).status, 'superseded', 'precondition: A is now retired via a real supersede');
+
+    const updated = tools.knowledgeUpdate(recA2.id as string, { rationale: 'small tweak, subject unchanged' }) as unknown as Loose;
     assert.equal(updated.status, 'active', 'the update succeeds regardless of any same-subject disclosure');
-    assert.equal(get(tools, recA.id as string).status, 'superseded', 'the prior version is retired by the update as usual');
+    assert.equal(updated.id, recA2.id, 'stable-identity-design-v2: the update mutates recA2 in place — no re-mint');
 
     const list = sameSubjectOf(updated);
     assert.ok(
@@ -234,7 +248,7 @@ test('AC3 SELF-LINEAGE-EXCLUDED: knowledge_update on a decision names a differen
     );
     const ids = idsOf(list);
     assert.ok(ids.includes(recB.id as string), 'the update names the genuinely different, still-active same-subject record B');
-    assert.ok(!ids.includes(recA.id as string), 'the update must NEVER name its own prior version (A) in its own supersede chain');
+    assert.ok(!ids.includes(recA.id as string), 'the update must NEVER name the true prior lineage (A) in its own supersede chain');
     assert.ok(!ids.includes(updated.id as string), 'the update must NEVER name itself');
   } finally {
     cleanup();
@@ -299,9 +313,22 @@ test('AC5 SUPERSEDED-NEVER-SURFACE: a record superseded via knowledge_update nev
       `A second independent audit of the Wyvern armature clip socket program across Heavy and LtMed chassis. ${SUBJECT_CORE}`,
       'Filed for a follow-up review.'
     );
-    const recD2 = tools.knowledgeUpdate(recD.id as string, { rationale: 'updated rationale, same subject' }) as unknown as Loose;
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 and no longer tombstones — the superseded
+    // precondition this test needs is built via a real knowledge_supersede
+    // instead. Disclosure assertions unchanged. [stable-identity-design-v2]
+    const recD2 = tools.knowledgeSupersede(recD.id as string, {
+      title: 'Wyvern armature clip socket chassis audit note 2',
+      statement: `A second independent audit of the Wyvern armature clip socket program across Heavy and LtMed chassis. ${SUBJECT_CORE}`,
+      alternatives_rejected: [],
+      rationale: 'updated rationale, same subject',
+    }) as unknown as Loose;
+    // test-repair 2026-08-22 (round 2): knowledge_supersede's echo is a receipt
+    // envelope, not the bare record — resolve D2 through knowledge_get before
+    // asserting its served shape. [stable-identity-design-v2]
+    const recD2Id = ((recD2.record as Loose)?.id ?? recD2.id) as string;
     assert.equal(get(tools, recD.id as string).status, 'superseded', 'precondition: D is now retired');
-    assert.equal(recD2.status, 'active', 'precondition: D2 is the live head');
+    assert.equal(get(tools, recD2Id).status, 'active', 'precondition: D2 is the live head');
 
     const created = createDecision(tools, TITLE_B, STATEMENT_B, RATIONALE_B) as Loose;
     assert.equal((created.record as Loose).status, 'active');
@@ -312,7 +339,7 @@ test('AC5 SUPERSEDED-NEVER-SURFACE: a record superseded via knowledge_update nev
       'EXPECTED RED: same_subject is undefined on today\'s knowledge_create response — this is the failing line until the feature exists'
     );
     const ids = idsOf(list);
-    assert.ok(ids.includes(recD2.id as string), 'the live replacement D2 is named');
+    assert.ok(ids.includes(recD2Id), 'the live replacement D2 is named');
     assert.ok(!ids.includes(recD.id as string), 'the superseded record D must NEVER appear in any same_subject list');
   } finally {
     cleanup();
