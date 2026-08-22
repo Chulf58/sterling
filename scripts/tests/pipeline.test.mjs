@@ -839,7 +839,7 @@ test('completeness-check --final: an amended file in the whole-run diff is in-co
 
 // ------- generated hook bundles in the whole-run diff (decision 66c15d77 corollary retired) -------
 
-// The enforcement suite runs build-hooks.mjs in-repo, so any run touching a bundle input
+// A run that rebuilds the bundles (`npm run build:hooks`) after touching a bundle input
 // (scripts/hooks/**, packages/schemas/**, packages/store/**) sweeps regenerated hooks/h*.mjs
 // bundles into its whole-run diff. --final derives a diff'd bundle as in-contract from its
 // CAUSE — another diff file under the input roots that is itself in the allowed set — so

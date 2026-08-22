@@ -2,7 +2,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -998,14 +998,30 @@ test('hooks.json emission check: shipped file is clean; backslash commands are f
 });
 
 test('bundled hooks are standalone: esbuild output runs without workspace resolution (invariant 4)', () => {
-  const build = spawnSync(process.execPath, [join(root, 'scripts', 'build-hooks.mjs')], { encoding: 'utf8', cwd: root, timeout: 120_000 });
-  assert.equal(build.status, 0, oneLine(build.stderr));
-  const bundled = join(root, 'hooks', 'h5-frozen-tests.mjs');
-  assert.ok(existsSync(bundled));
-  assert.ok(!readFileSync(bundled, 'utf8').includes("from '@sterling/"), 'no workspace imports at runtime');
-
-  const { dir, cleanup } = makeProject();
+  // Build into a TEMP dir — NEVER over hooks/, the live enforcement surface every
+  // hook call of the running session loads from disk. Building in place meant
+  // merely RUNNING this suite shipped whatever was in scripts/hooks/ live, and
+  // made a mutation battery compile its own sabotage into the surface it was
+  // testing (board 3e569411). The property pinned here — the EMITTED bundle
+  // behaves like its source — is unchanged; only the output location is.
+  const liveProbe = join(root, 'hooks', 'h5-frozen-tests.mjs');
+  // MTIME, not bytes: on a clean tree an in-place rebuild emits byte-identical
+  // output, so a content comparison would pass while the live surface was in
+  // fact rewritten — the exact hollow pin decision cf863d84 warns about. The
+  // mtime moves on every write, identical bytes or not. Tolerates an unbuilt
+  // clone (no shipped bundle yet) rather than throwing before the cleanup.
+  const liveBefore = existsSync(liveProbe) ? statSync(liveProbe).mtimeMs : null;
+  const outDir = mkdtempSync(join(tmpdir(), 'sterling-hooks-build-'));
+  let cleanup = () => {};
   try {
+    let dir;
+    ({ dir, cleanup } = makeProject());
+    const build = spawnSync(process.execPath, [join(root, 'scripts', 'build-hooks.mjs'), '--out-dir', outDir], { encoding: 'utf8', cwd: root, timeout: 120_000 });
+    assert.equal(build.status, 0, oneLine(build.stderr));
+    assert.equal(statSync(liveProbe).mtimeMs, liveBefore, 'the suite must not rebuild the LIVE hooks/ bundle');
+    const bundled = join(outDir, 'h5-frozen-tests.mjs');
+    assert.ok(existsSync(bundled));
+    assert.ok(!readFileSync(bundled, 'utf8').includes("from '@sterling/"), 'no workspace imports at runtime');
     const r = spawnSync(process.execPath, [bundled], {
       input: JSON.stringify(hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: join(dir, 'tests', 'x.test.mjs') } })),
       encoding: 'utf8',
@@ -1036,22 +1052,27 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
       'h13-reads-ledger.mjs': 'PostToolUse',
     };
     for (const [file, event] of Object.entries(events)) {
-      const res = spawnSync(process.execPath, [join(root, 'hooks', file)], {
+      const res = spawnSync(process.execPath, [join(outDir, file)], {
         input: JSON.stringify(hookInput(dir, { hook_event_name: event, ...benign[event] })),
         encoding: 'utf8',
         cwd: dir,
         timeout: 30_000,
-        // H1's clone-currency probe would otherwise run against the LIVE clone
-        // (no STERLING_PLUGIN_ROOT here, so pluginRoot() walks up to it) and
-        // fetch from the real origin inside the test battery — which runs
-        // during /sterling:update itself. Hermeticity by construction, not by
-        // this machine's declared role.
-        env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
+        // STERLING_PLUGIN_ROOT is set EXPLICITLY because these bundles now live
+        // in a tmpdir: h1's pluginRoot() resolves from import.meta.url and its
+        // bounded 4-level walk finds no .claude-plugin above /tmp, so it would
+        // return null and the smoke would exercise the plugin-root-absent
+        // branch instead of the production shape (reviewer finding, 2026-08-23).
+        // STERLING_CURRENCY_DISABLE then keeps the clone-currency probe from
+        // fetching the real origin inside the test battery — which runs during
+        // /sterling:update itself. Hermeticity by construction, not by this
+        // machine's declared role.
+        env: { ...process.env, STERLING_PLUGIN_ROOT: root, STERLING_CURRENCY_DISABLE: '1' },
       });
       assert.equal(res.status, 0, `${file} on benign ${event}: exit ${res.status} — ${oneLine(res.stderr)}`);
     }
   } finally {
     cleanup();
+    rmSync(outDir, { recursive: true, force: true });
   }
 });
 

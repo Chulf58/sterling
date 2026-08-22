@@ -123,9 +123,12 @@ if (isFinal) {
     const allowed = new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope, ...amendmentPaths]);
     const diffFiles = wholeRunDiffFiles({ cwd: target, store, runId: run.id });
     // Generated hook bundles (build-hooks.mjs: scripts/hooks/h*.mjs → hooks/<name>.mjs,
-    // lib + workspace packages inlined) regenerate whenever any bundle input changes,
-    // and the enforcement suite runs build-hooks in-repo — so a run touching an input
-    // sweeps regenerated bundles into the whole-run diff (decision 66c15d77). A diff'd
+    // lib + workspace packages inlined) regenerate whenever any bundle input changes
+    // and the run rebuilds them (`npm run build:hooks`, required before a bundle
+    // change ships) — so a run touching an input sweeps regenerated bundles into the
+    // whole-run diff (decision 66c15d77). (Until board 3e569411 the enforcement suite
+    // ALSO rebuilt in-repo, so merely running the tests did this; it now builds into a
+    // tmpdir, which removes one cause of a swept bundle, not the rule.) A diff'd
     // bundle is in-contract when its regeneration CAUSE is: some other in-contract diff
     // file under the bundle-input roots. Never a blanket allow — a bundle change with
     // no in-contract cause still refuses, a bundle with no generating source still
