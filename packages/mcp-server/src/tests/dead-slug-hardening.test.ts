@@ -72,6 +72,21 @@ function mkDecision(tools: SterlingTools, title: string, statement: string, over
   }).record as unknown as Loose;
 }
 
+// test-repair 2026-08-22: a tools-served body carries lifecycle:'live' (and
+// freshness metadata) since S2 — cloning that body and then forcing
+// status:'superseded' on top is a self-contradiction under stable-identity-
+// design-v2 (status now derives from lifecycle, so a stale raw column would
+// be masked or fought by the still-'live' lifecycle it was cloned from).
+// Strip lifecycle/freshness from the clone first so the forged raw row is a
+// clean legacy-shaped tombstone whose status/superseded_by pair is read
+// verbatim, exactly as the collision/newest-carrier logic under test expects. [stable-identity-design-v2]
+function stripLifecycle(body: Loose): Loose {
+  const clone = { ...body };
+  delete clone.lifecycle;
+  delete clone.freshness;
+  return clone;
+}
+
 // ===========================================================================
 // 1 — Collision refusal survives the dead-slug fallthrough.
 // ===========================================================================
@@ -113,7 +128,7 @@ test('collision refusal survives the dead-slug fallthrough: two LIVE records sha
     const survivor = mkDecision(tools, 'Collision hardening survivor', 'survivor body.');
     const donorC = mkDecision(tools, 'Collision hardening dead C (donor)', 'dead body C.');
     const deadC = {
-      ...(JSON.parse(JSON.stringify(donorC)) as Loose),
+      ...stripLifecycle(JSON.parse(JSON.stringify(donorC)) as Loose),
       id: 'cccccccc-c011-4000-8000-000000000003',
       slug: SHARED_SLUG,
       status: 'superseded',
@@ -175,7 +190,7 @@ test('cross-store newest carrier: a dead slug carried by tombstones in TWO mount
     clock = '2026-08-20T10:00:00.000Z';
     const olderDonor = mkDecision(tools, 'Cross-store dead slug older carrier donor', 'older carrier body.');
     const olderCarrier = {
-      ...(JSON.parse(JSON.stringify(olderDonor)) as Loose),
+      ...stripLifecycle(JSON.parse(JSON.stringify(olderDonor)) as Loose),
       id: 'aaaaaaaa-1001-4000-8000-000000000001',
       slug: SHARED_DEAD_SLUG,
       status: 'superseded',
@@ -190,7 +205,7 @@ test('cross-store newest carrier: a dead slug carried by tombstones in TWO mount
     clock = '2026-08-20T12:00:00.000Z';
     const newerDonor = mkDecision(tools, 'Cross-store dead slug newer carrier donor', 'newer carrier body.');
     const newerCarrier = {
-      ...(JSON.parse(JSON.stringify(newerDonor)) as Loose),
+      ...stripLifecycle(JSON.parse(JSON.stringify(newerDonor)) as Loose),
       id: 'bbbbbbbb-2002-4000-8000-000000000002',
       slug: SHARED_DEAD_SLUG,
       scope: 'domain:genesys',

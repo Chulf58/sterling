@@ -158,9 +158,16 @@ test('AC4 (regression): top-level enum reporting and required/optional list shap
     assert.ok(!dec.required.includes('reason') && !dec.optional.includes('reason'));
 
     const art = tools.knowledgeSchema('feature_article');
-    for (const f of ['slug', 'version', 'history', 'live_test_refs']) {
+    for (const f of ['slug', 'history', 'live_test_refs']) {
       assert.ok(art.required.includes(f), `${f} still reported required — unchanged`);
     }
+    // test-repair 2026-08-22: version/status/superseded_by are server-owned
+    // under stable-identity-design-v2 — never caller-required (mirrors pin
+    // S3-10a/S3-10b in stable-identity-tools.test.ts). [stable-identity-design-v2]
+    assert.ok(!art.required.includes('version'), 'version is server-owned — never caller-required');
+    assert.ok(art.fields.some((f) => f.name === 'version'), 'version is still reported as a field');
+    assert.ok(!art.required.includes('status'), 'status is server/lifecycle-derived — never caller-required');
+    assert.ok(!art.required.includes('superseded_by'), 'superseded_by is server/relation-derived — never caller-required');
     assert.ok(art.optional.includes('concept_family'), 'concept_family still optional — unchanged');
     assert.equal(art.fields.find((f) => f.name === 'concept_family')?.type, 'string');
     // No files[]/current_ac[] sub-field name leaked into the top-level lists.

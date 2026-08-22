@@ -4129,6 +4129,8 @@ var linkSchema = external_exports.object({
 });
 var AUTHOR_RE = /^(user|conductor|system|agent:[a-z0-9_-]+)$/;
 var SCOPE_RE = /^(project|domain:[a-z0-9_-]+)$/;
+var LIFECYCLE_VALUES = ["live", "retired"];
+var FRESHNESS_VALUES = ["fresh", "flagged_stale"];
 var envelopeFields = {
   id: external_exports.string().uuid(),
   type: external_exports.string(),
@@ -4138,6 +4140,13 @@ var envelopeFields = {
   status: external_exports.enum(["active", "superseded"]),
   // Separate from status on purpose: an enum conflated with a foreign key queries badly (§3.2).
   superseded_by: external_exports.string().uuid().nullable(),
+  // v2 identity trio — server-owned, optional on input (the store assigns them
+  // and refuses an out-of-enum value loudly). `version` starts at 1 and is
+  // bumped by every in-place write; feature_article narrows it to REQUIRED in
+  // its own extend, because its pre-v2 chains author the number explicitly.
+  lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
+  version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string()),
@@ -4906,7 +4915,7 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list

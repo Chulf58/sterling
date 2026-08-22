@@ -469,7 +469,11 @@ test('AC4: an old record that is already superseded is REFUSED — nothing writt
   const { tools, cleanup } = harness();
   try {
     const v1 = mkDecision(tools, 'ac4-already-superseded', 'plain single-ruling prose statement.');
-    tools.knowledgeUpdate(v1.id as string, { rationale: 'v2 via an ordinary knowledge_update' });
+    // test-repair 2026-08-22: knowledge_update mutates in place under
+    // stable-identity-design-v2 and no longer tombstones — the
+    // already-superseded precondition is built via a real knowledge_supersede
+    // instead. The refusal assertion is unchanged. [stable-identity-design-v2]
+    supersede(tools, v1.id as string, { title: 'ac4-already-superseded-v2', statement: 'v2 statement.', alternatives_rejected: [], rationale: 'v2 via a real knowledge_supersede' });
     assert.equal(get(tools, v1.id as string).status, 'superseded', 'precondition: v1 is already superseded');
 
     const before = decisionCount(tools);

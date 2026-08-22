@@ -90,6 +90,21 @@ try {
   throw e;
 }
 
+// Stable identity (S5, decision stable-identity-design-v2): the migration
+// collapses legacy chain members into record_aliases — every pre-migration
+// historical id must KEEP resolving (the design's no-false-positives promise),
+// so the dead-id index joins the resolution set as synthetic rows whose
+// status reads 'superseded' (they forward to a canonical live record).
+let aliasRows = [];
+try {
+  aliasRows = store.recordAliases();
+} catch {
+  aliasRows = []; // pre-v2 store: no alias table, nothing to join
+}
+for (const a of aliasRows) {
+  index.push({ id: a.historical_id, type: 'alias', status: 'superseded' });
+}
+
 const fullIds = new Set(index.map((r) => r.id));
 const byId = new Map(index.map((r) => [r.id, r]));
 const byPrefix = new Map();

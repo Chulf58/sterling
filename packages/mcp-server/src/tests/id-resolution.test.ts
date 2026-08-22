@@ -137,13 +137,19 @@ for (const form of ['uuid', 'slug', 'prefix'] as const) {
       const res = tools.knowledgeAppend(addr, 'history', [{ date: NOW, event: `via ${form}` }]) as unknown as {
         record: Loose;
       };
-      const resolved = supersedesTargetOf(res.record);
+      // test-repair 2026-08-22: knowledge_append mutates in place under
+      // stable-identity-design-v2 — no supersedes link is minted by an ordinary
+      // write, so resolution is now asserted via the stable-id echo shape (id
+      // unchanged, version bumped) rather than a supersedes link target. [stable-identity-design-v2]
       assert.equal(
-        resolved,
+        res.record.id,
         seed.id,
-        form === 'uuid'
-          ? 'regression control: the uuid form already resolves and supersedes correctly today'
-          : `EXPECTED FAILURE on current code: knowledge_append has no ${form} resolution yet — it throws "no record '${addr}'" before this line, or (if it somehow matched) the supersedes link is missing/wrong so resolved !== seed.id`
+        `the ${form} form must resolve to the SAME record — id stays stable across the write, no re-mint`
+      );
+      assert.equal(
+        (res.record as unknown as { version: number }).version,
+        2,
+        `the ${form} form's write landed and bumped the version of the resolved record`
       );
     } finally {
       cleanup();
@@ -201,13 +207,19 @@ for (const form of ['uuid', 'slug', 'prefix'] as const) {
       const res = tools.knowledgeEdit(addr, 'what_it_does', 'MARKER_TO_EDIT', 'EDITED_MARKER') as unknown as {
         record: Loose;
       };
-      const resolved = supersedesTargetOf(res.record);
+      // test-repair 2026-08-22: knowledge_edit inherits the same in-place write
+      // path as knowledge_update under stable-identity-design-v2 — no
+      // supersedes link is minted, so resolution is asserted via the stable-id
+      // echo shape instead. [stable-identity-design-v2]
       assert.equal(
-        resolved,
+        res.record.id,
         seed.id,
-        form === 'uuid'
-          ? 'regression control: the uuid form already resolves and supersedes correctly today'
-          : `EXPECTED FAILURE on current code: knowledge_edit has no ${form} resolution yet — it throws "no record '${addr}'" before this line, or the supersedes link is missing/wrong`
+        `the ${form} form must resolve to the SAME record — id stays stable across the write, no re-mint`
+      );
+      assert.equal(
+        (res.record as unknown as { version: number }).version,
+        2,
+        `the ${form} form's write landed and bumped the version of the resolved record`
       );
     } finally {
       cleanup();
@@ -264,14 +276,22 @@ for (const form of ['uuid', 'slug', 'prefix'] as const) {
 
       // knowledge_update returns the new version BARE (not wrapped in {record}) —
       // matches tools.test.ts's own usage (`const v2 = tools.knowledgeUpdate(...)`).
+      // test-repair 2026-08-22: knowledge_update mutates in place under
+      // stable-identity-design-v2 — no supersedes link is minted by an ordinary
+      // write, so resolution is asserted via the stable-id echo shape (id
+      // unchanged, version bumped, version now a universal server-owned field
+      // per pin S3-10a) instead of a supersedes link target. [stable-identity-design-v2]
       const res = tools.knowledgeUpdate(addr, { rationale: `updated via ${form}` }) as unknown as Loose;
-      const resolved = supersedesTargetOf(res);
       assert.equal(
-        resolved,
+        res.id,
         seed.id,
-        form === 'uuid'
-          ? 'regression control: the uuid form already resolves and supersedes correctly today'
-          : `EXPECTED FAILURE on current code: knowledge_update has no ${form} resolution yet — it throws "no record '${addr}'" before this line, or the supersedes link is missing/wrong`
+        `the ${form} form must resolve to the SAME record — id stays stable across the write, no re-mint`
+      );
+      assert.equal(res.rationale, `updated via ${form}`, `the ${form} form's write landed on the resolved record`);
+      assert.equal(
+        (res as unknown as { version: number }).version,
+        2,
+        `the ${form} form's write bumped the (now-universal) version field of the resolved record`
       );
     } finally {
       cleanup();

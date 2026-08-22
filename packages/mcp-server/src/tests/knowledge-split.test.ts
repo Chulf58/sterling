@@ -76,6 +76,15 @@ function split(tools: SterlingTools, input: Loose): Loose {
   return (tools as unknown as SplitCapable).knowledgeSplit(input) as Loose;
 }
 
+// test-repair 2026-08-22: under stable-identity-design-v2 a write mutates in
+// place (id stable) — the pre-write snapshot is archived in record_versions
+// and read back via knowledge_get(id, { version }). [stable-identity-design-v2]
+function knowledgeGetAtVersion(tools: SterlingTools, id: string, version: number): Loose {
+  return (
+    tools as unknown as { knowledgeGet: (id: string, opts?: { version: number }) => Loose }
+  ).knowledgeGet(id, { version });
+}
+
 function articleCount(tools: SterlingTools): number {
   return tools.knowledgeQuery({ types: ['feature_article'] }).length;
 }
@@ -185,10 +194,18 @@ test('success: splitting off one child preserves parent lineage, moves files/AC/
     const childRef = result.children[0];
     assert.equal(childRef.slug, 'compaction-child-b');
 
-    // parent survives under its ORIGINAL slug at version+1 — old version
-    // retained superseded, new version active
-    const oldParentPinned = tools.knowledgeGet(parent.id as string) as unknown as Loose;
-    assert.equal(oldParentPinned.status, 'superseded', 'the pre-split parent version is retained and flagged superseded');
+    // parent survives under its ORIGINAL slug at version+1 — trimmed IN PLACE
+    // under stable-identity-design-v2 (id stable, version bumped): that IS
+    // the design's parent-survives rule. The pre-split state is archived and
+    // readable at its old version, not under a separately-minted superseded
+    // id. [stable-identity-design-v2]
+    assert.equal(result.parent.id, parent.id, 'the parent id stays stable across the split — no re-mint');
+    const oldParentSnapshot = knowledgeGetAtVersion(tools, parent.id as string, 1);
+    assert.equal(
+      (oldParentSnapshot.files as { path: string }[]).length,
+      3,
+      'the pre-split parent state is archived in full (all three files) and readable by version'
+    );
     const newParent = tools.knowledgeGet(result.parent.id) as unknown as Loose;
     assert.equal(newParent.status, 'active');
     assert.equal(newParent.slug, 'compaction-parent', 'the surviving parent keeps its original slug');

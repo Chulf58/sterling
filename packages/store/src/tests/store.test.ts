@@ -311,7 +311,7 @@ test('remove() deletes INBOUND link edges, not just outbound — no dangling rev
     // no public reverse-traversal reader exists (the latent surface the audit
     // named), so assert the record_links index directly — a store-internal invariant
     const links = store as unknown as { db: { prepare: (s: string) => { all: (...a: unknown[]) => unknown[] } } };
-    const inbound = () => links.db.prepare('SELECT source_id FROM record_links WHERE target_id = ?').all(target.id);
+    const inbound = () => links.db.prepare('SELECT source_id FROM record_relations WHERE target_id = ?').all(target.id); // test-repair 2026-08-22: record_links replaced by record_relations in schema v2; invariant unchanged [stable-identity-design-v2]
     assert.equal(inbound().length, 1, 'inbound edge present before removal');
     store.remove(target.id);
     assert.equal(inbound().length, 0, 'inbound edge to a removed record is gone (was dangling before the fix)');

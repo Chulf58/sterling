@@ -62,9 +62,16 @@ export class MountedStores {
 
   /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
    *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
-   *  (feature_article always project, reference/research project-then-promote). */
+   *  (feature_article always project, reference/research project-then-promote).
+   *
+   *  Validation here needs `scope`, so it must run BEFORE the write reaches a
+   *  store — which means it must also run the store's identity normalization
+   *  first (SterlingStore.normalizeIdentityEnvelope, the ONE definition):
+   *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
+   *  accepts was rejected through the mounted surface, because the schemas
+   *  registry still declares the derived status/superseded_by fields. */
   create(input: unknown): DurableRecord {
-    const record = validateRecord(input);
+    const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
     return this.storeFor(record.scope).create(record);
   }
 
@@ -74,7 +81,8 @@ export class MountedStores {
    *  across the fan, which is right: two projects' queues are independent, and a
    *  cross-store key would let one project's item suppress another's. */
   enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
-    const record = validateRecord(input);
+    // Same normalize-then-validate order as create(), for the same reason.
+    const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
     return this.storeFor(record.scope).enqueueSystemTodo(record);
   }
 
@@ -161,6 +169,16 @@ export class MountedStores {
     return this.all().flatMap((s) => s.recordIdIndex());
   }
 
+  /** Project-first concatenation of every mounted store's dead-id alias index
+   *  ([stable-identity-design-v2] contract 3) — same reasoning as
+   *  recordIdIndex: a historical id cited anywhere may have belonged to a
+   *  record that now lives in a domain store, so resolution MUST span mounts.
+   *  A historical id is unique across the fan (it was one record's id), so no
+   *  dedup is needed. */
+  recordAliases(): ReturnType<SterlingStore['recordAliases']> {
+    return this.all().flatMap((s) => s.recordAliases());
+  }
+
   /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
    *  3db7095f's deterministic lookup, mounted). Feature articles are always
    *  project-scoped and never promote (AC7), so in practice this reads the project
@@ -234,6 +252,32 @@ export class MountedStores {
   /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
   remove(...args: Parameters<SterlingStore['remove']>): ReturnType<SterlingStore['remove']> {
     return this.storeHolding(args[0]).remove(...args);
+  }
+
+  // -- the generalized IN-PLACE write triad (stable-identity S2, decision
+  // [stable-identity-design-v2]) — same holding-store routing as supersede:
+  // an in-place write must land on the row that actually exists, and the
+  // version counter it bumps is that store's.
+
+  /** knowledge_update-shaped in-place write in the holding store. */
+  updateRecord(...args: Parameters<SterlingStore['updateRecord']>): ReturnType<SterlingStore['updateRecord']> {
+    return this.storeHolding(args[0]).updateRecord(...args);
+  }
+
+  /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
+  editRecordField(...args: Parameters<SterlingStore['editRecordField']>): ReturnType<SterlingStore['editRecordField']> {
+    return this.storeHolding(args[0]).editRecordField(...args);
+  }
+
+  /** knowledge_append-shaped array growth in the holding store. */
+  appendRecordField(...args: Parameters<SterlingStore['appendRecordField']>): ReturnType<SterlingStore['appendRecordField']> {
+    return this.storeHolding(args[0]).appendRecordField(...args);
+  }
+
+  /** An archived (record_id, version) snapshot from whichever store holds the
+   *  record. Version history is store-local, exactly like the record itself. */
+  getRecordVersion(...args: Parameters<SterlingStore['getRecordVersion']>): ReturnType<SterlingStore['getRecordVersion']> {
+    return this.storeHolding(args[0]).getRecordVersion(...args);
   }
 
   /** IN-PLACE todo edit (board_update) in the holding store — todos are always

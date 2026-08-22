@@ -89,9 +89,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         field: z.string().optional(),
         offset: z.number().int().nonnegative().optional(),
         length: z.number().int().positive().optional(),
+        version: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('read the ARCHIVED snapshot at this version instead of the current record; an unknown version is refused, never silently the latest'),
       }),
     },
-    ({ id, field, offset, length }) => json(tools.knowledgeGet(id, { field, offset, length }))
+    ({ id, field, offset, length, version }) => json(tools.knowledgeGet(id, { field, offset, length, version }))
   );
 
   server.registerTool(
@@ -171,7 +177,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description:
-        'Versioned update: writes a new version and supersedes the prior (which is retained). Never mutates in place. REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. This write does NOT auto-close any maintenance item: pass resolves:[<item ids>] to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write — a bad id refuses the whole call); anything left unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt (warnings kept, body dropped — you just authored it); pass projection:"full" for the whole stored record.',
+        'Versioned update IN PLACE: the record\'s id NEVER changes, the server-owned version counter bumps by one, and the full prior body is archived (read it back with knowledge_get version:<n>). REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. Pass expected_version:<the version you read> to make the write conditional: a stale token is refused naming both versions with nothing written. A `version` inside body is server-owned and ignored (disclosed as a warning). The ONE exception to in-place: an attestation update is a concept replacement (new id, prior retired), because an inspection verdict is immutable. This write does NOT auto-close any maintenance item: pass resolves:[<item ids>] to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write — a bad id refuses the whole call, and the drain rides the write\'s own transaction); anything left unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt carrying version + previous_version (body dropped — you just authored it); pass projection:"full" for the whole stored record.',
       inputSchema: strict({
         id: z.string(),
         body: passthrough,
@@ -179,10 +185,17 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
           .array(z.string())
           .optional()
           .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        expected_version: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('CAS token: the version you read. A stale value refuses naming both versions, with nothing written'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
-    ({ id, body, resolves, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves), projection))
+    ({ id, body, resolves, expected_version, projection }) =>
+      json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves, expected_version), projection))
   );
 
   server.registerTool(

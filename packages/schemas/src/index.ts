@@ -1,5 +1,16 @@
 export { normalizeRepoPath, repoPath, toRepoRelative, matchesGlob } from './paths.js';
-export { LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, envelopeFields, refineSupersession } from './envelope.js';
+export {
+  LINK_RELS,
+  linkSchema,
+  AUTHOR_RE,
+  SCOPE_RE,
+  envelopeFields,
+  refineSupersession,
+  // schema v2 identity pair [stable-identity-design-v2]
+  LIFECYCLE_VALUES,
+  FRESHNESS_VALUES,
+} from './envelope.js';
+export type { Lifecycle, Freshness } from './envelope.js';
 export {
   verifiableAt,
   modelsCatalogSchema,

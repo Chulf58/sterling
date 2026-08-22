@@ -12,6 +12,30 @@ export const linkSchema = z.object({
 export const AUTHOR_RE = /^(user|conductor|system|agent:[a-z0-9_-]+)$/;
 export const SCOPE_RE = /^(project|domain:[a-z0-9_-]+)$/;
 
+// ---------------------------------------------------------------------------
+// Schema v2 identity fields (stable-identity wave S2, decision
+// [stable-identity-design-v2]). LIFECYCLE + FRESHNESS are the AUTHORITATIVE
+// pair that replaces stored status/superseded_by:
+//   lifecycle  'live' | 'retired'          — retired ONLY via the supersede /
+//                                            retire paths, both writing a
+//                                            record_relations 'supersedes' edge
+//   freshness  'fresh' | 'flagged_stale'   — orthogonal, so a stale record can
+//                                            still be live
+// The SERVED status/superseded_by are DERIVED from them by the store
+// (retired → 'superseded'; else flagged_stale → 'flagged_stale'; else
+// 'active'; superseded_by = the successor of the inbound supersedes relation
+// when retired, else null). status/superseded_by therefore stay on the
+// envelope as WRITE-SIDE COMPATIBILITY INPUTS ONLY — every pre-v2 caller and
+// fixture keeps working, and the store normalizes them away before the body is
+// stored. Keeping them REQUIRED (rather than flipping them optional here) is
+// deliberate for this slice: it keeps the DurableRecord type stable for the
+// tool/TUI layers that S3 rewires.
+// ---------------------------------------------------------------------------
+export const LIFECYCLE_VALUES = ['live', 'retired'] as const;
+export const FRESHNESS_VALUES = ['fresh', 'flagged_stale'] as const;
+export type Lifecycle = (typeof LIFECYCLE_VALUES)[number];
+export type Freshness = (typeof FRESHNESS_VALUES)[number];
+
 export const envelopeFields = {
   id: z.string().uuid(),
   type: z.string(),
@@ -21,6 +45,13 @@ export const envelopeFields = {
   status: z.enum(['active', 'superseded']),
   // Separate from status on purpose: an enum conflated with a foreign key queries badly (§3.2).
   superseded_by: z.string().uuid().nullable(),
+  // v2 identity trio — server-owned, optional on input (the store assigns them
+  // and refuses an out-of-enum value loudly). `version` starts at 1 and is
+  // bumped by every in-place write; feature_article narrows it to REQUIRED in
+  // its own extend, because its pre-v2 chains author the number explicitly.
+  lifecycle: z.enum(LIFECYCLE_VALUES).optional(),
+  freshness: z.enum(FRESHNESS_VALUES).optional(),
+  version: z.number().int().positive().optional(),
   links: z.array(linkSchema),
   scope: z.string().regex(SCOPE_RE, 'scope must be project | domain:<name>'),
   stack_tags: z.array(z.string()),

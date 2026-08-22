@@ -245,6 +245,28 @@ const PLANNED_CREDIBLE_BYTES = 2000;
 export class UnresolvedIdentifierError extends Error {}
 
 /**
+ * Thrown by the id-resolution ladder when an identifier resolves through
+ * record_aliases — a HISTORICAL (pre-migration) id whose record was collapsed
+ * into a canonical one ([stable-identity-design-v2] contract 3).
+ *
+ * It is one throw with two receivers, deliberately: every WRITE tool inherits
+ * the refusal (naming the canonical id and its current version — a write must
+ * address the live record, never a version-pinned dead id), while knowledge_get
+ * CATCHES it and serves the archived snapshot plus a legacy_resolution block.
+ * Putting the alias hit on the error keeps the ladder single-exit — the
+ * alternative, a second resolution function for reads, is exactly the fork the
+ * one-ladder decision (2debab53) exists to prevent.
+ */
+export class HistoricalIdError extends Error {
+  constructor(
+    message: string,
+    readonly alias: { historical_id: string; canonical_id: string; archived_version: number }
+  ) {
+    super(message);
+  }
+}
+
+/**
  * knowledgeSplit's input shape, extracted so knowledgeSplitResult (the
  * MCP-facing wrapper, mirroring knowledgeUpdateResult) can share it without
  * a second hand-copied literal.
@@ -574,19 +596,40 @@ export class SterlingTools {
    * names on an unknown type is deliberate: the commonest reason to call this is
    * not knowing the vocabulary.
    */
-  knowledgeSchema(type: string): { type: string; fields: FieldShape[]; required: string[]; optional: string[] } {
+  knowledgeSchema(
+    type: string
+  ): { type: string; fields: (FieldShape & { server_owned?: boolean })[]; required: string[]; optional: string[] } {
     const described = schemaFor(type);
     if (!described) {
       throw new Error(`knowledge_schema: '${type}' is not a registered record type. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
     }
+    // SERVER-OWNED FIELDS ARE REPORTED AS SUCH ([stable-identity-design-v2]
+    // contract 1/4): `version` is the counter this surface OWNS — it starts at
+    // 1 and only a write moves it — and `status`/`superseded_by` are DERIVED
+    // from lifecycle + the supersedes relation since v2. All three are refused
+    // or stripped by the write path, so reporting them as caller-required (as
+    // the raw zod shape does, because the envelope still declares them for API
+    // compatibility) told callers to supply exactly what they must not: the
+    // measured cost of a wrong schema answer is one write attempt each.
+    //
+    // They stay listed in `fields` — a reader still needs to know they exist
+    // and what they hold — but marked with `server_owned: true`, and they appear
+    // in neither `required` nor `optional`, because both lists answer "what may I
+    // supply". There is deliberately NO top-level server_owned[] array: the
+    // per-field flag already answers the question at the place a reader is
+    // looking, and a second copy of the same list is one more thing to drift.
+    const serverOwned = new Set(SterlingTools.SERVER_OWNED_FIELDS);
+    const fields = described.fields.map((f) =>
+      serverOwned.has(f.name) ? { ...f, required: false, server_owned: true } : f
+    );
     // The split lists are redundant with `fields` on purpose — "what must I
     // supply" is the actual question, and making the reader filter the array to
     // answer it is how the guessing starts.
     return {
       type: described.type,
-      fields: described.fields,
-      required: described.fields.filter((f) => f.required).map((f) => f.name),
-      optional: described.fields.filter((f) => !f.required).map((f) => f.name),
+      fields,
+      required: fields.filter((f) => f.required && !serverOwned.has(f.name)).map((f) => f.name),
+      optional: fields.filter((f) => !f.required && !serverOwned.has(f.name)).map((f) => f.name),
     };
   }
 
@@ -601,7 +644,23 @@ export class SterlingTools {
   knowledgeStats(id?: string): Record<string, unknown> {
     const threshold = this.config.article_oversize_chars;
     if (id) {
-      const rec = this.resolveRecordId(id, 'knowledge_stats') as unknown as Record<string, unknown>;
+      // A HISTORICAL id READS (review finding): letting the ladder's refusal
+      // through here contradicted its own text — it says reads through this id
+      // still work — and stats ARE a read. Sized over the ARCHIVED body, which
+      // is what that id addresses, with the legacy_resolution block knowledge_get
+      // serves, so the caller can see which body was measured. The block is
+      // split off before recordSizes so it never inflates the numbers it
+      // annotates.
+      let rec: Record<string, unknown>;
+      let legacy: unknown;
+      try {
+        rec = this.resolveRecordId(id, 'knowledge_stats') as unknown as Record<string, unknown>;
+      } catch (err) {
+        if (!(err instanceof HistoricalIdError)) throw err;
+        const { legacy_resolution, ...snapshot } = this.serveArchivedAlias(err.alias);
+        rec = snapshot;
+        legacy = legacy_resolution;
+      }
       const sizes = recordSizes(rec);
       const history = Array.isArray(rec.history) ? (rec.history as unknown[]) : [];
       const links = Array.isArray(rec.links) ? (rec.links as { rel: string }[]) : [];
@@ -617,6 +676,7 @@ export class SterlingTools {
         history_entries: history.length,
         supersedes_count: links.filter((l) => l.rel === 'supersedes').length,
         ...(rec.type === 'feature_article' ? { oversize_threshold: threshold, over_threshold: sizes.body_chars > threshold } : {}),
+        ...(legacy !== undefined ? { legacy_resolution: legacy } : {}),
       };
     }
     const by_type: Record<string, { count: number; body_chars: number }> = {};
@@ -650,7 +710,7 @@ export class SterlingTools {
     // superseded_by/type via `...fields` (audit finding 14/43 — e.g. status:
     // 'superseded' would create an already-invisible record). knowledgeUpdate
     // strips the identical set for the same reason.
-    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
     const candidate: Record<string, unknown> = {
       id: this.newId(),
       type,
@@ -663,6 +723,14 @@ export class SterlingTools {
       scope: (body.scope as string) ?? 'project',
       stack_tags: body.stack_tags ?? [],
       ...body,
+      // THE COUNTER IS SERVER-OWNED AT BIRTH TOO ([stable-identity-design-v2]
+      // contract 1): every record starts at version 1 and only a write moves
+      // it, so a caller-supplied value is stripped above and replaced here
+      // rather than seeding the count. It is set explicitly (not left to the
+      // store's default) because feature_article DECLARES version as a required
+      // field, and this candidate is schema-parsed before it ever reaches the
+      // store. The strip is disclosed on the result's warnings, never silent.
+      version: 1,
     };
     // dedup_override is a create-time directive, never a stored field
     const dedupOverride = candidate.dedup_override === true;
@@ -794,6 +862,22 @@ export class SterlingTools {
     // per-type field list is invented here. Computed on `parsed` (post-schema,
     // pre-store) so a scan sees exactly what is about to be written.
     const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
+    // The stripped counter is DISCLOSED, not silently dropped
+    // ([stable-identity-design-v2] contract 1) — a caller who thought it was
+    // seeding version 42 needs to know the record was born at 1.
+    //
+    // EXCEPT for the value 1, deliberately (adjudicated, not an oversight):
+    // feature_article's schema still REQUIRES `version: 1` on a create, so every
+    // legitimate article create passes it. Warning there would fire on the
+    // correct call, every time, telling the caller nothing they did not already
+    // intend — ceremony, not disclosure (P1). Any OTHER value is a caller who
+    // believed it controlled the counter, which is exactly what must be said.
+    if (smuggledVersion !== undefined && smuggledVersion !== 1) {
+      citationWarnings.push(
+        `'version' is SERVER-OWNED and was ignored: you passed ${JSON.stringify(smuggledVersion)}, this record was created at version 1. ` +
+          `Every knowledge_update/append/edit bumps it by exactly one, in place, on the same id.`
+      );
+    }
 
     const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
     if (isSystemTodo) {
@@ -1173,7 +1257,12 @@ export class SterlingTools {
    * value is not an array, an empty entry list, and `links` — typed edges have
    * their own tool and a second path would let the record_links index drift.
    */
-  knowledgeAppend(id: string, field: string, entries: unknown[], resolves?: string[]): { record: DurableRecord; warnings: string[] } {
+  knowledgeAppend(
+    id: string,
+    field: string,
+    entries: unknown[],
+    resolves?: string[]
+  ): { record: DurableRecord; warnings: string[] } {
     const old = this.resolveRecordId(id, 'knowledge_append');
     this.refuseStaleAddress(old, id, 'knowledge_append');
     if (!Array.isArray(entries) || entries.length === 0) {
@@ -1196,7 +1285,7 @@ export class SterlingTools {
     // (decision 68988832): the write's result carries a warning on the SAME
     // channel knowledge_update uses. same_subject (ruling types only) is
     // split off rather than left inside `record` — see splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, 'knowledge_append'));
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_append'));
     // Cited-id scan (board fc053051 extension): only the newly APPENDED
     // entries — never the array's pre-existing elements, which were already
     // scanned (or not) on whatever write introduced them.
@@ -1244,7 +1333,11 @@ export class SterlingTools {
     find: string,
     replace: string,
     resolves?: string[]
-  ): { record: DurableRecord; replaced: { field: string; chars_before: number; chars_after: number }; warnings: string[] } {
+  ): {
+    record: DurableRecord;
+    replaced: { field: string; chars_before: number; chars_after: number };
+    warnings: string[];
+  } {
     const old = this.resolveRecordId(id, 'knowledge_edit');
     this.refuseStaleAddress(old, id, 'knowledge_edit');
     if (typeof find !== 'string' || find.length === 0) {
@@ -1300,7 +1393,7 @@ export class SterlingTools {
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
       // same_subject (ruling types only) is split off rather than left
       // inside `record` — see splitSameSubject.
-      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, 'knowledge_edit'));
+      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
       return {
         record,
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
@@ -1342,7 +1435,7 @@ export class SterlingTools {
     const next = current.replace(find, replace);
     // same_subject (ruling types only) is split off rather than left inside
     // `record` — see splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, 'knowledge_edit'));
+    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
     return {
       record,
       replaced: { field, chars_before: current.length, chars_after: next.length },
@@ -1479,7 +1572,8 @@ export class SterlingTools {
   knowledgeUpdateResult(
     id: string,
     body: Record<string, unknown>,
-    resolves?: string[]
+    resolves?: string[],
+    expectedVersion?: number
   ): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[] } {
     // Resolved the SAME way knowledgeUpdate resolves its own `id` (uuid/slug/
     // 8-char-prefix ladder) — review finding, 2026-08-21: a raw store.get(id)
@@ -1496,8 +1590,20 @@ export class SterlingTools {
     // wraps it as `record`. Left inside, the digest write-projection
     // (writeProjected -> digestRecord's field whitelist) silently drops it,
     // and projection:'full' would echo it back as a fake record field.
-    const { record, same_subject } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves));
+    const { record, same_subject } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves, expectedVersion));
     const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
+    // A SMUGGLED `version` IS STRIPPED, AND SAID SO ([stable-identity-design-v2]
+    // contract 1): the counter is server-owned, so the caller's value never
+    // lands — but a silent strip is how a caller comes to believe it controls
+    // the number. Refusing outright was rejected: a body copied from a previous
+    // read legitimately carries the version it was read at, and refusing that
+    // shape would punish the round-trip the update path exists to serve.
+    if (body.version !== undefined) {
+      warnings.push(
+        `'version' is SERVER-OWNED and was ignored: you passed ${JSON.stringify(body.version)}, the record is now at version ` +
+          `${(record as unknown as { version?: number }).version}. Each write bumps it by exactly one; pass expected_version to make a write conditional on the version you read.`
+      );
+    }
     if (before?.type === 'feature_article' && 'what_it_does' in body) {
       const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
       if (untouched.length > 0) {
@@ -1546,9 +1652,31 @@ export class SterlingTools {
   writeProjected<T>(result: T, projection?: 'full' | 'digest'): T | Record<string, unknown> {
     if (projection === 'full') return result;
     if (result && typeof result === 'object' && 'record' in result) {
-      return { ...(result as Record<string, unknown>), record: digestRecord((result as { record: unknown }).record as Record<string, unknown>) };
+      return { ...(result as Record<string, unknown>), record: this.digestWriteEcho((result as { record: unknown }).record as Record<string, unknown>) };
     }
-    return digestRecord(result as unknown as Record<string, unknown>);
+    return this.digestWriteEcho(result as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * digestRecord, plus the two identity numbers a WRITE receipt exists to
+   * report ([stable-identity-design-v2] contract 1): `version` and, on an
+   * in-place write, `previous_version`. The whole visible contract of the wave
+   * is "the id did not move, the version did" — a receipt that dropped the
+   * version would hide exactly the thing the caller needs to see, and the
+   * default receipt IS the digest. Only the write echo is widened; the read-side
+   * digest projection (query lines) is untouched, so no read result changes
+   * shape.
+   */
+  private digestWriteEcho(record: Record<string, unknown>): Record<string, unknown> {
+    const digested = digestRecord(record);
+    if (record.version !== undefined && digested.version === undefined) digested.version = record.version;
+    if (record.previous_version !== undefined) digested.previous_version = record.previous_version;
+    // The one write whose id MOVES (an attestation concept replacement) keeps its
+    // identity_moved disclosure on the digest receipt for the same reason
+    // previous_version is here: a receipt that dropped it would hide the single
+    // fact the caller cannot reconstruct from what it sent.
+    if (record.identity_moved !== undefined) digested.identity_moved = record.identity_moved;
+    return digested;
   }
 
   knowledgeQueryResult(opts: QueryOptions & { projection?: Projection }): KnowledgeQueryResult {
@@ -1783,6 +1911,18 @@ export class SterlingTools {
   /** The citation format the repo actually writes: 8-char id prefixes. */
   private static readonly CITATION_PREFIX_LEN = 8;
 
+  /**
+   * Fields knowledge_schema reports as SERVER-OWNED rather than caller-supplied
+   * ([stable-identity-design-v2]): `version` is the counter this surface owns,
+   * `status`/`superseded_by` are derived from lifecycle + the supersedes
+   * relation. Deliberately NOT the whole unforgeable envelope (id, the clocks,
+   * type — refuseServerOwnedFields already teaches those at the write): this
+   * list is the set the v2 identity model MOVED out of caller control, and
+   * widening it would change what knowledge_schema reports for fields nothing
+   * in this wave touched.
+   */
+  private static readonly SERVER_OWNED_FIELDS = ['version', 'status', 'superseded_by'];
+
   /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
   private static slugify(text: string): string {
     return text
@@ -1848,12 +1988,52 @@ export class SterlingTools {
    * end is NOT an error: empty value/entries with the TRUE total, so paging
    * has a clean termination. `offset`/`length` without `field` is refused — a
    * window addresses one named field, never the whole record.
+   *
+   * VERSION PARAMETER ([stable-identity-design-v2] contract 2): `version` reads
+   * the ARCHIVED snapshot at (id, version) out of record_versions, byte-exact
+   * as it was stored — the point of an in-place, permanently-identified record
+   * is that its history stays addressable. A version that was never archived
+   * REFUSES naming it (never a silent fall back to the head, which would answer
+   * a different question than the one asked); the record's CURRENT version
+   * resolves to the live head, since the head is not archived until the next
+   * write moves it. The parameter also accepts the bare number form
+   * knowledgeGet(id, 2) alongside the options object, because the frozen S3 pin
+   * suite addresses it positionally.
    */
-  knowledgeGet(id: string, opts?: { field?: string; offset?: number; length?: number }): DurableRecord | Record<string, unknown> {
+  knowledgeGet(
+    id: string,
+    opts?: number | { field?: string; offset?: number; length?: number; version?: number }
+  ): DurableRecord | Record<string, unknown> {
+    const options = typeof opts === 'number' ? { version: opts } : opts;
     let record: DurableRecord;
     try {
       record = this.resolveRecordId(id, 'knowledge_get');
     } catch (err) {
+      // A HISTORICAL id is not a miss: it resolved, to a record that now lives
+      // under a canonical id. Reads serve the pinned archived snapshot plus the
+      // legacy_resolution block; only writes inherit the refusal.
+      //
+      // THE OPTIONS ARE CONSULTED ON THIS PATH TOO (review finding): serving the
+      // snapshot before reading them silently DROPPED version/field/offset/length,
+      // so a windowed read through a dead id answered with a whole record and a
+      // version read answered with a different version than the one asked for —
+      // the exact "answered a question nobody asked" failure the version refusal
+      // below exists to prevent. `version` is a pin CHECK here rather than a
+      // lookup (the alias addresses exactly one archived version, so any other
+      // number refuses naming both, mirroring archivedVersion's shape), and the
+      // field window then rides projectFieldWindow — the same tail the live path
+      // uses, which carries legacy_resolution onto the windowed shape too.
+      if (err instanceof HistoricalIdError) {
+        const alias = err.alias;
+        if (options?.version !== undefined && options.version !== alias.archived_version) {
+          throw new Error(
+            `knowledge_get: '${alias.historical_id}' is a HISTORICAL id pinned to version ${alias.archived_version} of '${alias.canonical_id}', ` +
+              `so version ${options.version} cannot be read through it — a dead id addresses exactly the one snapshot it was collapsed at. ` +
+              `Nothing was served in its place; read version ${options.version} through the canonical id '${alias.canonical_id}'.`
+          );
+        }
+        return this.projectFieldWindow(this.serveArchivedAlias(alias), options);
+      }
       // DEAD-SLUG FALLTHROUGH (decision df361a0f, board 2b9f2f1a part 3,
       // 'supersede + disclose'), knowledge_get-ONLY: resolveRecordId already
       // tried live-slug then id-prefix resolution and both failed, so this
@@ -1883,27 +2063,49 @@ export class SterlingTools {
     // sourced from store.resolveTerminus so the disclosed end is the true chain
     // end, not the one-hop superseded_by (AC7).
     let full: DurableRecord | (DurableRecord & { terminus: unknown }) = record;
-    if (record.status === 'superseded') {
+    if (options?.version !== undefined) {
+      // An ARCHIVED read replaces the record entirely — no terminus disclosure,
+      // because a version is not a supersession and the snapshot must come back
+      // exactly as it was stored.
+      full = this.archivedVersion(record, options.version) as DurableRecord;
+    } else if (record.status === 'superseded') {
       const terminus = this.store.resolveTerminus(record.id);
       if (terminus) full = { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
     }
 
+    return this.projectFieldWindow(full as unknown as Record<string, unknown>, options);
+  }
+
+  /**
+   * knowledge_get's FIELD-WINDOW tail (decision compaction-tooling-windowed-read-
+   * plus-split), extracted so the ARCHIVED-ALIAS read shares it byte-for-byte
+   * instead of skipping it (review finding — see the HistoricalIdError branch
+   * above). `full` is whatever body the read resolved to: the live record, an
+   * archived version snapshot, or an alias snapshot. legacy_resolution rides
+   * through onto the windowed shape when the body carries one, because a reader
+   * holding a window must still be told the id they cited is historical.
+   */
+  private projectFieldWindow(
+    full: Record<string, unknown>,
+    options?: { field?: string; offset?: number; length?: number; version?: number }
+  ): DurableRecord | Record<string, unknown> {
     // No windowing requested at all: exactly today's behavior, untouched.
-    if (!opts || (opts.field === undefined && opts.offset === undefined && opts.length === undefined)) {
+    if (!options || (options.field === undefined && options.offset === undefined && options.length === undefined)) {
       return full;
     }
-    const { field, offset, length } = opts;
+    const { field, offset, length } = options;
     if (field === undefined) {
       throw new Error(
         `knowledge_get: 'offset'/'length' require 'field' to be set — a window addresses one named field on the record, never the whole thing.`
       );
     }
-    const known = knownFieldsFor(full.type);
+    const type = String(full.type);
+    const known = knownFieldsFor(type);
     if (!known || !known.has(field)) {
       const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
-      throw new Error(`knowledge_get: '${full.type}' does not define field '${field}' — valid fields: ${valid}.`);
+      throw new Error(`knowledge_get: '${type}' does not define field '${field}' — valid fields: ${valid}.`);
     }
-    const rec = full as unknown as Record<string, unknown>;
+    const rec = full;
     const value = rec[field];
     const base: Record<string, unknown> = {
       id: full.id,
@@ -1912,6 +2114,10 @@ export class SterlingTools {
       field,
       ...(rec.slug !== undefined ? { slug: rec.slug } : {}),
       ...(rec.version !== undefined ? { version: rec.version } : {}),
+      // An ALIAS read keeps its disclosure on the windowed shape too: the block
+      // is what tells the reader the id they cited is historical and where the
+      // concept lives now, which a window has no other way to say.
+      ...(rec.legacy_resolution !== undefined ? { legacy_resolution: rec.legacy_resolution } : {}),
     };
     if (typeof value === 'string') {
       const off = offset ?? 0;
@@ -1927,7 +2133,7 @@ export class SterlingTools {
     // nothing to page through.
     if (offset !== undefined || length !== undefined) {
       throw new Error(
-        `knowledge_get: field '${field}' on ${full.type} is not a string or array — offset/length are not windowable on it.`
+        `knowledge_get: field '${field}' on ${type} is not a string or array — offset/length are not windowable on it.`
       );
     }
     return { ...base, kind: 'value', value };
@@ -1970,18 +2176,36 @@ export class SterlingTools {
         `${toolName}: no ${noun} '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
       );
     }
+    // HISTORICAL (aliased) ids join the ladder here, between exact-slug and
+    // prefix resolution ([stable-identity-design-v2] contract 3): a LIVE record
+    // always wins — an alias is consulted only once nothing live matches — and
+    // an EXACT historical id is checked before any prefix, so a full dead uuid
+    // never has to compete with prefixes for precedence. Read after the
+    // too-short refusal because a historical id is a full uuid: nothing shorter
+    // than the citation prefix can match one, so the index is not even fetched
+    // on that path.
+    const aliases = this.store.recordAliases();
+    const exactAlias = aliases.find((a) => a.historical_id === id);
+    if (exactAlias) throw this.historicalIdRefusal(exactAlias, id, toolName);
     const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
-    if (hits.length === 0) throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
-    if (hits.length > 1) {
-      // NOT an UnresolvedIdentifierError: the prefix matched multiple records
-      // — an ambiguity between real hits, not a miss. Must reach the caller
-      // unchanged, same reasoning as the slug-collision throw above.
+    // Prefix resolution spans live ids AND aliases in ONE ambiguity judgement:
+    // a prefix matching one live record and one dead id is genuinely ambiguous
+    // and must refuse naming both, exactly as two live records do — picking the
+    // live one silently would answer a different question than the one asked.
+    // NOT an UnresolvedIdentifierError: the prefix matched real records — an
+    // ambiguity between hits, not a miss. It must reach the caller unchanged,
+    // same reasoning as the slug-collision throw above.
+    const aliasHits = aliases.filter((a) => a.historical_id.startsWith(id));
+    if (hits.length + aliasHits.length > 1) {
       throw new Error(
-        `${toolName}: '${id}' is ambiguous — it prefixes ${hits.length} records: ${hits
-          .map((r) => `${r.id} (${r.type}, ${r.status})`)
-          .join('; ')}. Cite more of the id.`
+        `${toolName}: '${id}' is ambiguous — it prefixes ${hits.length + aliasHits.length} records: ${[
+          ...hits.map((r) => `${r.id} (${r.type}, ${r.status})`),
+          ...aliasHits.map((a) => `${a.historical_id} (historical id → ${a.canonical_id})`),
+        ].join('; ')}. Cite more of the id.`
       );
     }
+    if (hits.length === 0 && aliasHits.length === 1) throw this.historicalIdRefusal(aliasHits[0], id, toolName);
+    if (hits.length === 0) throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
     const record = this.store.get(hits[0].id);
     // The index and the bodies come from the same rows, so a hit with no body is
     // a torn store, not a miss — say which it is rather than reporting "no record".
@@ -1989,6 +2213,99 @@ export class SterlingTools {
     // inconsistency is in the store, not the citation.
     if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
     return record;
+  }
+
+  /**
+   * knowledge_get's `version` read ([stable-identity-design-v2] contract 2):
+   * the archived snapshot at (record id, version), or the live head when the
+   * asked-for version IS the current one (the head is only archived when the
+   * next write displaces it — asking for it is not an error).
+   *
+   * An unknown version REFUSES naming the version asked for, the versions that
+   * do exist as a range, and the record — never a silent latest, which is the
+   * failure that makes a reader believe an old assertion is current (P5).
+   */
+  private archivedVersion(record: DurableRecord, version: number): Record<string, unknown> {
+    const current = (record as unknown as { version?: number }).version;
+    if (!Number.isInteger(version) || version < 1) {
+      throw new Error(
+        `knowledge_get: version ${version} is not a positive integer — versions start at 1 and count up by one per write` +
+          `${current !== undefined ? ` (record '${record.id}' is at version ${current})` : ''}.`
+      );
+    }
+    if (current !== undefined && version === current) return record as unknown as Record<string, unknown>;
+    const snapshot = this.store.getRecordVersion(record.id, version);
+    if (!snapshot) {
+      throw new Error(
+        `knowledge_get: record '${record.id}' has no archived version ${version}` +
+          `${current !== undefined ? ` — it is at version ${current}, so the addressable versions are 1..${current}` : ''}. ` +
+          `Nothing was fabricated and the current record was NOT served in its place; re-read without 'version' for the head.`
+      );
+    }
+    return snapshot;
+  }
+
+  /**
+   * The one refusal an aliased (historical) id produces
+   * ([stable-identity-design-v2] contract 3). It NAMES THE CANONICAL ID and the
+   * version that id is now at, because the whole promise of the alias table is
+   * that a citation written anywhere keeps resolving: telling the caller "no
+   * such record" when the record is alive under another id is the false
+   * negative the wave exists to remove. knowledge_get intercepts this and
+   * serves the archived snapshot instead; every write tool lets it through,
+   * because a write must land on the live record, never on a version-pinned
+   * dead id.
+   */
+  private historicalIdRefusal(
+    alias: { historical_id: string; canonical_id: string; archived_version: number },
+    addressed: string,
+    toolName: string
+  ): HistoricalIdError {
+    const canonical = this.store.get(alias.canonical_id) as (DurableRecord & { version?: number }) | undefined;
+    const currentVersion = canonical?.version;
+    const addressedAs = addressed === alias.historical_id ? `'${addressed}'` : `'${addressed}' → '${alias.historical_id}'`;
+    return new HistoricalIdError(
+      `${toolName}: ${addressedAs} is a HISTORICAL id — the record it named was collapsed into canonical record '${alias.canonical_id}'` +
+        `${currentVersion !== undefined ? ` (now at version ${currentVersion})` : ''}, and version ${alias.archived_version} is the snapshot this id is pinned to. ` +
+        `Reads through this id still work (knowledge_get serves that archived snapshot with a legacy_resolution block); a WRITE must address '${alias.canonical_id}'. Nothing was written.`,
+      alias
+    );
+  }
+
+  /**
+   * knowledge_get's read through an alias ([stable-identity-design-v2] contract
+   * 3): the ARCHIVED snapshot the historical id is pinned to, plus the
+   * legacy_resolution block that tells the reader where the concept lives now
+   * and how far behind this body is. Version-pinned on purpose — a citation
+   * meant a specific text, and silently forwarding it to a rewritten head is
+   * the failure mode decision de1a7329 already ruled out for dead ids.
+   *
+   * A missing snapshot refuses LOUDLY rather than falling back to the head: an
+   * alias promising version N while record_versions holds no such row is a torn
+   * index, and answering with different content than the caller asked for is
+   * how a reader comes to believe an old citation said something it never said.
+   */
+  private serveArchivedAlias(alias: { historical_id: string; canonical_id: string; archived_version: number }): Record<string, unknown> {
+    const canonical = this.store.get(alias.canonical_id) as (DurableRecord & { version?: number }) | undefined;
+    const snapshot =
+      canonical && canonical.version === alias.archived_version
+        ? (canonical as unknown as Record<string, unknown>)
+        : this.store.getRecordVersion(alias.canonical_id, alias.archived_version);
+    if (!snapshot) {
+      throw new Error(
+        `knowledge_get: '${alias.historical_id}' is a historical id pinned to version ${alias.archived_version} of '${alias.canonical_id}', ` +
+          `but no such archived version is stored${canonical?.version !== undefined ? ` (that record is at version ${canonical.version})` : ''} — ` +
+          `the alias index and the version archive disagree, and nothing was fabricated in their place.`
+      );
+    }
+    return {
+      ...snapshot,
+      legacy_resolution: {
+        canonical_id: alias.canonical_id,
+        archived_version: alias.archived_version,
+        current_version: canonical?.version ?? alias.archived_version,
+      },
+    };
   }
 
   /**
@@ -2029,6 +2346,14 @@ export class SterlingTools {
   private citedIdWarnings(text: string): string[] {
     if (!text) return [];
     const index = this.store.recordIdIndex();
+    // ALIASES COUNT AS RESOLUTION ([stable-identity-design-v2] contract 3): a
+    // HISTORICAL id resolves — knowledge_get serves its archived snapshot with a
+    // legacy_resolution block — so warning "fabricated or mistyped" on it would
+    // be exactly the FALSE POSITIVE the wave promises never to produce, on every
+    // migrated citation in the store's own prose. No new wording for this case,
+    // deliberately: a citation that resolves produces NO warning, whichever
+    // index resolved it.
+    const aliases = this.store.recordAliases();
     const seen = new Set<string>();
     const warnings: string[] = [];
     for (const match of text.matchAll(SterlingTools.CITATION_RE)) {
@@ -2036,7 +2361,9 @@ export class SterlingTools {
       const lower = cited.toLowerCase();
       if (seen.has(lower)) continue;
       seen.add(lower);
-      const resolves = index.some((r) => r.id.toLowerCase().startsWith(lower));
+      const resolves =
+        index.some((r) => r.id.toLowerCase().startsWith(lower)) ||
+        aliases.some((a) => a.historical_id.toLowerCase().startsWith(lower));
       if (!resolves) {
         warnings.push(
           `cited id '${cited}' does not resolve to any record in the project store or any mounted domain, at any status — check for a fabricated or mistyped citation`
@@ -2218,13 +2545,50 @@ export class SterlingTools {
     return warnings;
   }
 
-  /** Versioned change (§10): new version + supersede prior. Never mutates in place. */
-  knowledgeUpdate(id: string, body: Record<string, unknown>, resolves?: string[], toolName = 'knowledge_update'): DurableRecord & { same_subject?: SameSubjectEntry[] } {
+  /**
+   * Versioned change (§10) — IN PLACE since S3 ([stable-identity-design-v2]):
+   * the record's id NEVER changes, the server-owned `version` counter bumps by
+   * one, and the full prior body is archived in record_versions (readable via
+   * knowledge_get's `version` parameter). The write rides the store's in-place
+   * triad (store.updateRecord), which is the single transaction that also
+   * drains any `resolves` claim — so a refused claim rolls the version bump
+   * back with it, rather than leaving a bumped record beside an undrained item.
+   *
+   * WHY THIS REPLACED RE-MINTING: every citation written anywhere — commit
+   * message, brief, board item, article prose, a maintenance item's
+   * feature_link — used to rot the moment the record it named was edited, and
+   * "this record changed" was expressed by minting a new id, which made
+   * supersession meaningless as a statement about CONCEPTS. Version says
+   * "changed"; supersession now says only "replaced by a different ruling".
+   *
+   * THE ONE EXCEPTION IS attestation: an inspection verdict is immutable by
+   * construction, so an update to one is a CONCEPT REPLACEMENT — a new record
+   * with a new id, the prior one retired (pinned by attestation-immutability
+   * and S3-2). Nothing else re-mints here.
+   *
+   * `expectedVersion` is the CAS token that replaces the accidental
+   * UUID-as-token of the supersede era: a stale value refuses naming BOTH
+   * versions, with nothing written. It sits in the 4th positional slot and
+   * `toolName` moves to the 5th — the least-disruptive extension of the already
+   * frozen (id, patch, resolves) shape.
+   *
+   * A caller-supplied `version` is STRIPPED here, never honored: the counter is
+   * server-owned at every surface, so a smuggled value can neither jump the
+   * count nor be silently persisted (knowledgeUpdateResult surfaces the strip
+   * as a warning rather than letting it pass unremarked).
+   */
+  knowledgeUpdate(
+    id: string,
+    body: Record<string, unknown>,
+    resolves?: string[],
+    expectedVersion?: number,
+    toolName = 'knowledge_update'
+  ): DurableRecord & { same_subject?: SameSubjectEntry[]; previous_version?: number; identity_moved?: { previous_id: string; note: string } } {
     const old = this.resolveRecordId(id, toolName);
     this.refuseStaleAddress(old, id, toolName);
     this.refuseServerOwnedFields(body, 'knowledge_update');
     const ts = this.now();
-    const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, ...overrides } = body;
+    const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, version: _v, ...overrides } = body;
     // Same refusal as create, applied to the CALLER's fields rather than the
     // merged record: `old` is already valid, so anything unknown came from this
     // call. Without it the merge silently discarded the field and reported a new
@@ -2249,24 +2613,26 @@ export class SterlingTools {
     // RESOLVES CLAIM VALIDATION runs BEFORE any write (decision 68988832): a
     // write that does not validate is a write that must not land.
     const claims = (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
+    // ATTESTATION ONLY: a new id, a new birth clock, a retired predecessor.
+    // Every other type keeps its id and its created_at — identity and birth are
+    // properties of the RECORD, not of the version being written.
+    const replaced = old.type === 'attestation';
     const next: Record<string, unknown> = {
       ...old,
       ...overrides,
-      id: this.newId(),
+      id: replaced ? this.newId() : old.id,
       type: old.type,
-      created_at: ts,
+      created_at: replaced ? ts : old.created_at,
       updated_at: ts,
-      status: 'active',
-      superseded_by: null,
+      ...(replaced ? { status: 'active', superseded_by: null } : {}),
     };
-    if (old.type === 'feature_article' && body.version === undefined) {
-      next.version = (old as { version: number }).version + 1;
-    }
     // History rotation (board 0697c6bd): bound the stored history to genesis +
-    // newest entries. The middle is dropped from THIS version only — the version
-    // being superseded right here retains them forever, so the supersede chain
-    // is the archive and no entry ever becomes unreadable. Callers see the
-    // rotation via historyRotationWarnings on the write's result envelope.
+    // newest entries. The middle is dropped from the version being written —
+    // the PRIOR body, archived whole in record_versions by this same write,
+    // retains them forever (the archive that decision c68eb219's rotation
+    // originally leaned on the supersede chain for), so no entry ever becomes
+    // unreadable. Callers see the rotation via historyRotationWarnings on the
+    // write's result envelope.
     if (old.type === 'feature_article') {
       const hist = next.history as unknown[] | undefined;
       const max = this.config.article_history_max_entries;
@@ -2288,7 +2654,7 @@ export class SterlingTools {
     if (next.type === 'feature_article' || next.type === 'reference_material') {
       next.file_baselines = this.computeBaselines(next);
     }
-    const updated = this.store.supersede(old.id, next);
+    const previousVersion = (old as unknown as { version?: number }).version;
     // EXPLICIT-RESOLVES CLOSURE (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1;
     // board 68fe8373): drain EXACTLY the named+validated items, through the
     // SAME drain-log path maintenance_remove uses, so maintenance_remove later
@@ -2296,8 +2662,52 @@ export class SterlingTools {
     // (decision 8ecd435f — every open reconcile_needed/refresh_reference item
     // on the chain, discharged by ANY write, no claim required) is REMOVED: a
     // write that does not name an item leaves it open, however tightly linked.
-    for (const claim of claims) {
-      this.store.remove(claim.id, ts);
+    //
+    // Since S3 the drain rides INSIDE the store write's own transaction
+    // ([stable-identity-design-v2] contract 5) rather than following it as a
+    // separate loop: a claim that the store cannot close now rolls the version
+    // bump and the snapshot back with it. The tool-layer validation above still
+    // runs FIRST and still owns every message a caller reads (lane rules,
+    // feature_link matching, already-drained traces) — the store's own check is
+    // the transactional backstop, not the explanation.
+    let updated: DurableRecord;
+    if (replaced) {
+      // The attestation path keeps expected_version meaningful by checking it
+      // here: store.supersede has no CAS token of its own, and silently
+      // ignoring a caller's token would be the exact failure the token exists
+      // to prevent.
+      if (expectedVersion !== undefined && previousVersion !== undefined && expectedVersion !== previousVersion) {
+        throw new Error(
+          `${toolName}: stale expected_version — the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ` +
+            `${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`
+        );
+      }
+      updated = this.store.supersede(old.id, next);
+      for (const claim of claims) {
+        this.store.remove(claim.id, ts);
+      }
+    } else {
+      // EVERY in-place write is CAS-GUARDED, not only the ones that passed a
+      // token (review finding): this tool layer is a READ-MODIFY-WRITE — `next`
+      // is merged from the `old` read at the top of this call — so the version
+      // that read observed IS the write's precondition. Without it two writers
+      // against one store (MCP server + TUI, both importing packages/store) can
+      // each merge from version n and the second silently overwrites the first's
+      // fields: a LOST UPDATE nobody sees, rather than a conflict. Covers
+      // knowledge_append and knowledge_edit too, whose merge is entirely
+      // server-side and had no token to pass.
+      //
+      // A caller-supplied expected_version still WINS — it is a stricter
+      // statement about what the CALLER read, and a mismatch between the two is
+      // itself a conflict worth refusing. A conflict surfaces as the store's own
+      // version-conflict refusal, naming both versions with nothing written; no
+      // retry loop, deliberately (a silent retry would re-merge onto a body the
+      // caller never saw, which is the lost update by another route).
+      const cas = expectedVersion ?? previousVersion;
+      updated = this.store.updateRecord(old.id, next, {
+        ...(cas !== undefined ? { expected_version: cas } : {}),
+        ...(claims.length ? { resolves: claims.map((claim) => claim.id) } : {}),
+      });
     }
     this.repointPromotionReview(chain, updated.id, ts);
     // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
@@ -2308,14 +2718,37 @@ export class SterlingTools {
     // the disclosure never names the write's own prior self or its own new
     // self. Sourced from the registered FTS extractor's text over the
     // MERGED record about to be persisted.
+    //
+    // `previous_version` rides the echo on the in-place path so a caller can
+    // SEE the bump it just caused (n-1 → n) without a second read — the receipt
+    // for "the id did not move, the version did". The replacement path omits it:
+    // a new record's version 1 has no predecessor of its own.
+    //
+    // THE REPLACEMENT PATH DISCLOSES THE MOVE INSTEAD (review finding): this is
+    // the ONE write where the id legitimately changes, and a receipt that only
+    // carried the new id left the caller's own handle silently dead — the caller
+    // asked to update '<previous_id>' and got back a record with a different id,
+    // with nothing saying so. `identity_moved` names it explicitly; digestWriteEcho
+    // carries it through the default digest receipt the same way it carries
+    // previous_version, so the disclosure survives the projection it is for.
+    const bumpedTo = (updated as unknown as { version?: number }).version;
+    const echo = replaced
+      ? {
+          ...updated,
+          identity_moved: {
+            previous_id: old.id,
+            note: `an attestation update is a CONCEPT REPLACEMENT, not an in-place version bump (an inspection verdict is immutable by construction): this is a NEW record with a new id, and '${old.id}' was retired pointing at it. Cite '${updated.id}' from here on.`,
+          },
+        }
+      : { ...updated, previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined) };
     if (SterlingTools.SAME_SUBJECT_TYPES.includes(old.type)) {
       const registered = RECORD_TYPES[old.type as keyof typeof RECORD_TYPES];
       const excludeIds = new Set(chain);
       excludeIds.add(updated.id);
       const sameSubject = this.sameSubjectDigest(registered ? registered.fts(next) : '', excludeIds);
-      return { ...updated, same_subject: sameSubject };
+      return { ...echo, same_subject: sameSubject };
     }
-    return updated;
+    return echo;
   }
 
   /**
@@ -2517,7 +2950,10 @@ export class SterlingTools {
           live_test_refs: movedRefs,
           dependencies: child.dependencies ?? { relies_on: [parentRec.slug], relied_by: [] },
           state: parentRec.state,
-          version: 1,
+          // No `version` passed: the counter is SERVER-OWNED at birth
+          // ([stable-identity-design-v2] contract 1), so knowledgeCreate strips
+          // it and stamps 1 itself. Passing 1 relied on the strip being silent
+          // for that exact value — a contract this surface does not make.
           history: [{ date: ts, event: `split from '${parentRec.slug}'${reason ? ` — ${reason}` : ''}` }],
         });
         childResults.push({ id: created.record.id, slug: child.slug });
@@ -2592,8 +3028,14 @@ export class SterlingTools {
    * (no new version, no id churn) so every other reference to the item survives.
    *
    * Shared by knowledgeUpdate (decision 01f31039) and knowledge_supersede
-   * (decision e17794ea) — both mint a new id for the same lineage, so both owe
-   * the same re-point. `chain` is every id this supersession's target answers
+   * (decision e17794ea). Since S3 ([stable-identity-design-v2]) knowledgeUpdate
+   * writes IN PLACE, so only two shapes actually move an id and owe a re-point:
+   * knowledge_supersede, and knowledgeUpdate's ONE re-minting branch — an
+   * attestation concept replacement. On the in-place path `newId` IS the id the
+   * item already points at, so the `feature_link !== newId` guard below makes
+   * this a no-op rather than a rewrite; it is called unconditionally because the
+   * caller cannot tell the two branches apart cheaply, not because both re-mint.
+   * `chain` is every id this supersession's target answers
    * for (the old id plus any ancestors it already carries a 'supersedes' link
    * to) — computed for every type, since promotion_review can point at any
    * supersedable record, not only feature_article/reference_material.
@@ -2620,10 +3062,20 @@ export class SterlingTools {
    * rejected loudly by the store routing before anything is written.
    */
   knowledgePromote(id: string, domain: string): { promoted: DurableRecord; retired: string; drained_review: string | null } {
-    const original = this.store.get(id);
-    if (!original) throw new Error(`knowledge_promote: no record '${id}'`);
-    if (original.status !== 'active') throw new Error(`knowledge_promote: record '${id}' is not active (status ${original.status})`);
-    if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${id}' is ${original.scope} — only project-scoped records promote`);
+    // Through the SHARED LADDER (decision 2debab53), not a raw store.get: a
+    // slug or an 8-char citation prefix resolves here exactly as it does
+    // everywhere else, and — the reason this changed — a HISTORICAL id now
+    // produces the designed refusal naming the canonical record instead of a
+    // bare "no record", which would tell the caller their citation was wrong
+    // when the record is alive under another id ([stable-identity-design-v2]
+    // contract 3).
+    const original = this.resolveRecordId(id, 'knowledge_promote');
+    // Everything downstream addresses the RESOLVED id, never the caller's
+    // spelling: a slug/prefix caller would otherwise tombstone-and-link a
+    // record by a handle the store cannot resolve.
+    const originalId = original.id;
+    if (original.status !== 'active') throw new Error(`knowledge_promote: record '${originalId}' is not active (status ${original.status})`);
+    if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${originalId}' is ${original.scope} — only project-scoped records promote`);
     const UNPROMOTABLE = ['feature_article', 'todo', 'attestation'];
     if (UNPROMOTABLE.includes(original.type)) {
       throw new Error(
@@ -2641,17 +3093,17 @@ export class SterlingTools {
       status: 'active',
       superseded_by: null,
       scope: `domain:${domain}`,
-      links: [{ rel: 'informed_by', target_id: id }],
+      links: [{ rel: 'informed_by', target_id: originalId }],
     });
     // tombstone the project original, pointing forward to the promoted copy —
     // 'promoted' (not the default 'retired') so the activity feed names this
     // for what it is (board 39d6462d)
-    this.store.retireInFavorOf(id, promoted.id, ts, 'promoted');
+    this.store.retireInFavorOf(originalId, promoted.id, ts, 'promoted');
     const review = this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 }).find(
-      (t) => (t as { feature_link?: string }).feature_link === id
+      (t) => (t as { feature_link?: string }).feature_link === originalId
     );
     if (review) this.store.remove(review.id, ts);
-    return { promoted, retired: id, drained_review: review?.id ?? null };
+    return { promoted, retired: originalId, drained_review: review?.id ?? null };
   }
 
   // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------
@@ -2927,7 +3379,19 @@ export class SterlingTools {
    * found, rather than returning undefined.
    */
   boardGet(id: string): DurableRecord {
-    const record = this.resolveRecordId(id, 'board_get');
+    let record: DurableRecord;
+    try {
+      record = this.resolveRecordId(id, 'board_get');
+    } catch (err) {
+      // A HISTORICAL id READS (review finding), same as knowledge_get: the
+      // ladder's refusal is written for WRITES and says so ("reads through this
+      // id still work"), so serving it here would contradict itself. The
+      // archived snapshot comes back carrying its legacy_resolution block, and
+      // the type guard below still applies to it — a dead id that named
+      // something other than a board item is still not a board_get.
+      if (!(err instanceof HistoricalIdError)) throw err;
+      record = this.serveArchivedAlias(err.alias) as unknown as DurableRecord;
+    }
     if (record.type !== 'todo') {
       throw new Error(
         `board_get: '${id}' resolves to a ${record.type}, not a board/queue item — board_get reads board_add/maintenance_enqueue items only; use knowledge_get for other record types`
@@ -3197,11 +3661,30 @@ export class SterlingTools {
         `knowledge_retire: '${id}' is a todo — those leave through board_remove / maintenance_remove (done = removed, P4), not retirement.`
       );
     }
-    const survivor = this.store.get(inFavorOf);
-    if (!survivor) {
+    // in_favor_of resolves through the SHARED LADDER too (review finding): a raw
+    // store.get answered a HISTORICAL survivor id with "no record", which reads
+    // as "your citation is fabricated" for a record that is alive under a
+    // canonical id — the exact false negative record_aliases exists to remove
+    // ([stable-identity-design-v2] contract 3). The historical-id refusal
+    // propagates unchanged (it names the canonical id to retire into); only a
+    // GENUINE miss keeps this tool's own survivor-shaped wording, which says
+    // more than the ladder's generic one.
+    let survivor: DurableRecord;
+    try {
+      survivor = this.resolveRecordId(inFavorOf, 'knowledge_retire', 'target record');
+    } catch (err) {
+      if (!(err instanceof UnresolvedIdentifierError)) throw err;
       throw new Error(
         `knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first — ` +
           `retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`
+      );
+    }
+    // The literal-string self-retire check above cannot see two SPELLINGS of one
+    // record (id vs slug vs prefix), which resolving in_favor_of through the
+    // ladder now makes reachable — so it is re-checked on the resolved ids.
+    if (record.id === survivor.id) {
+      throw new Error(
+        `knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record.id}' — a record cannot be retired in favour of itself.`
       );
     }
     if (survivor.status === 'superseded') {
@@ -3214,7 +3697,7 @@ export class SterlingTools {
     // and there is no deferred retirement check to declare. Emitting one would
     // claim an obligation nobody planned — the opposite of what the loud-skip
     // channel is for.
-    const retired = this.store.retireInFavorOf(record.id, inFavorOf, this.now());
+    const retired = this.store.retireInFavorOf(record.id, survivor.id, this.now());
     return { retired };
   }
 

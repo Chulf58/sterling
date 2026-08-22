@@ -45,6 +45,16 @@ function harnessWithConfig(configOverrides: Record<string, unknown>) {
 
 const ev = (event: string) => ({ date: NOW, event });
 
+// test-repair 2026-08-22: under stable-identity-design-v2 knowledge_append
+// mutates in place (id stable) — the pre-rotation snapshot is archived in
+// record_versions under the SAME id and read back via knowledge_get(id,
+// { version }), not by resolving to a separately-minted superseded id. [stable-identity-design-v2]
+function knowledgeGetAtVersion(tools: SterlingTools, id: string, version: number): Record<string, unknown> {
+  return (
+    tools as unknown as { knowledgeGet: (id: string, opts?: { version: number }) => Record<string, unknown> }
+  ).knowledgeGet(id, { version });
+}
+
 function mkArticleWithHistory(tools: SterlingTools, slug: string, historyEvents: string[]) {
   return tools.knowledgeCreate('feature_article', {
     slug,
@@ -244,15 +254,18 @@ test('AC7: knowledge_get on the prior superseded version still shows the full pr
     article = appended.record;
     appended = tools.knowledgeAppend(article.id, 'history', ['e4'].map(ev));
     const priorId = appended.record.id; // full history [e1,e2,e3,e4], exactly at cap, untouched
+    const priorVersion = (appended.record as unknown as { version: number }).version;
 
     // one more append pushes past the cap and rotates the HEAD: genesis keep
     // = 1 (e1), newest keep = 3 (e3,e4,e5) — e2 is evicted from the live head.
     const rotated = tools.knowledgeAppend(priorId, 'history', [ev('e5')]);
     assert.deepEqual(eventsOf(rotated.record), ['e1', 'e3', 'e4', 'e5'], 'precondition: e2 was evicted from the live head');
 
-    // the version that got superseded by that rotating write is `priorId` —
-    // its own history was never itself rotated, so it still shows e2 in full.
-    const prior = tools.knowledgeGet(priorId) as unknown as { history: { event: string }[] };
+    // test-repair 2026-08-22: knowledge_append mutates in place under
+    // stable-identity-design-v2 — `priorId` is the SAME id as the rotated
+    // live head, so the pre-rotation snapshot is read back by its archived
+    // version, not by resolving priorId to a separately-minted record. [stable-identity-design-v2]
+    const prior = knowledgeGetAtVersion(tools, priorId, priorVersion) as unknown as { history: { event: string }[] };
     assert.deepEqual(
       prior.history.map((h) => h.event),
       ['e1', 'e2', 'e3', 'e4'],

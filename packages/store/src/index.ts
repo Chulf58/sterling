@@ -19,10 +19,14 @@ import {
   linkSchema,
   handoffSchema,
   runRecordSchema,
+  LIFECYCLE_VALUES,
+  FRESHNESS_VALUES,
   type DurableRecord,
   type Handoff,
   type MachineState,
   type RunRecord,
+  type Lifecycle,
+  type Freshness,
 } from '@sterling/schemas';
 
 export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
@@ -35,6 +39,9 @@ CREATE TABLE IF NOT EXISTS records (
   type TEXT NOT NULL,
   status TEXT NOT NULL,
   superseded_by TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'live',
+  freshness TEXT NOT NULL DEFAULT 'fresh',
+  version INTEGER NOT NULL DEFAULT 1,
   scope TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -43,6 +50,40 @@ CREATE TABLE IF NOT EXISTS records (
   body TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(type, status);
+-- Schema v2 identity tables [stable-identity-design-v2].
+-- record_versions: FULL-RECORD JSON snapshots, one per (record_id, version).
+-- Append-only and permanent — NEVER indexed into records_fts, so an archived
+-- version's text can never rank in query() (the whole point of contract 1).
+CREATE TABLE IF NOT EXISTS record_versions (
+  record_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  archived_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (record_id, version)
+);
+-- record_aliases: dead-id lookup (historical_id -> canonical_id + the version
+-- archived under that historical id). NOTHING writes it in S2 — the S4
+-- migration runner populates it once; it is an index, not a namespace.
+CREATE TABLE IF NOT EXISTS record_aliases (
+  historical_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  archived_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+-- remove() deletes aliases by canonical_id.
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON record_aliases(canonical_id);
+-- record_relations: the AUTHORITATIVE home of typed edges (supersedes,
+-- cites, ...). Replaces record_links: served links[] materializes from here,
+-- and supersession is a relation rather than a column value a caller sets.
+CREATE TABLE IF NOT EXISTS record_relations (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON record_relations(target_id);
+CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON record_relations(rel, target_id);
 CREATE TABLE IF NOT EXISTS record_stack_tags (
   record_id TEXT NOT NULL,
   tag TEXT NOT NULL,
@@ -54,13 +95,6 @@ CREATE TABLE IF NOT EXISTS record_file_keys (
   PRIMARY KEY (record_id, path)
 );
 CREATE INDEX IF NOT EXISTS idx_file_keys_path ON record_file_keys(path);
-CREATE TABLE IF NOT EXISTS record_links (
-  source_id TEXT NOT NULL,
-  rel TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  PRIMARY KEY (source_id, rel, target_id)
-);
-CREATE INDEX IF NOT EXISTS idx_links_target ON record_links(target_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
@@ -106,6 +140,65 @@ CREATE TABLE IF NOT EXISTS activity_log (
   title TEXT NOT NULL
 );
 `;
+
+// ---------------------------------------------------------------------------
+// Schema-version guard (stable-identity wave S1, extended by S2; decision
+// [stable-identity-design-v2] / 2176748e): refuse-until-migrated. PRAGMA
+// user_version (research_finding 5555895c: a 32-bit application-owned integer
+// at header offset 60 — NEVER SQLite's own PRAGMA schema_version) is checked at
+// the very top of open, before the DDL or any other write lands, so a store
+// from a NEWER, unsupported schema is refused with nothing touched.
+//
+// S2 SEMANTICS (the S1 blanket auto-stamp-forward is GONE):
+//   * a FRESH store file (sqlite_master empty at open, before DDL) is built as
+//     v2 and stamped user_version = 2;
+//   * an EXISTING, non-empty store below the supported version is NOT stamped
+//     forward — stamping it would claim a data migration that never ran. It
+//     opens READ-ONLY: reads work, every write refuses loudly naming the
+//     stable-identity migration;
+//   * a too-new store still refuses via UnsupportedSchemaVersionError with
+//     nothing written (the user_version read stays BEFORE journal_mode/DDL).
+// ---------------------------------------------------------------------------
+export const SUPPORTED_SCHEMA_VERSION = 2;
+
+export class UnsupportedSchemaVersionError extends Error {
+  readonly found: number;
+  readonly supported: number;
+  constructor(found: number, supported: number) {
+    super(
+      `Unsupported schema version: this store's user_version (${found}) is newer than the schema version this build supports (${supported}). ` +
+        `This store was likely migrated by a newer build of Sterling. Do not open it with an older/downgraded build — writing with a downgraded ` +
+        `build over a newer schema risks corrupting the store. Upgrade this build (or restore from a backup taken before the migration) before continuing.`
+    );
+    this.name = 'UnsupportedSchemaVersionError';
+    this.found = found;
+    this.supported = supported;
+  }
+}
+
+/**
+ * Every WRITE against a store that predates the stable-identity schema
+ * ([stable-identity-design-v2]). The store opened fine — reads are deliberately
+ * allowed pre-migration (AC3) — but no write may land: v2 shapes written into a
+ * v1 schema would corrupt it, and stamping the marker forward without moving
+ * the data would silently claim a migration that never ran (exactly what the S1
+ * 0→1 auto-stamp did, which is why it was removed here).
+ */
+export class SchemaMigrationRequiredError extends Error {
+  readonly found: number;
+  readonly supported: number;
+  constructor(found: number, supported: number, operation: string) {
+    super(
+      `Schema migration required: this store is at schema version ${found}, but this build requires version ${supported}. ` +
+        `The store is open READ-ONLY — '${operation}' and every other write refuses until the stable-identity migration has run. ` +
+        `Run the stable-identity store migration (decision stable-identity-design-v2) against this store file; the migration runner ` +
+        `reports the exact command, takes a VACUUM INTO backup first, and bumps user_version last. Nothing was written.`
+    );
+    this.name = 'SchemaMigrationRequiredError';
+    this.found = found;
+    this.supported = supported;
+  }
+}
 
 /** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
 export interface RecordedExit {
@@ -195,6 +288,23 @@ export const rankTerms = z
 // boundary, is TOLD so.
 export const DEFAULT_QUERY_CAP = 20;
 
+/**
+ * Options every in-place write shares ([stable-identity-design-v2]).
+ *
+ * `expected_version` is the CAS token that replaces the accidental
+ * UUID-as-token of the supersede era: UPDATE ... WHERE id = ? AND version = ?.
+ * It provides NO accidental idempotency — a replay on an already-consumed
+ * version is a stale caller and is refused.
+ *
+ * `resolves` names the maintenance items this write CLAIMS to close; they are
+ * drained inside the write's own transaction, and a refused claim rolls the
+ * whole write back.
+ */
+export interface RecordWriteOptions {
+  expected_version?: number;
+  resolves?: string[];
+}
+
 export interface QueryOptions {
   types?: string[];
   stack_tags?: string[];
@@ -242,6 +352,17 @@ export type ToolStore = Pick<
   // where a superseded record's chain currently ends.
   | 'resolveTerminus'
   | 'supersede'
+  // The generalized in-place write triad + its version reader (stable-identity
+  // S3, the call sites promised by S2's note): knowledge_update/edit/append all
+  // land through updateRecord, and knowledge_get's `version` parameter reads
+  // archived snapshots through getRecordVersion.
+  | 'updateRecord'
+  | 'editRecordField'
+  | 'appendRecordField'
+  | 'getRecordVersion'
+  // knowledge_get's legacy_resolution + the write tools' historical-id refusal
+  // (stable-identity S3) resolve dead ids through this index.
+  | 'recordAliases'
   | 'updateTodo'
   | 'retireInFavorOf'
   | 'remove'
@@ -267,10 +388,49 @@ export type ToolStore = Pick<
 export class SterlingStore {
   private db: DatabaseSync;
 
+  /**
+   * Set ONLY when an existing, non-empty store below SUPPORTED_SCHEMA_VERSION
+   * was opened ([stable-identity-design-v2]): the connection is read-only and
+   * assertWritable() refuses every write naming the required migration.
+   * undefined = a normal, writable store at the supported version.
+   */
+  private legacySchemaVersion: number | undefined;
+
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode=WAL');
+
+    // Schema-version guard — checked BEFORE journal_mode/foreign_keys/DDL land
+    // (stable-identity design-v2 / 2176748e; fixer-mode F1): this ordering
+    // guarantees that a too-new store is refused with NOTHING touched — not
+    // even a WAL journal-mode header rewrite or the -wal/-shm sidecar files a
+    // refusal AFTER `PRAGMA journal_mode=WAL` would have persistently
+    // materialized on a non-WAL too-new db. `busy_timeout` is connection-local
+    // and writes nothing to the db file, so it is safe to set first for
+    // contention safety on the read below without weakening that guarantee.
     this.db.exec('PRAGMA busy_timeout=5000');
+    const foundSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version;
+    if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
+
+    // S2 [stable-identity-design-v2]: distinguish a FRESH file (build it as v2)
+    // from an EXISTING pre-v2 store (open READ-ONLY, refuse every write). The
+    // probe is sqlite_master BEFORE the DDL runs — the only moment at which
+    // "this file has no schema yet" is still observable — and it is a read, so
+    // the refusal path still writes nothing.
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+      const objects = (
+        this.db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }
+      ).n;
+      if (objects > 0) {
+        this.legacySchemaVersion = foundSchemaVersion;
+        return; // read-only: no journal_mode, no DDL, no stamp — nothing written
+      }
+    }
+
+    this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec('PRAGMA foreign_keys=ON');
     this.db.exec(DDL);
     // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
@@ -283,20 +443,566 @@ export class SterlingStore {
     } catch {
       /* column already exists */
     }
+
+    // Stamp the supported version onto a FRESH file (S2 [stable-identity-
+    // design-v2]: an existing pre-v2 store returned read-only above and never
+    // reaches here), RE-READING user_version inside the same BEGIN IMMEDIATE
+    // transaction that writes it (fixer-mode F2 —
+    // closes a TOCTOU: the fast check above only skips work for a store
+    // already known too new at open time; without a re-read here, a
+    // concurrent migrator committing a newer version between that check and
+    // this write would be silently overwritten back down to 1, turning the
+    // guard's loud refusal into silent corruption). A re-read that is now
+    // too-new throws from inside the transaction (rolling back any stamp
+    // in progress); the catch below closes the connection before propagating,
+    // matching the fast-path refusal's write-nothing/close-cleanly contract.
+    try {
+      this.tx(() => {
+        const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+        if (current > SUPPORTED_SCHEMA_VERSION) {
+          throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
+        }
+        if (current < SUPPORTED_SCHEMA_VERSION) {
+          this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+        }
+      });
+    } catch (e) {
+      this.db.close();
+      throw e;
+    }
   }
 
   journalMode(): string {
     return (this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode;
   }
 
-  /** The one validated write path. Unregistered type or malformed record throws; nothing is written. */
+  // -------------------------------------------------------------------------
+  // Schema v2 identity core [stable-identity-design-v2]
+  // -------------------------------------------------------------------------
+
+  /**
+   * The ONE refusal for anything a pre-migration store cannot answer — one
+   * definition, two callers below (writes, and the v2-only read surfaces).
+   */
+  private assertV2Surface(operation: string): void {
+    if (this.legacySchemaVersion !== undefined) {
+      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation);
+    }
+  }
+
+  /**
+   * The refusal seam for a pre-migration store. Called at the top of every
+   * public write and, as a backstop, from tx() — reads stay allowed on purpose
+   * (AC3: read-only pre-migration).
+   */
+  private assertWritable(operation: string): void {
+    this.assertV2Surface(operation);
+  }
+
+  /**
+   * The DERIVED served status: the whole API-compatibility hinge of the v2
+   * model. Nothing stores this — it is computed from (lifecycle, freshness) on
+   * every read, so a caller that has always read `status` keeps working while
+   * the store stops holding two versions of the same truth.
+   */
+  private static derivedStatus(lifecycle: Lifecycle, freshness: Freshness): string {
+    if (lifecycle === 'retired') return 'superseded';
+    return freshness === 'flagged_stale' ? 'flagged_stale' : 'active';
+  }
+
+  /**
+   * Resolves the v2 identity trio from a caller's input, accepting BOTH
+   * envelope shapes (write-side compatibility, pin S2-5b):
+   *   * lifecycle/freshness given directly → used as given;
+   *   * only the legacy `status` given → 'active' → live+fresh,
+   *     'superseded' → retired+fresh, 'flagged_stale' → live+flagged_stale.
+   * An out-of-enum lifecycle/freshness is refused loudly rather than coerced.
+   *
+   * It then writes the DERIVED status/superseded_by back onto the candidate,
+   * because the schemas registry still declares those two envelope fields (see
+   * envelope.ts) — a new-shape record must satisfy the same validator every
+   * legacy caller does, and the stored body drops them again afterwards.
+   */
+  private static resolveIdentity(
+    raw: Record<string, unknown>,
+    defaults: { lifecycle: Lifecycle; freshness: Freshness; version: number }
+  ): { input: Record<string, unknown>; lifecycle: Lifecycle; freshness: Freshness; version: number } {
+    const input = { ...raw };
+    const readEnum = <T extends string>(field: string, allowed: readonly T[]): T | undefined => {
+      const value = input[field];
+      if (value === undefined || value === null) return undefined;
+      if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+        throw new Error(`invalid ${field} '${String(value)}' — expected one of ${allowed.join(' | ')} (stable-identity-design-v2)`);
+      }
+      return value as T;
+    };
+    let lifecycle = readEnum<Lifecycle>('lifecycle', LIFECYCLE_VALUES);
+    let freshness = readEnum<Freshness>('freshness', FRESHNESS_VALUES);
+    if (lifecycle === undefined || freshness === undefined) {
+      const status = typeof input.status === 'string' ? input.status : undefined;
+      if (status === 'superseded') {
+        lifecycle ??= 'retired';
+        freshness ??= 'fresh';
+      } else if (status === 'flagged_stale') {
+        lifecycle ??= 'live';
+        freshness ??= 'flagged_stale';
+      } else if (status === 'active') {
+        lifecycle ??= 'live';
+        freshness ??= 'fresh';
+      } else {
+        lifecycle ??= defaults.lifecycle;
+        freshness ??= defaults.freshness;
+      }
+    }
+    const rawVersion = input.version;
+    let version = defaults.version;
+    if (typeof rawVersion === 'number') {
+      if (!Number.isInteger(rawVersion) || rawVersion < 1) {
+        throw new Error(`invalid version ${rawVersion} — version is a positive integer (stable-identity-design-v2)`);
+      }
+      version = rawVersion;
+    }
+    input.lifecycle = lifecycle;
+    input.freshness = freshness;
+    input.version = version;
+    input.status = SterlingStore.derivedStatus(lifecycle, freshness);
+    if (input.superseded_by === undefined) input.superseded_by = null;
+    return { input, lifecycle, freshness, version };
+  }
+
+  /**
+   * The identity normalization every write-side caller shares, exposed for the
+   * ONE consumer that validates BEFORE it reaches a store: MountedStores, which
+   * routes on the validated record's `scope` and so must run validateRecord
+   * itself (invariant 1 — this is the single definition, never a second copy of
+   * the lifecycle→status derivation). Without it a lifecycle-only envelope that
+   * SterlingStore.create accepts was rejected through the mounted surface,
+   * because the schemas registry still declares status/superseded_by.
+   * Idempotent: normalizing an already-normalized envelope changes nothing, so
+   * the store's own resolveIdentity re-run downstream is a no-op.
+   */
+  static normalizeIdentityEnvelope(raw: unknown): Record<string, unknown> {
+    return SterlingStore.resolveIdentity(raw as Record<string, unknown>, {
+      lifecycle: 'live',
+      freshness: 'fresh',
+      version: 1,
+    }).input;
+  }
+
+  /**
+   * The body actually persisted: lifecycle/freshness/version are the stored
+   * truth, status/superseded_by are dropped because they are derived at read.
+   * A pre-v2 body (no lifecycle) passes through untouched, so a legacy store
+   * read through this code path is never rewritten in shape.
+   */
+  private static storableBody(record: Record<string, unknown>): Record<string, unknown> {
+    if (typeof record.lifecycle !== 'string') return record;
+    const body: Record<string, unknown> = { ...record };
+    delete body.status;
+    delete body.superseded_by;
+    return body;
+  }
+
+  /**
+   * Re-attaches everything derived at read: the SERVED status/superseded_by,
+   * and links[] MATERIALIZED from record_relations (the authoritative edge
+   * home). Batched — one relations query for a whole result set, plus one more
+   * for the successor of any retired record in it — so a capped query() costs
+   * two extra reads rather than 2N.
+   *
+   * A pre-v2 body carries no `lifecycle` and is passed through verbatim: that
+   * is what keeps a pre-migration store READABLE (AC3) with no branch at every
+   * call site.
+   */
+  private hydrateAll(records: DurableRecord[]): DurableRecord[] {
+    const v2 = records.filter((r) => typeof (r as unknown as { lifecycle?: unknown }).lifecycle === 'string');
+    if (!v2.length) return records;
+
+    const ids = [...new Set(v2.map((r) => r.id))];
+    const linkRows = this.db
+      .prepare(
+        `SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => '?').join(',')}) ORDER BY rowid`
+      )
+      .all(...ids) as { source_id: string; rel: string; target_id: string }[];
+    const bySource = new Map<string, { rel: string; target_id: string }[]>();
+    for (const row of linkRows) {
+      const list = bySource.get(row.source_id) ?? [];
+      list.push({ rel: row.rel, target_id: row.target_id });
+      bySource.set(row.source_id, list);
+    }
+
+    const retiredIds = v2
+      .filter((r) => (r as unknown as { lifecycle?: string }).lifecycle === 'retired')
+      .map((r) => r.id);
+    const successor = new Map<string, string>();
+    if (retiredIds.length) {
+      const rows = this.db
+        .prepare(
+          `SELECT source_id, target_id FROM record_relations
+            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => '?').join(',')}) ORDER BY rowid`
+        )
+        .all(...retiredIds) as { source_id: string; target_id: string }[];
+      for (const row of rows) {
+        if (!successor.has(row.target_id)) successor.set(row.target_id, row.source_id);
+      }
+    }
+
+    return records.map((record) => {
+      const meta = record as unknown as { lifecycle?: string; freshness?: string };
+      if (typeof meta.lifecycle !== 'string') return record;
+      const lifecycle = meta.lifecycle as Lifecycle;
+      const freshness = (meta.freshness === 'flagged_stale' ? 'flagged_stale' : 'fresh') as Freshness;
+      return {
+        ...record,
+        links: bySource.get(record.id) ?? [],
+        status: SterlingStore.derivedStatus(lifecycle, freshness),
+        superseded_by: lifecycle === 'retired' ? successor.get(record.id) ?? null : null,
+      } as DurableRecord;
+    });
+  }
+
+  /** The server-owned identity columns of a live row — the CAS + lifecycle source. */
+  private identityOf(id: string): { version: number; lifecycle: Lifecycle; freshness: Freshness; body: string } | undefined {
+    const row = this.db.prepare('SELECT version, lifecycle, freshness, body FROM records WHERE id = ?').get(id) as
+      | { version: number; lifecycle: string; freshness: string; body: string }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      version: row.version,
+      lifecycle: row.lifecycle === 'retired' ? 'retired' : 'live',
+      freshness: row.freshness === 'flagged_stale' ? 'flagged_stale' : 'fresh',
+      body: row.body,
+    };
+  }
+
+  /** Typed edge write — record_relations is the authoritative home (contract 6). */
+  private insertRelation(sourceId: string, rel: string, targetId: string, at: string): void {
+    if (sourceId === targetId) {
+      throw new Error(
+        `relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph — refused (stable-identity-design-v2)`
+      );
+    }
+    this.db
+      .prepare('INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)')
+      .run(sourceId, rel, targetId, at);
+  }
+
+  /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
+   *
+   *  NOTE (S3 boundary): a caller-supplied `version` is still honored here (the
+   *  legacy feature_article field, and the pin fixtures that pass version: 1).
+   *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
+   *  new should start relying on setting it. */
   create(input: unknown): DurableRecord {
-    const record = validateRecord(input);
+    this.assertWritable('create');
+    const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
+      lifecycle: 'live',
+      freshness: 'fresh',
+      version: 1,
+    });
+    // A record cannot be BORN RETIRED. lifecycle 'retired' with no successor is
+    // a record that default queries hide, in-place writes refuse ("goes to the
+    // live successor"), and supersede/retire refuse ("one successor maximum") —
+    // unreachable by every path that could revive it. Retirement is a lifecycle
+    // TRANSITION, owned by supersede/retireInFavorOf (contract 5).
+    // The legacy insert shape stays open: a pre-v2 body carrying
+    // status:'superseded' + superseded_by (fixtures, imports, and the S4
+    // migration's re-inserts) names its successor, so it is retired WITH a
+    // forward pointer and insertRecord materializes the supersedes relation.
+    if (prepared.lifecycle === 'retired' && !prepared.input.superseded_by) {
+      throw new Error(
+        `create: lifecycle 'retired' cannot be requested at creation without a successor — such a record is born dead ` +
+          `(hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). ` +
+          `Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`
+      );
+    }
+    const record = validateRecord(prepared.input);
     this.tx(() => {
       this.insertRecord(record);
       this.logActivity('created', record, record.created_at);
     });
-    return record;
+    // The echo goes through the SAME derivation get() serves (hydrate +
+    // derived relied_by), so a caller can never see a write echo that differs
+    // from the record it is about to read back.
+    return this.withDerivedReliedBy(
+      this.hydrateAll([SterlingStore.storableBody(record as unknown as Record<string, unknown>) as DurableRecord])[0]
+    );
+  }
+
+  /**
+   * The full record archived at (id, version) — a permanent, append-only
+   * snapshot from record_versions, returned exactly as it was stored (no
+   * derivation), so repeated reads of one version are byte-identical forever
+   * (pin S2-2c). A version that was never archived resolves to undefined —
+   * never fabricated.
+   *
+   * A V2-ONLY SURFACE: record_versions does not exist on a pre-migration store,
+   * so this refuses loudly naming the migration (P5) instead of letting a raw
+   * SQLite "no such table: record_versions" escape. Reads that a pre-v2 store
+   * CAN answer stay allowed (AC3) — version history simply is not one of them.
+   */
+  getRecordVersion(id: string, version: number): Record<string, unknown> | undefined {
+    this.assertV2Surface('getRecordVersion');
+    const row = this.db
+      .prepare('SELECT body FROM record_versions WHERE record_id = ? AND version = ?')
+      .get(id, version) as { body: string } | undefined;
+    return row ? (JSON.parse(row.body) as Record<string, unknown>) : undefined;
+  }
+
+  /**
+   * The dead-id INDEX, whole ([stable-identity-design-v2] contract 3): every
+   * record_aliases row as (historical_id, canonical_id, archived_version). The
+   * shape mirrors recordIdIndex — no body fetch, the full set, so the id
+   * resolution ladder above the store can match an exact historical id AND a
+   * citation PREFIX of one in the same pass it already makes over live ids.
+   *
+   * READ-ONLY and empty-tolerant by design: nothing writes to this table after
+   * the migration, and a PRE-MIGRATION store (where the table does not exist)
+   * returns [] rather than refusing — a legacy store is readable (AC3), and it
+   * has no historical ids to resolve because nothing has been collapsed yet.
+   */
+  recordAliases(): { historical_id: string; canonical_id: string; archived_version: number }[] {
+    if (this.legacySchemaVersion !== undefined) return [];
+    return this.db
+      .prepare('SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY rowid')
+      .all() as { historical_id: string; canonical_id: string; archived_version: number }[];
+  }
+
+  /**
+   * knowledge_update-shaped IN-PLACE write, generalized from updateTodo to
+   * EVERY record type (contract 2). `patch` is the FULL merged candidate (old
+   * record + the caller's changes), mirroring supersede/updateTodo's existing
+   * convention: this method validates and persists, the layer above decides
+   * which fields may change.
+   *
+   * The id, type and created_at are pinned to the stored record — an in-place
+   * write can never re-mint identity, which is the entire point of the wave.
+   * lifecycle is likewise preserved: retirement happens ONLY through
+   * supersede/retireInFavorOf.
+   */
+  updateRecord(id: string, patch: unknown, opts: RecordWriteOptions = {}): DurableRecord {
+    return this.applyInPlace('updateRecord', id, () => ({ ...(patch as Record<string, unknown>) }), opts);
+  }
+
+  /**
+   * knowledge_edit-shaped write: replace ONE passage inside a long string
+   * field without retransmitting it. `find` must match EXACTLY ONCE — zero and
+   * multiple matches are both refused NAMING THE COUNT, with nothing written,
+   * because a blind replace inside a field too large to read is an
+   * unreviewable write.
+   */
+  editRecordField(id: string, field: string, find: string, replace: string, opts: RecordWriteOptions = {}): DurableRecord {
+    if (find === '') throw new Error(`editRecordField: 'find' is empty — an empty find matches everywhere and nowhere; nothing was written`);
+    return this.applyInPlace('editRecordField', id, (current) => {
+      const value = (current as unknown as Record<string, unknown>)[field];
+      if (typeof value !== 'string') {
+        throw new Error(
+          `editRecordField: field '${field}' on ${current.type} '${id}' is ${value === undefined ? 'not set' : `a ${Array.isArray(value) ? 'array' : typeof value}`}, not a string — ` +
+            `an in-place passage replace applies to string fields only (use appendRecordField for arrays). Nothing was written.`
+        );
+      }
+      const matches = value.split(find).length - 1;
+      if (matches !== 1) {
+        throw new Error(
+          `editRecordField: 'find' matched ${matches} time(s) in field '${field}' of record '${id}' — exactly one match is required ` +
+            `(${matches === 0 ? 'no match: check whitespace and the exact passage' : `${matches} matches: extend 'find' until it is unique`}). Nothing was written.`
+        );
+      }
+      return { ...(current as unknown as Record<string, unknown>), [field]: value.split(find).join(replace) };
+    }, opts);
+  }
+
+  /**
+   * knowledge_append-shaped write: grow an ARRAY field in place (history,
+   * files, current_ac, …) without retransmitting the existing entries. One
+   * transaction, one version bump, prior array archived.
+   */
+  appendRecordField(id: string, field: string, entry: unknown, opts: RecordWriteOptions = {}): DurableRecord {
+    return this.applyInPlace('appendRecordField', id, (current) => {
+      const value = (current as unknown as Record<string, unknown>)[field];
+      if (value !== undefined && value !== null && !Array.isArray(value)) {
+        throw new Error(
+          `appendRecordField: field '${field}' on ${current.type} '${id}' is a ${typeof value}, not an array — ` +
+            `append grows array fields only (use editRecordField for a string passage). Nothing was written.`
+        );
+      }
+      const existing = Array.isArray(value) ? value : [];
+      return { ...(current as unknown as Record<string, unknown>), [field]: [...existing, entry] };
+    }, opts);
+  }
+
+  /**
+   * THE in-place write core shared by updateRecord / editRecordField /
+   * appendRecordField / updateTodo / renameFileKey / the enqueueSystemTodo
+   * text-update branch (contracts 2-4, 7):
+   *
+   *  1. resolve the live record + its server-owned identity columns;
+   *  2. CAS on expected_version when supplied — a stale token refuses naming
+   *     BOTH versions and writes nothing, not even a snapshot row;
+   *  3. archive the FULL prior body into record_versions (append-only);
+   *  4. UPDATE ... WHERE id = ? AND version = ? — the real CAS, kept as a
+   *     backstop now that step 1 reads under the write lock;
+   *  5. rebuild the join indexes and REPLACE the single records_fts row, so an
+   *     archived version's text can never rank (contract 1/7);
+   *  6. drain any claimed `resolves` items INSIDE the same transaction — a
+   *     refused claim rolls the whole write back (contract 4).
+   *
+   * EVERY step, step 1 included, runs inside ONE transaction. BEGIN IMMEDIATE
+   * takes the write lock before the identity read, so no committed concurrent
+   * write can land between the CAS check and the snapshot INSERT. Reading
+   * outside the transaction cost two things: a CAS loser died on the
+   * record_versions (record_id, version) primary key with a raw constraint
+   * error instead of the pinned refusal naming both versions, and the body it
+   * archived could be a stale generation of the record.
+   *
+   * `internal.allowRetired` is for the ONE path that legitimately rewrites a
+   * tombstone: renameFileKey, whose contract is that a move orphans no owning
+   * record's paths, retired ones included. It is deliberately not reachable
+   * from the public triad — a content write still goes to the live successor.
+   */
+  private applyInPlace(
+    op: string,
+    id: string,
+    buildPatch: (current: DurableRecord) => Record<string, unknown>,
+    opts: RecordWriteOptions,
+    internal: { allowRetired?: boolean } = {}
+  ): DurableRecord {
+    this.assertWritable(op);
+    let served!: DurableRecord;
+    this.tx(() => {
+      const current = this.get(id);
+      if (!current) throw new Error(`${op}: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (!identity) throw new Error(`${op}: no record '${id}'`);
+      if (identity.lifecycle === 'retired' && !internal.allowRetired) {
+        throw new Error(
+          `${op}: record '${id}' is retired (served status 'superseded') — an in-place write goes to the live successor, never to a retired record`
+        );
+      }
+      if (opts.expected_version !== undefined && opts.expected_version !== identity.version) {
+        throw new Error(
+          `${op}: stale expected_version — the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ` +
+            `${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`
+        );
+      }
+
+      const candidate = buildPatch(current);
+      // Identity is server-owned: pin it to the stored record rather than
+      // trusting a caller's (possibly stale) copy.
+      candidate.id = id;
+      candidate.type = current.type;
+      candidate.created_at = current.created_at;
+      // lifecycle never moves through this path. freshness may: an explicit
+      // freshness wins, a legacy status:'flagged_stale' is honored, and anything
+      // else PRESERVES the stored value — so a routine content update carrying a
+      // legacy status:'active' can never silently un-flag a stale record.
+      const freshness: Freshness =
+        candidate.freshness === 'fresh' || candidate.freshness === 'flagged_stale'
+          ? candidate.freshness
+          : candidate.status === 'flagged_stale'
+            ? 'flagged_stale'
+            : identity.freshness;
+      // A live record has no successor. A retired one (allowRetired path) KEEPS
+      // the one it has: the served superseded_by is derived from the inbound
+      // supersedes relation, and the schema refines status 'superseded' to
+      // require it, so nulling it here would both lie and fail validation.
+      const supersededBy = identity.lifecycle === 'retired' ? current.superseded_by ?? null : null;
+      const nextVersion = identity.version + 1;
+      const prepared = SterlingStore.resolveIdentity(candidate, {
+        lifecycle: identity.lifecycle,
+        freshness,
+        version: nextVersion,
+      });
+      prepared.input.lifecycle = identity.lifecycle;
+      prepared.input.freshness = freshness;
+      prepared.input.version = nextVersion;
+      prepared.input.status = SterlingStore.derivedStatus(identity.lifecycle, freshness);
+      prepared.input.superseded_by = supersededBy;
+
+      const validated = validateRecord(prepared.input) as DurableRecord;
+      if (validated.type !== current.type) {
+        throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
+      }
+      const entry = RECORD_TYPES[validated.type];
+      const stored = SterlingStore.storableBody(validated as unknown as Record<string, unknown>);
+      const now = new Date().toISOString();
+
+      // The archived snapshot is the CURRENT stored body, verbatim — a full
+      // record, never a diff. The (record_id, version) primary key makes a
+      // double-archive of one version a loud constraint failure.
+      this.db
+        .prepare('INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)')
+        .run(id, identity.version, now, identity.body);
+      const res = this.db
+        .prepare(
+          `UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
+             updated_at = ?, derived_unconfirmed = ?, body = ? WHERE id = ? AND version = ?`
+        )
+        .run(
+          nextVersion,
+          SterlingStore.derivedStatus(identity.lifecycle, freshness),
+          identity.lifecycle,
+          freshness,
+          supersededBy,
+          (stored.updated_at as string) ?? now,
+          (stored.derived_unconfirmed as boolean | undefined) ? 1 : 0,
+          JSON.stringify(stored),
+          id,
+          identity.version
+        );
+      if (res.changes === 0) {
+        throw new Error(
+          `${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) — re-read and retry`
+        );
+      }
+      // stack_tags / file_keys may have changed: rebuild rather than diff.
+      this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
+      for (const tag of new Set(validated.stack_tags)) {
+        this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(id, tag);
+      }
+      this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
+      for (const path of new Set(entry.fileKeys(stored))) {
+        this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(id, path);
+      }
+      // Additive on relations: an edge named in the patch is ensured, never
+      // silently dropped — removing an edge is knowledge_unlink's business, not
+      // a side effect of a content update.
+      for (const link of validated.links) this.insertRelation(id, link.rel, link.target_id, now);
+      // EXACTLY ONE records_fts row per id, current version only (contract 7):
+      // the row is replaced, so the prior generation's text stops ranking.
+      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(stored), id);
+      this.logActivity('updated', validated, (stored.updated_at as string) ?? now);
+      if (opts.resolves?.length) this.drainResolves(op, opts.resolves, now);
+      // The echo goes through the SAME derivation get() serves, so a write
+      // echo can never disagree with the next read of the same record.
+      served = this.withDerivedReliedBy(this.hydrateAll([stored as DurableRecord])[0]);
+    });
+    return served;
+  }
+
+  /**
+   * The `resolves` drain (contract 4): the maintenance items a write CLAIMS to
+   * close, closed inside the write's own transaction. An unresolvable or
+   * already-closed claim throws, which rolls the ENTIRE write back — an
+   * unclaimed write must never appear to succeed against a dead reference, and
+   * a partial drain is worse than none.
+   */
+  private drainResolves(op: string, ids: string[], at: string): void {
+    for (const claimed of new Set(ids)) {
+      const item = this.get(claimed);
+      if (!item) {
+        throw new Error(
+          `${op}: resolves claim '${claimed}' names no open item — it was never created, or it is already closed. ` +
+            `The whole write rolled back (no version bump, no snapshot, no other item drained); re-read the queue and claim only open ids.`
+        );
+      }
+      if (item.type !== 'todo') {
+        throw new Error(
+          `${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) — the whole write rolled back`
+        );
+      }
+      this.remove(claimed, at);
+    }
   }
 
   /**
@@ -329,12 +1035,21 @@ export class SterlingStore {
    * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
    * severity — edited today, deleted tomorrow, both reconcile_needed, the first
    * not yet drained — would otherwise be swallowed as a duplicate, losing the more
-   * urgent fact. Todos carry no version chain (P4: done = removed), so the text is
-   * replaced in place and updated_at moved; file_keys are identical by
-   * construction, so no index maintenance is needed.
+   * urgent fact. Since S2 that update goes through the versioned in-place core
+   * like every other write ([stable-identity-design-v2]): todos DO carry the
+   * universal version counter now, so the escalation bumps the version and
+   * archives the prior text instead of overwriting the body invisibly (a bare
+   * body UPDATE was invisible to expected_version, so a concurrent in-place
+   * write could silently revert it, and the FTS row kept the old text).
    */
   enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
-    const candidate = validateRecord(input) as DurableRecord & { source?: string; system_reason?: string; file_keys?: string[]; text?: string };
+    this.assertWritable('enqueueSystemTodo');
+    const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
+      lifecycle: 'live',
+      freshness: 'fresh',
+      version: 1,
+    });
+    const candidate = validateRecord(prepared.input) as DurableRecord & { source?: string; system_reason?: string; file_keys?: string[]; text?: string };
     if (candidate.type !== 'todo' || candidate.source !== 'system') {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? 'no source'}`);
     }
@@ -372,19 +1087,35 @@ export class SterlingStore {
         return;
       }
       if ((existing.text ?? '') !== (candidate.text ?? '')) {
-        const merged = { ...existing, text: candidate.text, updated_at: candidate.updated_at };
-        this.db.prepare('UPDATE records SET body = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(merged), candidate.updated_at, existing.id);
-        existing = merged as DurableRecord & { text?: string };
+        // The versioned core, joining THIS transaction (tx is reentrant): version
+        // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
+        existing = this.applyInPlace(
+          'enqueueSystemTodo',
+          existing.id,
+          (cur) => ({ ...(cur as unknown as Record<string, unknown>), text: candidate.text, updated_at: candidate.updated_at }),
+          {}
+        ) as DurableRecord & { text?: string };
         textUpdated = true;
       }
     });
-    return existing ? { record: existing, deduped: true, text_updated: textUpdated } : { record: candidate, deduped: false, text_updated: false };
+    // The stored bodies scanned above carry no status/superseded_by (they are
+    // derived), so both return paths go through hydration before the caller
+    // sees them ([stable-identity-design-v2]).
+    return existing
+      ? { record: this.hydrateAll([existing as DurableRecord])[0], deduped: true, text_updated: textUpdated }
+      : {
+          record: this.hydrateAll([SterlingStore.storableBody(candidate as unknown as Record<string, unknown>) as DurableRecord])[0],
+          deduped: false,
+          text_updated: false,
+        };
   }
 
   get(id: string): DurableRecord | undefined {
     const row = this.db.prepare('SELECT body FROM records WHERE id = ?').get(id) as { body: string } | undefined;
     if (!row) return undefined;
-    return this.withDerivedReliedBy(JSON.parse(row.body) as DurableRecord);
+    // hydrateAll re-attaches the DERIVED status/superseded_by and materializes
+    // links[] from record_relations ([stable-identity-design-v2]).
+    return this.withDerivedReliedBy(this.hydrateAll([JSON.parse(row.body) as DurableRecord])[0]);
   }
 
   /**
@@ -495,7 +1226,7 @@ export class SterlingStore {
           ORDER BY updated_at DESC`
       )
       .all(slug) as { body: string }[];
-    const records = rows.map((r) => JSON.parse(r.body) as DurableRecord);
+    const records = this.hydrateAll(rows.map((r) => JSON.parse(r.body) as DurableRecord));
     if (!records.length) return records;
     const relations = this.activeArticleRelations();
     return records.map((r) => this.withDerivedReliedBy(r, relations));
@@ -671,7 +1402,10 @@ export class SterlingStore {
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
    *  relied_by to each. */
-  private withDerivedReliedByAll(records: DurableRecord[]): DurableRecord[] {
+  private withDerivedReliedByAll(input: DurableRecord[]): DurableRecord[] {
+    // v2 hydration first (derived status/superseded_by + materialized links) —
+    // it applies to every type, where relied_by derivation is article-only.
+    const records = this.hydrateAll(input);
     if (!records.some((r) => r.type === 'feature_article')) return records;
     const relations = this.activeArticleRelations();
     return records.map((r) => this.withDerivedReliedBy(r, relations));
@@ -683,20 +1417,38 @@ export class SterlingStore {
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
   supersede(oldId: string, newInput: unknown): DurableRecord {
+    this.assertWritable('supersede');
     const oldRecord = this.get(oldId);
     if (!oldRecord) throw new Error(`supersede: no record '${oldId}'`);
+    const oldIdentity = this.identityOf(oldId);
     // A flagged_stale research finding is superseded by re-verification — that is
     // the ADVERTISED remedy (retrieval tells the reader "re-verification supersedes
-    // this finding"); only a terminal (already-superseded) record is refused
+    // this finding"); only a terminal (already-retired) record is refused
     // (audit finding 13/43). The in-tx guard below closes the check-then-act race.
-    if (oldRecord.status === 'superseded') throw new Error(`supersede: record '${oldId}' is already superseded`);
+    // ONE SUCCESSOR MAX, across both paths ([stable-identity-design-v2]): the
+    // lifecycle IS the single source of that constraint, so retireInFavorOf and
+    // supersede can no longer each add a successor to the same record.
+    if (oldIdentity?.lifecycle === 'retired' || oldRecord.status === 'superseded') {
+      throw new Error(`supersede: record '${oldId}' is already superseded (retired) — one successor maximum`);
+    }
     const candidate = { ...(newInput as Record<string, unknown>) };
+    // A "new" record carrying the OLD id would be an edge from a node to
+    // itself — a self-cycle in the relation graph, and (worse) an in-place
+    // overwrite masquerading as supersession. Refused before anything is
+    // validated or written ([stable-identity-design-v2] contract 5).
+    if (candidate.id === oldId) {
+      throw new Error(
+        `supersede: the replacement carries the SAME id as '${oldId}' — that is a self-cycle in the relation graph, not a supersession. ` +
+          `Use updateRecord for an in-place change, or mint a genuinely new id for a concept replacement.`
+      );
+    }
     const links = Array.isArray(candidate.links) ? [...(candidate.links as { rel: string; target_id: string }[])] : [];
     if (!links.some((l) => l.rel === 'supersedes' && l.target_id === oldId)) {
       links.push({ rel: 'supersedes', target_id: oldId });
     }
     candidate.links = links;
-    const newRecord = validateRecord(candidate);
+    const prepared = SterlingStore.resolveIdentity(candidate, { lifecycle: 'live', freshness: 'fresh', version: 1 });
+    const newRecord = validateRecord(prepared.input);
     if (newRecord.type !== oldRecord.type) {
       throw new Error(`supersede: type mismatch ('${newRecord.type}' cannot supersede '${oldRecord.type}')`);
     }
@@ -705,23 +1457,33 @@ export class SterlingStore {
         `supersede: feature_article version must increase (old v${oldRecord.version}, new v${newRecord.version})`
       );
     }
+    const storedOld = SterlingStore.storableBody({
+      ...(oldRecord as unknown as Record<string, unknown>),
+      lifecycle: 'retired',
+      updated_at: newRecord.updated_at,
+    });
     this.tx(() => {
+      // insertRecord writes the candidate's links into record_relations, so the
+      // authoritative (new -> supersedes -> old) edge lands here (contract 6);
+      // the served superseded_by on the old record materializes from it.
       this.insertRecord(newRecord);
-      const updatedOld = { ...oldRecord, status: 'superseded', superseded_by: newRecord.id, updated_at: newRecord.updated_at };
-      // Guard the UPDATE on the observed status INSIDE the BEGIN IMMEDIATE tx
-      // (audit finding 29/43): the pre-tx status read is check-then-act, so a
-      // concurrent supersede (server + note worker / TUI on the shared WAL file)
-      // could otherwise leave two active successors. changes===0 → the row moved
-      // out from under us → roll back loud (the inserted newRecord is undone).
+      // Guard the UPDATE on the observed lifecycle INSIDE the BEGIN IMMEDIATE tx
+      // (audit finding 29/43): the pre-tx read is check-then-act, so a
+      // concurrent supersede (server + TUI on the shared WAL file) could
+      // otherwise leave two successors. changes===0 → the row moved out from
+      // under us → roll back loud (the inserted newRecord is undone).
       const res = this.db
-        .prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'")
-        .run('superseded', newRecord.id, newRecord.updated_at, JSON.stringify(updatedOld), oldId);
+        .prepare(
+          `UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`
+        )
+        .run('superseded', newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
       if (res.changes === 0) {
         throw new Error(`supersede: record '${oldId}' was concurrently superseded — retry against the current version`);
       }
       this.logActivity('updated', newRecord, newRecord.updated_at);
     });
-    return newRecord;
+    return this.hydrateAll([SterlingStore.storableBody(newRecord as unknown as Record<string, unknown>) as DurableRecord])[0];
   }
 
   /**
@@ -741,32 +1503,19 @@ export class SterlingStore {
    * and the UPDATE is guarded on that status inside the transaction to close the
    * same concurrent-supersede race.
    */
-  updateTodo(id: string, newInput: unknown): DurableRecord {
+  updateTodo(id: string, newInput: unknown, opts: RecordWriteOptions = {}): DurableRecord {
     const old = this.get(id);
     if (!old) throw new Error(`updateTodo: no record '${id}'`);
     if (old.type !== 'todo') throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo — board_update only mutates todos`);
-    if (old.status === 'superseded') throw new Error(`updateTodo: record '${id}' is already superseded`);
     const candidate = { ...(newInput as Record<string, unknown>) };
-    const updated = validateRecord(candidate) as DurableRecord;
-    if (updated.type !== 'todo') throw new Error(`updateTodo: type mismatch ('${updated.type}' is not 'todo')`);
-    const entry = RECORD_TYPES.todo;
-    this.tx(() => {
-      const res = this.db
-        .prepare("UPDATE records SET updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'")
-        .run(updated.updated_at, JSON.stringify(updated), id);
-      if (res.changes === 0) {
-        throw new Error(`updateTodo: record '${id}' was concurrently removed or superseded — retry against the current version`);
-      }
-      // file_keys may have changed — rebuild the join index rather than diffing it.
-      this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
-      for (const path of new Set(entry.fileKeys(updated as unknown as Record<string, unknown>))) {
-        this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(id, path);
-      }
-      // text may have changed — refresh the FTS row in place (this table is not
-      // an external-content fts5 table, so a plain UPDATE is well-formed).
-      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(updated as unknown as Record<string, unknown>), id);
-    });
-    return updated;
+    if (typeof candidate.type === 'string' && candidate.type !== 'todo') {
+      throw new Error(`updateTodo: type mismatch ('${candidate.type}' is not 'todo')`);
+    }
+    // Since S2 this is the generalized in-place triad's todo entry point
+    // ([stable-identity-design-v2]): same id, same lifecycle, but the universal
+    // server-owned version counter now bumps and the prior body is archived,
+    // exactly as it is for every other type. Todos still get no slug.
+    return this.applyInPlace('updateTodo', id, () => candidate, opts);
   }
 
   /**
@@ -787,23 +1536,53 @@ export class SterlingStore {
    * having to know the parameter exists.
    */
   retireInFavorOf(id: string, replacementId: string, at: string, verb: string = 'retired'): DurableRecord {
+    this.assertWritable('retireInFavorOf');
     const record = this.get(id);
     if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
+    const identity = this.identityOf(id);
     // Same relaxation + in-tx guard as supersede (audit findings 13/43 + 29/43):
-    // only a terminal (already-superseded) record is refused; the status guard on
-    // the UPDATE closes the check-then-act race.
-    if (record.status === 'superseded') throw new Error(`retireInFavorOf: record '${id}' is already superseded`);
-    const retired = { ...record, status: 'superseded' as const, superseded_by: replacementId, updated_at: at };
+    // only a terminal (already-retired) record is refused; the lifecycle guard
+    // on the UPDATE closes the check-then-act race. ONE SUCCESSOR MAX holds
+    // ACROSS BOTH PATHS — a record already superseded cannot also be retired in
+    // favour of a second survivor ([stable-identity-design-v2]).
+    if (identity?.lifecycle === 'retired' || record.status === 'superseded') {
+      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) — one successor maximum`);
+    }
+    // THE REPLACEMENT MUST BE ALIVE. Retiring A in favour of B and then B in
+    // favour of A left both records retired, each forwarding to a dead one — a
+    // supersession cycle where the reader is sent nowhere, which is exactly
+    // what `in_favor_of` is required for in the first place (decision 9948475b).
+    // A replacement this store cannot see is the PROMOTION shape (the survivor
+    // is the copy in a domain store) and stays allowed: relations carry no
+    // foreign key by design, and MountedStores has already resolved it.
+    const replacement = this.identityOf(replacementId);
+    if (replacement?.lifecycle === 'retired') {
+      throw new Error(
+        `retireInFavorOf: replacement '${replacementId}' is itself retired — retiring '${id}' in favour of it would leave both records ` +
+          `dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`
+      );
+    }
+    const retired = { ...record, status: 'superseded' as const, superseded_by: replacementId, lifecycle: 'retired', updated_at: at };
+    const stored = SterlingStore.storableBody(retired as unknown as Record<string, unknown>);
     this.tx(() => {
       const res = this.db
-        .prepare("UPDATE records SET status = ?, superseded_by = ?, updated_at = ?, body = ? WHERE id = ? AND status != 'superseded'")
-        .run('superseded', replacementId, at, JSON.stringify(retired), id);
+        .prepare(
+          `UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`
+        )
+        .run('superseded', replacementId, at, JSON.stringify(stored), id);
       if (res.changes === 0) {
         throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded — retry`);
       }
-      this.logActivity(verb, retired as DurableRecord, at);
+      // The relation is what makes the served superseded_by derivable, and it
+      // is written by BOTH retirement paths — that is why retirement can only
+      // happen here or in supersede (contract 5/6). The survivor may live in
+      // another store (promotion), so no local existence check: relations carry
+      // no foreign key by design.
+      this.insertRelation(replacementId, 'supersedes', id, at);
+      this.logActivity(verb, retired as unknown as DurableRecord, at);
     });
-    return retired;
+    return this.hydrateAll([stored as DurableRecord])[0];
   }
 
   /**
@@ -813,6 +1592,7 @@ export class SterlingStore {
    * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
    */
   remove(id: string, drainedAt?: string): void {
+    this.assertWritable('remove');
     this.tx(() => {
       const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[] }) | undefined;
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
@@ -834,11 +1614,23 @@ export class SterlingStore {
       this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
       this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
       this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
-      this.db.prepare('DELETE FROM record_links WHERE source_id = ?').run(id);
+      this.db.prepare('DELETE FROM record_relations WHERE source_id = ?').run(id);
       // ALSO delete inbound edges (audit finding 31/43): a record that linked TO
-      // the removed one kept a record_links row pointing at a nonexistent id, so
-      // the idx_links_target reverse-traversal surface accrued dangling edges.
-      this.db.prepare('DELETE FROM record_links WHERE target_id = ?').run(id);
+      // the removed one kept a relation row pointing at a nonexistent id, so
+      // the reverse-traversal surface accrued dangling edges.
+      this.db.prepare('DELETE FROM record_relations WHERE target_id = ?').run(id);
+      // Version snapshots are permanent for a LIVING record; a hard removal is
+      // that record's death (P4 — the artifact-write event ends its life), so
+      // its history goes with it rather than becoming orphan rows keyed on an
+      // id nothing resolves ([stable-identity-design-v2]).
+      this.db.prepare('DELETE FROM record_versions WHERE record_id = ?').run(id);
+      // The alias index follows its canonical record for the same reason: an
+      // alias whose canonical_id no longer exists resolves a dead citation to
+      // NOTHING AT ALL, which is worse than an unresolved id — an unresolved id
+      // says so, a dangling alias just fails. Todos leave the store by removal
+      // (P4), and nothing else is hard-removed outside gated cleanup, so the
+      // rows deleted here are the aliases of a record that is genuinely gone.
+      this.db.prepare('DELETE FROM record_aliases WHERE canonical_id = ?').run(id);
       this.db.prepare('DELETE FROM records_fts WHERE record_id = ?').run(id);
     });
   }
@@ -859,9 +1651,20 @@ export class SterlingStore {
    * id never existed.
    */
   drainLogEntry(id: string): { drained_at: string; system_reason: string } | undefined {
-    return this.db
-      .prepare('SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1')
-      .get(id) as { drained_at: string; system_reason: string } | undefined;
+    try {
+      return this.db
+        .prepare('SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1')
+        .get(id) as { drained_at: string; system_reason: string } | undefined;
+    } catch (e) {
+      // A pre-v2 store may predate the additive record_id column, and the ALTER
+      // that adds it now runs only on the writable path — so on a legacy store
+      // the column can be absent. "No recent trace" is the honest answer here
+      // (this is a read, and reads stay allowed pre-migration, AC3); anything
+      // else — including the same failure on a v2 store, which would be a real
+      // defect — still propagates.
+      if (this.legacySchemaVersion !== undefined && /record_id/.test(String((e as Error).message))) return undefined;
+      throw e;
+    }
   }
 
   /**
@@ -1008,6 +1811,7 @@ export class SterlingStore {
    * updateRunOptimistic.
    */
   casTransitionMerge(observed: MachineState, runId: string, mutate: (fresh: RunRecord) => RunRecord, attempts = 5): RunRecord {
+    this.assertWritable('casTransitionMerge');
     for (let i = 0; i < attempts; i++) {
       const row = this.db.prepare('SELECT body, machine_state, pending_exit FROM runs WHERE id = ?').get(runId) as
         | { body: string; machine_state: string; pending_exit: string | null }
@@ -1072,6 +1876,7 @@ export class SterlingStore {
 
   /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
   writeHandoff(runId: string, input: unknown, at: string): Handoff {
+    this.assertWritable('writeHandoff');
     const handoff = handoffSchema.parse(input);
     if (!this.db.prepare('SELECT 1 FROM runs WHERE id = ?').get(runId)) {
       throw new Error(`writeHandoff: no run '${runId}'`);
@@ -1103,6 +1908,7 @@ export class SterlingStore {
    * not change through this path.
    */
   updateRunOptimistic(runId: string, mutate: (run: RunRecord) => RunRecord, attempts = 5): RunRecord {
+    this.assertWritable('updateRunOptimistic');
     for (let i = 0; i < attempts; i++) {
       const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
       if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
@@ -1178,6 +1984,7 @@ export class SterlingStore {
    * transactionally — read + delete in one transaction, never a signal file (P4).
    */
   writeSelection(type: string, recordId: string, at: string): void {
+    this.assertWritable('writeSelection');
     this.db
       .prepare('INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at')
       .run(type, recordId, at);
@@ -1197,18 +2004,31 @@ export class SterlingStore {
    * knowledge — every owning record's stored paths are rewritten as part of
    * the move (exact normalized-path matches only), revalidated, and the
    * file-key index updated, in one transaction.
+   *
+   * It goes through the VERSIONED in-place core ([stable-identity-design-v2]):
+   * a rename is a real change to the record's content, so it bumps the version,
+   * archives the prior body, rebuilds record_file_keys and refreshes the FTS
+   * row like every other write. As a bare body UPDATE it was invisible to
+   * expected_version — a concurrent updateRecord holding a pre-rename read
+   * silently reverted the rename with no CAS conflict — and left the old path
+   * ranking in records_fts. allowRetired keeps the contract intact for
+   * tombstones: a move must orphan NO owning record's paths.
    */
   renameFileKey(oldPath: string, newPath: string): number {
+    this.assertWritable('renameFileKey');
     const from = normalizeRepoPath(oldPath);
     const to = normalizeRepoPath(newPath);
     const rows = this.db.prepare('SELECT record_id FROM record_file_keys WHERE path = ?').all(from) as { record_id: string }[];
     this.tx(() => {
       for (const { record_id } of rows) {
-        const record = this.get(record_id);
-        if (!record) continue;
-        const rewritten = validateRecord(deepReplaceString(record as unknown, from, to));
-        this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(rewritten), record_id);
-        this.db.prepare('UPDATE record_file_keys SET path = ? WHERE record_id = ? AND path = ?').run(to, record_id, from);
+        if (!this.get(record_id)) continue;
+        this.applyInPlace(
+          'renameFileKey',
+          record_id,
+          (current) => deepReplaceString(current as unknown, from, to) as Record<string, unknown>,
+          {},
+          { allowRetired: true }
+        );
       }
     });
     return rows.length;
@@ -1220,20 +2040,37 @@ export class SterlingStore {
    *  (promotion itself writes them: supersedes / informed_by across project↔domain)
    *  that a store-local get cannot see. Standalone usage keeps the local check. */
   addLink(sourceId: string, rel: string, targetId: string, targetValidated = false): DurableRecord {
+    this.assertWritable('addLink');
     const source = this.get(sourceId);
     if (!source) throw new Error(`addLink: no record '${sourceId}'`);
     if (!targetValidated && !this.get(targetId)) throw new Error(`addLink: no target record '${targetId}'`);
     const parsedRel = linkSchema.shape.rel.parse(rel);
+    // 'supersedes' is NOT a plain edge: it is the authoritative carrier of a
+    // LIFECYCLE change (the target must become retired, the served status /
+    // superseded_by of both records derive from it, and at most one may exist).
+    // Written raw here it would desync the records.lifecycle/superseded_by
+    // cache columns from the relation graph and slip past the one-successor
+    // invariant, so the two sanctioned paths own it exclusively.
+    if (parsedRel === 'supersedes') {
+      throw new Error(
+        `addLink: rel 'supersedes' cannot be written as a raw edge — supersession is a lifecycle transition, not a link. ` +
+          `Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`
+      );
+    }
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
     const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
+    const at = new Date().toISOString();
+    const stored = SterlingStore.storableBody(updated as unknown as Record<string, unknown>);
     this.tx(() => {
-      this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(updated), sourceId);
-      this.db.prepare('INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)').run(sourceId, parsedRel, targetId);
+      this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(stored), sourceId);
+      // record_relations is the authoritative edge home (contract 6); the body
+      // copy is a convenience the read materialization overwrites anyway.
+      this.insertRelation(sourceId, parsedRel, targetId, at);
       // addLink does not bump updated_at (the edge is metadata, not content) —
       // the activity row still needs a real timestamp, so it stamps "now".
-      this.logActivity('linked', updated, new Date().toISOString());
+      this.logActivity('linked', updated, at);
     });
-    return updated;
+    return this.hydrateAll([stored as DurableRecord])[0];
   }
 
   /**
@@ -1287,6 +2124,7 @@ export class SterlingStore {
 
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
+    this.assertWritable('recordCheckSkipped');
     this.db
       .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
       .run(runId ?? null, check, reason, at);
@@ -1397,40 +2235,76 @@ export class SterlingStore {
     this.create(todo);
   }
 
+  /**
+   * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
+   * carries lifecycle/freshness/version and NOT status/superseded_by — those two
+   * are derived at read. They survive as records COLUMNS because they are the
+   * §3.4 filter surface every read SQL already joins on (and the shape a
+   * pre-migration store still has): written here from the derived values in the
+   * same statement, never read back as the served truth.
+   */
   private insertRecord(record: DurableRecord): void {
     const entry = RECORD_TYPES[record.type];
+    const meta = record as unknown as { lifecycle?: string; freshness?: string; version?: number; superseded_by?: string | null };
+    const lifecycle: Lifecycle = meta.lifecycle === 'retired' ? 'retired' : 'live';
+    const freshness: Freshness = meta.freshness === 'flagged_stale' ? 'flagged_stale' : 'fresh';
+    const version = typeof meta.version === 'number' ? meta.version : 1;
+    const stored = SterlingStore.storableBody(record as unknown as Record<string, unknown>);
     this.db
       .prepare(
-        `INSERT INTO records (id, type, status, superseded_by, scope, created_at, updated_at, author, derived_unconfirmed, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, derived_unconfirmed, body)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
         record.type,
-        record.status,
-        record.superseded_by,
+        SterlingStore.derivedStatus(lifecycle, freshness),
+        meta.superseded_by ?? null,
+        lifecycle,
+        freshness,
+        version,
         record.scope,
         record.created_at,
         record.updated_at,
         record.author,
         record.derived_unconfirmed ? 1 : 0,
-        JSON.stringify(record)
+        JSON.stringify(stored)
       );
     for (const tag of new Set(record.stack_tags)) {
       this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(record.id, tag);
     }
-    for (const path of new Set(entry.fileKeys(record as unknown as Record<string, unknown>))) {
+    for (const path of new Set(entry.fileKeys(stored))) {
       this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(record.id, path);
     }
     for (const link of record.links) {
-      this.db
-        .prepare('INSERT OR IGNORE INTO record_links (source_id, rel, target_id) VALUES (?, ?, ?)')
-        .run(record.id, link.rel, link.target_id);
+      // A links[] entry pointing at its OWN record is malformed data that
+      // already exists in the wild (same shape as the self-referential
+      // superseded_by handled below — resolveTerminus's self-loop boundary is
+      // pinned against it). The relation GRAPH must not hold the self-edge, but
+      // refusing the insert would make such a record UNSTORABLE, which would
+      // abort S4's migration re-insert of exactly that legacy row. So the edge
+      // is skipped while the row lands; the loud self-cycle refusal stays on
+      // the paths that MINT an edge (addLink / supersede / retireInFavorOf),
+      // where a caller is actually asking for it.
+      if (link.target_id === record.id) continue;
+      this.insertRelation(record.id, link.rel, link.target_id, record.updated_at);
     }
-    this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(
-      record.id,
-      entry.fts(record as unknown as Record<string, unknown>)
-    );
+    // A record created in the legacy retired shape (status 'superseded' +
+    // superseded_by, as pre-v2 fixtures and imports write it) gets the same
+    // authoritative relation the supersede path writes, so its served
+    // superseded_by materializes from the graph like everyone else's.
+    //
+    // A record pointing at ITSELF is malformed data that already exists in the
+    // wild (resolveTerminus's self-loop boundary is pinned against exactly that
+    // shape): the relation GRAPH must not hold the self-edge, but refusing the
+    // insert would make such a record unstorable and unreadable. So the edge is
+    // skipped while the row lands — the loud self-cycle refusal stays on the
+    // paths that MINT supersession (supersede / retireInFavorOf / addLink),
+    // where a caller is actually asking for it.
+    if (lifecycle === 'retired' && meta.superseded_by && meta.superseded_by !== record.id) {
+      this.insertRelation(meta.superseded_by, 'supersedes', record.id, record.updated_at);
+    }
+    this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(record.id, entry.fts(stored));
   }
 
   /**
@@ -1447,17 +2321,34 @@ export class SterlingStore {
   private txDepth = 0;
 
   private tx(fn: () => void): void {
+    // Backstop for the pre-migration read-only mode: every public write names
+    // itself through assertWritable, and this catches anything that forgets to
+    // ([stable-identity-design-v2]). Reads never open a transaction.
+    this.assertWritable('transaction');
     if (this.txDepth > 0) {
       fn();
       return;
     }
-    this.txDepth++;
+    // BEGIN FIRST, then count. A failing BEGIN (SQLITE_BUSY on a contended
+    // file) previously left txDepth stuck at 1 forever, because the increment
+    // happened before the statement that threw and the `finally` was never
+    // entered: every later tx() on that connection then took the "join the open
+    // transaction" branch with NO transaction open, so each statement
+    // autocommitted individually and atomicity silently disappeared for the
+    // life of the connection.
     this.db.exec('BEGIN IMMEDIATE');
+    this.txDepth++;
     try {
       fn();
       this.db.exec('COMMIT');
     } catch (e) {
-      this.db.exec('ROLLBACK');
+      // A ROLLBACK that itself throws must never REPLACE the original failure —
+      // the caller would be told about the cleanup and never about the cause.
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* the original error below is the one that matters */
+      }
       throw e;
     } finally {
       this.txDepth--;
