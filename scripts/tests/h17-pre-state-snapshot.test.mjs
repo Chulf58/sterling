@@ -1230,3 +1230,763 @@ test('PIN-CLEAN-AT-PRE-UNCHANGED (tripwire): a path CLEAN at Pre and changed in-
     cleanup();
   }
 });
+
+// #########################################################################
+// ##  REVIEW FINDINGS AGAINST v3.3 (commit b945cf0) — FIVE PINS BELOW    ##
+// #########################################################################
+//
+// Two independent reviews (a roster reviewer and an outside-model reviewer)
+// found five defects in the shipped v3.3; all five were conductor-adjudicated
+// REAL and are release blockers. Authored BLIND to
+// scripts/hooks/h17-bash-write-sweep.mjs, exactly like the pins above — the
+// findings were supplied as behaviour statements, and every fixture below is
+// built from the STORE's account of the contract (article h17-bash-write-sweep
+// AC12/AC13/AC14, decisions 7021526c / 4d9b76e8 / 6e132e19 / 2422e76a), never
+// from hook source.
+//
+// NO CONFLICT WITH THE STORE, checked before authoring rather than assumed:
+//   * F1 (dirty-at-Pre, CLEAN-at-Post must deny) is 7021526c's "otherwise
+//     deny" arm reached through the EXISTENCE/BYTES terms — the ruling says
+//     "compare state -> if unchanged, allow", and reverting a file to HEAD
+//     changes its bytes, so it is not unchanged. Nothing in the ruling licenses
+//     skipping a recorded pre-dirty path because git no longer reports it.
+//   * F2/F3 (mode / index / TYPE changes are not attestable) rest on
+//     7021526c's own words: "consult the stamp FRESH and hash the CURRENT
+//     STATE". A stamp entry is {path, sha256} (4d9b76e8 FIX-A: "exact {path,
+//     sha256} match"), which structurally cannot attest a mode, a file type or
+//     an index entry — so those changes fall to the ruling's third arm. The
+//     already-green PIN-STAMP-ON-CHANGED-PREDIRT arm 1 (a BYTES change matched
+//     by a byte hash -> allow) is untouched: bytes are the one term a byte hash
+//     can attest.
+//   * F4's exploit route needs a tampered record, which 2422e76a accepts as a
+//     determined-attacker residual ("the plaintext OS-temp baseline at a
+//     deterministic path is forgeable in the same command"). These two pins are
+//     therefore SHAPE-VALIDATION pins, not new-hole pins: AC12 promises "an
+//     absent or unparseable record denies fail-closed", and a record whose
+//     per-path VALUE is malformed is unparseable in every sense that matters.
+//   * F5's chosen fix (a per-path sha256 instead of base64 bytes) narrows the
+//     AC12 sentence "bytes (base64, lossless — never a UTF-8 string)". That
+//     sentence's PURPOSE is stated in the same breath — it exists so a
+//     byte-level change invisible to UTF-8 decoding is still CHANGED — and a
+//     digest over the raw bytes preserves exactly that, which is why
+//     PIN-UTF8-CHANGED / PIN-UTF8-UNCHANGED above remain correct AS WRITTEN
+//     under a hash (raw-byte digest: differing bytes -> differing digest;
+//     identical bytes -> identical digest). The two pins here add what a hash
+//     newly makes checkable: the record stays FLAT as dirt grows, and the
+//     digest covers the WHOLE file rather than a prefix.
+//
+// DELIBERATELY NOT PINNED, disclosed rather than smuggled in: the arm where a
+// reverted-to-clean path carries a fresh stamp attesting the HEAD bytes. The
+// sanctioned writer (scripts/enforcement-stamp.mjs, decision 6e132e19) "records
+// whatever enforcement paths are currently DIRTY", so a stamp entry for a path
+// that is clean is not a state the CLI can produce — asserting either outcome
+// there would invent behaviour. Every deny below instead asserts NO STAMP
+// EXISTS, the established idiom in this file, so each lands on the "otherwise"
+// arm and none can be satisfied by the attested arm.
+// #########################################################################
+
+// the working tree as git reports it — used as a PRECONDITION, so a failure
+// here is a fixture failure and must be loud (P5)
+function porcelain(dir) {
+  return git(dir, ['status', '--porcelain'], { must: true }).stdout;
+}
+
+// The single per-call snapshot record, for the tests that TAMPER it. Asserting
+// exactly one keeps the tamper unambiguous; today's failure of this assertion
+// is the same per-call-record precondition PIN-NO-RECORD documents.
+function soleRecordPath(fx, why) {
+  const records = perCallRecords(fx);
+  assert.equal(
+    records.length,
+    1,
+    `PRECONDITION: exactly ONE per-call snapshot record must exist so ${why} is unambiguous (found ${records.length}; per PIN-NO-RECORD a per-call record cannot be the per-run .dirty.json and must be its own sterling-enforce-<projectTag>-* temp file)`
+  );
+  return records[0];
+}
+
+// Recursively delete every `children` key, returning how many were removed.
+// Blind-safe by construction: it assumes NOTHING about the record's key format
+// for a dirty untracked directory (trailing slash or not) or about where in the
+// value the children live.
+function stripChildren(node) {
+  let removed = 0;
+  if (Array.isArray(node)) {
+    for (const v of node) removed += stripChildren(v);
+    return removed;
+  }
+  if (node && typeof node === 'object') {
+    if (Object.prototype.hasOwnProperty.call(node, 'children')) {
+      delete node.children;
+      removed += 1;
+    }
+    for (const v of Object.values(node)) removed += stripChildren(v);
+    return removed;
+  }
+  return 0;
+}
+
+const BIG_SIZE = 4 * 1024 * 1024; // one dirty file, big enough that base64 bytes cannot hide
+const RECORD_BUDGET = 64 * 1024; // generous for a handful of per-path digests; 100x under base64 of BIG_SIZE
+
+// =========================================================================
+// PIN-REVERT-TO-CLEAN — FINDING 1 (CRITICAL), the fail-closed violation.
+// Post iterates only the paths the CURRENT `git status` reports, so a path that
+// was dirty at Pre and is CLEAN at Post is never visited: no comparison, no
+// stamp consult, no denial. The reproducer is a destructive one — the command
+// runs `git checkout HEAD -- <enforcement path>`, destroying the conductor's
+// uncommitted enforcement-file work — and the agent is ALLOWED.
+//
+// THE CLAUSE PINNED: dirty-at-Pre and clean-at-Post is a STATE CHANGE and must
+// DENY (decision 7021526c's third arm, reached because the bytes moved from the
+// conductor's in-flight image to HEAD's).
+//
+// EXPECTED FAILURE SHAPE (RED TODAY): the tree is fully clean at Post, so
+// today's blanket pre-existing denial has an empty pre-existing set and the
+// call is ALLOWED — `assert.equal(r.code, 2)` fires with actual 0 and an empty
+// stderr. This is red NOW, not red-after-PIN-ALLOW.
+//
+// CATCHES SABOTAGE: the recorded-pre-dirty iteration deleted, i.e. the Post
+// loop reverted to `for (const rel of currentlyDirtyPaths)` — the recorded set
+// is then only ever consulted as a lookup for paths git still reports, and this
+// path disappears from the sweep entirely.
+// =========================================================================
+
+test('PIN-REVERT-TO-CLEAN: a pre-dirty enforcement path REVERTED to HEAD inside the window (CLEAN at Post, absent from git status) DENIES', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = bundlePath(dir);
+    const headBytes = readFileSync(bundle, 'utf8');
+    preDirtyBundle(dir, '// conductor rebuild in flight, uncommitted — the work this destroys\n');
+
+    const L = lane('revert');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre snapshots the pre-dirty state');
+
+    // THE COMMAND'S EFFECT. H17 watches file EFFECTS, never command strings
+    // (decision f404dfb4), so the recorded tool_input stays the measured
+    // read-only victim while the effect below is what the reproducer's
+    // `git checkout HEAD -- hooks/h3-contract-gate.mjs` actually produces.
+    git(dir, ['checkout', 'HEAD', '--', BUNDLE_REL], { must: true });
+
+    assert.equal(
+      porcelain(dir),
+      '',
+      'PRECONDITION AND THE WHOLE POINT: the tree is CLEAN at Post, so the path is ABSENT from git status and a Post that iterates only currently-dirty paths never visits it'
+    );
+    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — this deny must land on the "otherwise" arm (step 3), never on the attested arm (step 2)');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `dirty-at-Pre + CLEAN-at-Post is a STATE CHANGE — the conductor's uncommitted enforcement work was destroyed inside this window — and must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.match(r.stderr, /h3-contract-gate/, 'and the denial names the path whose RECORDED pre-dirty state changed');
+    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'a CHANGED pre-dirty path is still never restored — the destroyed pre-image is NOT resurrected (that stays the deferred slice)');
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-REVERT-TO-CLEAN-DEGRADED — FINDING 1, SECOND HALF: the same defect
+// breaks the SAFETY NET. With no usable tool_use_id there is no per-call
+// record, and the blanket pre-existing denial is driven by a set populated only
+// while iterating currently-dirty paths — so a command that cleans EVERY
+// pre-dirty enforcement path leaves that set empty and degraded mode ALLOWS.
+// A fallback that fails OPEN is worse than the hole it backs up, which is why
+// this gets its own pin rather than riding the one above.
+//
+// The empty-string tool_use_id is the same unusable-but-present shape
+// PIN-FALLBACK-BLANK uses; what differs here is that the command CLEANS the
+// dirt instead of leaving it.
+//
+// EXPECTED FAILURE SHAPE (RED TODAY): two independent red assertions — the
+// call is ALLOWED (`assert.equal(r.code, 2)` fires with actual 0, stderr
+// empty), and `assert.match(r.stderr, /tool_use_id/)` has nothing to match.
+//
+// CATCHES SABOTAGE: the degraded blanket denial computed from the CURRENT
+// status instead of the RECORDED pre-dirty set (`if (currentDirty.length &&
+// noUsableId) deny`) — the cleaned tree then has nothing to deny over.
+// =========================================================================
+
+test('PIN-REVERT-TO-CLEAN-DEGRADED: degraded mode (unusable tool_use_id) still DENIES when the command cleans EVERY pre-dirty enforcement path — the safety net may not fail open', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = bundlePath(dir);
+    const headBytes = readFileSync(bundle, 'utf8');
+    preDirtyBundle(dir, '// conductor rebuild in flight, uncommitted\n');
+
+    const blank = { agent_id: 'a1', tool_use_id: '' }; // present but unusable
+    assert.equal(h17(dir, 'PreToolUse', blank).code, 0, 'Pre runs; with no usable tool_use_id it writes no per-call STATE record (AC14)');
+
+    git(dir, ['checkout', 'HEAD', '--', BUNDLE_REL], { must: true });
+
+    assert.equal(porcelain(dir), '', 'PRECONDITION: every pre-dirty path is CLEAN at Post — nothing remains for a status-driven blanket denial to fire on');
+    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
+
+    const r = h17(dir, 'PostToolUse', blank);
+    assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `degraded mode keeps the BLANKET pre-existing denial (AC14) — and a command that cleaned the dirt is exactly when it must fire, not when it lapses — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.match(r.stderr, /tool_use_id/, 'DEGRADED-LOUD: and it still names the reason it could not verify (AC14 — a silent degrade is a defect)');
+    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'and the destroyed pre-image is not resurrected');
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-STAMP-MODE — FINDING 2(a) (HIGH): THE STAMP ATTESTS BYTES, NOT STATE. On
+// the changed-pre-dirty arm, attestation is decided by hashing the file's
+// current bytes against the stamp — but a stamp entry records only {path,
+// sha256} (4d9b76e8 FIX-A), so it structurally CANNOT attest a mode, a file
+// type, or an index entry. A change whose bytes are IDENTICAL while another
+// state term moved is therefore wrongly attested and allowed.
+//
+// THE CLAUSE PINNED: 7021526c's step 2 hashes the CURRENT STATE, not the
+// current bytes; a state difference the stamp cannot express falls through to
+// step 3 and DENIES. The complement of PIN-MODE above: that one pins the
+// no-stamp route, this one pins the stamped route, and together they close both.
+//
+// EXPECTED FAILURE SHAPE (RED TODAY): today's stamp consult covers every
+// pre-dirty path and matches on bytes alone, so the call is ALLOWED —
+// `assert.equal(r.code, 2)` fires with actual 0.
+//
+// CATCHES SABOTAGE: the guard restricting stamp attestation to a BYTES-ONLY
+// state difference deleted, i.e. attestation decided by the byte hash alone.
+// (Existence, type, link target and index entry are all identical across this
+// window, so mode is the only term that can produce the deny — the same
+// isolation PIN-MODE relies on.)
+// =========================================================================
+
+test('PIN-STAMP-MODE: a MODE flip with byte-identical content is NOT attestable by a {path, sha256} stamp — a fresh stamp matching the bytes must still DENY', { skip: GIT_SKIP || MODE_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = preDirtyBundle(dir, '// conductor rebuild, not yet committed\n');
+    chmodSync(bundle, 0o644);
+    const bytesBefore = readFileSync(bundle, 'utf8');
+
+    const L = lane('stampmode');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    chmodSync(bundle, 0o755); // the ONLY change: the executable bit
+    writeStamp(dir, [{ path: BUNDLE_REL, sha256: sha256Of(bundle), at: NOW }]);
+
+    assert.equal(readFileSync(bundle, 'utf8'), bytesBefore, 'PRECONDITION: the bytes never moved, so the stamp attests EXACTLY the bytes that were there at Pre — a byte-hash consult matches');
+    assert.equal(lstatSync(bundle).mode & 0o111, 0o111, 'PRECONDITION: the mode actually flipped on this host');
+    assert.equal(JSON.parse(readFileSync(stampPath(dir), 'utf8'))[0].sha256, sha256Of(bundle), 'PRECONDITION: the stamp is FRESH against the CURRENT bytes — this test must fail on the mode term, never on a stale hash');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a {path, sha256} entry can attest a BYTES change and nothing else — a mode flip it cannot see must still deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-STAMP-INDEX — FINDING 2(b) (HIGH), the same defect through the INDEX
+// term: `git add` inside the window moves the index entry while the worktree
+// bytes stay byte-identical, so the fresh stamp still matches and a bytes-only
+// attestation allows a staged tamper.
+//
+// EXPECTED FAILURE SHAPE (RED TODAY): allowed by today's bytes-only stamp
+// consult — `assert.equal(r.code, 2)` fires with actual 0.
+//
+// CATCHES SABOTAGE: (a) the bytes-only restriction on stamp attestation
+// deleted; (b) the INDEX blob-OID term deleted from the state comparison — the
+// state then compares UNCHANGED, step 1 allows without any stamp consult at
+// all, and the same assertion fires.
+// =========================================================================
+
+test('PIN-STAMP-INDEX: `git add` inside the window (worktree bytes untouched) is NOT attestable by a {path, sha256} stamp — a fresh matching stamp must still DENY', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const bundle = preDirtyBundle(dir, '// conductor rebuild, not yet committed\n');
+    const bytesBefore = readFileSync(bundle, 'utf8');
+
+    const L = lane('stampindex');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    git(dir, ['add', BUNDLE_REL], { must: true }); // index moves; worktree does not
+    writeStamp(dir, [{ path: BUNDLE_REL, sha256: sha256Of(bundle), at: NOW }]);
+
+    assert.equal(readFileSync(bundle, 'utf8'), bytesBefore, 'PRECONDITION: the worktree bytes are untouched, so the stamp matches them exactly');
+    assert.match(porcelain(dir), /^M /m, 'PRECONDITION: the change is STAGED — the index entry is what moved');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a stamp cannot attest an INDEX entry — a staged-index-only change must still deny even with a byte-perfect fresh stamp — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-STAMP-TYPE-GATE-ON-CHANGED-PREDIRT — RENAMED 2026-08-22 AFTER MUTATION
+// MEASUREMENT (was PIN-STAMP-SYMLINK; the old name claimed a property the
+// battery proved it does not pin, and a name is what most readers see). THIS
+// TEST DOES NOT PIN THE STAMP-SIDE LINK GUARDS. It was authored to pin finding
+// 3 (the stamp consult follows a symlink) and it does not. The conductor
+// removed the stamp side's link guards one at a time and then together — the
+// helper's regular-file check, the caller's `kind !== 'file'` early return, and
+// both — and this test stayed GREEN every time. It is satisfied by a different
+// guard.
+//
+// WHY, so the next reader does not repeat the mistake: this fixture exercises
+// the CHANGED-PRE-DIRTY arm, and finding 2's fix put a gate in front of the
+// stamp consult on that arm which rejects any state difference a {path, sha256}
+// entry cannot speak for — a file TYPE change among them. A regular file
+// replaced by a symlink is a type change, so the consult is never reached and
+// the deny comes from finding 2's gate. On this path the link guards are dead
+// code, which is precisely why removing them changed nothing.
+//
+// WHAT IT ACTUALLY PINS, and it is worth keeping for this: finding 2's gate
+// covering the TYPE term on the changed-pre-dirty arm. The test name and the
+// assertion messages now say exactly that. The rename touched ONLY those
+// strings — the fixture, the assertions and the expected outcomes are
+// unchanged — so the measurement recorded above still describes this exact
+// test.
+//
+// CATCHES SABOTAGE (measured): the gate's TYPE term forced true, i.e. an
+// attestation predicate that treats a type change as byte-attestable — the
+// out-of-repo bytes are then hashed and attested and this test goes red.
+// DOES NOT CATCH (measured): either stamp-side link guard, alone or together.
+//
+// FINDING 3's LINK GUARDS ARE PINNED BY PIN-STAMP-SYMLINK-CLEAN-AT-PRE at the
+// end of this file, on the CLEAN-AT-PRE arm — where a path has no recorded
+// state, so there is no difference to qualify, finding 2's gate is not
+// consulted, and the lstat guard is the only thing standing between a symlink
+// and an attested allow. That is the arm where the guards are load-bearing.
+//
+// Skips with a named reason where the host cannot create symlinks, exactly as
+// PIN-TYPE and PIN-LINK do (P5: a check that cannot run says so).
+// =========================================================================
+
+test('PIN-STAMP-TYPE-GATE-ON-CHANGED-PREDIRT: a pre-dirty path whose file TYPE changed in-window is not byte-attestable — the gate must reject it BEFORE the stamp consult, so a fresh stamp matching the bytes still DENIES', { skip: GIT_SKIP || SYMLINK_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  const decoy = join(tmpdir(), 'sterling-h17-stampdecoy-' + randomUUID().slice(0, 8));
+  try {
+    const bundle = preDirtyBundle(dir, '// X: conductor rebuild in flight, uncommitted\n');
+    const decoyBytes = '// Z: content the hook loader would execute, from OUTSIDE the repo\n';
+    writeFileSync(decoy, decoyBytes);
+
+    const L = lane('stamplink');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    rmSync(bundle, { force: true });
+    symlinkSync(decoy, bundle);
+    // the stamp attests the bytes now reachable at the path, so a BYTE mismatch
+    // cannot be why this denies — the TYPE term has to carry it
+    writeStamp(dir, [{ path: BUNDLE_REL, sha256: createHash('sha256').update(decoyBytes).digest('hex'), at: NOW }]);
+
+    assert.equal(readFileSync(bundle, 'utf8'), decoyBytes, 'PRECONDITION: the bytes at the path equal the STAMPED bytes, so a byte-hash attestation would match — the deny must come from the TYPE term, never from a stale or mismatched stamp');
+    assert.equal(lstatSync(bundle).isSymbolicLink(), true, 'PRECONDITION: the path is no longer a regular file — this is how the fixture produces a TYPE change');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a TYPE change is not attestable by {path, sha256}, so the gate must reject it before the stamp is ever consulted — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(lstatSync(bundle).isSymbolicLink(), true, 'the changed pre-dirty path is still not restored (the pre-image restore stays the deferred slice)');
+    assert.equal(readFileSync(decoy, 'utf8'), decoyBytes, 'containment check, NOT the link pin: this arm restores nothing at all, so an untouched out-of-repo target is expected either way — the link guards are pinned by PIN-STAMP-SYMLINK-CLEAN-AT-PRE');
+  } finally {
+    cleanup([decoy]);
+  }
+});
+
+// =========================================================================
+// PIN-RECORD-DIR-NO-CHILDREN — FINDING 4(a) (MEDIUM): the record's per-path
+// VALUES are under-validated. Only the top-level object and its KEYS are
+// checked, so a recorded DIRECTORY state that OMITS `children` compares EQUAL
+// to a real empty directory (the comparison reads a missing children map as
+// `{}`), and the destruction of every file under a dirty untracked
+// enforcement-surface directory is allowed.
+//
+// WHY THE FIXTURE IS SHAPED THIS WAY, and why it ISOLATES this finding from
+// finding 1: an EMPTY directory is invisible to git, so the emptied path is
+// absent from Post's status output and is reached only by iterating the
+// RECORDED pre-dirty set. Finding 1's fix alone therefore makes Post VISIT this
+// path and then compare `{}` against `{}` and ALLOW — this test stays red until
+// the missing-children shape itself denies. The tamper is a tampered record,
+// which 2422e76a accepts as a determined-attacker residual; the pin is on the
+// implementation's own claim that unexpected shapes DENY (AC12: "an absent or
+// unparseable record denies fail-closed").
+//
+// EXPECTED FAILURE SHAPE (RED TODAY): `soleRecordPath`'s precondition fires
+// first — no per-call record exists today at all (the same first-failure
+// PIN-NO-RECORD, PIN-CORRUPT-RECORD and PIN-KEY have). Once the record exists,
+// the carrying assertion is `assert.equal(r.code, 2)` with actual 0.
+//
+// CATCHES SABOTAGE: the per-path VALUE validation deleted, i.e. a directory
+// state read as `pre.children ?? {}` — the emptied directory then compares
+// equal and the call is allowed. Also catches a validator that checks only
+// `typeof value === 'object'`.
+//
+// It asserts only THAT it denies, never HOW: per AC12 a malformed record may
+// legitimately deny naming the RECORD rather than the path, so pinning the
+// message text here would pin an implementation choice this finding does not
+// settle.
+// =========================================================================
+
+test('PIN-RECORD-DIR-NO-CHILDREN: a recorded DIRECTORY state with NO `children` key DENIES — it must not compare EQUAL to a real EMPTY directory', { skip: GIT_SKIP }, () => {
+  const fx = makeGitProject();
+  const { dir, cleanup } = fx;
+  try {
+    const newDir = join(dir, 'hooks', 'newdir');
+    mkdirSync(newDir, { recursive: true });
+    writeFileSync(join(newDir, 'a.mjs'), '// untracked enforcement-surface file, uncommitted\n');
+    assert.match(porcelain(dir), /newdir/, 'PRECONDITION: the untracked enforcement-surface directory is dirty at Pre and visible to porcelain');
+
+    const L = lane('nochildren');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    const rec = soleRecordPath(fx, 'the record tamper below');
+    const parsed = JSON.parse(readFileSync(rec, 'utf8'));
+    const removed = stripChildren(parsed);
+    assert.ok(
+      removed >= 1,
+      'PRECONDITION: Pre must record recursive `children` for a dirty untracked directory (AC12) — with no children term anywhere in the record there is nothing for this pin to remove and the fixture is not exercising the defect'
+    );
+    writeFileSync(rec, JSON.stringify(parsed));
+
+    // the child goes; the now-EMPTY directory stays
+    rmSync(join(newDir, 'a.mjs'), { force: true });
+    assert.equal(existsSync(newDir), true, 'PRECONDITION: the directory itself still exists and is now EMPTY — the state a missing children map is read as');
+    assert.equal(
+      porcelain(dir),
+      '',
+      'PRECONDITION: git cannot see an empty directory, so this path is ABSENT from Post\'s status and is reached only by iterating the RECORDED pre-dirty set'
+    );
+    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a directory state with no \`children\` key is an unexpected shape and must deny — read as {} it compares EQUAL to the emptied directory and ALLOWS the destruction of every file under it — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.notEqual(oneLine(r.stderr), '', 'and the denial says something (P5: never a silent exit 2)');
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-RECORD-PROTO — FINDING 4(b) (MEDIUM): the lookup map is a plain object,
+// so a crafted `__proto__` key can install an INHERITED state that satisfies a
+// real pre-dirty path and bypasses the explicit absent-entry check.
+//
+// HOW THE FIXTURE AVOIDS GUESSING THE STATE SCHEMA — and this is the load-
+// bearing trick: the crafted prototype entry is not hand-written, it is
+// HARVESTED. A second Pre runs after the tamper, so the record it writes holds
+// the genuine state of the tampered file AS IT IS AT POST. Nothing about the
+// state's field names is assumed, and a term this test does not know about (a
+// timestamp, an inode) cannot make the pin pass for the wrong reason, because
+// the harvest happens between the tamper and the Post with nothing changing in
+// between.
+//
+// Built as TEXT, not an object literal: `{ __proto__: v }` in source SETS the
+// prototype instead of creating an own property, so JSON.stringify would emit
+// `{}` and the test would prove nothing.
+//
+// EXPECTED FAILURE SHAPE (RED TODAY): the per-call-record precondition fires
+// first (no per-call record today), then the harvest key lookup. Once records
+// exist, the carrying assertion is `assert.equal(r.code, 2)` with actual 0 if
+// the map is pollutable.
+//
+// CATCHES SABOTAGE: the parsed record copied into a fresh lookup object with
+// `Object.assign(map, parsed)` or a `for (const k of keys) map[k] = parsed[k]`
+// loop — both route an own `__proto__` property through [[Set]] and really do
+// change the map's prototype, after which the real path resolves the crafted
+// state, compares UNCHANGED, and is allowed. (JSON.parse alone creates
+// `__proto__` as an own data property and does not pollute — which is exactly
+// why the sabotage is a copy step, and why this pin must exist before someone
+// adds one.)
+// =========================================================================
+
+test('PIN-RECORD-PROTO: a record carrying a `__proto__` key must not let a real pre-dirty path resolve its state through the PROTOTYPE — that path still DENIES', { skip: GIT_SKIP }, () => {
+  const fx = makeGitProject();
+  const { dir, cleanup } = fx;
+  try {
+    const bundle = preDirtyBundle(dir, '// X: parallel lane rebuild, uncommitted\n');
+
+    const L = lane('proto');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre L snapshots X');
+    const afterL = perCallRecords(fx);
+    assert.equal(afterL.length, 1, `PRECONDITION: exactly one per-call record after Pre L (found ${afterL.length}; see PIN-NO-RECORD)`);
+
+    const tampered = '// Y: TAMPERED by this command, inside its own window\n';
+    writeFileSync(bundle, tampered);
+
+    // HARVEST the genuine post-tamper state — see the block comment
+    const H = lane('protoharvest');
+    assert.equal(h17(dir, 'PreToolUse', H).code, 0, 'a second Pre records the CURRENT (tampered) state');
+    const harvestPath = perCallRecords(fx).find((p) => !afterL.includes(p));
+    assert.ok(harvestPath, 'PRECONDITION: the harvest Pre wrote its OWN per-call record rather than overwriting lane L\'s (per-call keying — PIN-KEY)');
+    const harvested = JSON.parse(readFileSync(harvestPath, 'utf8'));
+    const key = Object.keys(harvested).find((k) => k.includes('h3-contract-gate'));
+    assert.ok(key, `PRECONDITION: the record keys the pre-dirty path so its state can be harvested (keys seen: ${Object.keys(harvested).join(', ')})`);
+    const stateY = harvested[key];
+    rmSync(harvestPath, { force: true }); // the harvest lane's Post is never run
+
+    const crafted = '{"__proto__":' + JSON.stringify({ [key]: stateY }) + '}';
+    const craftedParsed = JSON.parse(crafted);
+    assert.match(crafted, /"__proto__"/, 'PRECONDITION: the crafted record really carries a __proto__ KEY');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(craftedParsed, key),
+      false,
+      'PRECONDITION: and NO OWN entry for the real path — the prototype is the only route to a state, so an immune implementation must hit its absent-entry deny'
+    );
+    writeFileSync(afterL[0], crafted);
+    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a real pre-dirty path with no OWN record entry must hit the absent-entry deny and must never satisfy it through an inherited state — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'and the changed pre-dirty path is still not restored');
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-RECORD-NO-BYTES-BLOAT — FINDING 5 (MEDIUM, resource shape). Pre
+// snapshots every dirty path in the repo, recursing untracked directories and
+// base64-encoding every file, with no cap on file size, child count, total
+// bytes, path count or recursion depth — measured 717 KB live. A guard that
+// OOMs or times out is a guard that FAILS, and it fails OUTSIDE its own
+// fail-closed control flow, where AC9 cannot reach it.
+//
+// THE CHOSEN FIX is a per-path sha256 INSTEAD of base64 bytes (comparison only
+// ever needs equality; the bytes existed solely for a pre-image restore that is
+// explicitly out of scope, 7021526c). So the pin is on the OBSERVABLE
+// CONSEQUENCE, not the mechanism: the record does not grow with the SIZE of the
+// dirt. This is expressible blind because the record is an observable artifact
+// of the Pre call — the harness already locates it by name for PIN-NO-RECORD —
+// so nothing here reads or assumes hook source.
+//
+// EXPECTED FAILURE SHAPE (RED TODAY): `soleRecordPath`'s precondition fires
+// first (no per-call record today). Under a base64 implementation the carrying
+// assertion is the size bound, firing with ~5.6 MB against a 64 KiB budget.
+//
+// CATCHES SABOTAGE: the per-path digest replaced by (or accompanied by) the
+// base64 bytes — the record immediately exceeds the budget. The budget is
+// deliberately ~100x above what per-path digests need and ~100x below base64 of
+// BIG_SIZE, so it cannot fire on incidental record growth.
+// =========================================================================
+
+test('PIN-RECORD-NO-BYTES-BLOAT: a 4 MiB pre-dirty file does not make the per-call record grow proportionally — the record holds a per-path DIGEST, not the bytes', { skip: GIT_SKIP }, () => {
+  const fx = makeGitProject();
+  const { dir, cleanup } = fx;
+  try {
+    const bundle = preDirtyBundle(dir, Buffer.alloc(BIG_SIZE, 0x41));
+    assert.equal(lstatSync(bundle).size, BIG_SIZE, 'PRECONDITION: the pre-dirty enforcement path really is 4 MiB');
+
+    const L = lane('bloat');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    const rec = soleRecordPath(fx, 'the size measurement below');
+    const size = lstatSync(rec).size;
+    assert.ok(
+      size < RECORD_BUDGET,
+      `the record must stay FLAT as dirt grows: a per-path digest is a few hundred bytes, base64 bytes are ~4/3 of the tree (${BIG_SIZE} bytes of dirt -> ~5.6 MB of record, and no cap on size, child count, path count or depth). Measured ${size} bytes against a ${RECORD_BUDGET}-byte budget`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-LARGE-MIDFILE-FLIP — FINDING 5's OTHER HALF, the one that keeps the fix
+// honest: moving from bytes to a digest must not narrow WHAT IS COMPARED. One
+// byte flipped 3 MiB into a 4 MiB pre-dirty file, with the file LENGTH held
+// identical, must still be CHANGED.
+//
+// This is the scale companion to PIN-UTF8-CHANGED, which already pins that a
+// byte-level change invisible to UTF-8 decoding still denies — and which
+// remains correct AS WRITTEN under a raw-byte digest (differing bytes ->
+// differing digest). What this adds is the sabotage PIN-UTF8-CHANGED's tiny
+// fixture cannot see: a digest computed over a PREFIX, a truncated read, or a
+// size+mtime shortcut.
+//
+// EXPECTED FAILURE SHAPE: denies TODAY for the wrong reason (the blanket
+// pre-existing denial). Once PIN-ALLOW's behaviour lands, a prefix/truncated
+// digest or a size-based shortcut reports UNCHANGED and ALLOWS, so
+// `assert.equal(r.code, 2)` fires with actual 0. A regression/mutation guard,
+// exactly like PIN-MODE — not a today-red pin, and labelled so nobody reads a
+// green here as proof the fix landed.
+//
+// CATCHES SABOTAGE: the digest computed over a bounded prefix
+// (`createHash('sha256').update(buf.subarray(0, 65536))`), a read capped at N
+// bytes, or a comparison that falls back to size+mtime above a size threshold.
+// =========================================================================
+
+test('PIN-LARGE-MIDFILE-FLIP: ONE byte flipped 3 MiB into a 4 MiB pre-dirty file (length identical) is still CHANGED — DENIES', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const before = Buffer.alloc(BIG_SIZE, 0x41);
+    const bundle = preDirtyBundle(dir, before);
+
+    const L = lane('midflip');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    const at = 3 * 1024 * 1024; // far beyond any plausible prefix window
+    const after = Buffer.from(before);
+    after[at] = 0x42;
+    writeFileSync(bundle, after);
+
+    assert.equal(after.length, before.length, 'PRECONDITION: the length is IDENTICAL, so a size-only check cannot carry this test');
+    assert.notEqual(after[at], before[at], 'PRECONDITION: exactly one byte differs, 3 MiB in');
+    assert.equal(lstatSync(bundle).size, BIG_SIZE, 'PRECONDITION: and the file on disk is still 4 MiB');
+    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — this deny must land on the "otherwise" arm (step 3)');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a mid-file single-byte flip must deny — a digest replacing the bytes must cover the WHOLE file, never a prefix — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-STAMP-SYMLINK-CLEAN-AT-PRE — FINDING 3, ON THE ARM WHERE THE STAMP-SIDE
+// LINK GUARDS ARE ACTUALLY LOAD-BEARING. Replaces the coverage
+// PIN-STAMP-TYPE-GATE-ON-CHANGED-PREDIRT (formerly PIN-STAMP-SYMLINK) was
+// authored for and measurably does not provide (see its comment above): that
+// fixture rides the CHANGED-PRE-DIRTY arm, where finding 2's attestation gate
+// rejects a TYPE change before the stamp consult is ever reached, so the link
+// guards are dead code there and removing them changed nothing.
+//
+// THIS arm is different, and the difference is the whole reason the pin lives
+// here: a path CLEAN at Pre has NO recorded state, so there is no difference to
+// qualify and finding 2's gate is not consulted at all — the stamp check is
+// called directly. The lstat guard is then the only thing between a symlink and
+// an attested allow, and an attested allow means the hook loader executes
+// content from a path OUTSIDE the repo that no sweep covers and no
+// `git checkout` can restore.
+//
+// THE CONTROL IS NOT OPTIONAL, and it is the lesson of the hollow pin: a test
+// that denies for an unrelated reason is indistinguishable from a test that
+// works. So the control arm runs FIRST and proves the stamp WOULD attest these
+// exact bytes at this exact path as a REGULAR FILE — same path key, same
+// sha256, byte-identical stamp file, asserted identical. Only then does the pin
+// arm re-run the same fixture with the bytes behind a symlink. A green pin arm
+// therefore always carries the control's evidence: the deny cannot be "the
+// stamp never attested anything", because the stamp just did.
+//
+// ORDERING IS DELIBERATE (the idiom PIN-STAMP-ON-CHANGED-PREDIRT established): a
+// sequential arm placed after a failing one never executes, and the arm whose
+// evidence the other arm depends on must be the one that runs.
+//
+// EXPECTED FAILURE SHAPE: with the caller's `kind !== 'file'` early return
+// removed (alone, or together with the helper's regular-file guard) the stamp
+// hashes THROUGH the link, matches, and the change is attested — so
+// `assert.equal(r.code, 2)` fires with actual 0 AND the restore assertion fires
+// with the path still a symlink.
+//
+// CATCHES SABOTAGE — MEASURED 2026-08-22, so nobody has to infer it: removing
+// BOTH stamp-side link guards (the caller's `kind !== 'file'` early return AND
+// the helper's regular-file check) makes this test RED, firing exactly as the
+// failure shape above predicts. Removing EITHER guard alone leaves it GREEN,
+// because the two are redundant with each other — either one still refuses to
+// hash through the link.
+//
+// READ THAT DISTINCTION CAREFULLY BEFORE CALLING THIS PIN HOLLOW: a green under
+// a single-guard mutation is correct defense in depth, not hollowness. The
+// difference from the test above, which WAS hollow, is the both-guards case —
+// that one stayed green with both guards gone, meaning no mutation of the
+// mechanism could ever move it. This one goes red the moment the property it
+// names stops holding. The control arm is what makes the verdict trustworthy:
+// because a byte-identical stamp attested moments earlier, a green pin arm
+// cannot be explained away as "the stamp was never attesting."
+// =========================================================================
+
+test('PIN-STAMP-SYMLINK-CLEAN-AT-PRE: a CLEAN-at-Pre path replaced in-window by a SYMLINK to an OUT-OF-REPO file holding the stamped bytes is NOT attested — DENIES and is restored (control: the same bytes as a regular file ARE attested)', { skip: GIT_SKIP || SYMLINK_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  const decoy = join(tmpdir(), 'sterling-h17-cleanpre-decoy-' + randomUUID().slice(0, 8));
+  try {
+    const bundle = bundlePath(dir);
+    const headBytes = readFileSync(bundle, 'utf8');
+    const decoyBytes = '// Z: content the hook loader would execute, from OUTSIDE the repo\n';
+    writeFileSync(decoy, decoyBytes);
+
+    // ONE stamp, used by BOTH arms. Hashed from the bytes directly, never
+    // through a path, so the fixture cannot accidentally hash a link.
+    const stampEntries = [{ path: BUNDLE_REL, sha256: createHash('sha256').update(decoyBytes).digest('hex'), at: NOW }];
+
+    // ---- CONTROL ARM (expected ALLOW): the stamp genuinely attests these
+    // bytes at this path when they arrive as a REGULAR FILE. Without this, a
+    // deny in the pin arm proves nothing.
+    assert.equal(porcelain(dir), '', 'PRECONDITION: the path is CLEAN at Pre — this arm is the clean-at-Pre branch, not the pre-dirty one');
+    const C = lane('cleanpre-control');
+    assert.equal(h17(dir, 'PreToolUse', C).code, 0);
+
+    writeFileSync(bundle, decoyBytes); // a plain regular-file write of the stamped bytes
+    writeStamp(dir, stampEntries);
+    const stampText = readFileSync(stampPath(dir), 'utf8');
+    assert.equal(lstatSync(bundle).isFile(), true, 'PRECONDITION: the control arm writes a REGULAR FILE');
+
+    const control = h17(dir, 'PostToolUse', C);
+    assert.notEqual(control.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      control.code,
+      0,
+      `CONTROL: a fresh stamp matching the CURRENT bytes of a clean-at-Pre in-window change must be honored (decision 4d9b76e8) — if THIS fails the pin arm below cannot be trusted, because the stamp is not attesting at all — actual ${control.code}, stderr: ${oneLine(control.stderr)}`
+    );
+    assert.equal(readFileSync(bundle, 'utf8'), decoyBytes, 'CONTROL: and the attested bytes are KEPT, not restored to HEAD');
+
+    // ---- back to CLEAN, so the pin arm runs the same branch as the control
+    git(dir, ['checkout', 'HEAD', '--', BUNDLE_REL], { must: true });
+    assert.equal(porcelain(dir), '', 'PRECONDITION: the path is CLEAN at Pre again for the pin arm');
+    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'PRECONDITION: and back to its committed bytes');
+
+    // ---- PIN ARM: the SAME stamped bytes, now reachable only THROUGH a link
+    const S = lane('cleanpre-symlink');
+    assert.equal(h17(dir, 'PreToolUse', S).code, 0);
+
+    rmSync(bundle, { force: true });
+    symlinkSync(decoy, bundle);
+    writeStamp(dir, stampEntries); // the conductor stamps mid-window, exactly as in the control
+    assert.equal(readFileSync(stampPath(dir), 'utf8'), stampText, 'THE CONTROL\'S FORCE: the stamp is BYTE-IDENTICAL to the one that just attested — same path key, same sha256, same freshness');
+    assert.equal(lstatSync(bundle).isSymbolicLink(), true, 'PRECONDITION: the repo path is now a SYMLINK, not a regular file');
+    assert.equal(readFileSync(bundle, 'utf8'), decoyBytes, 'PRECONDITION: following the link yields the STAMPED bytes — a link-following consult finds an exact match');
+
+    const r = h17(dir, 'PostToolUse', S);
+    assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a symlink is not a regular file and the stamp must NOT attest it — attesting it would let the hook loader execute content from outside the repo that no sweep covers — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(lstatSync(bundle).isSymbolicLink(), false, 'the clean-at-Pre arm RESTORES an unattested in-window change — so the symlink is gone');
+    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'and the path holds its committed bytes again');
+    assert.equal(existsSync(decoy), true, 'the out-of-repo target still exists — a restore must never delete through a link');
+    assert.equal(readFileSync(decoy, 'utf8'), decoyBytes, 'and its bytes are untouched — a restore that writes THROUGH a link is an arbitrary-write primitive outside the repo (AC10)');
+  } finally {
+    cleanup([decoy]);
+  }
+});

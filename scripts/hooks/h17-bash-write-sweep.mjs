@@ -33,6 +33,23 @@
 // deliberately deferred). No usable tool_use_id -> DEGRADED-LOUD: today's
 // blanket pre-existing denial, naming tool_use_id as the reason, never a
 // silent per-run key (which would let one lane adopt another's tampered bytes).
+// v3.4 (two independent reviews of v3.3, all five findings adjudicated REAL):
+// (1) FAIL-CLOSED HOLE — Post iterated only the CURRENT git status, so a path
+// dirty at Pre and CLEAN at Post was never visited (`git checkout HEAD -- <hook>`
+// destroyed conductor work and exited 0); the sweep set is now the UNION of the
+// current status and the RECORDED pre-dirty set, in both the compared and the
+// degraded path (whose blanket denial a command could otherwise empty by
+// cleaning files). (2) A STAMP ATTESTS BYTES, NOT STATE — a {path, sha256} /
+// {path, deleted:true} entry cannot express a mode, a type, a link target or an
+// index entry, so the stamp is consulted on a changed pre-dirty path ONLY when
+// the difference is confined to bytes (or the absent state). (3) NO STAMP-SIDE
+// LINK FOLLOWING — every stamp read is lstat-guarded; a path that is not a
+// regular file is unattested, and a symlink is never a directory. (4) RECORD
+// VALUES are shape-validated and the lookup is a Map (a missing `children` key
+// no longer compares equal to an empty directory; a `__proto__` key cannot
+// install an inherited state). (5) RESOURCE SHAPE — the record stores a
+// per-path raw-byte sha256 instead of base64 bytes (717 KB measured live), and
+// the index query is chunked and --literal-pathspecs.
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync, lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { join, dirname, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -130,19 +147,39 @@ function stateFile(cwd, runId, key) {
 function indexEntriesFor(cwd, rels) {
   const map = new Map();
   if (!rels.length) return map;
-  const r = spawnSync('git', ['-C', cwd, 'ls-files', '--stage', '-z', '--', ...rels], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  if (r.error || r.status !== 0) {
-    throw new Error(`git ls-files --stage -z failed (status ${r.status}: ${r.stderr || r.error})`);
-  }
   const staged = new Map();
-  for (const tok of (r.stdout || '').split('\0')) {
-    if (!tok) continue;
-    const tab = tok.indexOf('\t');
-    if (tab < 0) throw new Error(`git ls-files --stage -z produced an unparseable entry ('${tok.slice(0, 60)}')`);
-    const p = tok.slice(tab + 1);
-    const list = staged.get(p) ?? [];
-    list.push(tok.slice(0, tab).trim().replace(/\s+/g, ':')); // "<mode> <oid> <stage>" -> "mode:oid:stage"
-    staged.set(p, list);
+  // CHUNKED + --literal-pathspecs (review finding 5, resource shape): one
+  // spawn carrying every dirty path can exceed the OS argument limit (E2BIG)
+  // on a large dirty set, and a guard that dies of E2BIG dies OUTSIDE its own
+  // fail-closed control flow, where AC9 cannot reach it. --literal-pathspecs
+  // so a dirty filename containing pathspec magic (a leading ':' or a glob
+  // metacharacter) is treated as a PATH and cannot widen or narrow what the
+  // index query reports. A git failure in ANY chunk still throws -> AC9 deny.
+  const CHUNK_ARGS = 256;
+  const CHUNK_CHARS = 32 * 1024;
+  for (let i = 0; i < rels.length; ) {
+    const chunk = [];
+    let chars = 0;
+    while (i < rels.length && chunk.length < CHUNK_ARGS && chars < CHUNK_CHARS) {
+      chars += rels[i].length + 1;
+      chunk.push(rels[i++]); // at least one per chunk — a single huge path still progresses
+    }
+    const r = spawnSync('git', ['-C', cwd, '--literal-pathspecs', 'ls-files', '--stage', '-z', '--', ...chunk], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (r.error || r.status !== 0) {
+      throw new Error(`git ls-files --stage -z failed (status ${r.status}: ${r.stderr || r.error})`);
+    }
+    for (const tok of (r.stdout || '').split('\0')) {
+      if (!tok) continue;
+      const tab = tok.indexOf('\t');
+      if (tab < 0) throw new Error(`git ls-files --stage -z produced an unparseable entry ('${tok.slice(0, 60)}')`);
+      const p = tok.slice(tab + 1);
+      const list = staged.get(p) ?? [];
+      list.push(tok.slice(0, tab).trim().replace(/\s+/g, ':')); // "<mode> <oid> <stage>" -> "mode:oid:stage"
+      staged.set(p, list);
+    }
   }
   for (const [p, list] of staged) map.set(p, list.sort().join(','));
   return map;
@@ -152,11 +189,19 @@ function indexEntriesFor(cwd, rels) {
 // an escape a bytes-only comparison would miss and today's blanket denial does
 // catch — a mode flip with identical bytes; a regular file replaced by a symlink
 // whose target holds identical bytes; a symlink re-pointed at another
-// identical-content target; a staged-index-only change. BYTES ARE BASE64, never
-// a UTF-8 string: two different invalid-UTF-8 sequences can decode to the same
-// U+FFFD, so a text snapshot is lossy exactly where tampering hides. A symlink's
-// target is read with readlink and NEVER followed. An unsupported file type
-// (fifo, socket, device) throws -> AC9 fail-closed, never a silent "unchanged".
+// identical-content target; a staged-index-only change. BYTES ARE CARRIED AS A
+// RAW-BYTE SHA-256, never as base64 and never as a UTF-8 string (review finding
+// 5): the comparison only ever needs EQUALITY, and the bytes themselves existed
+// solely for a pre-image restore that decision 7021526c puts explicitly out of
+// scope — while base64 made the record grow with the size of the dirt (717 KB
+// measured live, ~5.6 MB for one 4 MiB dirty file), so a big enough dirty tree
+// could OOM or time out the guard OUTSIDE its own fail-closed control flow. The
+// digest is over the WHOLE file's RAW bytes, never a prefix and never a decoded
+// string: two different invalid-UTF-8 sequences decode to the same U+FFFD, so a
+// text snapshot is lossy exactly where tampering hides, and a raw-byte digest
+// keeps that escape visible. A symlink's target is read with readlink and NEVER
+// followed. An unsupported file type (fifo, socket, device) throws -> AC9
+// fail-closed, never a silent "unchanged".
 function pathState(cwd, rel, idx) {
   const abs = join(cwd, rel);
   const index = idx.get(rel) ?? null;
@@ -169,12 +214,15 @@ function pathState(cwd, rel, idx) {
   }
   const mode = st.mode & 0o7777; // PERMISSION bits only; the type is its own term
   if (st.isSymbolicLink()) return { exists: true, type: 'symlink', mode, index, target: readlinkSync(abs) };
-  if (st.isFile()) return { exists: true, type: 'file', mode, index, bytes: readFileSync(abs).toString('base64') };
+  if (st.isFile()) return { exists: true, type: 'file', mode, index, sha256: createHash('sha256').update(readFileSync(abs)).digest('hex') };
   if (st.isDirectory()) {
     // An untracked directory reaches the sweep as its COLLAPSED path (`?? dir/`),
     // so comparing the directory alone would let a write to a file inside it pass
-    // as unchanged. Recurse: every child is a state of its own.
-    const children = {};
+    // as unchanged. Recurse: every child is a state of its own. NULL-PROTOTYPE:
+    // a child literally named `__proto__` must be an ordinary key here, never a
+    // prototype write (the same hazard review finding 4(b) names on the record's
+    // own lookup).
+    const children = Object.create(null);
     for (const name of readdirSync(abs)) {
       const childRel = `${rel}/${name}`;
       children[childRel] = pathState(cwd, childRel, idx);
@@ -189,21 +237,109 @@ function pathState(cwd, rel, idx) {
 // diagnosable — and so the mutation battery this slice is verified by can tell
 // the terms apart. Anything unrecognized is NOT equal (fail-closed).
 function sameState(a, b) {
-  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (!isStateObject(a) || !isStateObject(b)) return false;
   if (a.exists !== b.exists) return false; // EXISTENCE
   if (a.index !== b.index) return false; // INDEX ENTRY (stage, mode, blob OID)
   if (!a.exists) return true;
   if (a.type !== b.type) return false; // FILE TYPE
   if (a.mode !== b.mode) return false; // MODE
   if (a.type === 'symlink') return a.target === b.target; // SYMLINK TARGET (readlink)
-  if (a.type === 'file') return a.bytes === b.bytes; // BYTES (base64, lossless)
+  if (a.type === 'file') return a.sha256 === b.sha256; // BYTES (raw-byte sha256, whole file)
   if (a.type === 'dir') {
-    const ak = Object.keys(a.children ?? {}).sort();
-    const bk = Object.keys(b.children ?? {}).sort();
+    // NO `?? {}` FALLBACK (review finding 4(a)): reading a missing children map
+    // as an empty object made a recorded directory state that OMITS `children`
+    // compare EQUAL to a really-empty directory, so emptying a dirty untracked
+    // enforcement directory passed as "unchanged". A shape that cannot be
+    // compared is NOT equal (fail-closed); the record loader rejects it outright.
+    if (!isStateObject(a.children) || !isStateObject(b.children)) return false;
+    const ak = ownKeys(a.children).sort();
+    const bk = ownKeys(b.children).sort();
     if (ak.length !== bk.length) return false;
     for (let i = 0; i < ak.length; i++) {
       if (ak[i] !== bk[i]) return false;
       if (!sameState(a.children[ak[i]], b.children[bk[i]])) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function isStateObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function ownKeys(o) {
+  return Object.keys(o).filter((k) => Object.prototype.hasOwnProperty.call(o, k));
+}
+
+// Per-path VALUE validation for the Pre-STATE record (review finding 4). The
+// loader used to validate only the top-level object and its KEYS, so any value
+// shape at all was trusted by the comparison — and two shapes then compared
+// EQUAL that must not: a directory state with no `children` key (read as `{}`)
+// matched a really-empty directory. Returns null when the value is a state this
+// comparison can speak for, or a human-readable reason when it is not; an
+// unexpected shape DENIES (AC12: "an absent or unparseable record denies
+// fail-closed" — a per-path value that is malformed is unparseable in every
+// sense that matters). Child keys are validated for containment exactly like
+// top-level keys, so a crafted child path cannot smuggle a traversal in.
+function stateShapeError(cwd, v, where) {
+  if (!isStateObject(v)) return `'${where}' is not a state object`;
+  if (typeof v.exists !== 'boolean') return `'${where}' has no boolean 'exists'`;
+  if (!(v.index === null || typeof v.index === 'string')) return `'${where}' has a non-string, non-null 'index'`;
+  if (!v.exists) return null; // absence carries existence + index and nothing else
+  if (v.type !== 'file' && v.type !== 'symlink' && v.type !== 'dir') return `'${where}' has an unrecognized 'type' (${JSON.stringify(v.type)})`;
+  if (!Number.isInteger(v.mode) || v.mode < 0 || v.mode > 0o7777) return `'${where}' has an invalid 'mode' (${JSON.stringify(v.mode)})`;
+  if (v.type === 'file') {
+    if (typeof v.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(v.sha256)) return `'${where}' is a file with no sha256 digest`;
+    return null;
+  }
+  if (v.type === 'symlink') {
+    if (typeof v.target !== 'string') return `'${where}' is a symlink with no string 'target'`;
+    return null;
+  }
+  if (!isStateObject(v.children)) return `'${where}' is a directory with no explicit 'children' object`;
+  for (const k of ownKeys(v.children)) {
+    if (!validateStateKey(cwd, k)) return `'${where}' carries a child key that is not a repo-relative path inside the project ('${k}')`;
+    const bad = stateShapeError(cwd, v.children[k], k);
+    if (bad) return bad;
+  }
+  return null;
+}
+
+// WHAT A STAMP CAN ATTEST (review finding 2). A stamp entry is only
+// {path, sha256} or {path, deleted:true} (decision 4d9b76e8) — it structurally
+// cannot express a MODE, a file TYPE, a symlink TARGET or the git INDEX entry.
+// Decision 7021526c step 2 says the stamp is consulted against the CURRENT
+// STATE, so a state difference the stamp cannot speak for falls to step 3 and
+// DENIES without any consult: otherwise a chmod-only change, or a `git add`
+// that moves only the index, or a regular file swapped for a symlink leaves the
+// bytes identical, matches the stamp, and is wrongly allowed. Returns true only
+// when the difference between the recorded and current state is confined to
+// what a byte hash (or a {deleted:true} entry) can attest.
+function stampCouldAttest(recorded, current) {
+  if (!isStateObject(recorded) || !isStateObject(current)) return false;
+  if (recorded.index !== current.index) return false; // INDEX: unattestable
+  if (!current.exists) return recorded.exists === true; // present -> absent: {path, deleted:true}
+  if (!recorded.exists) return false; // absent -> present: an existence flip, unattestable
+  if (recorded.type !== current.type) return false; // TYPE: unattestable
+  if (recorded.mode !== current.mode) return false; // MODE: unattestable
+  if (current.type === 'file') return true; // only the bytes can still differ
+  if (current.type === 'symlink') return false; // link TARGET: unattestable
+  if (current.type === 'dir') {
+    // A directory attests through its child FILES (stampAttestsDirectory walks
+    // what is there NOW), so a child that was ADDED or REMOVED leaves nothing
+    // for the walk to attest — fail closed on any change to the child key set,
+    // and require every differing child to be bytes-only in the same sense.
+    if (!isStateObject(recorded.children) || !isStateObject(current.children)) return false;
+    const ak = ownKeys(recorded.children);
+    const bk = ownKeys(current.children);
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) {
+      if (!Object.prototype.hasOwnProperty.call(current.children, k)) return false;
+      const a = recorded.children[k];
+      const b = current.children[k];
+      if (sameState(a, b)) continue;
+      if (!stampCouldAttest(a, b)) return false;
     }
     return true;
   }
@@ -229,12 +365,52 @@ function validateStateKey(cwd, key) {
   return fwd;
 }
 
-function isDirectoryAt(cwd, rel) {
+// What a path IS, WITHOUT ever following a link (review finding 3). 'absent' is
+// kept distinct from 'error' so a stamped deletion attests only on a genuine
+// ENOENT — an EACCES must never read as "gone, as attested".
+function lstatKind(abs) {
   try {
-    return statSync(join(cwd, rel)).isDirectory();
-  } catch {
-    return false;
+    const st = lstatSync(abs);
+    if (st.isSymbolicLink()) return 'symlink';
+    if (st.isFile()) return 'file';
+    if (st.isDirectory()) return 'dir';
+    return 'other'; // fifo, socket, device: never attestable, never a directory
+  } catch (e) {
+    return e && e.code === 'ENOENT' ? 'absent' : 'error';
   }
+}
+
+// LSTAT, not stat (review finding 3): a symlink is NEVER a directory for this
+// purpose, so a link pointing at a directory can never route the stamp consult
+// into a recursive walk outside the repo.
+function isDirectoryAt(cwd, rel) {
+  return lstatKind(join(cwd, rel)) === 'dir';
+}
+
+// The stamp's entries, as { present, entries }. `entries` is null whenever the
+// stamp cannot be used (absent, not a JSON array, or — review finding 3 — not a
+// REGULAR FILE: the stamp is read through lstat too, so
+// .sterling/transient/enforcement-stamp.json cannot be a symlink pointing the
+// consult at bytes outside the repo). `present` keeps the existing message
+// distinction between "no stamp at all" and "a stamp that attests nothing".
+// A parse error propagates to the caller's fail-closed catch, unchanged.
+function readStamp(cwd) {
+  const stampPath = join(cwd, '.sterling', 'transient', 'enforcement-stamp.json');
+  const kind = lstatKind(stampPath);
+  if (kind !== 'file') return { present: kind !== 'absent', entries: null };
+  const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
+  return { present: true, entries: Array.isArray(stamp) ? stamp : null };
+}
+
+// One path's CURRENT bytes hashed for a stamp comparison — only ever for a
+// REGULAR FILE (review finding 3). Returns null for anything else, so the
+// consult can never hash THROUGH a symlink: the attack that closes is replacing
+// a stamped enforcement file with a link to an out-of-repo file holding the
+// stamped bytes, which the hook loader would then execute from outside every
+// sweep's reach.
+function sha256OfRegularFile(abs) {
+  if (lstatKind(abs) !== 'file') return null;
+  return createHash('sha256').update(readFileSync(abs)).digest('hex');
 }
 
 function toRel(cwd, abs) {
@@ -315,12 +491,11 @@ function parsePorcelainZ(out) {
 // never collapse attestation for a changed stamped one.
 function verifyStampAttestation(cwd, preExistingRels) {
   try {
-    const stampPath = join(cwd, '.sterling', 'transient', 'enforcement-stamp.json');
-    if (!existsSync(stampPath)) return { attested: false, stampPresent: false, failedPath: null };
-    const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    if (!Array.isArray(stamp)) return { attested: false, stampPresent: true, failedPath: null };
+    const { present, entries } = readStamp(cwd);
+    if (!present) return { attested: false, stampPresent: false, failedPath: null };
+    if (!entries) return { attested: false, stampPresent: true, failedPath: null };
     const byPath = new Map();
-    for (const entry of stamp) {
+    for (const entry of entries) {
       if (entry && typeof entry.path === 'string') byPath.set(entry.path, entry);
     }
     for (const rel of preExistingRels) {
@@ -329,14 +504,18 @@ function verifyStampAttestation(cwd, preExistingRels) {
       const abs = join(cwd, rel);
       // FIX L1 (upgrade-polish, 2026-08-21): a stamped DELETION attests iff the
       // path is STILL absent — the path reappearing is not the attested state,
-      // so no exemption (fail-closed, no partial credit).
+      // so no exemption (fail-closed, no partial credit). LSTAT-guarded (review
+      // finding 3): a dangling symlink is present, not absent, so it can never
+      // pass as an attested deletion.
       if (entry.deleted === true) {
-        if (existsSync(abs)) return { attested: false, stampPresent: true, failedPath: rel };
+        if (lstatKind(abs) !== 'absent') return { attested: false, stampPresent: true, failedPath: rel };
         continue;
       }
       if (typeof entry.sha256 !== 'string') return { attested: false, stampPresent: true, failedPath: rel };
-      if (!existsSync(abs)) return { attested: false, stampPresent: true, failedPath: rel };
-      const current = createHash('sha256').update(readFileSync(abs)).digest('hex');
+      // Only a REGULAR FILE can be hashed for attestation — never a symlink
+      // (whose bytes may live outside the repo), a directory, or a device.
+      const current = sha256OfRegularFile(abs);
+      if (current === null) return { attested: false, stampPresent: true, failedPath: rel };
       if (current !== entry.sha256) return { attested: false, stampPresent: true, failedPath: rel };
     }
     return { attested: true, stampPresent: true, failedPath: null };
@@ -355,21 +534,26 @@ function verifyStampAttestation(cwd, preExistingRels) {
 // hash mismatch, deleted-entry shape) attests nothing.
 function stampAttestsCurrentBytes(cwd, rel) {
   try {
-    const stampPath = join(cwd, '.sterling', 'transient', 'enforcement-stamp.json');
-    if (!existsSync(stampPath)) return false;
-    const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    if (!Array.isArray(stamp)) return false;
-    const entry = stamp.find((e) => e && e.path === rel);
+    const { entries } = readStamp(cwd);
+    if (!entries) return false;
+    const entry = entries.find((e) => e && e.path === rel);
     if (!entry) return false;
     const abs = join(cwd, rel);
     // Review fix 5: a stamped DELETION (enforcement-stamp.mjs writes
     // {path, deleted:true} for a dirty path with no bytes) attests iff the
     // path is STILL absent — mirrors verifyStampAttestation's deleted arm.
     // Without this, an attested in-window deletion was silently resurrected.
-    if (!existsSync(abs)) return entry.deleted === true;
+    const kind = lstatKind(abs);
+    if (kind === 'absent') return entry.deleted === true;
+    // Review finding 3: a path that is not a REGULAR FILE is UNATTESTED, full
+    // stop. The old existsSync/readFileSync pair FOLLOWED a link, so a stamped
+    // file replaced by a symlink to an out-of-repo file holding the stamped
+    // bytes was attested and allowed — and the hook loader would then execute
+    // content from outside the repo that no sweep covers.
+    if (kind !== 'file') return false;
     if (typeof entry.sha256 !== 'string') return false;
-    const current = createHash('sha256').update(readFileSync(abs)).digest('hex');
-    return current === entry.sha256;
+    const current = sha256OfRegularFile(abs);
+    return current !== null && current === entry.sha256;
   } catch {
     return false;
   }
@@ -388,8 +572,15 @@ function stampAttestsDirectory(cwd, relDir) {
     const walk = (rel) => {
       for (const de of readdirSync(join(cwd, rel), { withFileTypes: true })) {
         const childRel = `${rel}/${de.name}`;
+        // Review finding 3: Dirent classification is lstat-shaped, and this
+        // walk keeps it that way — a symlink is never recursed into and never
+        // counted as an attestable file, so the recursion cannot leave the repo
+        // and no child's bytes are ever hashed through a link. Anything that is
+        // neither a real directory nor a regular file aborts the walk into the
+        // catch below (fail-closed: the directory attests nothing).
         if (de.isDirectory()) walk(childRel);
-        else files.push(childRel);
+        else if (de.isFile()) files.push(childRel);
+        else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
       }
     };
     walk(relDir);
@@ -663,18 +854,29 @@ try {
           })
         );
       }
-      // Validate EVERY key before the record is trusted (AC10 posture): the
-      // audited agent can write arbitrary bytes into os.tmpdir(), so a crafted
-      // record is conduct, not environment.
-      preState = {};
-      for (const k of Object.keys(recorded)) {
+      // Validate EVERY key AND EVERY VALUE before the record is trusted (AC10
+      // posture + review finding 4): the audited agent can write arbitrary
+      // bytes into os.tmpdir(), so a crafted record is conduct, not
+      // environment. A MAP, never a plain object (finding 4(b)): copying parsed
+      // keys into an object routes an own `__proto__` key through [[Set]] and
+      // really does change the lookup's prototype, after which a real pre-dirty
+      // path resolves an INHERITED state, compares "unchanged", and defeats the
+      // absent-entry check. A Map has no prototype chain to poison.
+      preState = new Map();
+      for (const k of ownKeys(recorded)) {
         const norm = validateStateKey(cwd, k);
         if (!norm) {
           deny(
             `H17: crafted per-call Pre-STATE record key rejected ('${k}' — not a repo-relative path inside the project); no write performed, failing closed (P5).`
           );
         }
-        preState[norm] = recorded[k];
+        const shapeError = stateShapeError(cwd, recorded[k], norm);
+        if (shapeError) {
+          deny(
+            `H17: per-call Pre-STATE record '${sPath}' carries an unexpected per-path state shape (${shapeError}) — an unvalidated state can compare EQUAL to a tampered path, so it is refused; no write performed, failing closed (P5).`
+          );
+        }
+        preState.set(norm, recorded[k]);
       }
       // Lifecycle-bound (P4): the record's life ends with the Post that consumed
       // it. Best-effort — a failed unlink must never change the verdict.
@@ -692,79 +894,107 @@ try {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
   }
   const postEntries = parsePorcelainZ(status.stdout);
-  // Current INDEX entries for everything git reports dirty, in ONE call — the
+  // THE SWEEP SET = the UNION of what git reports dirty NOW and what the record
+  // says was dirty at Pre (review finding 1, CRITICAL — a fail-closed
+  // violation). Iterating only the CURRENT status skipped every path that was
+  // dirty at Pre and is CLEAN at Post, so it was never compared, never
+  // stamp-consulted and never denied: a command running
+  // `git checkout HEAD -- hooks/h3-contract-gate.mjs` destroyed the conductor's
+  // uncommitted enforcement work and exited 0. Dirty-at-Pre + clean-at-Post is
+  // a STATE CHANGE like any other — it lands on the ordinary comparison below
+  // (the bytes moved from the in-flight image to HEAD's), reaches the stamp
+  // consult, then the deny, so ONE code path governs and there is no
+  // special-cased unconditional denial to keep in sync.
+  // Value = the RAW porcelain path (a `?? dir/` keeps its trailing slash for
+  // restoreTracked); a recorded-only path is its own raw form.
+  const sweep = new Map();
+  for (const entry of postEntries) {
+    for (const p of entry.paths) {
+      const rel = p.replace(/\/+$/, '');
+      if (rel && !sweep.has(rel)) sweep.set(rel, p);
+    }
+  }
+  for (const rel of preDirty) {
+    if (typeof rel === 'string' && rel && !sweep.has(rel)) sweep.set(rel, rel);
+  }
+  // Current INDEX entries for the whole sweep set, in ONE chunked call — the
   // index term of the state comparison. Skipped entirely when there is no
   // record to compare against, so the degraded path keeps exactly today's
   // behaviour and gains no new failure mode. A git failure throws -> deny (AC9).
   let postIndex = new Map();
-  if (preState) {
-    const postRels = [];
-    for (const entry of postEntries) {
-      for (const p of entry.paths) {
-        const rel = p.replace(/\/+$/, '');
-        if (rel) postRels.push(rel);
-      }
-    }
-    postIndex = indexEntriesFor(cwd, postRels);
-  }
-  for (const entry of postEntries) {
-    for (const p of entry.paths) {
-      const rel = p.replace(/\/+$/, '');
-      if (!rel) continue;
-      const isViolation =
-        isEnforcementSurface(rel) ||
-        matchesGlob(rel, 'hooks/**') ||
-        (brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny);
-      if (isViolation) {
-        if (preDirty.has(rel)) {
+  if (preState) postIndex = indexEntriesFor(cwd, [...sweep.keys()]);
+  for (const [rel, p] of sweep) {
+    const isViolation =
+      isEnforcementSurface(rel) ||
+      matchesGlob(rel, 'hooks/**') ||
+      (brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny);
+    if (isViolation) {
+      if (preDirty.has(rel)) {
           // Already dirty at Pre — not this command's write, and never reverted:
           // reverting here is what destroyed a conductor's uncommitted
           // enforcement-surface work and reported it as the agent's (f76d7c5c).
           //
-          // Decision 7021526c: it is no longer DENIED merely for being dirty
-          // either. The order is exactly (1) compare the recorded Pre STATE with
-          // the CURRENT state — unchanged means the surface is verified BY
-          // OBSERVATION and no stamp is consulted or needed; (2) changed ->
-          // consult the stamp FRESH against the CURRENT state, PER PATH
-          // (4d9b76e8's rule is general, not confined to the clean-at-Pre arm:
-          // a stamp can only be written by a deliberate conductor-run CLI,
-          // 6e132e19, so a match means the change is conductor-attested);
-          // (3) otherwise deny. No arm restores — a pre-image restore across
-          // overlapping Bash windows would clobber a concurrent lane's
-          // legitimate write (board 0b848342 finding 1, deferred by decision).
-          if (!preState) {
-            // DEGRADED-LOUD: nothing to compare against, so the old blanket
-            // pre-existing denial stands and names its reason below.
-            preExisting.push(rel);
-            continue;
-          }
-          const wasState = preState[rel];
-          if (wasState === undefined) {
-            // The attribution record says this path was dirty at Pre and the
-            // state record has no entry for it — the two disagree, so the write
-            // is unattributable. Fail closed (AC9); an absent entry must NEVER
-            // read as "unchanged".
-            throw new Error(
-              `per-call Pre-STATE record has no entry for the pre-dirty path '${rel}' — the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
-            );
-          }
-          if (sameState(wasState, pathState(cwd, rel, postIndex))) continue; // (1) verified by observation
-          if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue; // (2) conductor-attested
-          changedPreDirty.push(rel); // (3) denied, and still not restored
+        // Decision 7021526c: it is no longer DENIED merely for being dirty
+        // either. The order is exactly (1) compare the recorded Pre STATE with
+        // the CURRENT state — unchanged means the surface is verified BY
+        // OBSERVATION and no stamp is consulted or needed; (2) changed ->
+        // consult the stamp FRESH against the CURRENT state, PER PATH
+        // (4d9b76e8's rule is general, not confined to the clean-at-Pre arm:
+        // a stamp can only be written by a deliberate conductor-run CLI,
+        // 6e132e19, so a match means the change is conductor-attested);
+        // (3) otherwise deny. No arm restores — a pre-image restore across
+        // overlapping Bash windows would clobber a concurrent lane's
+        // legitimate write (board 0b848342 finding 1, deferred by decision).
+        if (!preState) {
+          // DEGRADED-LOUD: nothing to compare against, so the old blanket
+          // pre-existing denial stands and names its reason below. Reached for
+          // every RECORDED pre-dirty path, whether or not git still reports it
+          // dirty (review finding 1, second half): populating this set only
+          // while walking the current status let a command that CLEANED every
+          // pre-dirty enforcement path leave it empty, so the safety net that
+          // backs up the whole comparison failed OPEN.
+          preExisting.push(rel);
           continue;
         }
-        // FIX-A (h17-stamp-honor-loud-restore, 4d9b76e8): an IN-WINDOW change
-        // (not in the Pre dirty-set) gets one fresh-stamp chance before the
-        // restore — a stamped conductor edit landing inside an agent's Bash
-        // window used to be silently HEAD-restored (the measured defect). Read
-        // the stamp NOW, hash the CURRENT bytes: an exact match exempts this
-        // path from both the restore and the deny; no match falls straight
-        // through to the restore+deny exactly as before.
-        if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
-        restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
-        violations.push(rel);
-        restoredPaths.push(rel); // FIX-B: mints a restore_performed item below
+        if (!preState.has(rel)) {
+          // The attribution record says this path was dirty at Pre and the
+          // state record has no entry for it — the two disagree, so the write
+          // is unattributable. Fail closed (AC9); an absent entry must NEVER
+          // read as "unchanged", and must never be satisfiable through a
+          // prototype (finding 4(b): the lookup is a Map for exactly that).
+          throw new Error(
+            `per-call Pre-STATE record has no entry for the pre-dirty path '${rel}' — the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
+          );
+        }
+        const wasState = preState.get(rel);
+        const nowState = pathState(cwd, rel, postIndex);
+        if (sameState(wasState, nowState)) continue; // (1) verified by observation
+        // (2) conductor-attested — but ONLY where a stamp can actually speak
+        // for the difference (review finding 2). A {path, sha256} /
+        // {path, deleted:true} entry attests BYTES or an ABSENCE and nothing
+        // else, so a mode flip, an index-only move, a type swap or a retargeted
+        // link is unattestable by construction and falls straight to (3): those
+        // leave the bytes identical, match the stamp, and were wrongly allowed.
+        if (stampCouldAttest(wasState, nowState)) {
+          if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
+        }
+        changedPreDirty.push(rel); // (3) denied, and still not restored
+        continue;
       }
+      // FIX-A (h17-stamp-honor-loud-restore, 4d9b76e8): an IN-WINDOW change
+      // (not in the Pre dirty-set) gets one fresh-stamp chance before the
+      // restore — a stamped conductor edit landing inside an agent's Bash
+      // window used to be silently HEAD-restored (the measured defect). Read
+      // the stamp NOW, hash the CURRENT bytes: an exact match exempts this
+      // path from both the restore and the deny; no match falls straight
+      // through to the restore+deny exactly as before. UNCHANGED by the
+      // finding-2 gate above: this arm has no recorded Pre state to diff, so
+      // there is no "difference confined to bytes" to establish — AC13's
+      // clean-at-Pre behaviour stays exactly as it was.
+      if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
+      restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
+      violations.push(rel);
+      restoredPaths.push(rel); // FIX-B: mints a restore_performed item below
     }
   }
 
