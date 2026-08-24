@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { ZodError } from 'zod';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -88,7 +88,18 @@ export interface BoardFilter {
    */
   feature_slug?: string;
   cap?: number;
-  projection?: Projection;
+  projection?: BoardProjection;
+  /**
+   * PAGING (board b786a84f) — a 186-item lane audit died at item 1 because
+   * board_query/maintenance_query had no way to see past one capped window.
+   * Applied AFTER the same filter+sort boardFiltered already uses and BEFORE
+   * the cap slice, over the same DETERMINISTIC ordering (updated_at DESC —
+   * query()'s own §3.4 mechanical fallback rank, made explicit and stable in
+   * boardFiltered) so paging through offset 0, cap, 2*cap, … visits every
+   * matching item exactly once, in the same order, even as the board changes
+   * between calls elsewhere. Defaults to 0.
+   */
+  offset?: number;
 }
 
 /**
@@ -121,16 +132,28 @@ export interface BoardFilter {
  */
 export type Projection = 'full' | 'digest' | 'count';
 
+/**
+ * board_query/maintenance_query's own projection axis (board b786a84f):
+ * every `Projection` value PLUS 'headline', which is board/maintenance-only
+ * (there is no headlineRecord for the other record types knowledge_query
+ * reads) — kept as its own type rather than widening `Projection` itself so
+ * knowledge_query's tool schema (full/digest/count) cannot silently start
+ * accepting a value it has no handling for.
+ */
+export type BoardProjection = Projection | 'headline';
+
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
   /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
   matched_filter: number;
   returned: number;
   cap: number;
-  /** exact: more matched than were returned */
+  /** exact: more matched than were returned (i.e. offset + returned < matched_filter) */
   capped: boolean;
+  /** PAGING (board b786a84f): the offset this page was read at (0 when omitted) — the next page starts at offset + returned. */
+  offset: number;
   note?: string;
-  /** full records, or their headline digests when projection:'digest' */
+  /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
 
@@ -157,6 +180,17 @@ export interface KnowledgeQueryResult {
    *  same uncapped, rank-blind count() split per queried type, alongside the
    *  combined `matched_filter` total (board fa19524d, AC2). */
   by_type?: Record<string, number>;
+  /**
+   * ABSENCE QUERY (board a577a69d): present only when `min_score` was passed.
+   * The count of records scoring >= min_score on the `-bm25(records_fts)`
+   * scale (higher is more relevant — see countAboveScore), computed over the
+   * FULL rank_terms match set, never the capped `records` window — so
+   * above_threshold:0 is a usable "nothing scored that high", the thing a
+   * capped/ranked window alone can never establish. matched_filter/returned/
+   * cap/capped are untouched by this — it is a THRESHOLDED SURFACE beside the
+   * capped-window disclosure, never a replacement for it.
+   */
+  above_threshold?: number;
 }
 
 /** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
@@ -866,6 +900,11 @@ export class SterlingTools {
       // store. The strip is disclosed on the result's warnings, never silent.
       version: 1,
     };
+    // links[].target_id THROUGH THE LADDER (board 2e71d464) — set AFTER the
+    // `...body` spread above so a caller-supplied `links` array (which lands
+    // inside `body`) does not silently reintroduce its own unresolved
+    // target_id past this resolution.
+    candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_create') ?? [];
     // dedup_override is a create-time directive, never a stored field
     const dedupOverride = candidate.dedup_override === true;
     delete candidate.dedup_override;
@@ -1859,6 +1898,12 @@ export class SterlingTools {
     // (verify_targets), a zero-return window carries no basis to answer from
     // (insufficient), otherwise the window is complete and non-empty (ready).
     const answerability: KnowledgeQueryResult['answerability'] = capped ? 'verify_targets' : records.length === 0 ? 'insufficient' : 'ready';
+    // ABSENCE QUERY (board a577a69d): computed over the FULL match set, never
+    // the capped `records` window above — min_score requires rank_terms
+    // (countAboveScore refuses loudly otherwise), so a caller asking "is
+    // anything ruled about X" combines the two rather than reading a bare
+    // filter count as if it were a relevance judgement.
+    const aboveThreshold = filter.min_score !== undefined ? this.store.countAboveScore(filter, filter.min_score) : undefined;
     return {
       matched_filter: matchedFilter,
       returned: records.length,
@@ -1873,6 +1918,7 @@ export class SterlingTools {
           : {}),
       answerability,
       records: records.map((r) => (projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r))),
+      ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
     };
   }
 
@@ -2420,6 +2466,34 @@ export class SterlingTools {
   }
 
   /**
+   * links[].target_id through the SAME id-resolution ladder as knowledge_get
+   * (board 2e71d464) — a caller-supplied links[] array (knowledge_create /
+   * knowledge_update / knowledge_supersede) previously reached the envelope's
+   * `target_id: z.string().uuid()` schema check BEFORE anything resolved it,
+   * so an 8-char prefix or a slug failed validation outright and never got
+   * near resolveRecordId; the measured workaround was dropping the edge
+   * entirely and keeping only a prose citation. Only a NON-full-uuid string is
+   * routed through the ladder — an already-full-uuid target_id is left
+   * untouched (existence is not re-checked here, preserving today's tolerance
+   * for a dangling-but-well-formed target, the same shape the migration
+   * classifier already expects to see) — so this only widens what resolves,
+   * never what refuses. An ambiguous prefix/slug refuses naming the
+   * candidates, exactly as knowledge_get does; worst case here is a
+   * recoverable wrong edge, unlike the destroying paths (board_remove,
+   * maintenance_remove) whose exact-id rule is untouched by this change.
+   */
+  private resolveLinksTargets(links: unknown, toolName: string): unknown {
+    if (!Array.isArray(links)) return links;
+    return links.map((link) => {
+      if (!link || typeof link !== 'object') return link;
+      const targetId = (link as { target_id?: unknown }).target_id;
+      if (typeof targetId !== 'string' || SterlingTools.FULL_UUID_RE.test(targetId)) return link;
+      const resolved = this.resolveRecordId(targetId, toolName, 'target record');
+      return { ...(link as Record<string, unknown>), target_id: resolved.id };
+    });
+  }
+
+  /**
    * knowledge_get's `version` read ([stable-identity-design-v2] contract 2):
    * the archived snapshot at (record id, version), or the live head when the
    * asked-for version IS the current one (the head is only archived when the
@@ -2834,6 +2908,15 @@ export class SterlingTools {
     // call. Without it the merge silently discarded the field and reported a new
     // version — the failure that makes a "fix" look applied when it never landed.
     this.refuseUnknownFields(old.type, overrides);
+    // links[].target_id THROUGH THE LADDER (board 2e71d464): a caller-supplied
+    // `links` array in this update's own body may cite a slug or 8-char prefix
+    // the same way knowledge_get already resolves; `old.links` (spread into
+    // `next` below when this call touches no links) is already stored as full
+    // ids from a prior resolved write, so only an EXPLICIT overrides.links
+    // needs this pass.
+    if (overrides.links !== undefined) {
+      overrides.links = this.resolveLinksTargets(overrides.links, toolName);
+    }
     // The item's feature_link points to whatever version was current when it
     // was raised, which may now be an ancestor, so match the whole supersede
     // chain — computed for every type, since promotion_review (below) can
@@ -3518,6 +3601,25 @@ export class SterlingTools {
       const chain = this.articleChainIds(filter.feature_slug);
       filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
     }
+    // DETERMINISTIC ORDER, MADE EXPLICIT (board b786a84f, PAGING): the store's
+    // own order for a rank_terms-less query() is `updated_at DESC` (mechanical
+    // fallback rank, §3.4). Re-sorted here on that SAME key so the order is a
+    // property of this method rather than an incidental SQL detail — but only
+    // on `updated_at`: Array.prototype.sort is SPEC-GUARANTEED STABLE (ES2019),
+    // so returning 0 for a tie (two todos sharing one updated_at, e.g. minted
+    // in the same write or the same test tick) preserves whatever relative
+    // order the underlying scan already produced for them, rather than
+    // imposing a different tie-break (an id-based one was tried and reordered
+    // same-timestamp items relative to existing, already-passing callers that
+    // assume insertion order for ties). Paging is still exactly reproducible:
+    // offset 0, cap, 2·cap, … visits every matching item once, in one order,
+    // as long as the board is unchanged between calls.
+    filtered = [...filtered].sort((a, b) => {
+      const at = (a as { updated_at: string }).updated_at;
+      const bt = (b as { updated_at: string }).updated_at;
+      if (at === bt) return 0;
+      return at < bt ? 1 : -1;
+    });
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
     return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
@@ -3546,7 +3648,9 @@ export class SterlingTools {
   }
 
   boardQuery(filter: BoardFilter = {}): DurableRecord[] {
-    return this.boardFiltered(filter).matching.slice(0, filter.cap ?? DEFAULT_BOARD_CAP);
+    const offset = filter.offset ?? 0;
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    return this.boardFiltered(filter).matching.slice(offset, offset + cap);
   }
 
   /**
@@ -3569,26 +3673,39 @@ export class SterlingTools {
   boardQueryResult(filter: BoardFilter = {}): BoardQueryResult {
     const { matching, scanTruncated } = this.boardFiltered(filter);
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
-    const records = matching.slice(0, cap);
-    const capped = records.length < matching.length;
+    const offset = filter.offset ?? 0;
+    const records = matching.slice(offset, offset + cap);
+    // capped is EXACT here (same guarantee as before offset existed): more of
+    // the matching set sits past this page's end.
+    const capped = offset + records.length < matching.length;
     const projection = filter.projection ?? 'full';
     const notes: string[] = [];
     if (capped) {
       notes.push(
-        `cap reached — showing ${records.length} of ${matching.length} matching items; raise cap to see the rest (a drain that stops at the cap leaves the tail behind)` +
-          (projection === 'full' ? `, or re-run with projection:"digest" for one-line items (board items run to several KB of text each)` : '')
+        `cap reached — showing ${records.length} of ${matching.length} matching items (offset ${offset}); ` +
+          `page with offset:${offset + records.length} to continue, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
+          (projection === 'full' ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)` : '')
       );
     }
     if (scanTruncated) {
-      notes.push(`the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total`);
+      notes.push(
+        `the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total — ` +
+          `and PAGING IS BOUNDED BY THAT SAME CEILING: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue)`
+      );
     }
     return {
       matched_filter: matching.length,
       returned: records.length,
       cap,
       capped,
+      offset,
       ...(notes.length ? { note: notes.join('; ') } : {}),
-      records: projection === 'digest' ? records.map((r) => digestRecord(r as unknown as Record<string, unknown>)) : records,
+      records:
+        projection === 'headline'
+          ? records.map((r) => headlineRecord(r as unknown as Record<string, unknown>))
+          : projection === 'digest'
+            ? records.map((r) => digestRecord(r as unknown as Record<string, unknown>))
+            : records,
     };
   }
 
@@ -4254,6 +4371,9 @@ export class SterlingTools {
       ...body,
       ...(slug !== undefined ? { slug } : {}),
     };
+    // links[].target_id THROUGH THE LADDER (board 2e71d464), set AFTER the
+    // `...body` spread above for the same reason as knowledgeCreate.
+    candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_supersede') ?? [];
     this.refuseUnknownFields(type, candidate, 'knowledge_supersede');
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
     const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
@@ -4539,7 +4659,9 @@ export class SterlingTools {
     });
   }
 
-  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number } = {}): DurableRecord[] {
+  maintenanceQuery(
+    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; offset?: number } = {}
+  ): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap. contains
     // (work order d9960c98) and feature_slug (board e725979c) ride the same
@@ -4551,12 +4673,21 @@ export class SterlingTools {
       contains: filter.contains,
       feature_slug: filter.feature_slug,
       cap: filter.cap,
+      offset: filter.offset,
     });
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
   maintenanceQueryResult(
-    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; projection?: Projection } = {}
+    filter: {
+      system_reason?: string;
+      file_keys?: string[];
+      contains?: string;
+      feature_slug?: string;
+      cap?: number;
+      offset?: number;
+      projection?: BoardProjection;
+    } = {}
   ): BoardQueryResult {
     return this.boardQueryResult({
       source: 'system',
@@ -4565,6 +4696,7 @@ export class SterlingTools {
       contains: filter.contains,
       feature_slug: filter.feature_slug,
       cap: filter.cap,
+      offset: filter.offset,
       projection: filter.projection,
     });
   }

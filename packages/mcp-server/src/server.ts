@@ -223,7 +223,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_query',
     {
       description:
-        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. matched_filter counts the FILTER only — rank_terms order that set, they never narrow it. projection:"digest" returns one headline line per record (id + slug/title, anti_pattern trigger, research_finding clocks) instead of full bodies: use it to SEE THE LANDSCAPE cheaply — a wide digest then knowledge_get on the few that matter beats a capped full-body window you can neither complete nor trust. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read.',
+        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. matched_filter counts the FILTER only — rank_terms order that set, they never narrow it. projection:"digest" returns one headline line per record (id + slug/title, anti_pattern trigger, research_finding clocks) instead of full bodies: use it to SEE THE LANDSCAPE cheaply — a wide digest then knowledge_get on the few that matter beats a capped full-body window you can neither complete nor trust. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read. min_score (requires rank_terms) answers the ABSENCE QUESTION a capped window cannot: the result gains above_threshold, the count of records scoring >= min_score over the FULL match set (never the capped `records` window), so above_threshold:0 is a usable "nothing is ruled about this". SCALE: the score is `-bm25(records_fts)` — SQLite FTS5\'s bm25() is lower-is-better and unbounded below, so this negates it: HIGHER means more relevant, a bare keyword match sits near 0, and there is no fixed upper bound.',
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
@@ -232,6 +232,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         include_unconfirmed: z.boolean().optional(),
         cap: z.number().int().positive().optional(),
         projection: z.enum(['full', 'digest', 'count']).optional(),
+        min_score: z.number().optional(),
       }),
     },
     (opts) => json(tools.knowledgeQueryResult(opts))
@@ -429,13 +430,14 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description:
-        'List open board items. source=user is the board; source=system is the maintenance queue. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, records}: capped=true means more items matched than are shown — raise cap before concluding the board or queue is shorter than it is. projection:"digest" returns one clipped line per item instead of its full text — board items run to several KB each, so prefer it for auditing or triaging the whole board and read the full text only for the items you act on.',
+        'List open board items. source=user is the board; source=system is the maintenance queue. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, offset, records}: capped=true means more items matched than are shown past this page — raise cap or page with offset before concluding the board or queue is shorter than it is. offset (default 0) pages through a DETERMINISTIC order (updated_at DESC, stable) — offset:0, offset:cap, offset:2*cap, … visits every matching item exactly once. projection:"digest" returns one clipped line per item instead of its full text; projection:"headline" is smaller still (id, priority, objective, first 80 chars of text — no source/status/type/size_chars) for auditing or paging a large board cheaply; read the full item only for the ones you act on.',
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         file_keys: z.array(z.string()).optional(),
         contains: z.string().optional(),
         cap: z.number().int().positive().optional(),
-        projection: z.enum(['full', 'digest']).optional(),
+        offset: z.number().int().nonnegative().optional(),
+        projection: z.enum(['full', 'digest', 'headline']).optional(),
       }),
     },
     (args) => json(tools.boardQueryResult(args))
@@ -610,14 +612,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_query',
     {
       description:
-        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax), or feature_slug (narrows to items owned by ONE article, resolved from its slug and CHAIN-AWARE — an item raised against an earlier superseded version of the article still matches; every filter combines as a genuine AND). An unresolvable feature_slug narrows to nothing rather than erroring. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
+        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax), or feature_slug (narrows to items owned by ONE article, resolved from its slug and CHAIN-AWARE — an item raised against an earlier superseded version of the article still matches; every filter combines as a genuine AND). An unresolvable feature_slug narrows to nothing rather than erroring. Returns {matched_filter, returned, cap, capped, offset, records}: capped=true means the queue is DEEPER than what is shown past this page — a drain that stops at the cap leaves the tail behind, so raise cap or page with offset until capped is false. offset (default 0) pages a DETERMINISTIC order (updated_at DESC, stable) — offset:0, offset:cap, offset:2*cap, … visits every item exactly once, even a 186-item queue a single capped call cannot see past item 1 of. projection:"digest" returns one clipped line per item (with its system_reason lane); projection:"headline" is smaller still (id, priority, system_reason, first 80 chars of text) — the cheap way to size, sort, and page a deep queue before draining it.',
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         contains: z.string().optional(),
         feature_slug: z.string().optional(),
         cap: z.number().int().positive().optional(),
-        projection: z.enum(['full', 'digest']).optional(),
+        offset: z.number().int().nonnegative().optional(),
+        projection: z.enum(['full', 'digest', 'headline']).optional(),
       }),
     },
     (args) => json(tools.maintenanceQueryResult(args))

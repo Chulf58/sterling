@@ -116,6 +116,12 @@ export class MountedStores {
     return this.countBySource(opts).reduce((n, s) => n + s.count, 0);
   }
 
+  /** Cross-mount twin of countAboveScore (board a577a69d) — summed
+   *  project-first across every mounted store, same fan as count(). */
+  countAboveScore(opts: QueryOptions, minScore: number): number {
+    return this.all().reduce((n, s) => n + s.countAboveScore(opts, minScore), 0);
+  }
+
   /** Per-source projection (AC2): project store FIRST, then each mounted domain
    *  in manifest order. Each store runs the full query independently — type
    *  filter, file-key join, cap, and match_all are all PER-STORE (never a
