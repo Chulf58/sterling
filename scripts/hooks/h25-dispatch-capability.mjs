@@ -51,7 +51,7 @@ import { PIPELINE_AGENT_TYPES, matchesGlob } from '@sterling/schemas';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Harness BUILT-IN subagent types (board a6b76e8c item 2, 2026-08-24 wave: 11
+// Harness BUILT-IN subagent types (board a6b76e8c item 2, 2026-08-24 feedback batch: 11
 // of 12 firings in one session): the platform ships these with NO
 // per-project .claude/agents/<type>.md definition file at all — that absence
 // is by design, not a capability gap, so they must never trigger the
