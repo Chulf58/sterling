@@ -24,6 +24,7 @@ import { join } from 'node:path';
 // builtins-only module — safe at load time on an unbuilt clone (see the
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
+import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -477,6 +478,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         if (launcher.status !== 'matches') log(`      ${UPDATE_LAUNCHER_NAME}: ${launcher.status} — ${launcher.detail}`);
       } catch (err) {
         log(`      ⚠ ${UPDATE_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
+      }
+      // Deliver the consumer-runnable checks entry the same way (board 4ccf0644):
+      // a project init'd before this launcher existed otherwise never gets one.
+      try {
+        const checkLauncher = ensureConsumerCheckLauncher(p.repo_path, cwd);
+        if (checkLauncher.status !== 'matches') log(`      ${CONSUMER_CHECK_LAUNCHER_NAME}: ${checkLauncher.status} — ${checkLauncher.detail}`);
+      } catch (err) {
+        log(`      ⚠ ${CONSUMER_CHECK_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
       }
     }
   } else if (opts.projects === false) {
