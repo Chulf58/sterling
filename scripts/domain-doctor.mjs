@@ -450,14 +450,168 @@ function migrate() {
   if (refused.length) process.exit(3);
 }
 
-/** All record ids in a store file (any status, tombstones included). */
+/** Every id that RESOLVES in a store: `records.id` UNION, when the table
+ *  exists, `record_aliases.historical_id` — a resolvable id namespace of its
+ *  own since [stable-identity-design-v2] (anti_pattern 44d4f74f). Without the
+ *  alias half, sweep can report a successor reachable ONLY through an alias
+ *  as dangling (a false finding), and restore's already-resolves refusal can
+ *  miss a target id an alias already resolves elsewhere — letting --apply
+ *  mint a live record under an id that means something else there. migrate()
+ *  already guards this exact collision on its own copy path (~:415-423,
+ *  naming record_aliases); this is the same union for sweep/restore's
+ *  resolution universe (board a215b119, roster review finding).
+ *
+ *  Goes through readOnlyProbe (not a bare openRO) because a read-only open of
+ *  a WAL-mode store can materialize an empty -wal/-shm it cannot unlink on
+ *  close — the same trap anti_pattern 8616e72d documents; sweep, restore and
+ *  scan all call this (or the same pattern) across every store they touch, so
+ *  a bare open here left litter beside every one of them (board a215b119,
+ *  third defect). */
+function idsAndAliasesIn(dbPath) {
+  return readOnlyProbe(dbPath, (db) => {
+    const ids = new Set(db.prepare('SELECT id FROM records').all().map((r) => r.id));
+    const aliasIds = new Set();
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
+    if (tables.has('record_aliases')) {
+      for (const row of db.prepare('SELECT historical_id FROM record_aliases').all()) aliasIds.add(row.historical_id);
+    }
+    return { ids, aliasIds };
+  });
+}
+
+/** The UNION of ids and aliases — what sweep needs, since a dangling-pointer
+ *  resolution check only cares WHETHER an id resolves, never which namespace
+ *  answered. restore's already-resolves refusal needs the finer-grained
+ *  idsAndAliasesIn instead, because the two namespaces mean OPPOSITE things
+ *  to the operator there (board a215b119, roster MEDIUM): a live-record
+ *  collision means the successor is alive and there is genuinely nothing to
+ *  restore, but an alias collision means the successor's CONTENT IS STILL
+ *  LOST — that id has just been repurposed to mean a different canonical
+ *  record — so a refusal that does not say which one fired tells the operator
+ *  the content is safe when it is not. */
 function idsIn(dbPath) {
-  const db = openRO(dbPath);
-  try {
-    return new Set(db.prepare('SELECT id FROM records').all().map((r) => r.id));
-  } finally {
-    db.close();
-  }
+  const { ids, aliasIds } = idsAndAliasesIn(dbPath);
+  return new Set([...ids, ...aliasIds]);
+}
+
+/** Does this store's `records` table carry the v2 'lifecycle' column
+ *  [stable-identity-design-v2] adds? A SEPARATE signal from the header's
+ *  user_version — a store can carry the column while its header was never
+ *  bumped (or vice-versa, mid-migration). Checking BOTH signals is what lets
+ *  refuseIfHalfMigratedForSupersession catch a v2-SHAPED records table
+ *  lacking record_relations regardless of which signal tips it off (Codex
+ *  review finding, board a215b119 HIGH 1). */
+function recordsTableIsV2Shaped(db) {
+  return db.prepare('PRAGMA table_info(records)').all().some((c) => c.name === 'lifecycle');
+}
+
+/** A store whose `records` table is v2-shaped (by EITHER signal above) but
+ *  which lacks `record_relations` is HALF-MIGRATED: the compatibility
+ *  `superseded_by` COLUMN is kept in sync with the relation graph only by the
+ *  normal v2 write paths, and there is no relation graph here at all — so
+ *  resolving supersession from the column alone is a GUESS, not a read.
+ *  Without this guard, sweep could read the column, find it (already) NULL or
+ *  stale, and print `clean` on a store that is not safely readable at all.
+ *  Returns an error string (never calls fail() — same discipline as every
+ *  other readOnlyProbe gatherer) or null when the store's shape is fine to
+ *  read as-is. Applied to BOTH sweep (supersessionPointers) and restore
+ *  (tombstoneInfo) — the failure mode is identical in each. */
+function refuseIfHalfMigratedForSupersession(dbPath, db, tables) {
+  if (tables.has('record_relations')) return null;
+  const userVersion = db.prepare('PRAGMA user_version').get().user_version;
+  const lifecycleShaped = recordsTableIsV2Shaped(db);
+  if (userVersion !== SUPPORTED_SCHEMA_VERSION && !lifecycleShaped) return null;
+  return (
+    `the store '${dbPath}' is v2-shaped (user_version ${userVersion}` +
+    (lifecycleShaped ? ", 'records' already carries the v2 'lifecycle' column" : '') +
+    `) but its 'record_relations' table is absent — a HALF-MIGRATED store, and resolving supersession from the compatibility ` +
+    `'superseded_by' column alone would be a guess. Finish the migration ('node scripts/migrate-stores.mjs --db ${dbPath}') or ` +
+    `restore its pre-migration backup. Nothing was written.`
+  );
+}
+
+/**
+ * Every supersession pointer visible in a store, from BOTH surfaces the v2
+ * cutover left behind — read-only, litter-free, and schema-adaptive.
+ *
+ * Since [stable-identity-design-v2], `record_relations` (rel='supersedes') is
+ * the AUTHORITATIVE home of supersession; `records.superseded_by` survives as
+ * a compatibility/filter column the normal write paths (supersede,
+ * retireInFavorOf, create with a pre-set successor) keep in sync inside the
+ * same transaction as the relation. But ONE migration-runner path does not:
+ * board a215b119 traces a discarded extra link-only claimant that removes the
+ * row from `links` but leaves the ORIGINAL relation intact while writing NULL
+ * to the column, because the column rewrite derives only from
+ * retirements/foreignRetirements. A sweep reading the column alone therefore
+ * MISSES that pointer entirely and can print `clean` on a store that still
+ * holds a dangling successor — a false negative, which is worse than a loud
+ * failure for a forensics tool.
+ *
+ * So both surfaces are queried and deduped by (id, successor_id), retaining
+ * which surface(s) reported each pointer (disclosed in sweep's output) so a
+ * genuine column/relation disagreement is visible rather than silently
+ * resolved one way. `record_relations` only exists from schema v2 on, so it
+ * is queried only when present — a pre-v2 store is read from the column
+ * alone, same as before. A store with no `records` table at all is a
+ * structural finding for the CALLER to raise (never a silent zero pointers —
+ * board a215b119 is explicit that an unrecognized schema must fail loud).
+ */
+function supersessionPointers(dbPath) {
+  return readOnlyProbe(dbPath, (db) => {
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
+    if (!tables.has('records')) {
+      return { error: `the store '${dbPath}' holds no records table — it is a SQLite file, but not a Sterling knowledge store.` };
+    }
+    const halfMigrated = refuseIfHalfMigratedForSupersession(dbPath, db, tables);
+    if (halfMigrated) return { error: halfMigrated };
+    const byKey = new Map();
+    const add = (id, type, successorId, source) => {
+      const key = `${id}::${successorId}`;
+      const existing = byKey.get(key);
+      if (existing) existing.sources.add(source);
+      else byKey.set(key, { id, type, successor_id: successorId, sources: new Set([source]) });
+    };
+    for (const row of db.prepare("SELECT id, type, superseded_by FROM records WHERE superseded_by IS NOT NULL").all()) {
+      add(row.id, row.type, row.superseded_by, 'column');
+    }
+    if (tables.has('record_relations')) {
+      const rows = db
+        .prepare(
+          `SELECT rr.target_id AS id, r.type AS type, rr.source_id AS successor_id
+             FROM record_relations rr JOIN records r ON r.id = rr.target_id
+            WHERE rr.rel = 'supersedes'`
+        )
+        .all();
+      for (const row of rows) add(row.id, row.type, row.successor_id, 'relation');
+    }
+    const pointers = [...byKey.values()].map((p) => ({ ...p, sources: [...p.sources].sort() }));
+    // A genuine column/relation DISAGREEMENT — the same tombstone id pointing
+    // at two DIFFERENT successors depending which surface answers — is a
+    // distinct integrity defect from a dangling pointer, and sweep is the
+    // forensics surface that must say so explicitly rather than merely
+    // holding two separate pointer rows a reader has to notice share an id.
+    const byId = new Map();
+    for (const p of pointers) {
+      const succ = byId.get(p.id) ?? new Set();
+      succ.add(p.successor_id);
+      byId.set(p.id, succ);
+    }
+    const sourceLabel = (s) => (s === 'relation' ? 'record_relations' : s);
+    const conflicts = [...byId.entries()]
+      .filter(([, succ]) => succ.size > 1)
+      .map(([id, succ]) => ({
+        id,
+        type: pointers.find((p) => p.id === id).type,
+        // Carry each successor's OWN source(s) rather than a bare id list —
+        // a conflict line that just lists successors implies a column-then-
+        // relation ORDER without ever stating it (roster LOW fold-in).
+        successors: [...succ].map((successorId) => ({
+          successorId,
+          via: pointers.find((p) => p.id === id && p.successor_id === successorId).sources.map(sourceLabel).join('+'),
+        })),
+      }));
+    return { ok: { pointers, conflicts } };
+  });
 }
 
 /** adopt --from <store.db> --to <store.db>: the READ-ONLY PROOF for the
@@ -749,8 +903,12 @@ function scan() {
     return;
   }
   for (const f of files) {
-    const db = openRO(f.dbPath);
-    try {
+    // readOnlyProbe, not a bare openRO+db.close(): a read-only open of a
+    // WAL-mode store can materialize -wal/-shm litter it cannot unlink on
+    // close (anti_pattern 8616e72d, severity block) — scan touches every
+    // store file under the roots, so a bare open here left litter beside
+    // every one of them.
+    readOnlyProbe(f.dbPath, (db) => {
       const n = db.prepare('SELECT COUNT(*) AS n FROM records').get().n;
       const range = db.prepare('SELECT MIN(created_at) AS lo, MAX(created_at) AS hi FROM records').get();
       const first = db.prepare('SELECT id FROM records ORDER BY created_at ASC LIMIT 1').get();
@@ -762,9 +920,7 @@ function scan() {
         console.log(`  first: ${first.id}  last: ${last.id}`);
         console.log(`  scopes: ${byScope.map((s) => `${s.scope}=${s.n}`).join(', ')}`);
       }
-    } finally {
-      db.close();
-    }
+    });
   }
 }
 
@@ -788,25 +944,82 @@ function sweep() {
     seenPaths.add(f.dbPath);
   }
 
-  const db = openRO(storePath);
-  let rows;
-  try {
-    rows = db.prepare("SELECT id, type, superseded_by FROM records WHERE superseded_by IS NOT NULL").all();
-  } finally {
-    db.close();
-  }
-  const dangling = rows.filter((r) => !universe.has(r.superseded_by));
+  const surveyed = supersessionPointers(storePath);
+  if (surveyed.error) fail(surveyed.error);
+  const { pointers: rows, conflicts } = surveyed.ok;
+  const dangling = rows.filter((r) => !universe.has(r.successor_id));
   console.log(
     `domain-doctor sweep — ${rows.length} superseded_by pointer(s) in ${storePath}, resolved against ${seenPaths.size} store file(s)`
   );
-  if (!dangling.length) {
+  for (const c of conflicts) {
+    const labeled = c.successors.map((s) => `${s.successorId} (${s.via})`).join(' vs ');
+    console.log(
+      `CONFLICT: tombstone ${c.id} (${c.type}) has DIFFERENT successors depending which surface answers: ${labeled} — column and record_relations disagree`
+    );
+  }
+  if (!dangling.length && !conflicts.length) {
     console.log('clean: every pointer resolves');
     return;
   }
   for (const d of dangling) {
-    console.log(`DANGLING: tombstone ${d.id} (${d.type}) → superseded_by ${d.superseded_by} resolves in NO store`);
+    const via = d.sources.length > 1 ? d.sources.join('+') : d.sources[0];
+    console.log(`DANGLING: tombstone ${d.id} (${d.type}) → superseded_by ${d.successor_id} resolves in NO store [via ${via}]`);
   }
   process.exit(3);
+}
+
+/**
+ * The tombstone's status and successor id, read AUTHORITATIVELY rather than
+ * from the JSON body — storableBody (packages/store/src/index.ts:598-604)
+ * strips status/superseded_by from the persisted body of every v2 record, so
+ * a body-sourced read always sees them as undefined/null and restore refused
+ * on every v2 store (board a215b119, half 1). The `records.status` /
+ * `records.superseded_by` COLUMNS are the correct source for both pre-v2 and
+ * ordinary v2 stores — every normal write path keeps them in sync — but a
+ * relation left by the migration runner's discarded-claimant path (the same
+ * shape sweep must tolerate) can survive with the column desynced to NULL;
+ * when `record_relations` holds an inbound 'supersedes' row for this id it is
+ * preferred as the more authoritative source, exactly as show() already
+ * treats it (line ~674 above). Read-only and litter-free via readOnlyProbe.
+ *
+ * TWO further guards, same review round (board a215b119, Codex HIGH 1/2):
+ * (1) a v2-shaped store lacking `record_relations` refuses outright — same
+ * half-migrated posture as supersessionPointers, because the column alone is
+ * a guess there too. (2) `record_relations` can hold MORE THAN ONE inbound
+ * 'supersedes' row for one target on a corrupted or half-migrated store — the
+ * v2 identity design allows one successor maximum, so more than one is
+ * ambiguity, not data to silently collapse with `.get()`. Restoring under an
+ * arbitrarily-picked successor could mint the WRONG identity, so this refuses
+ * and names every candidate, the same posture show() uses for an ambiguous id
+ * prefix.
+ */
+function tombstoneInfo(dbPath, id) {
+  return readOnlyProbe(dbPath, (db) => {
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
+    if (!tables.has('records')) {
+      return { error: `the store '${dbPath}' holds no records table — it is a SQLite file, but not a Sterling knowledge store.` };
+    }
+    const halfMigrated = refuseIfHalfMigratedForSupersession(dbPath, db, tables);
+    if (halfMigrated) return { error: halfMigrated };
+    const row = db.prepare('SELECT status, superseded_by, body FROM records WHERE id = ?').get(id);
+    if (!row) return { error: `no record '${id}' in ${dbPath}` };
+    let successorId = row.superseded_by ?? null;
+    if (tables.has('record_relations')) {
+      const rels = db.prepare("SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ?").all(id);
+      if (rels.length > 1) {
+        return {
+          error:
+            `record '${id}' in '${dbPath}' has ${rels.length} inbound 'supersedes' relations in record_relations — ambiguous. ` +
+            `The v2 identity design allows one successor maximum, so a corrupted or half-migrated store holding more than one is a ` +
+            `finding, not a pick: ${rels.map((r) => r.source_id).join(', ')}. Restoring under an arbitrarily-chosen successor could mint ` +
+            `the WRONG identity, so nothing was resolved.`,
+        };
+      }
+      if (rels.length === 1) successorId = rels[0].source_id;
+    }
+    const status = successorId ? 'superseded' : row.status;
+    return { ok: { status, successorId, body: JSON.parse(row.body) } };
+  });
 }
 
 function restore() {
@@ -815,34 +1028,58 @@ function restore() {
   const domain = arg('domain') ?? fail('--domain <name> is required');
   const apply = process.argv.includes('--apply');
 
-  const db = openRO(storePath);
-  let row;
-  try {
-    row = db.prepare('SELECT body FROM records WHERE id = ?').get(tombstoneId);
-  } finally {
-    db.close();
+  const info = tombstoneInfo(storePath, tombstoneId);
+  if (info.error) fail(info.error);
+  const { status, successorId, body: tombstone } = info.ok;
+  if (status !== 'superseded' || !successorId) {
+    fail(`record '${tombstoneId}' is not a tombstone (status ${status}, superseded_by ${successorId ?? 'null'}) — nothing to restore from it`);
   }
-  if (!row) fail(`no record '${tombstoneId}' in ${storePath}`);
-  const tombstone = JSON.parse(row.body);
-  if (tombstone.status !== 'superseded' || !tombstone.superseded_by) {
-    fail(`record '${tombstoneId}' is not a tombstone (status ${tombstone.status}, superseded_by ${tombstone.superseded_by ?? 'null'}) — nothing to restore from it`);
-  }
-  const targetId = tombstone.superseded_by;
+  const targetId = successorId;
 
-  // refuse when the target already resolves ANYWHERE the sweep can see —
-  // restoring over a live record would mint a duplicate identity.
+  // Refuse when the target already resolves ANYWHERE the sweep can see — as
+  // either a live records.id OR a record_aliases.historical_id
+  // (anti_pattern 44d4f74f). The two mean OPPOSITE things to the operator, so
+  // the refusal must say WHICH one fired rather than collapsing them into one
+  // Set the way sweep's resolution universe does (idsIn stays the union for
+  // sweep's purposes; idsAndAliasesIn keeps them apart for this check):
+  //   - a live-record collision: the successor is genuinely alive elsewhere,
+  //     "nothing to restore" is TRUE, and the content is safe.
+  //   - an alias collision: the successor's CONTENT IS STILL LOST — that id
+  //     has merely been repurposed to resolve to a DIFFERENT canonical
+  //     record — so telling the operator only "already resolves" would claim
+  //     the content is safe when it is not, and restoring under it anyway
+  //     would give one id two incompatible meanings, exactly the collision
+  //     migrate() already refuses on its own copy path (~:415-423).
   const rootList = roots();
   const resolvesIn = [];
-  if (idsIn(storePath).has(targetId)) resolvesIn.push(storePath);
+  const noteResolution = (path, { ids, aliasIds }) => {
+    if (ids.has(targetId)) resolvesIn.push({ path, kind: 'live record id' });
+    else if (aliasIds.has(targetId)) {
+      resolvesIn.push({
+        path,
+        kind: "record_aliases historical id — that id already resolves to another canonical record there; restoring under it would give one id two incompatible meanings",
+      });
+    }
+  };
+  noteResolution(storePath, idsAndAliasesIn(storePath));
   for (const m of resolveDomainMounts(config)) {
     const p = POSIX(m.dbPath);
-    if (existsSync(p) && idsIn(p).has(targetId)) resolvesIn.push(p);
+    if (existsSync(p)) noteResolution(p, idsAndAliasesIn(p));
   }
   for (const f of storeFilesUnder(rootList)) {
-    if (idsIn(f.dbPath).has(targetId)) resolvesIn.push(f.dbPath);
+    noteResolution(f.dbPath, idsAndAliasesIn(f.dbPath));
   }
   if (resolvesIn.length) {
-    fail(`target '${targetId}' already resolves in: ${[...new Set(resolvesIn)].join(', ')} — nothing to restore`);
+    const seen = new Set();
+    const lines = resolvesIn.filter((r) => {
+      const key = `${r.path}::${r.kind}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    fail(
+      `target '${targetId}' already resolves in: ${lines.map((r) => `${r.path} (${r.kind})`).join('; ')} — nothing to restore`
+    );
   }
 
   const domainDb = POSIX(config.domain_paths[domain] ?? join(homedir(), '.sterling', 'domains', domain, 'sterling.db'));
@@ -850,8 +1087,20 @@ function restore() {
   // content verbatim from the tombstone body; envelope rebuilt exactly as
   // knowledge_promote builds it, except the id is the DANGLING one — restoring
   // the identity the tombstone already points at, so no server-owned field on
-  // the tombstone needs touching.
-  const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, scope: _sc, links: _l, ...content } = tombstone;
+  // the tombstone needs touching. lifecycle/freshness/version are stripped
+  // too (not just status/superseded_by): a v2 tombstone's body still carries
+  // lifecycle:'retired' verbatim (storableBody only drops status/
+  // superseded_by, board a215b119), and create() refuses a record BORN
+  // retired outright — the restored copy is a fresh live record, not a
+  // resurrection of the tombstone's own retired identity. file_baselines is
+  // stripped too: it is server-derived content-hash provenance for the OLD
+  // (tombstoned) record's files, and create() would otherwise persist it
+  // verbatim onto the reconstruction, which is a stale, unrelated claim about
+  // what the reconstructed record's baseline should be.
+  const {
+    id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, scope: _sc, links: _l,
+    lifecycle: _lc, freshness: _fr, version: _v, file_baselines: _fb, ...content
+  } = tombstone;
   const record = {
     ...content,
     id: targetId,
