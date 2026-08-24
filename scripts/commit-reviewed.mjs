@@ -157,6 +157,52 @@ if (staged.status === 0) {
   fail(`commit-reviewed: git diff --cached --quiet exited unexpectedly (${staged.status}): ${(staged.stderr || '').trim()}`);
 }
 
+// SABOTAGE-TARGETS-THE-DIFF CHECK (board 4a867546-2b3e-44ff-a5df-83fd4e9228f6):
+// a mutation/sabotage check that PASSED can still verify nothing this commit
+// changes — the incident this closes: a passing mutation check named
+// sabotages of barrel_heat.gd while the diff changed machine_gun.gd, caught
+// only by reviewers. Both inputs this needs — the sabotage's named target
+// file(s) and the staged diff's file list — must actually be available to
+// this CLI; the diff list is one git call away, and the sabotage target rides
+// an OPTIONAL `sabotage_targets: string[]` field on the SAME ledger entry the
+// reviewer receipt already lives on (the reviewing act that runs the mutation
+// check is the act that writes the ledger entry, so this is the natural
+// place for it — no other recorded source of this data reaches this script).
+// WARN ONLY, never refuses: this is disclosure at commit time, not a gate: a
+// missing/malformed field is guarded (Array.isArray) so an entry that names
+// none never crashes and never warns.
+// NOTHING WRITES sabotage_targets YET — the field is populated by the
+// reviewer/mutation-check flow when that lands; this check is dormant (never
+// fires) until then, and is safe to ship ahead of it (Array.isArray guard).
+const diffNameOnly = spawnSync('git', ['diff', '--cached', '--name-only', '-z'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+if (diffNameOnly.error) {
+  fail(`commit-reviewed: git diff --cached --name-only failed: ${diffNameOnly.error.message}`);
+}
+if (diffNameOnly.status !== 0) {
+  fail(`commit-reviewed: git diff --cached --name-only exited unexpectedly (${diffNameOnly.status}): ${(diffNameOnly.stderr || '').trim()}`);
+}
+// -z (NUL-separated, no quoting) sidesteps core.quotePath's octal-escaping of
+// non-ASCII/space-bearing paths, which the plain (newline) form can mangle.
+// Both sides of the comparison are further normalized (backslash separators
+// to '/', a stripped leading './') so a cosmetic path spelling difference
+// can never produce a false "DOES NOT CHANGE" warning.
+const normalizePath = (p) => String(p).replace(/\\/g, '/').replace(/^\.\//, '');
+const stagedFiles = new Set(
+  (diffNameOnly.stdout ?? '')
+    .split('\0')
+    .filter(Boolean)
+    .map(normalizePath)
+);
+for (const e of validEntries) {
+  if (!Array.isArray(e.sabotage_targets)) continue;
+  for (const t of e.sabotage_targets) {
+    if (typeof t !== 'string' || !t || stagedFiles.has(normalizePath(t))) continue;
+    console.error(
+      `commit-reviewed: SABOTAGE TARGETS ${t}, WHICH THIS DIFF DOES NOT CHANGE (named by ${e.agent_type}'s ledger entry) — this is a warning, not a refusal; verify the mutation actually pins the behavior this commit changes.`
+    );
+  }
+}
+
 const trailerLines = validEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
 const fullMessage = `${message}\n\n${trailerLines.join('\n')}`;
 

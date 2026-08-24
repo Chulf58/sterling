@@ -29,7 +29,19 @@
 // arbitrary path; find/sed/awk stay denied. Containment lives elsewhere — H3
 // (write contract), H5 (frozen tests), H17 (bash write sweep) — and in Sterling
 // running agents that are already trusted to write code.
-import { relative, resolve, sep } from 'node:path';
+//
+// dangerouslyDisableSandbox DISCLOSURE (board f46f09a2) — NOT LIVE-PROBED: a
+// Bash tool_input carrying dangerouslyDisableSandbox bypasses the PLATFORM's
+// OS-level command sandboxing, a separate mechanism from this hook. PreToolUse
+// hooks are registered per tool matcher and fire on the tool call itself, so
+// there is no documented or probed reason this flag would suppress H14's own
+// invocation — but that is architectural reasoning, not a measurement, and
+// this codebase's standing rule is to verify platform behavior rather than
+// assume it (decision 19678617). If a future probe finds H14 is skipped
+// entirely when this flag is set, the disclosure below never runs and this
+// comment is the loud flag that it was never verified either way.
+import { relative, resolve, sep, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 
 const input = readStdin();
@@ -47,6 +59,65 @@ try {
   }
 
   const command = String(input.tool_input?.command ?? '').trim();
+
+  // BOARD f46f09a2 — dangerouslyDisableSandbox IS AN UNTRACED ESCAPE HATCH,
+  // AND IT WAS USED (self-reported bypass of a command restriction). It
+  // bypasses the platform's OS-level command sandboxing, NOT this allowlist —
+  // the command below is still evaluated by every check that follows. Its use
+  // is disclosed loudly (session stderr + a durable register entry) whenever
+  // set truthy; it never denies on its own, and a failure disclosing it must
+  // never escalate into denying the command — hence the OWN try/catch here,
+  // nested inside the outer one whose catch below fails CLOSED (exactly wrong
+  // for a logging failure that has nothing to do with allowlist evaluation).
+  if (input.tool_input?.dangerouslyDisableSandbox) {
+    try {
+      const commandHead = command.slice(0, 80) + (command.length > 80 ? '…' : '');
+      process.stderr.write(
+        `⚠ H14 ADVISORY: dangerouslyDisableSandbox=true on this Bash call — sandbox is bypassed for '${commandHead}'. ` +
+          `This does NOT bypass the allowlist below; logged to .sterling/transient/sandbox-bypass-log.json.\n`
+      );
+      const transient = join(input.cwd, '.sterling', 'transient');
+      mkdirSync(transient, { recursive: true });
+      const logPath = join(transient, 'sandbox-bypass-log.json');
+      let entries = [];
+      try {
+        if (existsSync(logPath)) {
+          const raw = JSON.parse(readFileSync(logPath, 'utf8'));
+          if (Array.isArray(raw)) entries = raw;
+        }
+      } catch (parseErr) {
+        // A corrupt register must not silently DISCARD the prior bypass
+        // entries it held — that defeats the point of an audit trail. Loud
+        // stderr note, and the corrupt bytes are preserved as a .corrupt
+        // sidecar (never overwritten in place) before re-initializing empty.
+        entries = [];
+        try {
+          process.stderr.write(
+            `H14: sandbox-bypass-log.json is corrupt (${(parseErr && parseErr.message) || parseErr}) — prior entries are being TRUNCATED; preserving the corrupt file as '${logPath}.corrupt'.\n`
+          );
+          if (existsSync(logPath)) renameSync(logPath, `${logPath}.corrupt`);
+        } catch {
+          // best-effort disclosure/preservation only — must not escalate past
+          // the outer disclosure catch below
+        }
+      }
+      entries.push({ at: new Date().toISOString(), command_head: commandHead, cwd: input.cwd });
+      const tmpPath = join(transient, `sandbox-bypass-log.json.tmp-${process.pid}`);
+      writeFileSync(tmpPath, JSON.stringify(entries));
+      renameSync(tmpPath, logPath);
+    } catch (e) {
+      // Disclosure is an aid, never a gate: loud on stderr, but must not
+      // propagate into the outer catch's fail-closed deny (P5 without
+      // costing an unrelated command a denial it never earned). The write
+      // itself is guarded too — a broken stderr stream (e.g. EPIPE) must not
+      // become the thing that finally reaches the fail-closed catch.
+      try {
+        process.stderr.write(`H14: sandbox-bypass disclosure failed (${(e && e.message) || e}) — the command is still evaluated normally below.\n`);
+      } catch {
+        // stderr itself is broken — nothing more can be done to disclose this
+      }
+    }
+  }
 
   // Shell control operators would let an allowed prefix smuggle a second command
   // ('node --test && …') OR redirect an allowed command's output to write an
