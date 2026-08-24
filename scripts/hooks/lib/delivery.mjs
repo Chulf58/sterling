@@ -33,6 +33,9 @@ export {
   recordCentralityHits,
   hasRecordCentralityHit,
 } from '@sterling/store';
+// Also bound locally (not just re-exported) so this file's OWN deny-once
+// constants below can be defined in terms of it.
+import { AXIS_RECORD_TOP_K as _AXIS_RECORD_TOP_K } from '@sterling/store';
 
 /** The OUTGOING text H20 scans, PER SURFACE — the two do not share an input
  *  shape, and assuming they do yields a hook that silently never fires.
@@ -136,6 +139,187 @@ export function writeGuard(path, guard) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
+}
+
+// ---------------------------------------------------------------------------
+// DENY-ONCE PRE-STEP (H20, decision 68332e4b). A first-attempt AskUserQuestion
+// whose subject strongly matches a store RULING (decision/anti_pattern) is
+// DENIED before it ever reaches the user — see h20-mechanism-axis.mjs for the
+// orchestration. This section is only the mechanical plumbing: which record
+// types count as a "ruling", the stricter floors that gate a deny (tuned
+// tighter than the existing loose audit floors so the deny classifier, never
+// retrieval recall, absorbs the tuning — decision amendment 4), the ledger
+// that makes suppression/override STATEFUL across a retry, and the render.
+//
+// LEDGER, not the session delivery guard: the guard (above) answers "was this
+// record already shown this session" and is irrelevant here — a denied
+// question must stay denied on an identical re-ask even if the record was
+// never delivered, and an overridden question must stay allowed on a further
+// resubmission of the SAME still-open sub-question. Same transient directory,
+// same P4 lifecycle (cleared at SessionStart), separate file so a corrupt
+// ledger cannot also wipe the unrelated delivery guard.
+// ---------------------------------------------------------------------------
+
+/** Record types the deny-once floor treats as a "ruling" — decision is the
+ *  measured case (dome-farmer, decision 9456cdc7), anti_pattern is included
+ *  because it is equally prescriptive ("do not do X") and carries the same
+ *  status/scope/supersession fields the denial must disclose. feature_article/
+ *  research_finding/disconfirmed_hypothesis stay OUT: they describe or answer,
+ *  they do not rule, so denying a question because it merely OVERLAPS one is
+ *  not what this decision asks for. (Decision 68332e4b does not enumerate the
+ *  type set explicitly — this scoping is this build's choice, flagged here.) */
+export const DENY_RULING_TYPES = ['decision', 'anti_pattern'];
+
+/** STRICT floors (deny eligibility) vs the existing LOOSE floors (AXIS_MIN_HITS
+ *  / AXIS_MIN_RECORD_TERMS, unchanged, still driving the post-answer audit).
+ *  Both draw from the SAME stage-1 candidate pool built with the canonical
+ *  extractAxisTerms/query — amendment 4 tunes the classifier, never recall.
+ *  HONEST NOTE, same caveat AXIS_MIN_HITS itself carries: chosen on the
+ *  motivating case, not measured data — tune on observed deny/override rates. */
+export const STRICT_MIN_HITS = 3;
+/** The deny floor requires FULL coverage of the record's own top-K central
+ *  terms (every one of hasRecordCentralityHit's own extracted terms present),
+ *  not merely AXIS_MIN_RECORD_TERMS (>=2, the loose audit's bar). Raw distinct
+ *  hit COUNT alone does not discriminate a genuinely governing ruling from a
+ *  topically-adjacent one: a short decision record and a prompt built around
+ *  it both tend to land in the same 5-8 hit range regardless of how
+ *  thoroughly the prompt actually covers the ruling's own vocabulary — what
+ *  discriminates is whether EVERY one of the record's own dominant terms is
+ *  present, not just most of them. Passing AXIS_RECORD_TOP_K itself as
+ *  `minTerms` composes with hasRecordCentralityHit's own degenerate-scaling
+ *  (`Math.min(minTerms, central.length)`), so a terse record's smaller central
+ *  set still demands FULL coverage of what it has, never a fixed count larger
+ *  than the record can offer. */
+export const STRICT_MIN_RECORD_TERMS = _AXIS_RECORD_TOP_K;
+
+/** How many newly-introduced axis terms a retry must add over the FIRST
+ *  denied attempt (same intent key) before its citation counts as stating an
+ *  "unresolved delta" rather than a bare re-ask with an id pasted in. Set
+ *  well above the ~2 incidental new words a bare citation itself contributes
+ *  ("override(ing)", "decision") — a real stated delta (what is unresolved,
+ *  and why) reads as substantially more new vocabulary than the citation
+ *  phrasing alone, so the gap between "id pasted in" and "id + explanation"
+ *  is wide enough that this floor does not need to be exact, only clearly
+ *  above the citation's own incidental contribution. */
+export const DELTA_MIN_NEW_TERMS = 5;
+
+/** The text one AskUserQuestion sub-question contributes — mirrors
+ *  outgoingProposalText's questions[] branch, but for exactly one entry, so
+ *  per-sub-question scoring (amendment 2, form handling) can run independently
+ *  of the combined multi-question blob. */
+export function subQuestionText(q) {
+  return [
+    q?.question,
+    q?.header,
+    ...(Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []),
+  ]
+    .filter((s) => typeof s === 'string' && s.trim())
+    .join('\n');
+}
+
+export function denyLedgerPath(cwd, agentId) {
+  return join(deliveryDir(cwd), agentId ? `deny-ledger-agent-${agentId}.json` : 'deny-ledger-conductor.json');
+}
+
+function emptyDenyLedger() {
+  return { entries: {}, overrides: [] };
+}
+
+/** Self-healing like readGuard: a torn ledger resets to empty (worst case one
+ *  re-denied question) instead of wedging the pre-step for the rest of the
+ *  session. */
+export function readDenyLedger(path) {
+  try {
+    if (!existsSync(path)) return emptyDenyLedger();
+    return { ...emptyDenyLedger(), ...JSON.parse(readFileSync(path, 'utf8')) };
+  } catch {
+    process.stderr.write(`H20: corrupt deny-once ledger at ${path} — reset to empty\n`);
+    return emptyDenyLedger();
+  }
+}
+
+export function writeDenyLedger(path, ledger) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(ledger));
+  renameSync(tmp, path);
+}
+
+/** Suppression key: "normalized question intent + matched record ids", never
+ *  exact text (decision 68332e4b). Keyed on the matched record ids ALONE —
+ *  NOT on the prompt's own hit terms, even though those are the record's fixed
+ *  vocabulary rather than raw prompt text. Tried hit-terms-in-the-key first and
+ *  rejected it here: a retry's hit SET still shifts with paraphrase (a
+ *  rephrased sub-question can pick up or drop a matched word — e.g. "shown"
+ *  vs "displayed" — even while targeting the exact same ruling), so a key that
+ *  includes the hit set can silently mint a NEW key on a legitimate retry and
+ *  the override contract (which requires a PRIOR ledger entry under the SAME
+ *  key) would never fire. The record ids a sub-question strongly matches are
+ *  the stable signal: the same underlying question about the same ruling(s)
+ *  matches the same records across a reasonable paraphrase, while a question
+ *  that drifts far enough to match different records is arguably a different
+ *  question anyway — so it is right for it to get its own key. */
+export function denyIntentKey(recordIds) {
+  return [...new Set(recordIds ?? [])].sort().join('|');
+}
+
+/** Whether `text` cites `id` — the full id, or its unambiguous 8-char prefix
+ *  (the same prefix convention the id-resolution ladder already resolves
+ *  through elsewhere in the store), case-insensitively. */
+export function idCitedIn(text, id) {
+  if (!id) return false;
+  const hay = String(text ?? '').toLowerCase();
+  const full = String(id).toLowerCase();
+  if (hay.includes(full)) return true;
+  const prefix = full.split('-')[0];
+  return prefix.length >= 8 && hay.includes(prefix);
+}
+
+/** The denial payload: substance (not a bare sentence) for every SETTLED
+ *  sub-question, naming which are settled and NAMING (not just counting) the
+ *  open ones so only they need resubmission on a multi-question form
+ *  (amendment 2), plus the override contract (amendment 1). `ruled` is
+ *  `{index, label, decisions}[]` — `decisions` the matched ruling records
+ *  themselves (status/superseded_by/scope disclosed, never just their title,
+ *  so a laundered re-ask cannot hide behind a summary that dropped the
+ *  ruling's status). `open` is `{index, label}[]` — the sub-questions that did
+ *  NOT strongly match anything; naming them (not merely their count) is what
+ *  lets the reader resubmit exactly the right slice of a form instead of
+ *  re-deriving it. */
+export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
+  const lines = [
+    'STERLING DENY-ONCE (H20, decision 68332e4b) — this question is DENIED before it reaches the user: its subject strongly matches a settled store ruling.',
+    'The store already decides this; asking again spends the user\'s attention on a resolved question and risks minting a competing ruling.',
+  ];
+  if (totalQuestions > 1) {
+    lines.push(
+      `This form has ${totalQuestions} sub-question(s); ${ruled.length} of them are SETTLED by the store below — resubmit ONLY the open sub-question(s) named here:`
+    );
+  }
+  for (const r of ruled) {
+    lines.push(`— Sub-question ${r.index + 1}${r.label ? ` ("${clip(r.label, 80)}")` : ''} is SETTLED:`);
+    for (const d of r.decisions) {
+      const kind = d.type === 'anti_pattern' ? 'anti_pattern' : 'decision';
+      const substance = d.type === 'anti_pattern' ? `${d.trigger ?? ''} — ${d.right_way ?? ''}` : d.statement ?? '';
+      lines.push(
+        `  ▸ ${kind} [${d.id}] (status: ${d.status ?? 'unknown'}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ''}, scope: ${d.scope ?? 'unknown'}): ${clip(substance, 300)}`
+      );
+    }
+  }
+  if (totalQuestions > 1) {
+    if (open.length) {
+      lines.push('— OPEN (resubmit only these):');
+      for (const o of open) {
+        lines.push(`  ▸ Sub-question ${o.index + 1}${o.label ? ` ("${clip(o.label, 80)}")` : ''}`);
+      }
+    } else {
+      lines.push('— OPEN (resubmit only these): none — every sub-question in this form is settled.');
+    }
+  }
+  lines.push(
+    'TO OVERRIDE: resubmit this exact sub-question citing one of the ruling ids above AND stating the UNRESOLVED DELTA — what this ask needs that the cited ruling does not already settle. A resubmission that neither cites an id nor introduces new substance beyond the first attempt is denied again; repeated overrides are logged.'
+  );
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
