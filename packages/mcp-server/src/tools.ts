@@ -621,8 +621,11 @@ export class SterlingTools {
    * Never throws: an absent/failing git, a non-repo tree, or nothing eligible
    * all degrade to a disclosed 'unavailable:<reason>'.
    */
-  private computeProvenance(records: DurableRecord[], treeRoot: string | undefined): { status: string; warnings: Map<string, string> } {
-    const warnings = new Map<string, string>();
+  private computeProvenance(
+    records: DurableRecord[],
+    treeRoot: string | undefined
+  ): { status: string; warnings: Map<string, { full: string; short: string }> } {
+    const warnings = new Map<string, { full: string; short: string }>();
     const withFileKeys = (records as unknown as Record<string, unknown>[]).filter((r) => {
       const fk = r.file_keys as string[] | undefined;
       return Array.isArray(fk) && fk.length > 0;
@@ -641,28 +644,38 @@ export class SterlingTools {
     if (withFileKeys.length === 0) return { status: 'unavailable:no_file_keys', warnings };
     if (eligible.length === 0) return { status: 'unavailable:no_measured_items', warnings };
 
-    // F1: resolve the oldest eligible base with ONE subprocess (skipped
-    // entirely when there is only one distinct sha to begin with).
+    // F1 / OUTSIDE-MODEL FINDING 1 (2026-08-24, repro d5b84e6→3ef9fbc): resolve
+    // the oldest eligible base topologically, never by commit TIMESTAMP — a
+    // child and its parent can share a timestamp, which made the CHILD
+    // "oldest" and excluded the PARENT's range entirely, falsely reporting the
+    // parent's sha as "not in current history". `git merge-base --octopus
+    // <shas>` returns a commit reachable from EVERY given base — an ancestor
+    // of all of them by construction — so `<that>^..HEAD` is guaranteed to
+    // cover every base's range regardless of commit-time skew. Pre-filter to
+    // shas that actually resolve (rev-list --ignore-missing) first: merge-base
+    // refuses outright if handed one that doesn't, and one rebased-away sha
+    // must not poison the whole batch back to the unbounded walk.
     const uniqueShas = [...new Set(eligible.map((r) => r.measured_at_head as string))];
     let oldestBase: string | undefined = uniqueShas.length === 1 ? uniqueShas[0] : undefined;
     if (uniqueShas.length > 1) {
-      // --ignore-missing: one unresolvable-but-40-hex sha (rebased/gc'd) must
-      // not poison the whole batch back to the unbounded walk (review finding).
-      const tsCheck = this.runGit(treeRoot, ['rev-list', '--no-walk', '--ignore-missing', '--timestamp', ...uniqueShas]);
-      if (tsCheck && tsCheck.status === 0) {
-        let minTs = Infinity;
-        for (const line of tsCheck.stdout.split('\n')) {
-          const m = line.trim().match(/^(\d+)\s+([0-9a-f]{40})$/);
-          if (!m) continue;
-          const ts = Number(m[1]);
-          if (ts < minTs) {
-            minTs = ts;
-            oldestBase = m[2];
-          }
-        }
+      const resolveCheck = this.runGit(treeRoot, ['rev-list', '--no-walk', '--ignore-missing', ...uniqueShas]);
+      const resolvableShas =
+        resolveCheck && resolveCheck.status === 0
+          ? resolveCheck.stdout
+              .split('\n')
+              .map((l) => l.trim())
+              .filter((l) => /^[0-9a-f]{40}$/.test(l))
+          : [];
+      if (resolvableShas.length === 1) {
+        oldestBase = resolvableShas[0];
+      } else if (resolvableShas.length > 1) {
+        const mb = this.runGit(treeRoot, ['merge-base', '--octopus', ...resolvableShas]);
+        const candidate = mb && mb.status === 0 ? mb.stdout.trim() : '';
+        if (/^[0-9a-f]{40}$/.test(candidate)) oldestBase = candidate;
       }
-      // tsCheck failing leaves oldestBase undefined — the walk below falls
-      // back to the unbounded-range/-n-cap-backstop form (never a throw).
+      // Any failure above (missing/unrelated histories/no common ancestor)
+      // leaves oldestBase undefined — the walk below falls back to the
+      // unbounded-range/-n-cap-backstop form (never a throw).
     }
 
     // The `-n` request asks for one MORE than the disclosed cap so a
@@ -670,12 +683,19 @@ export class SterlingTools {
     // against the cap (F4 — `commits.length < CAP` misreads a repo with
     // EXACTLY `CAP` commits as truncated; requesting CAP+1 and trimming the
     // lookahead entry fixes the off-by-one instead of guessing at it).
+    // --no-renames (OUTSIDE-MODEL FINDING 2, repro 644b46e): --name-only's
+    // default rename detection reports only the NEW path for a renamed file,
+    // so an item keyed to the path it was renamed FROM never saw its own
+    // change. --no-renames reports both the old and new paths as plain
+    // add/delete entries.
     const requestCap = PROVENANCE_WALK_COMMIT_CAP + 1;
     const rangedWalk = oldestBase
-      ? this.runGit(treeRoot, ['log', '--name-only', '--format=%H', '-n', String(requestCap), `${oldestBase}^..HEAD`])
+      ? this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), `${oldestBase}^..HEAD`])
       : undefined;
     const walk =
-      rangedWalk && rangedWalk.status === 0 ? rangedWalk : this.runGit(treeRoot, ['log', '--name-only', '--format=%H', '-n', String(requestCap), 'HEAD']);
+      rangedWalk && rangedWalk.status === 0
+        ? rangedWalk
+        : this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), 'HEAD']);
     if (!walk || walk.status !== 0) return { status: 'unavailable:no_git', warnings };
     const commits: { sha: string; files: string[] }[] = [];
     for (const raw of walk.stdout.split('\n')) {
@@ -701,15 +721,24 @@ export class SterlingTools {
         // (rebased/orphaned); either way the count cannot be trusted, so say
         // so on the item rather than reporting nothing.
         if (walkTruncated) capHit = true;
-        warnings.set(
-          id,
-          `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD'}) — re-verify`
-        );
+        const reason = walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+        warnings.set(id, {
+          full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+          // OUTSIDE-MODEL FINDING 3 (headline stays compact): no sha/reason detail.
+          short: ` ⚠not verifiable — re-verify`,
+        });
         continue;
       }
       const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
       if (count > 0) {
-        warnings.set(id, `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`);
+        warnings.set(id, {
+          full: `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`,
+          // OUTSIDE-MODEL FINDING 3 (2026-08-24): appending the full sentence
+          // after headlineRecord's clip broke headline's compact-line contract
+          // (an 80-char line became 170+ chars, multiline). Headline gets a
+          // short marker instead; digest/full keep the full sentence.
+          short: ` ⚠${count} commits since measured`,
+        });
       }
     }
     return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
@@ -3916,7 +3945,11 @@ export class SterlingTools {
       const warning = warnings.get((r as unknown as { id: string }).id);
       if (!warning) return base;
       const text = typeof base.text === 'string' ? base.text : '';
-      return { ...base, text: text ? `${text}\n\n${warning}` : warning };
+      // OUTSIDE-MODEL FINDING 3: headline's line stays compact (a short marker,
+      // appended directly, no separator) — the full sentence only lands on
+      // digest/full, which already tolerate multi-line text.
+      if (projection === 'headline') return { ...base, text: `${text}${warning.short}` };
+      return { ...base, text: text ? `${text}\n\n${warning.full}` : warning.full };
     };
     return {
       matched_filter: matching.length,
