@@ -550,12 +550,41 @@ export class SterlingTools {
    * want either and pointing at retirement alone would trade a stale denial for an
    * invitation to retire away every error instead of correcting it.
    */
+  /**
+   * The unforgeable envelope: every write REFUSES these by name (board
+   * 617e97d4 hoisted this out of refuseServerOwnedFields so knowledge_schema's
+   * server_owned mask derives from the SAME list this refusal guard consumes —
+   * the two surfaces used to be two hand-maintained copies of one truth, and
+   * the projection's copy was missing four of these names).
+   *
+   * lifecycle/freshness/file_baselines joined on this slice's review (both
+   * reviewers, independently). The genuinely reachable forgeries were
+   * freshness:'flagged_stale' (resolveIdentity honors a directly-given value,
+   * deriving status 'flagged_stale' — a forged-stale record) and the silent
+   * file_baselines overwrite — the misleading-success shape this guard exists
+   * to eliminate. lifecycle:'retired' alone was already blocked one layer down
+   * (the store's born-dead refusal demands a superseded_by, itself refused
+   * here), so its entry is defense-in-depth at the right layer: the tool
+   * surface names the caller's mistake instead of leaking a store-internal
+   * message. The store's own readEnum refusal for lifecycle/freshness is now
+   * tool-unreachable — it survives for internal/MountedStores callers only.
+   * Internal writers are unaffected:
+   * knowledgeSplit's create passes an explicit field list, knowledgePromote
+   * copies through store.create below this guard, and update/supersede spread
+   * the OLD record after this refusal has run on the caller's input.
+   *
+   * The destructure-strips in knowledgeCreate/knowledgeUpdate/knowledgeSupersede
+   * still enumerate names literally — dead code for refused names (the refusal
+   * throws first), kept as defense-in-depth; the shared list binds the two
+   * surfaces that must agree, the guard and the projection.
+   */
+  private static readonly WRITE_REFUSED_FIELDS = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type', 'lifecycle', 'freshness', 'file_baselines'];
+
   private refuseServerOwnedFields(
     fields: Record<string, unknown>,
     op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede'
   ): void {
-    const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
-    const attempted = SERVER_OWNED.filter((k) => k in fields);
+    const attempted = SterlingTools.WRITE_REFUSED_FIELDS.filter((k) => k in fields);
     if (attempted.length === 0) return;
     const retiring = attempted.includes('status') || attempted.includes('superseded_by');
     throw new Error(
@@ -566,7 +595,7 @@ export class SterlingTools {
             `To correct a WRONG record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug. ` +
             `The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, ` +
             `never for a record that is merely wrong — /sterling:cleanup never hard-deletes knowledge either.`
-          : `id and the clocks are assigned at write; type is fixed at create.`)
+          : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile.`)
     );
   }
 
@@ -663,11 +692,10 @@ export class SterlingTools {
       throw new Error(`knowledge_schema: '${type}' is not a registered record type. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
     }
     // SERVER-OWNED FIELDS ARE REPORTED AS SUCH ([stable-identity-design-v2]
-    // contract 1/4): `version` is the counter this surface OWNS — it starts at
-    // 1 and only a write moves it — and `status`/`superseded_by` are DERIVED
-    // from lifecycle + the supersedes relation since v2. All three are refused
-    // or stripped by the write path, so reporting them as caller-required (as
-    // the raw zod shape does, because the envelope still declares them for API
+    // contract 1/4; widened to the whole write-refused envelope by board
+    // 617e97d4): everything in SERVER_OWNED_FIELDS is refused or stripped by
+    // the write path, so reporting any of it as caller-required (as the raw
+    // zod shape does, because the envelope still declares them for API
     // compatibility) told callers to supply exactly what they must not: the
     // measured cost of a wrong schema answer is one write attempt each.
     //
@@ -677,9 +705,19 @@ export class SterlingTools {
     // supply". There is deliberately NO top-level server_owned[] array: the
     // per-field flag already answers the question at the place a reader is
     // looking, and a second copy of the same list is one more thing to drift.
+    //
+    // CREATE-DEFAULTED fields (author/links/scope/stack_tags) are the second
+    // mask: zod declares them required, but knowledge_create defaults every
+    // one when absent, so to a caller they are optional — required[] is
+    // exactly the set a create must supply.
     const serverOwned = new Set(SterlingTools.SERVER_OWNED_FIELDS);
+    const defaulted = new Set(SterlingTools.CREATE_DEFAULTED_FIELDS);
     const fields = described.fields.map((f) =>
-      serverOwned.has(f.name) ? { ...f, required: false, server_owned: true } : f
+      serverOwned.has(f.name)
+        ? { ...f, required: false, server_owned: true }
+        : defaulted.has(f.name)
+          ? { ...f, required: false }
+          : f
     );
     // The split lists are redundant with `fields` on purpose — "what must I
     // supply" is the actual question, and making the reader filter the array to
@@ -1990,16 +2028,28 @@ export class SterlingTools {
   private static readonly FULL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
   /**
-   * Fields knowledge_schema reports as SERVER-OWNED rather than caller-supplied
-   * ([stable-identity-design-v2]): `version` is the counter this surface owns,
-   * `status`/`superseded_by` are derived from lifecycle + the supersedes
-   * relation. Deliberately NOT the whole unforgeable envelope (id, the clocks,
-   * type — refuseServerOwnedFields already teaches those at the write): this
-   * list is the set the v2 identity model MOVED out of caller control, and
-   * widening it would change what knowledge_schema reports for fields nothing
-   * in this wave touched.
+   * Fields knowledge_schema reports as SERVER-OWNED rather than caller-supplied:
+   * the whole write-refused envelope (WRITE_REFUSED_FIELDS — one shared list
+   * with refuseServerOwnedFields, so the projection and the refusal guard
+   * cannot re-diverge) plus `version`, the counter this surface owns (stripped
+   * with a disclosed warning at create, never honored).
+   *
+   * REVERSED from the earlier stance ("refuseServerOwnedFields already teaches
+   * those at the write") by board 617e97d4: teaching-at-the-write IS
+   * learn-by-rejection, the exact habit knowledge_schema exists to eliminate —
+   * measured, a caller followed the projection's required[] verbatim and
+   * composed a write the guard refused.
    */
-  private static readonly SERVER_OWNED_FIELDS = ['version', 'status', 'superseded_by'];
+  private static readonly SERVER_OWNED_FIELDS = [...SterlingTools.WRITE_REFUSED_FIELDS, 'version'];
+
+  /**
+   * Envelope fields knowledge_create DEFAULTS when absent (author 'conductor',
+   * links [], scope 'project', stack_tags []) — caller-SUPPLIABLE but never
+   * caller-REQUIRED, so knowledge_schema reports them optional (board
+   * 617e97d4: with these masked, required[] is exactly what a create must
+   * supply). Keep in lockstep with the `??` defaults in knowledgeCreate.
+   */
+  private static readonly CREATE_DEFAULTED_FIELDS = ['author', 'links', 'scope', 'stack_tags'];
 
   /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
   private static slugify(text: string): string {

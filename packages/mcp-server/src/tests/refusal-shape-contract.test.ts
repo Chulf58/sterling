@@ -1144,7 +1144,12 @@ test('DERIVATION-B (enums): for EVERY registered type and EVERY top-level closed
 
     for (const type of types) {
       for (const f of t.knowledgeSchema(type).fields) {
-        if (SERVER_OWNED_FIELDS.has(f.name)) continue;
+        // Skip server-owned fields by the projection's OWN flag (board
+        // 617e97d4: the flag and the write refusal derive from one shared
+        // list, so the sweep tracks it automatically — lifecycle/freshness
+        // joined the refused set on that slice), plus the literal set kept as
+        // the floor's second opinion.
+        if (SERVER_OWNED_FIELDS.has(f.name) || (f as { server_owned?: boolean }).server_owned) continue;
         if (Array.isArray(f.enum_values) && f.enum_values.length > 0) {
           enumPairs.push({ type, field: f.name, members: f.enum_values, isArray: /\[\]\s*$/.test(f.type), fieldType: f.type });
         }
