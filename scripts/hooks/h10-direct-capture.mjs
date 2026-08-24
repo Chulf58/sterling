@@ -611,7 +611,7 @@ try {
   // Capture-pending declaration (board 1af5d630, decision follows e23f38f8):
   // the capture EXISTS and its write is in flight on a named target (detail =
   // "<target> — <reason>"). Unlike no_capture it covers LATER work too — the
-  // whole point is that wave work keeps arriving while the capture rides a
+  // whole point is that new work keeps arriving while the capture rides a
   // pending commit, and per-batch re-declaration is the boilerplate loop that
   // trains false declarations (six in ~90 minutes, measured 2026-08-09).
   // Safe because the debt cannot evaporate: the deferral below either settles

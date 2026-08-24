@@ -15,7 +15,13 @@ const pluginRoot = resolve(here, '..');
 const violations = checkRegistryConsistency({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
-  scanDirs: [join(pluginRoot, 'templates'), join(pluginRoot, 'commands'), join(pluginRoot, 'skills')],
+  // scripts/hooks/ is the convention-injection surface (H1 speaks into every
+  // session ahead of every conductor) — the dead-term scan is strictly worse
+  // at missing residue there than in templates/, which only gets stamped
+  // occasionally. Board f4221f8a: a term banned everywhere else shipped in H1
+  // undetected, and text copied VERBATIM out of H1 into a template then failed
+  // the merge for carrying the very term H1 itself carried.
+  scanDirs: [join(pluginRoot, 'templates'), join(pluginRoot, 'commands'), join(pluginRoot, 'skills'), join(pluginRoot, 'scripts', 'hooks')],
 });
 
 // §6 hook-emission backslash check over the shipped hooks.json
