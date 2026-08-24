@@ -153,6 +153,15 @@ export interface BoardQueryResult {
   /** PAGING (board b786a84f): the offset this page was read at (0 when omitted) — the next page starts at offset + returned. */
   offset: number;
   note?: string;
+  /**
+   * board-provenance-measured-at-head: whether the one-shot git walk backing
+   * the per-item '⚠ file_keys changed…' annotation ran. 'checked' means it ran
+   * (items with nothing to warn about are silently fine); 'unavailable:<reason>'
+   * — no_repo_root | no_git | detached_head | no_file_keys | walk_cap — states
+   * WHY, because an absent warning must never be mistaken for a checked-fresh
+   * one (P5).
+   */
+  provenance: string;
   /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
@@ -263,6 +272,15 @@ const BOARD_SCAN_CAP = 1000;
 // deletion item — which is the safe direction, since that lane demands work and
 // the parked lane does not.
 const PARKED_REF_PROBE_CAP = 40;
+// board-provenance-measured-at-head: the ONE git log --name-only walk
+// board_query runs per call (never per item) is bounded by this many commits
+// back from HEAD, so a repo with a long history cannot turn one query into an
+// unbounded subprocess. An eligible item whose measured_at_head sha does not
+// appear inside this window is left unannotated and the envelope discloses
+// 'unavailable:walk_cap' rather than reporting a possibly-wrong count.
+// Measured against this repo's own board (~50 items, deep history): see the
+// coder report for the ms figure.
+const PROVENANCE_WALK_COMMIT_CAP = 2000;
 // Per-file drift items one read may mint for ONE article (board 2ded3b4b). One
 // item per FILE is the point — an item that names the changed file is actionable
 // where an article-level one is not, and the old article-level dedup is what
@@ -531,6 +549,170 @@ export class SterlingTools {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * board-provenance-measured-at-head: one shared, swallowing git runner —
+   * the same spawn pattern parkedOnRef already uses (never throws; a failure
+   * or absent git surfaces as `undefined`, and every caller here decides for
+   * itself what an absent result means for ITS disclosure).
+   */
+  private runGit(treeRoot: string, args: string[]): { status: number | null; stdout: string } | undefined {
+    try {
+      const r = spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
+      return { status: r.status, stdout: typeof r.stdout === 'string' ? r.stdout : '' };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Current HEAD's full 40-hex sha in `treeRoot`, or undefined if git/the tree is unavailable (board-provenance-measured-at-head: what board_add/board_update stamp measured_at_head with). */
+  private currentHeadSha(treeRoot: string | undefined): string | undefined {
+    if (!treeRoot) return undefined;
+    const r = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
+    if (!r || r.status !== 0) return undefined;
+    const sha = r.stdout.trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  }
+
+  /**
+   * Does `sha` resolve to a real commit in `treeRoot`? Used to refuse a
+   * caller-supplied measured_at_head BY NAME rather than silently replacing
+   * it with HEAD (P5, decision board-provenance-measured-at-head) — the exact
+   * inverse of parkedOnRef's swallow-to-undefined direction, because here an
+   * unresolvable value is a caller error that must be reported, not degraded
+   * past.
+   */
+  private shaResolves(sha: string, treeRoot: string | undefined): boolean {
+    if (!treeRoot) return false;
+    const r = this.runGit(treeRoot, ['cat-file', '-e', `${sha}^{commit}`]);
+    return r?.status === 0;
+  }
+
+  /**
+   * board-provenance-measured-at-head: ONE bounded `git log --name-only` walk
+   * per board_query call (never per item — the decision's whole point).
+   *
+   * FIX F1 (review 2026-08-24): the walk is RANGE-BOUNDED by the OLDEST
+   * eligible item's measured_at_head, not an unconditional HEAD-relative cap
+   * — `<oldestBase>^..HEAD` (backstopped by `-n PROVENANCE_WALK_COMMIT_CAP+1`
+   * so a query never pays for history no returned item's evidence predates).
+   * Finding the oldest base costs exactly ONE extra subprocess regardless of
+   * how many eligible items there are: `git rev-list --no-walk --timestamp
+   * <every unique sha>` resolves each sha's commit time directly (no
+   * traversal), and the minimum timestamp names the oldest — cheaper than N
+   * `merge-base --is-ancestor` calls and cheaper than walking full history to
+   * derive it. If that resolution fails for any reason (unexpected — every
+   * stored sha was validated resolvable at write time) or `<oldestBase>^`
+   * itself doesn't exist (oldestBase is the repo's root commit), the walk
+   * falls back to the unbounded-range `-n cap HEAD` form — the cap stays the
+   * backstop either way (never a silent unbounded walk).
+   *
+   * For every record carrying both file_keys and a (40-hex) measured_at_head,
+   * counts — in JS, over this single walk — how many of the commits STRICTLY
+   * NEWER than its measured_at_head touched one of its file_keys.
+   *
+   * FIX F3: a sha genuinely absent from the walked range (rebased away, or a
+   * non-ancestor of HEAD) previously skipped SILENTLY while the envelope
+   * still reported 'checked' — a missing warning read as fresh, the exact P5
+   * inversion the whole feature exists to avoid. It now ALWAYS gets a visible
+   * per-item note rather than being dropped.
+   *
+   * Never throws: an absent/failing git, a non-repo tree, or nothing eligible
+   * all degrade to a disclosed 'unavailable:<reason>'.
+   */
+  private computeProvenance(records: DurableRecord[], treeRoot: string | undefined): { status: string; warnings: Map<string, string> } {
+    const warnings = new Map<string, string>();
+    const withFileKeys = (records as unknown as Record<string, unknown>[]).filter((r) => {
+      const fk = r.file_keys as string[] | undefined;
+      return Array.isArray(fk) && fk.length > 0;
+    });
+    const eligible = withFileKeys.filter((r) => {
+      const head = r.measured_at_head as string | undefined;
+      return typeof head === 'string' && /^[0-9a-f]{40}$/.test(head);
+    });
+    if (!treeRoot) return { status: 'unavailable:no_repo_root', warnings };
+    const headCheck = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
+    if (!headCheck || headCheck.status !== 0) return { status: 'unavailable:no_git', warnings };
+    const branchCheck = this.runGit(treeRoot, ['symbolic-ref', '-q', 'HEAD']);
+    if (!branchCheck || branchCheck.status !== 0) return { status: 'unavailable:detached_head', warnings };
+    // FIX F2: distinguish "nothing here even carries file_keys" from "file_keys
+    // exist but none of them have been stamped yet" — different remedies.
+    if (withFileKeys.length === 0) return { status: 'unavailable:no_file_keys', warnings };
+    if (eligible.length === 0) return { status: 'unavailable:no_measured_items', warnings };
+
+    // F1: resolve the oldest eligible base with ONE subprocess (skipped
+    // entirely when there is only one distinct sha to begin with).
+    const uniqueShas = [...new Set(eligible.map((r) => r.measured_at_head as string))];
+    let oldestBase: string | undefined = uniqueShas.length === 1 ? uniqueShas[0] : undefined;
+    if (uniqueShas.length > 1) {
+      // --ignore-missing: one unresolvable-but-40-hex sha (rebased/gc'd) must
+      // not poison the whole batch back to the unbounded walk (review finding).
+      const tsCheck = this.runGit(treeRoot, ['rev-list', '--no-walk', '--ignore-missing', '--timestamp', ...uniqueShas]);
+      if (tsCheck && tsCheck.status === 0) {
+        let minTs = Infinity;
+        for (const line of tsCheck.stdout.split('\n')) {
+          const m = line.trim().match(/^(\d+)\s+([0-9a-f]{40})$/);
+          if (!m) continue;
+          const ts = Number(m[1]);
+          if (ts < minTs) {
+            minTs = ts;
+            oldestBase = m[2];
+          }
+        }
+      }
+      // tsCheck failing leaves oldestBase undefined — the walk below falls
+      // back to the unbounded-range/-n-cap-backstop form (never a throw).
+    }
+
+    // The `-n` request asks for one MORE than the disclosed cap so a
+    // cap-truncated walk is detectable by comparing the RETURNED count
+    // against the cap (F4 — `commits.length < CAP` misreads a repo with
+    // EXACTLY `CAP` commits as truncated; requesting CAP+1 and trimming the
+    // lookahead entry fixes the off-by-one instead of guessing at it).
+    const requestCap = PROVENANCE_WALK_COMMIT_CAP + 1;
+    const rangedWalk = oldestBase
+      ? this.runGit(treeRoot, ['log', '--name-only', '--format=%H', '-n', String(requestCap), `${oldestBase}^..HEAD`])
+      : undefined;
+    const walk =
+      rangedWalk && rangedWalk.status === 0 ? rangedWalk : this.runGit(treeRoot, ['log', '--name-only', '--format=%H', '-n', String(requestCap), 'HEAD']);
+    if (!walk || walk.status !== 0) return { status: 'unavailable:no_git', warnings };
+    const commits: { sha: string; files: string[] }[] = [];
+    for (const raw of walk.stdout.split('\n')) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (/^[0-9a-f]{40}$/.test(line)) {
+        commits.push({ sha: line, files: [] });
+      } else if (commits.length) {
+        commits[commits.length - 1].files.push(line);
+      }
+    }
+    const walkTruncated = commits.length > PROVENANCE_WALK_COMMIT_CAP;
+    if (walkTruncated) commits.length = PROVENANCE_WALK_COMMIT_CAP; // drop the CAP+1'th lookahead entry
+    let capHit = false;
+    for (const rec of eligible) {
+      const fileKeys = rec.file_keys as string[];
+      const head = rec.measured_at_head as string;
+      const id = rec.id as string;
+      const idx = commits.findIndex((c) => c.sha === head);
+      if (idx === -1) {
+        // F3: never silently skip — the sha is either older than a truncated
+        // window (cap genuinely hit) or not on HEAD's ancestry at all
+        // (rebased/orphaned); either way the count cannot be trusted, so say
+        // so on the item rather than reporting nothing.
+        if (walkTruncated) capHit = true;
+        warnings.set(
+          id,
+          `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD'}) — re-verify`
+        );
+        continue;
+      }
+      const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
+      if (count > 0) {
+        warnings.set(id, `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`);
+      }
+    }
+    return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
   }
 
   /**
@@ -3549,7 +3731,7 @@ export class SterlingTools {
   // -- board (§3.2.7) ----------------------------------------------------------
 
   boardAdd(args: Record<string, unknown>): CreateResult & { notice?: string } {
-    const { text, source, objective, ...rest } = args;
+    const { text, source, objective, measured_at_head, ...rest } = args;
     // Objective grouping (decision a8d2ce6c): a grouping key for the human's
     // board only — maintenance items are lane-keyed by system_reason.
     if (objective !== undefined && source === 'system') {
@@ -3560,10 +3742,35 @@ export class SterlingTools {
     // 'standalone' (exact lowercase) is the declared answer for "not a slice";
     // it normalizes to field-absent so ungrouped items stay shapeless.
     const normalized = objective === 'standalone' ? undefined : objective;
+    // board-provenance-measured-at-head: server-stamps HEAD at add time unless
+    // the caller supplies its own sha (decision — the a2a17efa §13.2 incident:
+    // an author who knew the head had nowhere to put it). A caller-supplied
+    // sha that does not resolve in this repo is refused BY NAME rather than
+    // silently replaced with HEAD (P5); an absent/unavailable git degrades to
+    // no stamp at all, same swallow direction as every other write-time probe
+    // in this file — the annotation surface (board_query) is where absence
+    // gets disclosed, not the write.
+    let stampedHead: string | undefined;
+    if (measured_at_head !== undefined) {
+      const candidate = String(measured_at_head);
+      // FIX F5 (review 2026-08-24): the 40-hex SHAPE check runs BEFORE
+      // shaResolves — git resolves an abbreviated sha too, so a short-but-real
+      // value would pass shaResolves and only fail later at the schema layer
+      // with a bare zod message instead of this refusal naming the value.
+      if (!/^[0-9a-f]{40}$/.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+        throw new Error(
+          `board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+      stampedHead = candidate;
+    } else {
+      stampedHead = this.currentHeadSha(this.repoRoot);
+    }
     const res = this.knowledgeCreate('todo', {
       text,
       source,
       ...(normalized !== undefined ? { objective: normalized } : {}),
+      ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
       ...rest,
     });
     if (source === 'user' && objective === undefined) {
@@ -3693,19 +3900,33 @@ export class SterlingTools {
           `and PAGING IS BOUNDED BY THAT SAME CEILING: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue)`
       );
     }
+    // board-provenance-measured-at-head: ONE bounded git walk for this whole
+    // page (never per item), then the warning — if any — is appended to the
+    // projected record's `text` (full/digest/headline all read `text`, and
+    // this keeps the annotation visible through whichever projection the
+    // caller asked for without adding a wire field no projection declares).
+    const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    const projectRecord = (r: DurableRecord): Record<string, unknown> => {
+      const base =
+        projection === 'headline'
+          ? headlineRecord(r as unknown as Record<string, unknown>)
+          : projection === 'digest'
+            ? digestRecord(r as unknown as Record<string, unknown>)
+            : { ...(r as unknown as Record<string, unknown>) };
+      const warning = warnings.get((r as unknown as { id: string }).id);
+      if (!warning) return base;
+      const text = typeof base.text === 'string' ? base.text : '';
+      return { ...base, text: text ? `${text}\n\n${warning}` : warning };
+    };
     return {
       matched_filter: matching.length,
       returned: records.length,
       cap,
       capped,
       offset,
+      provenance,
       ...(notes.length ? { note: notes.join('; ') } : {}),
-      records:
-        projection === 'headline'
-          ? records.map((r) => headlineRecord(r as unknown as Record<string, unknown>))
-          : projection === 'digest'
-            ? records.map((r) => digestRecord(r as unknown as Record<string, unknown>))
-            : records,
+      records: records.map(projectRecord),
     };
   }
 
@@ -3735,7 +3956,7 @@ export class SterlingTools {
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective'] as const;
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head'] as const;
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
@@ -3759,6 +3980,26 @@ export class SterlingTools {
     }
     if (Object.keys(patch).length === 0) {
       throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
+    }
+    // board-provenance-measured-at-head: a text/file_keys rewrite carries new
+    // evidence, so it re-stamps measured_at_head to the CURRENT HEAD — unless
+    // the caller explicitly named a measured_at_head in this same patch, which
+    // wins verbatim (validated below). priority/objective-only patches leave
+    // the field untouched entirely (no key added to `next`). A caller-supplied
+    // measured_at_head that does not resolve is refused by name, never
+    // silently replaced with HEAD (P5) — on EITHER path (bare re-verify or
+    // alongside a text/file_keys change).
+    if ('measured_at_head' in patch) {
+      const candidate = String(patch.measured_at_head);
+      // FIX F5: shape check before shaResolves (see boardAdd's identical fix).
+      if (!/^[0-9a-f]{40}$/.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+        throw new Error(
+          `board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+    } else if ('text' in patch || 'file_keys' in patch) {
+      const head = this.currentHeadSha(this.repoRoot);
+      if (head) patch = { ...patch, measured_at_head: head };
     }
     const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
     // 'standalone' clears the grouping to absent (decision a8d2ce6c) — the same

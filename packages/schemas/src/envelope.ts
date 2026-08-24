@@ -50,6 +50,14 @@ export const envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: z.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: z.enum(FRESHNESS_VALUES).optional(),
   version: z.number().int().positive().optional(),
   links: z.array(linkSchema),

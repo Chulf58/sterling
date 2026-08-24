@@ -410,7 +410,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_add',
     {
       description:
-        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). EVERY user-source add answers parentage via `objective` (decision a8d2ce6c): when the task is a SLICE of a larger objective — the conductor slicing a big ask mints one board_add per slice, all sharing the objective name — pass objective:"<name>"; a freestanding task passes objective:"standalone" (exact lowercase, stored as ungrouped). The TUI groups slices under their objective, so declared parentage is what keeps the board readable as N objectives instead of N×slices. Omitting objective never loses the task — it saves ungrouped with a loud notice, and board_update can group it later. system-source items never take an objective (lane-keyed by system_reason). The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
+        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). EVERY user-source add answers parentage via `objective` (decision a8d2ce6c): when the task is a SLICE of a larger objective — the conductor slicing a big ask mints one board_add per slice, all sharing the objective name — pass objective:"<name>"; a freestanding task passes objective:"standalone" (exact lowercase, stored as ungrouped). The TUI groups slices under their objective, so declared parentage is what keeps the board readable as N objectives instead of N×slices. Omitting objective never loses the task — it saves ungrouped with a loud notice, and board_update can group it later. system-source items never take an objective (lane-keyed by system_reason). measured_at_head (decision board-provenance-measured-at-head) is server-stamped to HEAD unless you supply a resolvable 40-hex sha yourself — an unresolvable one is refused, never silently replaced. The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
@@ -420,6 +420,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         feature_link: z.string().optional(),
         system_reason: z.string().optional(),
         stack_tags: z.array(z.string()).optional(),
+        measured_at_head: z.string().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -430,7 +431,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description:
-        'List open board items. source=user is the board; source=system is the maintenance queue. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, offset, records}: capped=true means more items matched than are shown past this page — raise cap or page with offset before concluding the board or queue is shorter than it is. offset (default 0) pages through a DETERMINISTIC order (updated_at DESC, stable) — offset:0, offset:cap, offset:2*cap, … visits every matching item exactly once. projection:"digest" returns one clipped line per item instead of its full text; projection:"headline" is smaller still (id, priority, objective, first 80 chars of text — no source/status/type/size_chars) for auditing or paging a large board cheaply; read the full item only for the ones you act on.',
+        'List open board items. source=user is the board; source=system is the maintenance queue. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, offset, provenance, records}: capped=true means more items matched than are shown past this page — raise cap or page with offset before concluding the board or queue is shorter than it is. offset (default 0) pages through a DETERMINISTIC order (updated_at DESC, stable) — offset:0, offset:cap, offset:2*cap, … visits every matching item exactly once. provenance (decision board-provenance-measured-at-head) states whether the one-shot git walk behind the per-item "⚠ file_keys changed in N commits since this item\'s evidence was measured (<sha7>)" annotation ran: \'checked\', or \'unavailable:<reason>\' when it could not (no git, detached HEAD, no eligible file_keys, or the walk\'s commit cap was hit) — an absent warning is never proof of freshness. projection:"digest" returns one clipped line per item instead of its full text; projection:"headline" is smaller still (id, priority, objective, first 80 chars of text — no source/status/type/size_chars) for auditing or paging a large board cheaply; read the full item only for the ones you act on.',
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         file_keys: z.array(z.string()).optional(),
@@ -467,13 +468,14 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_update',
     {
       description:
-        'IN-PLACE edit of a board/queue item — text/priority/file_keys/objective only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). objective (re)groups a task under a larger objective (decision a8d2ce6c — the remedy for a slice saved ungrouped or a late-discovered slice); objective:"standalone" un-groups it. Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one updatable field is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
+        'IN-PLACE edit of a board/queue item — text/priority/file_keys/objective/measured_at_head only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). objective (re)groups a task under a larger objective (decision a8d2ce6c — the remedy for a slice saved ungrouped or a late-discovered slice); objective:"standalone" un-groups it. A text or file_keys change re-stamps measured_at_head to the current HEAD automatically (decision board-provenance-measured-at-head — new evidence); a priority/objective-only patch leaves it untouched; pass measured_at_head yourself (a resolvable 40-hex sha) to re-verify without rewriting text — an unresolvable sha is refused, never silently replaced. Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one updatable field is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
       inputSchema: strict({
         id: z.string(),
         text: z.string().optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         file_keys: z.array(z.string()).optional(),
         objective: z.string().optional(),
+        measured_at_head: z.string().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },

@@ -350,6 +350,15 @@ export const todoSchema = base
     // a parent record — absent means standalone. The 'standalone' sentinel is
     // normalized to absent at the TOOL layer; the schema stores what it gets.
     objective: z.string().min(1).optional(),
+    // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+    // commit this item's evidence was read at. Server-stamped on board_add and
+    // re-stamped on a board_update that changes text/file_keys; a caller MAY
+    // supply it, and the tool layer refuses an unresolvable sha by name rather
+    // than silently replacing it with HEAD (P5).
+    measured_at_head: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/, '40-hex commit sha required')
+      .optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
@@ -690,20 +699,25 @@ export function digestRecord(record: Record<string, unknown>): Record<string, un
 
 /**
  * projection:'headline' (board b786a84f) — board_query/maintenance_query
- * ONLY, and smaller than 'digest': id, priority (if set), objective (if
- * present), system_reason (maintenance items only), and the first
- * HEADLINE_CLIP chars of text. Measured need: projection:'digest' on a
- * 289-item board ran 108KB in one call — digest still carries
- * source/status/type/updated_at/size_chars per item, which a scale audit
- * pays for and rarely reads. Todo-only by construction (board/maintenance
- * items are always type:'todo') rather than a per-type registry entry like
- * `digest`, because no other record type is read through board_query.
+ * ONLY, and smaller than 'digest': id, priority, objective (user items),
+ * system_reason (maintenance items), and the first HEADLINE_CLIP chars of
+ * text. Measured need: projection:'digest' on a 289-item board ran 108KB in
+ * one call — digest still carries source/status/type/updated_at/size_chars
+ * per item, which a scale audit pays for and rarely reads. Todo-only by
+ * construction (board/maintenance items are always type:'todo') rather than
+ * a per-type registry entry like `digest`, because no other record type is
+ * read through board_query.
+ *
+ * `priority` is emitted UNCONDITIONALLY (even when the item never set one) —
+ * unlike `objective`/`system_reason`, which are omitted when absent — because
+ * priority is a board-wide sort axis every item carries a slot for, while
+ * objective/system_reason are properties of ONE lane (user vs. system) a
+ * record from the other lane never has at all.
  */
 export const HEADLINE_CLIP = 80;
 
 export function headlineRecord(record: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { id: record.id };
-  if (record.priority !== undefined && record.priority !== null && record.priority !== '') out.priority = record.priority;
+  const out: Record<string, unknown> = { id: record.id, priority: record.priority };
   if (record.objective !== undefined && record.objective !== null && record.objective !== '') out.objective = record.objective;
   if (record.system_reason !== undefined && record.system_reason !== null && record.system_reason !== '') out.system_reason = record.system_reason;
   const text = clipped(record.text, HEADLINE_CLIP);
