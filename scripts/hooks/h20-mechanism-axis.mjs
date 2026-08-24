@@ -236,7 +236,7 @@ try {
       // When THIS attempt still strict-matches something, a cited entry only
       // counts as overriding IT if the cited entry's recordIds INTERSECT this
       // attempt's own strict-matched ids — otherwise citing an unrelated prior
-      // denial (R1) would wave through a live, never-denied match (R2) just
+      // denial (R1) would let a live, never-denied match (R2) sail through just
       // by pasting R1's id and adding filler words (reviewer finding).
       const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
       let overridden = null;
