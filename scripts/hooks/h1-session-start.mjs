@@ -517,6 +517,7 @@ try {
 
 let counts = { todos: 0, maintenance: 0, groupedTodos: 0, objectives: 0 };
 let queueReasons = [];
+let queueReasonEntries = [];
 let drainable = 0;
 let parked = 0;
 try {
@@ -559,7 +560,8 @@ try {
   // common cap literal.
   const byReason = new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`);
+  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
+  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`);
 } finally {
   store.close();
 }
@@ -571,16 +573,59 @@ try {
 // reached 63 items, most of them work finished days earlier and never closed,
 // with nothing anywhere prompting a drain (reported 2026-07-29). Silent below the
 // threshold (P1); above it, states the depth, the lanes, and the remedy.
+//
+// TWO TIERS (board 91fc3d6f): "drain it before taking new work" is an honest ask
+// at a few dozen items, but not at hundreds — a consuming project measured 247
+// drainable items against 5 closed in one drain pass, i.e. an instruction whose
+// only honest response was to ignore it ("is not a drain, it is evaporation").
+// TOO_DEEP_MULTIPLIER anchors the second tier off the SAME deep_threshold that
+// gates the first: at 10x threshold (default 150), naming every lane is no
+// longer readable and a blanket "drain it" is no longer actionable, so the
+// message switches to naming the top few lanes by count with a BOUNDED ask
+// (drain the biggest lane, or board a dedicated drain slice for the rest)
+// instead of repeating the same unattainable instruction at a larger number.
+const TOO_DEEP_MULTIPLIER = 10;
 let queueContext = '';
-if (drainable >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
-  queueContext =
-    `\n\nMAINTENANCE QUEUE IS DEEP — ${drainable} drainable items (${queueReasons.join(', ')})` +
-    (parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain — excluded from this count)` : '') +
-    `.\n` +
-    `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
-    `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
-    `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
-    `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+// Clamped to >= 1 (reviewer F1): a corrupt/hostile deep_threshold <= 0 would
+// otherwise make BOTH tier conditions true even on an EMPTY drainable queue —
+// queueReasonEntries[0] would then be undefined and the destructure below
+// would throw OUTSIDE this try/finally, crashing H1 non-zero and losing the
+// whole injection (including an already-consumed rotation note — unrecoverable).
+const deepThreshold = Math.max(1, config?.maintenance_queue?.deep_threshold ?? 15);
+if (drainable >= deepThreshold) {
+  const parkedNote =
+    parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain — excluded from this count)` : '';
+  // Second guard (reviewer F1, belt-and-suspenders alongside the clamp above):
+  // never take the very-deep branch with an empty lane breakdown — fall back
+  // to the modest-tier wording instead of destructuring an undefined entry.
+  if (drainable >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries.length) {
+    // Every count named below stays in the "N item(s) in lane X" shape (never a
+    // bare number) — the same phrasing the moderate tier already uses — so a
+    // lane count can never be misread as a truncated/capped total.
+    const topLanes = queueReasons.slice(0, 3);
+    const [topReason, topCount] = queueReasonEntries[0];
+    const topPhrase = `${topCount} item${topCount === 1 ? '' : 's'} in lane ${topReason}`;
+    // "too many to name in full" is only true past the top-3 we actually show
+    // (reviewer cosmetic note: it read as false with exactly 2 lanes).
+    const laneLead =
+      queueReasonEntries.length > topLanes.length
+        ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(', ')}. `
+        : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(', ')}. `;
+    queueContext =
+      `\n\nMAINTENANCE QUEUE IS VERY DEEP — ${drainable} drainable items across ${queueReasonEntries.length} lane(s)${parkedNote}.\n` +
+      laneLead +
+      `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest — don't try to clear the whole queue in one pass. ` +
+      `Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back ` +
+      `(an already-paid item closes with board_remove and NO knowledge_update). ` +
+      `A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
+  } else {
+    queueContext =
+      `\n\nMAINTENANCE QUEUE IS DEEP — ${drainable} drainable items (${queueReasons.join(', ')})${parkedNote}.\n` +
+      `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
+      `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
+      `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
+      `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+  }
 }
 
 // shared project registry (decision 8f9e6db2): touch THIS project's last_seen
@@ -727,9 +772,24 @@ try {
   maxConcurrent = 5;
 }
 
+// PAYLOAD TRIM ON /clear (board eeb8ee53): a rotation restore already sits in a
+// context that just read the whole committed CLAUDE.md to get at the note —
+// re-injecting the conventions block (which mirrors CLAUDE.md almost verbatim)
+// on EVERY /clear was ~70% duplicate payload in the one injection a fresh
+// session must read most carefully. A genuinely fresh start (source=startup)
+// has no committed-CLAUDE.md context to fall back on yet, so it keeps the full
+// conventions injection; only source=clear trims it. Everything else here
+// (machine role, sibling projects, the deep-queue banner, the rotation note
+// itself) are per-machine/per-session facts CLAUDE.md does not carry, so they
+// are unaffected. INTENTIONAL (reviewer F2 confirm): the trim keys on
+// source==='clear' alone, not on whether a rotation note is staged — a /clear
+// with NO note reloads the committed CLAUDE.md exactly the same way, so the
+// duplication this closes is present either way.
+const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurrent);
+
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventions(maxConcurrent) + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();
