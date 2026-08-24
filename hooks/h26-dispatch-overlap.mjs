@@ -4122,6 +4122,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4400,7 +4408,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5058,6 +5072,56 @@ function liveDispatches(root) {
   });
 }
 
+// scripts/hooks/lib/dispatch-advisory.mjs
+var CLAUSE_SPLIT_RE = /[!?;\n–—]|\.(?=\s|$)/;
+function splitClauses(text) {
+  return String(text ?? "").split(CLAUSE_SPLIT_RE);
+}
+var NEGATOR_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bnever\b|\bno\b|\bwithout\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var NEGATOR_TEST = new RegExp(NEGATOR_RE, "i");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+var SUBJECT_VERB_WINDOW = 40;
+function isNegatedContext(clause, index) {
+  const text = String(clause ?? "");
+  return NEGATOR_TEST.test(text.slice(0, Math.max(0, index)));
+}
+function isSubjectOfChangeContext(clause, index) {
+  const text = String(clause ?? "");
+  const before = text.slice(0, Math.max(0, index));
+  const near = before.slice(Math.max(0, before.length - SUBJECT_VERB_WINDOW));
+  return SUBJECT_VERB_TEST.test(near);
+}
+function isSuppressedContext(clause, index, checkSubjectVerb = true) {
+  if (isNegatedContext(clause, index)) return true;
+  return checkSubjectVerb && isSubjectOfChangeContext(clause, index);
+}
+function hasUnsuppressedMatch(text, pattern, { checkSubjectVerb = true } = {}) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const global = new RegExp(pattern.source, flags);
+  for (const clause of splitClauses(text)) {
+    global.lastIndex = 0;
+    let m;
+    while (m = global.exec(clause)) {
+      if (!isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
+      if (m.index === global.lastIndex) global.lastIndex++;
+    }
+  }
+  return false;
+}
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function isReviewerClass(type) {
+  return !!type && type.startsWith("reviewer-");
+}
+function isReadOnlyDispatchType(type) {
+  if (!type) return false;
+  if (isReviewerClass(type)) return true;
+  const lower = type.toLowerCase();
+  return lower === "explorer" || lower === "explore" || lower === "plan";
+}
+
 // scripts/hooks/h26-dispatch-overlap.mjs
 var input;
 try {
@@ -5074,10 +5138,17 @@ function emit(additionalContext) {
 }
 try {
   if (!existsSync3(join3(input.cwd ?? ".", ".sterling", "sterling.db"))) allow();
-  const candidates = extractPathCandidates(input.tool_input?.prompt);
-  const files = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
-    (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
+  if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) allow();
+  const prompt = input.tool_input?.prompt;
+  const candidates = extractPathCandidates(prompt);
+  const normalized = candidates.map((raw) => ({ raw, norm: repoRel(raw, input.cwd) })).filter((p) => p.norm).filter(
+    (p) => p.norm !== ".git" && !p.norm.startsWith(".git/") && !p.norm.startsWith(".sterling/") && !p.norm.startsWith("sterling/") && !p.norm.startsWith("git/")
   );
+  const files = [
+    ...new Set(
+      normalized.filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false })).map((p) => p.norm)
+    )
+  ];
   if (!files.length) allow();
   const candidateSet = new Set(files);
   const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
