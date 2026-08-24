@@ -50,7 +50,7 @@
 // install an inherited state). (5) RESOURCE SHAPE — the record stores a
 // per-path raw-byte sha256 instead of base64 bytes (717 KB measured live), and
 // the index query is chunked and --literal-pathspecs.
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync, lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { join, dirname, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -487,27 +487,147 @@ function toRel(cwd, abs) {
   return relative(cwd, abs).replace(/\\/g, '/');
 }
 
-// Snapshot every existing (B)-set file as { repoRelPath -> bytes }.
-function collectBaseline(cwd) {
-  const map = {};
-  const walk = (absDir) => {
-    if (!existsSync(absDir)) return;
-    for (const name of readdirSync(absDir)) {
-      const abs = join(absDir, name);
-      if (statSync(abs).isDirectory()) walk(abs);
-      else map[toRel(cwd, abs)] = readFileSync(abs, 'utf8');
-    }
-  };
-  walk(join(cwd, '.claude', 'agents')); // .claude/agents/** (recursive)
-  const claudeDir = join(cwd, '.claude'); // .claude/settings*.json (top level)
-  if (existsSync(claudeDir)) {
-    for (const name of readdirSync(claudeDir)) {
-      const rel = '.claude/' + name;
-      if (matchesGlob(rel, '.claude/settings*.json')) map[rel] = readFileSync(join(cwd, rel), 'utf8');
+// Classify EVERY path COMPONENT of a (B)-relative path, from the repo root
+// down, by lstat — before any read, walk, or write touches it (board 8b53dc84,
+// round 2 outside-family review). Checking only the final joined path (or only
+// the entries a readdirSync happens to enumerate) is NOT enough: path
+// resolution still FOLLOWS an INTERMEDIATE symlink component when the OS
+// resolves the rest of the string — lstat refuses to follow only the LAST
+// component. A `.sterling` replaced by a symlink to an outside directory still
+// let `.sterling/config.json` resolve THROUGH it, on both the read and the
+// restore write, when only the final component was ever lstat-checked.
+// This walks segment-by-segment, extending the path ONLY after the PRIOR
+// segment is confirmed a real directory (never a symlink): by induction, every
+// path this function ever hands to lstat has zero symlinks in its
+// already-verified prefix, so the OS cannot follow one on the way to the
+// segment being checked. `cwd` (the repo root) is the TRUST ANCHOR and is
+// never itself lstat'd — the walk starts at its first-level children.
+// Returns the FINAL segment's lstat kind ('file' | 'dir' | 'absent'); throws
+// on the first symlink or other non-regular kind found at ANY component,
+// intermediate or final — so a directory is always classified BEFORE it is
+// walked or listed, never interleaved with the walk itself.
+// OUT OF SCOPE (boarded separately): the check/use TOCTOU between this
+// classification and the read/write that follows — a descriptor-based
+// O_NOFOLLOW open is a platform-parity design question (Windows included).
+function classifyPathComponents(cwd, rel) {
+  const segments = rel.split('/');
+  let abs = cwd;
+  let soFar = '';
+  for (let i = 0; i < segments.length; i++) {
+    abs = join(abs, segments[i]);
+    soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
+    const kind = lstatKind(abs);
+    if (kind === 'absent') return 'absent'; // nothing further to resolve — not a violation
+    if (i === segments.length - 1) return kind;
+    if (kind !== 'dir') {
+      throw new Error(
+        `(B) baseline path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
+          `through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+      );
     }
   }
-  const cfg = join(cwd, '.sterling', 'config.json'); // .sterling/config.json
-  if (existsSync(cfg)) map['.sterling/config.json'] = readFileSync(cfg, 'utf8');
+  return 'absent'; // unreachable — rel is always non-empty
+}
+
+// Snapshot every existing (B)-set file as { repoRelPath -> raw bytes, base64 }.
+// LSTAT-GUARDED AT EVERY LEVEL, ancestors included (board 8b53dc84): the old
+// walk used existsSync/statSync/readFileSync, which all FOLLOW a symlink — a
+// symlink planted at a (B) path was read through at Pre (baseline capture
+// out-of-repo content as the file's own) and a symlink to a DIRECTORY under
+// .claude/agents/** was walked into (readdirSync/statSync following it),
+// enumerating a tree outside the repository. This function is called from
+// BOTH Pre (whose caller denies immediately on throw, PHASE: PRE — a
+// non-regular (B) path predates the command and is an environment defect)
+// and Post-as-"current" (whose throw reaches the same fail-closed catch
+// BEFORE any restore write is attempted, PHASE: POST — a kind transition
+// across the window is conduct) — one code path governs both instead of two
+// guards that could drift apart. `classifyPathComponents` is consulted for
+// EVERY (B) surface root — '.claude/agents', '.claude', '.sterling/config.json'
+// — BEFORE that root is walked or listed (round-2 finding: '.claude/agents'
+// must never be walked before '.claude' itself is classified). Descendants
+// beneath an already-classified root are still classified per-entry via
+// readdirSync's Dirent (which reflects the entry's own lstat kind, never a
+// symlink target's), so a symlink is denied on sight and never opened at any
+// depth. Bytes are stored as base64 of the RAW file bytes (never a decoded
+// utf8 string): two different invalid-UTF-8 sequences can decode to the same
+// U+FFFD text, so a string snapshot is lossy exactly where tampering hides.
+function collectBaseline(cwd) {
+  const map = {};
+  const walkDir = (absDir, relDir) => {
+    // Belt-and-suspenders per-recursion recheck (Codex delta re-review):
+    // callers classify `absDir` via classifyPathComponents before the FIRST
+    // call, but every RECURSIVE call already trusts the parent's own Dirent
+    // classification (`de.isDirectory()`) alone. Re-lstat `absDir` itself
+    // here too — narrows the TOCTOU window between that Dirent read and this
+    // readdirSync, even though closing it fully is the boarded, out-of-scope
+    // item (6c1e0890): this recheck cannot eliminate a race, only shrink it.
+    const kind = lstatKind(absDir);
+    if (kind === 'absent') return; // raced away between classification and here — nothing to snapshot, not a violation
+    if (kind !== 'dir') {
+      throw new Error(
+        `(B) baseline path '${relDir}' is not a directory (lstat kind: ${kind}) — refusing to read through it; a symlink or other non-regular ` +
+          `entry standing in for a (B) directory is denied on sight, never followed`
+      );
+    }
+    for (const de of readdirSync(absDir, { withFileTypes: true })) {
+      const abs = join(absDir, de.name);
+      const rel = relDir ? `${relDir}/${de.name}` : de.name;
+      if (de.isSymbolicLink()) {
+        throw new Error(
+          `(B) baseline path '${rel}' is a symlink — refusing to read through it (it may point outside the repository); denied on sight, never followed`
+        );
+      }
+      if (de.isDirectory()) {
+        walkDir(abs, rel);
+      } else if (de.isFile()) {
+        map[toRel(cwd, abs)] = readFileSync(abs).toString('base64');
+      } else {
+        throw new Error(`(B) baseline path '${rel}' is not a regular file or directory (unsupported type) — refusing to read it`);
+      }
+    }
+  };
+
+  // .claude/agents/** (recursive) — '.claude' AND '.claude/agents' are BOTH
+  // classified, component by component, BEFORE any readdirSync ever touches
+  // either of them (round-2 finding (b): walking 'agents' before classifying
+  // '.claude' let an out-of-repo traversal happen before the denial).
+  const agentsKind = classifyPathComponents(cwd, '.claude/agents');
+  if (agentsKind === 'dir') {
+    walkDir(join(cwd, '.claude', 'agents'), '.claude/agents');
+  } else if (agentsKind !== 'absent') {
+    throw new Error(`'.claude/agents' is not a directory (lstat kind: ${agentsKind}) — refusing to read/walk through it; denied on sight, never followed`);
+  }
+
+  // .claude/settings*.json (top level only) — '.claude' classified before it
+  // is listed.
+  const claudeKind = classifyPathComponents(cwd, '.claude');
+  if (claudeKind === 'dir') {
+    for (const de of readdirSync(join(cwd, '.claude'), { withFileTypes: true })) {
+      const rel = '.claude/' + de.name;
+      if (!matchesGlob(rel, '.claude/settings*.json')) continue;
+      if (!de.isFile()) {
+        throw new Error(
+          `(B) baseline path '${rel}' is not a regular file (lstat kind: ${de.isSymbolicLink() ? 'symlink' : 'other'}) — refusing to read through it; ` +
+            `denied on sight, never followed`
+        );
+      }
+      map[rel] = readFileSync(join(cwd, rel)).toString('base64');
+    }
+  } else if (claudeKind !== 'absent') {
+    throw new Error(`'.claude' is not a directory (lstat kind: ${claudeKind}) — refusing to read the (B) baseline surface through it`);
+  }
+
+  // .sterling/config.json — every component ('.sterling' AND 'config.json')
+  // classified before the file is read (round-2 finding (a): a '.sterling'
+  // symlink to an outside directory previously resolved straight through to
+  // whatever 'config.json' sat there).
+  const cfgRel = '.sterling/config.json';
+  const cfgKind = classifyPathComponents(cwd, cfgRel);
+  if (cfgKind === 'file') {
+    map[cfgRel] = readFileSync(join(cwd, cfgRel)).toString('base64');
+  } else if (cfgKind !== 'absent') {
+    throw new Error(`(B) baseline path '${cfgRel}' is not a regular file (lstat kind: ${cfgKind}) — refusing to read through it; denied on sight, never followed`);
+  }
   return map;
 }
 
@@ -522,10 +642,52 @@ function validateBaselineKey(key) {
   return fwd;
 }
 
+// The restore's OWN write primitive (board 8b53dc84, ROUND 2 — folds in board
+// 4d7d188d) — the serious half of the defect: a plain writeFileSync to a path
+// currently occupied by a symlink FOLLOWS it, landing baseline bytes on a
+// destination the agent chose, outside the repository; and
+// mkdirSync(dirname(abs), {recursive:true}) creates directories THROUGH an
+// existing symlinked ANCESTOR exactly the same way. Guarded here with its own
+// component-by-component classification (`classifyPathComponents`, ancestors
+// AND the final segment), deliberately SEPARATE from collectBaseline's
+// read-side scan above (which already denies before this is ever reached in
+// the ordinary flow, since a kind transition makes "current" throw first) — a
+// write primitive that can be aimed is worse than one that can merely be
+// evaded, so it is never trusted to be safe only because an earlier scan said
+// so. `content` is base64 of the raw bytes to restore (collectBaseline's own
+// encoding), decoded back to a Buffer so the write is byte-exact.
 function writeUnder(cwd, rel, content) {
   const abs = join(cwd, rel);
+  // Every ancestor directory must be real (never a symlink) BEFORE mkdirSync
+  // or writeFileSync touches any of them. classifyPathComponents itself
+  // throws on the first non-directory ancestor it finds; its return value
+  // here is the ANCESTOR directory's own kind, which must be 'dir' (already
+  // there) or 'absent' (mkdirSync will create it fresh — safe, nothing to
+  // follow yet).
+  const segments = rel.split('/');
+  const ancestorRel = segments.slice(0, -1).join('/');
+  if (ancestorRel) {
+    const ancestorKind = classifyPathComponents(cwd, ancestorRel);
+    if (ancestorKind !== 'dir' && ancestorKind !== 'absent') {
+      throw new Error(
+        `refusing to restore (B) baseline path '${rel}': ancestor '${ancestorRel}' is not a directory (lstat kind: ${ancestorKind}) — a symlink or ` +
+          `other non-regular ancestor is never created through or written through by a restore`
+      );
+    }
+  }
+  // The FINAL component's own kind — by the ancestor check above, every
+  // component of `abs` up to but not including this final segment is already
+  // confirmed a real directory, so this lstat cannot be fooled by an
+  // intermediate symlink either.
+  const kind = lstatKind(abs);
+  if (kind !== 'file' && kind !== 'absent') {
+    throw new Error(
+      `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) — a symlink or other ` +
+        `non-regular entry is never written through by a restore`
+    );
+  }
   mkdirSync(dirname(abs), { recursive: true });
-  writeFileSync(abs, content);
+  writeFileSync(abs, Buffer.from(content, 'base64'));
 }
 
 // Parse `git status --porcelain -z`: NUL-separated entries `XY <path>`; a

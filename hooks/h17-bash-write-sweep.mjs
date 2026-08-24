@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { join as join2, dirname as dirname3, relative, resolve as resolve2, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
@@ -7078,26 +7078,79 @@ function sha256OfRegularFile(abs) {
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
 }
-function collectBaseline(cwd2) {
-  const map = {};
-  const walk = (absDir) => {
-    if (!existsSync3(absDir)) return;
-    for (const name of readdirSync(absDir)) {
-      const abs = join2(absDir, name);
-      if (statSync(abs).isDirectory()) walk(abs);
-      else map[toRel(cwd2, abs)] = readFileSync2(abs, "utf8");
-    }
-  };
-  walk(join2(cwd2, ".claude", "agents"));
-  const claudeDir = join2(cwd2, ".claude");
-  if (existsSync3(claudeDir)) {
-    for (const name of readdirSync(claudeDir)) {
-      const rel = ".claude/" + name;
-      if (matchesGlob(rel, ".claude/settings*.json")) map[rel] = readFileSync2(join2(cwd2, rel), "utf8");
+function classifyPathComponents(cwd2, rel) {
+  const segments = rel.split("/");
+  let abs = cwd2;
+  let soFar = "";
+  for (let i = 0; i < segments.length; i++) {
+    abs = join2(abs, segments[i]);
+    soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
+    const kind = lstatKind(abs);
+    if (kind === "absent") return "absent";
+    if (i === segments.length - 1) return kind;
+    if (kind !== "dir") {
+      throw new Error(
+        `(B) baseline path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+      );
     }
   }
-  const cfg = join2(cwd2, ".sterling", "config.json");
-  if (existsSync3(cfg)) map[".sterling/config.json"] = readFileSync2(cfg, "utf8");
+  return "absent";
+}
+function collectBaseline(cwd2) {
+  const map = {};
+  const walkDir = (absDir, relDir) => {
+    const kind = lstatKind(absDir);
+    if (kind === "absent") return;
+    if (kind !== "dir") {
+      throw new Error(
+        `(B) baseline path '${relDir}' is not a directory (lstat kind: ${kind}) \u2014 refusing to read through it; a symlink or other non-regular entry standing in for a (B) directory is denied on sight, never followed`
+      );
+    }
+    for (const de of readdirSync(absDir, { withFileTypes: true })) {
+      const abs = join2(absDir, de.name);
+      const rel = relDir ? `${relDir}/${de.name}` : de.name;
+      if (de.isSymbolicLink()) {
+        throw new Error(
+          `(B) baseline path '${rel}' is a symlink \u2014 refusing to read through it (it may point outside the repository); denied on sight, never followed`
+        );
+      }
+      if (de.isDirectory()) {
+        walkDir(abs, rel);
+      } else if (de.isFile()) {
+        map[toRel(cwd2, abs)] = readFileSync2(abs).toString("base64");
+      } else {
+        throw new Error(`(B) baseline path '${rel}' is not a regular file or directory (unsupported type) \u2014 refusing to read it`);
+      }
+    }
+  };
+  const agentsKind = classifyPathComponents(cwd2, ".claude/agents");
+  if (agentsKind === "dir") {
+    walkDir(join2(cwd2, ".claude", "agents"), ".claude/agents");
+  } else if (agentsKind !== "absent") {
+    throw new Error(`'.claude/agents' is not a directory (lstat kind: ${agentsKind}) \u2014 refusing to read/walk through it; denied on sight, never followed`);
+  }
+  const claudeKind = classifyPathComponents(cwd2, ".claude");
+  if (claudeKind === "dir") {
+    for (const de of readdirSync(join2(cwd2, ".claude"), { withFileTypes: true })) {
+      const rel = ".claude/" + de.name;
+      if (!matchesGlob(rel, ".claude/settings*.json")) continue;
+      if (!de.isFile()) {
+        throw new Error(
+          `(B) baseline path '${rel}' is not a regular file (lstat kind: ${de.isSymbolicLink() ? "symlink" : "other"}) \u2014 refusing to read through it; denied on sight, never followed`
+        );
+      }
+      map[rel] = readFileSync2(join2(cwd2, rel)).toString("base64");
+    }
+  } else if (claudeKind !== "absent") {
+    throw new Error(`'.claude' is not a directory (lstat kind: ${claudeKind}) \u2014 refusing to read the (B) baseline surface through it`);
+  }
+  const cfgRel = ".sterling/config.json";
+  const cfgKind = classifyPathComponents(cwd2, cfgRel);
+  if (cfgKind === "file") {
+    map[cfgRel] = readFileSync2(join2(cwd2, cfgRel)).toString("base64");
+  } else if (cfgKind !== "absent") {
+    throw new Error(`(B) baseline path '${cfgRel}' is not a regular file (lstat kind: ${cfgKind}) \u2014 refusing to read through it; denied on sight, never followed`);
+  }
   return map;
 }
 function validateBaselineKey(key) {
@@ -7110,8 +7163,24 @@ function validateBaselineKey(key) {
 }
 function writeUnder(cwd2, rel, content) {
   const abs = join2(cwd2, rel);
+  const segments = rel.split("/");
+  const ancestorRel = segments.slice(0, -1).join("/");
+  if (ancestorRel) {
+    const ancestorKind = classifyPathComponents(cwd2, ancestorRel);
+    if (ancestorKind !== "dir" && ancestorKind !== "absent") {
+      throw new Error(
+        `refusing to restore (B) baseline path '${rel}': ancestor '${ancestorRel}' is not a directory (lstat kind: ${ancestorKind}) \u2014 a symlink or other non-regular ancestor is never created through or written through by a restore`
+      );
+    }
+  }
+  const kind = lstatKind(abs);
+  if (kind !== "file" && kind !== "absent") {
+    throw new Error(
+      `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink or other non-regular entry is never written through by a restore`
+    );
+  }
   mkdirSync2(dirname3(abs), { recursive: true });
-  writeFileSync(abs, content);
+  writeFileSync(abs, Buffer.from(content, "base64"));
 }
 function parsePorcelainZ(out) {
   const tokens = out.split("\0");
