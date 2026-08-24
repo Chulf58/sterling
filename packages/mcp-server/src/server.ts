@@ -295,7 +295,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_schema',
     {
       description:
-        'Ask what a record type requires BEFORE writing it, instead of learning by rejection. Returns {type, fields:[{name, required, type, enum_values?}], required[], optional[]} — derived from the registered zod schema, so it cannot drift from what a write will accept. Use it when you are unsure of a field name, whether a field is mandatory, whether it takes a string or an array of objects, or what a closed enum permits (volatility_hint is fast|medium|stable — "low" is refused). An unregistered type lists the registered ones.',
+        'Ask what a record type requires BEFORE writing it, instead of learning by rejection. Returns {type, fields:[{name, required, type, enum_values?, server_owned?}], required[], optional[]} — derived from the registered zod schema, so it cannot drift from what a write will accept. A field marked server_owned:true (id, created_at, status, superseded_by, …) is set by the server and refused if you pass it — it still appears in `fields` so you know it exists, but never in `required`/`optional`, because those two lists answer "what may I supply", not "what does this record hold". required[] means required FROM THE CALLER on a create, not every field the raw schema declares. Use it when you are unsure of a field name, whether a field is mandatory, whether it takes a string or an array of objects, or what a closed enum permits (volatility_hint is fast|medium|stable — "low" is refused). An unregistered type lists the registered ones.',
       inputSchema: strict({ type: z.string() }),
     },
     ({ type }) => json(tools.knowledgeSchema(type))

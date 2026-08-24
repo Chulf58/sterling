@@ -192,6 +192,16 @@ export interface SameSubjectEntry {
   type: string;
   title: string;
   matched_on: string[];
+  /** N25: the served/derived status of the matched record. A same_subject
+   *  candidate is drawn from axisCandidateMatches -> store.query over the
+   *  five governing types, which never serves a 'superseded' row (AC5,
+   *  same-subject-surfacing.test.ts: a just-superseded record must NEVER be
+   *  named) — a retired record simply never reaches this entry at all, so
+   *  `status` cannot disclose retirement. What it DOES disclose: among the
+   *  live candidates that DO surface, 'active' vs 'flagged_stale' (a
+   *  research_finding whose currency has lapsed) — a caller can see that a
+   *  same-subject match is stale before deciding whether to link to it. */
+  status: string;
 }
 
 export interface ToolDeps {
@@ -1979,6 +1989,7 @@ export class SterlingTools {
         type: record.type,
         title: SterlingTools.axisRecordTitle(record),
         matched_on: hits,
+        status: record.status,
       }));
   }
 
@@ -2255,13 +2266,7 @@ export class SterlingTools {
       );
     }
     const type = String(full.type);
-    const known = knownFieldsFor(type);
-    if (!known || !known.has(field)) {
-      const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
-      throw new Error(`knowledge_get: '${type}' does not define field '${field}' — valid fields: ${valid}.`);
-    }
     const rec = full;
-    const value = rec[field];
     const base: Record<string, unknown> = {
       id: full.id,
       type: full.type,
@@ -2274,6 +2279,41 @@ export class SterlingTools {
       // concept lives now, which a window has no other way to say.
       ...(rec.legacy_resolution !== undefined ? { legacy_resolution: rec.legacy_resolution } : {}),
     };
+    // REAL FIELDS WIN OVER THE VIRTUAL ONE (roster review follow-up): check
+    // knownFieldsFor FIRST — if some type ever registers an actual field
+    // literally named 'headline', it must be reachable by field:'headline'
+    // exactly like any other real field, never shadowed by the fallback
+    // below. Only when no type declares 'headline' as a real field does the
+    // virtual resolver get a turn.
+    const known = knownFieldsFor(type);
+    if (!known?.has(field)) {
+      // N26: a type-agnostic headline read. 'headline' is a VIRTUAL field
+      // name — not registered per-type in knownFieldsFor, because the whole
+      // point is that it resolves the same way (title, falling back to
+      // question, falling back to slug) on every record type, so a caller
+      // does not need to know whether this record's headline lives in
+      // `title` (decision/feature_article) or `question` (research_finding,
+      // which carries no title at all). Reuses axisRecordTitle unchanged —
+      // the same fallback chain knowledgePreflight and sameSubjectDigest
+      // already rely on — so there is exactly one definition of "this
+      // record's headline" in the codebase. Not windowable: it is always a
+      // short derived scalar, never a long field offset/length would matter
+      // for.
+      if (field === 'headline') {
+        if (offset !== undefined || length !== undefined) {
+          throw new Error(
+            `knowledge_get: field 'headline' is a derived scalar (title ?? question ?? slug) — offset/length are not windowable on it.`
+          );
+        }
+        const value = SterlingTools.axisRecordTitle(rec as unknown as DurableRecord);
+        return { ...base, kind: 'value', value };
+      }
+      const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
+      throw new Error(
+        `knowledge_get: '${type}' does not define field '${field}' — valid fields: ${valid}, plus 'headline' (a virtual field on every type: title ?? question ?? slug).`
+      );
+    }
+    const value = rec[field];
     if (typeof value === 'string') {
       const off = offset ?? 0;
       const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
@@ -3774,8 +3814,26 @@ export class SterlingTools {
             // window honestly — it is a bounded scan of the 200 most-recently-
             // updated records of the evidence types, not an exhaustive search of
             // everything ever written citing this id.
+            //
+            // ROSTER REVIEW FIX (N28, follow-up): the file-key clause must not
+            // claim a negative result for a scan that never ran. When fileKeys
+            // is empty the file-key arm is SKIPPED (see check_skipped above) —
+            // saying "no knowledge record touching this item's file_keys...
+            // since it was created" on exactly those items (concept_article_
+            // missing / research_owed / plain tasks, per the FIX M1 comment
+            // above) restates the false-reason defect this note exists to fix,
+            // just relocated to the keyless case. And when the file-key arm DID
+            // run, it is the SAME bounded, overlap-ordered 200-record window as
+            // the id-citation arm (see the comment above fileKeyMatches) — an
+            // unhedged claim there is exactly as overclaiming as the id arm's
+            // own "not an exhaustive search" note already guards against, so
+            // both clauses carry the same window disclosure.
             note:
-              `no fulfilling artifact-write found — nothing touching this item's file_keys, and nothing citing its id among the 200 most-recently-updated evidence records, since it was created — removed on the operator's word. ` +
+              (fileKeys.length > 0
+                ? `no knowledge record touching this item's file_keys among the 200 most-recently-updated evidence records`
+                : `this item carries no file_keys, so the file-key scan could not run (see check_skipped)`) +
+              `, and no knowledge record citing its id among the 200 most-recently-updated evidence records, since it was created — removed on the operator's word. ` +
+              `This checks the durable knowledge store only, never git — a commit that fulfilled this item leaves no trace here unless it was also captured as a record. ` +
               `If work fulfilled this item, its capture is missing (that is drift, not a formality).`,
           }
         : {}),
