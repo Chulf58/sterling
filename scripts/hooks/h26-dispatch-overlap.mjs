@@ -45,6 +45,7 @@ import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel } from './lib/common.mjs';
 import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
 import { liveDispatches } from '../lib/dispatch-register.mjs';
+import { hasUnsuppressedMatch, escapeRe, isReadOnlyDispatchType } from './lib/dispatch-advisory.mjs';
 
 let input;
 try {
@@ -68,19 +69,49 @@ try {
   // other hook in this layer keys on.
   if (!existsSync(join(input.cwd ?? '.', '.sterling', 'sterling.db'))) allow();
 
-  const candidates = extractPathCandidates(input.tool_input?.prompt);
+  // READ-ONLY incoming dispatch (board a6b76e8c item 3): a reviewer/explorer/
+  // Explore/Plan class cannot write, so it can never enter a live write lane
+  // — never warn overlap for one, regardless of prompt content.
+  if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) allow();
+
+  const prompt = input.tool_input?.prompt;
+  const candidates = extractPathCandidates(prompt);
   // Repo-relative POSIX only, with H22's exact exclusion filter mirrored
   // verbatim: .git/.sterling are never governed territory, and the dot-
   // stripped 'sterling/…'/'git/…' forms the extractor can produce are
   // dropped too, so an excluded path never enters the candidate set at all.
-  const files = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
-    (r) =>
-      r !== '.git' &&
-      !r.startsWith('.git/') &&
-      !r.startsWith('.sterling/') &&
-      !r.startsWith('sterling/') &&
-      !r.startsWith('git/')
-  );
+  // KEEP THE PRE-NORMALIZATION STRING for the suppression check (review
+  // finding, board a6b76e8c fixer pass): a Windows-style mention
+  // ('src\util.mjs') normalizes to 'src/util.mjs', which never literally
+  // appears in the RAW prompt — searching the normalized form there silently
+  // dropped every such candidate as "not found" rather than warning on it.
+  // The normalized form is still what feeds the register comparison below.
+  const normalized = candidates
+    .map((raw) => ({ raw, norm: repoRel(raw, input.cwd) }))
+    .filter((p) => p.norm)
+    .filter(
+      (p) =>
+        p.norm !== '.git' &&
+        !p.norm.startsWith('.git/') &&
+        !p.norm.startsWith('.sterling/') &&
+        !p.norm.startsWith('sterling/') &&
+        !p.norm.startsWith('git/')
+    );
+  // Then the SHARED PROHIBITION/NEGATION CHECK (board a6b76e8c item 1): a
+  // path named only inside a prohibition ("DO NOT TOUCH: <paths> (another
+  // lane owns those)") is a NEGATIVE territory declaration, not a positive
+  // claim on this dispatch's own lane — it must never count as a candidate.
+  // checkSubjectVerb:false — "implement the feature in <path>" is a
+  // legitimate territory declaration for a FILE candidate, not a
+  // subject-of-change mention to discount (that guard is for H25's tool
+  // mentions only); only an actual negation suppresses a path here.
+  const files = [
+    ...new Set(
+      normalized
+        .filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false }))
+        .map((p) => p.norm)
+    ),
+  ];
   if (!files.length) allow();
 
   const candidateSet = new Set(files);
