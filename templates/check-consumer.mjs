@@ -13,8 +13,9 @@
 //   node sterling-check.mjs [--base <ref>]
 //
 // --base defaults to this project's own remote default branch (git
-// symbolic-ref against origin/HEAD), falling back to 'main' when that cannot
-// be resolved (a fresh clone that has never fetched, or no origin at all).
+// symbolic-ref against origin/HEAD); with no origin at all (or one never
+// fetched), there is nothing known to diff against yet, so it falls back to
+// HEAD itself — an empty, no-op diff, same as running on the default branch.
 //
 // This file is MACHINE-SPECIFIC (the Sterling clone path below is baked at
 // generation time), gitignored, and individually regenerable: delete it and
@@ -37,45 +38,86 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 // update-win.bat (cmd.exe only), runs under EITHER a WSL node or a
 // native-Windows node, so the conversion cannot be pre-baked — it must
 // happen here, at the moment we know which node is actually running.
-// /mnt/<drive>/... -> <DRIVE>:\...; anything else (an ext4 clone) has no
-// Windows form and passes through unchanged, same limitation as the .bat.
+// /mnt/<drive>/... -> <DRIVE>:\...; drive letter widened to [a-zA-Z] (WSL
+// drvfs mounts are case-insensitive here). Anything else (an ext4 clone, or
+// any non-drvfs path) has NO Windows form — returns null rather than passing
+// a garbage \mnt\... string through, which previously made both checks fail
+// confusingly instead of naming the real problem.
 function toWindowsPath(p) {
-  const m = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
-  return m ? `${m[1].toUpperCase()}:${(m[2] ?? '/').replace(/\//g, '\\')}` : p;
+  const m = /^\/mnt\/([a-zA-Z])(\/.*)?$/.exec(p);
+  return m ? `${m[1].toUpperCase()}:${(m[2] ?? '/').replace(/\//g, '\\')}` : null;
 }
-const PLUGIN_DIR = process.platform === 'win32' ? toWindowsPath(RAW_PLUGIN_DIR) : RAW_PLUGIN_DIR;
+let PLUGIN_DIR = RAW_PLUGIN_DIR;
+if (process.platform === 'win32') {
+  const converted = toWindowsPath(RAW_PLUGIN_DIR);
+  if (!converted) {
+    console.error(
+      `sterling-check: the Sterling clone lives at '${RAW_PLUGIN_DIR}', a WSL-only path with no Windows-drive form — it cannot be converted for native-Windows node. Run this from WSL node instead (wsl node sterling-check.mjs), or move the clone onto a drvfs mount (/mnt/<drive>/...).`
+    );
+    process.exit(3);
+  }
+  PLUGIN_DIR = converted;
+}
 
 const argOf = (name) => {
   const i = process.argv.indexOf(name);
   return i !== -1 ? process.argv[i + 1] : undefined;
 };
 
+// origin/HEAD names the default branch, but stripping 'origin/' assumes a
+// LOCAL branch of that name exists — not true right after a fresh clone or
+// a shallow checkout. Use the bare name only when it actually resolves
+// locally; otherwise fall back to the remote ref itself (--base accepts
+// either form).
 function defaultBranch() {
   const r = spawnSync(
     'git',
     ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
     { cwd: projectRoot, encoding: 'utf8' }
   );
-  const ref = (r.stdout ?? '').trim().replace(/^origin\//, '');
-  return ref || 'main';
+  const originRef = (r.stdout ?? '').trim(); // e.g. 'origin/main', or '' if unresolved
+  if (!originRef) {
+    // Nothing known to diff against — the scan degrades to an empty, no-op
+    // diff that LOOKS like a clean pass, so say why loudly (review finding).
+    console.error('sterling-check: no origin/HEAD resolvable — falling back to --base HEAD (empty diff; the stale-claim scan checks nothing this run)');
+    return 'HEAD';
+  }
+  const localName = originRef.replace(/^origin\//, '');
+  const localResolves = spawnSync('git', ['rev-parse', '--verify', '--quiet', localName], { cwd: projectRoot, encoding: 'utf8' }).status === 0;
+  return localResolves ? localName : originRef;
 }
 
 const base = argOf('--base') ?? defaultBranch();
 
+// EXIT CODES, propagated distinctly rather than collapsed to a bare 0/1:
+//   0 clean · 1 a genuine finding · 2 capability_absent (the check skipped
+//   loud, not a pass) · 3 an environment/spawn failure (the check never ran
+//   at all — e.g. node missing, bad --base, unreadable target). Conflating
+//   these into one exit code would make "found a problem" indistinguishable
+//   from "could not even check".
 function run(label, args) {
   console.log(`\n▸ ${label}`);
-  const r = spawnSync('node', args, { cwd: projectRoot, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, args, { cwd: projectRoot, encoding: 'utf8' });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
   if (out) console.log(out);
-  // r.error (ENOENT, etc.) means the check never ran at all — an environment
-  // failure, not a finding. Print it loudly so it is never mistaken for one.
-  if (r.error) console.error(`\n✗ ${label} could not be run: ${r.error.message}`);
-  return r.status ?? 1;
+  if (r.error) {
+    // spawn itself failed (ENOENT, etc.) — the check never ran at all.
+    console.error(`\n✗ ${label} could not be run: ${r.error.message}`);
+    return 3;
+  }
+  if (r.status === null) {
+    // killed by a signal, not a normal exit — also never ran to completion.
+    console.error(`\n✗ ${label} terminated abnormally (signal ${r.signal})`);
+    return 3;
+  }
+  // check-record-citations only ever exits 0/1; check-stale-claims exits
+  // 0/1/2/3 (see its own header) — pass either through unchanged.
+  return r.status;
 }
 
 // join(), not string interpolation: PLUGIN_DIR may be a Windows-form path
-// (C:\...) baked for a native-Windows node invocation, and concatenating a
-// forward slash onto that would produce a broken mixed-separator path.
+// (C:\...) on native-Windows node, and concatenating a forward slash onto
+// that would produce a broken mixed-separator path.
 const citationsStatus = run('record citations', [
   join(PLUGIN_DIR, 'scripts', 'check-record-citations.mjs'),
   projectRoot,
@@ -88,8 +130,12 @@ const staleClaimsStatus = run(`stale-claim scan (--base ${base})`, [
   base,
 ]);
 
-const failed = [citationsStatus, staleClaimsStatus].some((s) => s !== 0);
-if (failed) {
+// Overall exit reflects the MOST SEVERE of the two children rather than
+// collapsing everything non-zero to a bare 1: an environment failure (3)
+// outranks a skipped check (2), which outranks a genuine finding (1).
+const codes = [citationsStatus, staleClaimsStatus];
+const exitCode = codes.includes(3) ? 3 : codes.includes(2) ? 2 : codes.includes(1) ? 1 : 0;
+if (exitCode !== 0) {
   console.error('\nsterling-check: FAILED — see the check output above.');
 }
-process.exit(failed ? 1 : 0);
+process.exit(exitCode);
