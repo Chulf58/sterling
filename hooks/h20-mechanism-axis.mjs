@@ -6223,6 +6223,50 @@ var SterlingStore = class _SterlingStore {
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
     return row.n;
   }
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts, minScore) {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore);
+    return row.n;
+  }
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  ftsMatchExpr(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
@@ -6230,8 +6274,7 @@ var SterlingStore = class _SterlingStore {
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        const joiner = opts.match_all ? " AND " : " OR ";
-        const match = terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+        const match = this.ftsMatchExpr(terms, opts.match_all);
         const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
@@ -6976,6 +7019,10 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
+function deny(message) {
+  process.stderr.write(message);
+  process.exit(2);
+}
 function allow() {
   process.exit(0);
 }
@@ -7040,6 +7087,89 @@ function writeGuard(path, guard) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
+}
+var DENY_RULING_TYPES = ["decision", "anti_pattern"];
+var STRICT_MIN_HITS = 3;
+var STRICT_MIN_RECORD_TERMS = AXIS_RECORD_TOP_K;
+var DELTA_MIN_NEW_TERMS = 5;
+function subQuestionText(q) {
+  return [
+    q?.question,
+    q?.header,
+    ...Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []
+  ].filter((s2) => typeof s2 === "string" && s2.trim()).join("\n");
+}
+function denyLedgerPath(cwd, agentId) {
+  return join2(deliveryDir(cwd), agentId ? `deny-ledger-agent-${agentId}.json` : "deny-ledger-conductor.json");
+}
+function emptyDenyLedger() {
+  return { entries: {}, overrides: [] };
+}
+function readDenyLedger(path) {
+  try {
+    if (!existsSync3(path)) return emptyDenyLedger();
+    return { ...emptyDenyLedger(), ...JSON.parse(readFileSync2(path, "utf8")) };
+  } catch {
+    process.stderr.write(`H20: corrupt deny-once ledger at ${path} \u2014 reset to empty
+`);
+    return emptyDenyLedger();
+  }
+}
+function writeDenyLedger(path, ledger) {
+  mkdirSync2(dirname3(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(ledger));
+  renameSync(tmp, path);
+}
+function denyIntentKey(recordIds) {
+  return [...new Set(recordIds ?? [])].sort().join("|");
+}
+function escapeForRegex(s2) {
+  return String(s2).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function idCitedIn(text, id) {
+  if (!id) return false;
+  const hay = String(text ?? "").toLowerCase();
+  const full = String(id).toLowerCase();
+  const boundaried = (needle) => new RegExp(`(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`, "i").test(hay);
+  if (boundaried(full)) return true;
+  const prefix = full.split("-")[0];
+  return prefix.length >= 8 && boundaried(prefix);
+}
+function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
+  const lines = [
+    "STERLING DENY-ONCE (H20, decision 68332e4b) \u2014 this question is DENIED before it reaches the user: its subject strongly matches a settled store ruling.",
+    "The store already decides this; asking again spends the user's attention on a resolved question and risks minting a competing ruling."
+  ];
+  if (totalQuestions > 1) {
+    lines.push(
+      `This form has ${totalQuestions} sub-question(s); ${ruled.length} of them are SETTLED by the store below \u2014 resubmit ONLY the open sub-question(s) named here:`
+    );
+  }
+  for (const r of ruled) {
+    lines.push(`\u2014 Sub-question ${r.index + 1}${r.label ? ` ("${clip(r.label, 80)}")` : ""} is SETTLED:`);
+    for (const d of r.decisions) {
+      const kind = d.type === "anti_pattern" ? "anti_pattern" : "decision";
+      const substance = d.type === "anti_pattern" ? `${d.trigger ?? ""} \u2014 ${d.right_way ?? ""}` : d.statement ?? "";
+      lines.push(
+        `  \u25B8 ${kind} [${d.id}] (status: ${d.status ?? "unknown"}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ""}, scope: ${d.scope ?? "unknown"}): ${clip(substance, 300)}`
+      );
+    }
+  }
+  if (totalQuestions > 1) {
+    if (open.length) {
+      lines.push("\u2014 OPEN (resubmit only these):");
+      for (const o of open) {
+        lines.push(`  \u25B8 Sub-question ${o.index + 1}${o.label ? ` ("${clip(o.label, 80)}")` : ""}`);
+      }
+    } else {
+      lines.push("\u2014 OPEN (resubmit only these): none \u2014 every sub-question in this form is settled.");
+    }
+  }
+  lines.push(
+    "TO OVERRIDE: resubmit this exact sub-question citing one of the ruling ids above AND stating the UNRESOLVED DELTA \u2014 what this ask needs that the cited ruling does not already settle. A resubmission that neither cites an id nor introduces new substance beyond the first attempt is denied again; repeated overrides are logged."
+  );
+  return lines.join("\n");
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -7132,7 +7262,68 @@ try {
     ...store.query({ types: ["research_finding"], rank_terms: terms, cap: 40 }),
     ...store.query({ types: ["disconfirmed_hypothesis"], rank_terms: terms, cap: 40 })
   ];
+  if (isQuestion && input.tool_input.questions.length > 1) {
+    const seen = new Set(candidates.map((r) => r.id));
+    for (const q of input.tool_input.questions) {
+      const subTerms = extractAxisTerms(subQuestionText(q), MAX_RANK_TERMS);
+      if (subTerms.length < AXIS_MIN_HITS) continue;
+      for (const type of DENY_RULING_TYPES) {
+        for (const r of store.query({ types: [type], rank_terms: subTerms, cap: 40 })) {
+          if (!seen.has(r.id)) {
+            seen.add(r.id);
+            candidates.push(r);
+          }
+        }
+      }
+    }
+  }
   if (!candidates.length) allow();
+  if (isQuestion) {
+    const questions = input.tool_input.questions;
+    const perQuestion = questions.map((q, index) => {
+      const subText = subQuestionText(q);
+      const subTerms = extractAxisTerms(subText, MAX_RANK_TERMS);
+      const strict = candidates.filter((r) => DENY_RULING_TYPES.includes(r.type)).map((r) => ({ record: r, hits: axisHits(r, subTerms) })).filter(
+        (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, subText, { minTerms: STRICT_MIN_RECORD_TERMS })
+      );
+      return { index, label: q?.header ?? q?.question, subText, subTerms, strict };
+    });
+    const ledgerPath = denyLedgerPath(input.cwd, input.agent_id);
+    const ledger = readDenyLedger(ledgerPath);
+    const unresolved = [];
+    const openIndexes = /* @__PURE__ */ new Set();
+    for (const p of perQuestion) {
+      const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
+      let overridden = null;
+      for (const [key2, entry] of Object.entries(ledger.entries)) {
+        if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
+        if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
+        const newTerms = p.subTerms.filter((t) => !entry.terms.includes(t));
+        if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
+          overridden = { key: key2, recordIds: entry.recordIds };
+          break;
+        }
+      }
+      if (overridden) {
+        ledger.overrides.push({ key: overridden.key, recordIds: overridden.recordIds, at: (/* @__PURE__ */ new Date()).toISOString() });
+        openIndexes.add(p.index);
+        continue;
+      }
+      if (p.strict.length === 0) {
+        openIndexes.add(p.index);
+        continue;
+      }
+      const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
+      const key = denyIntentKey(recordIds);
+      if (!ledger.entries[key]) ledger.entries[key] = { terms: p.subTerms, recordIds };
+      unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record) });
+    }
+    writeDenyLedger(ledgerPath, ledger);
+    if (unresolved.length) {
+      const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
+      deny(renderDenyOnceMessage(unresolved, questions.length, open));
+    }
+  }
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);

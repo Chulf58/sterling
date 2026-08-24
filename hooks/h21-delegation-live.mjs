@@ -5058,31 +5058,44 @@ try {
     const validPrior = prior && prior.session_id === input.session_id && Number.isFinite(prior.count) && Number.isFinite(prior.bytes);
     const count = validPrior ? prior.count + 1 : 1;
     const priorBytes = validPrior ? prior.bytes : 0;
-    const priorNagged = validPrior && prior.nagged === true;
+    const sessionAdvised = validPrior && (prior.advised === true || prior.nagged === true);
     const writeBytes = toolInputBytes(input.tool_input);
     const sessionBytes = priorBytes + writeBytes;
     const { writeThreshold, sessionThreshold } = sizeThresholds();
     const overWrite = writeBytes > writeThreshold;
-    const crossesSession = !priorNagged && sessionBytes > sessionThreshold;
-    const nagged = priorNagged || crossesSession;
-    writeJson(articleWritesPath, { session_id: input.session_id, count, bytes: sessionBytes, nagged });
-    if (overWrite || crossesSession) {
+    const crossesSession = sessionBytes > sessionThreshold;
+    const shouldEmit = !sessionAdvised && (overWrite || crossesSession);
+    const advised = sessionAdvised || shouldEmit;
+    writeJson(articleWritesPath, { session_id: input.session_id, count, bytes: sessionBytes, advised });
+    if (shouldEmit) {
       const sizeReason = overWrite ? `this write is ${writeBytes} bytes, over the per-write advisory threshold (write_bytes_advise=${writeThreshold} bytes)` : `this session's cumulative hand-run write bytes just crossed the session advisory threshold (session_bytes_advise=${sessionThreshold} bytes, now ${sessionBytes} bytes)`;
       emit(
-        `H21 article-write watch: ${sizeReason} \u2014 hand-run article write #${count} this session (decision dac3d2c6 \u2014 article application is librarian-shaped). Hand-run writes are for the three named exceptions only: (1) a small authored create, (2) a write needing live adjudication, (3) a single small-record touch. Bulkier article reconciles should batch through the librarian dispatch instead \u2014 it runs on a cheaper model in parallel, and the conductor's context window is the session's scarcest and most expensive resource.`
+        `H21 article-write watch (once per session): ${sizeReason} \u2014 hand-run article write #${count} this session (decision dac3d2c6 \u2014 article application is librarian-shaped). Hand-run writes are for the three named exceptions only: (1) a small authored create, (2) a write needing live adjudication, (3) a single small-record touch. Bulkier article reconciles should batch through the librarian dispatch instead \u2014 it runs on a cheaper model in parallel, and the conductor's context window is the session's scarcest and most expensive resource.`
       );
     }
     process.exit(0);
   }
   if (toolName === "Task" || toolName === "Agent") {
-    writeJson(streakPath, { session_id: input.session_id, read_paths: [], searches: 0, nagged: false });
+    const prior = readJsonSafe(streakPath, null);
+    const advised = prior && prior.session_id === input.session_id && (prior.advised === true || prior.nagged === true);
+    writeJson(streakPath, { session_id: input.session_id, read_paths: [], searches: 0, nagged: false, advised });
     process.exit(0);
   }
   if (toolName === "Read" || toolName === "Grep" || toolName === "Glob") {
     const threshold = safeConfig().delegation_watch.streak_threshold;
-    let streak = readJsonSafe(streakPath, null);
-    if (!streak || streak.session_id !== input.session_id) {
-      streak = { session_id: input.session_id, read_paths: [], searches: 0, nagged: false };
+    const rawStreak = readJsonSafe(streakPath, null);
+    let streak;
+    if (rawStreak && rawStreak.session_id === input.session_id) {
+      streak = {
+        session_id: input.session_id,
+        read_paths: Array.isArray(rawStreak.read_paths) ? rawStreak.read_paths : [],
+        searches: Number.isFinite(rawStreak.searches) ? rawStreak.searches : 0,
+        nagged: rawStreak.nagged === true,
+        // Legacy migration: a pre-upgrade `nagged: true` counts as advised.
+        advised: rawStreak.advised === true || rawStreak.nagged === true
+      };
+    } else {
+      streak = { session_id: input.session_id, read_paths: [], searches: 0, nagged: false, advised: false };
     }
     if (toolName === "Read") {
       const fp = input.tool_input?.file_path;
@@ -5092,9 +5105,10 @@ try {
     }
     const streakCount = streak.read_paths.length + streak.searches;
     let ctx = null;
-    if (!streak.nagged && streakCount >= threshold) {
+    if (!streak.nagged && !streak.advised && streakCount >= threshold) {
       streak.nagged = true;
-      ctx = `H21 hand-work streak: ${streakCount} distinct hand-work action(s) (reads + searches) since the last dispatch \u2014 moment 3 of decision 677f1639: hand-work that needed only its CONCLUSION was a dispatch. Every hand-read lands file contents in the conductor's own context window \u2014 the session's scarcest and most expensive resource; a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion. Delegate the remaining reads/searches.`;
+      streak.advised = true;
+      ctx = `H21 hand-work streak (once per session): ${streakCount} distinct hand-work action(s) (reads + searches) since the last dispatch \u2014 moment 3 of decision 677f1639: hand-work that needed only its CONCLUSION was a dispatch. Every hand-read lands file contents in the conductor's own context window \u2014 the session's scarcest and most expensive resource; a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion. Delegate the remaining reads/searches.`;
     }
     writeJson(streakPath, streak);
     if (ctx) emit(ctx);

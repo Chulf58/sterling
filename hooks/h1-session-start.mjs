@@ -6063,6 +6063,50 @@ var SterlingStore = class _SterlingStore {
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
     return row.n;
   }
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts, minScore) {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore);
+    return row.n;
+  }
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  ftsMatchExpr(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
@@ -6070,8 +6114,7 @@ var SterlingStore = class _SterlingStore {
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        const joiner = opts.match_all ? " AND " : " OR ";
-        const match = terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+        const match = this.ftsMatchExpr(terms, opts.match_all);
         const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
@@ -7181,6 +7224,7 @@ SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient regis
 }
 var counts = { todos: 0, maintenance: 0, groupedTodos: 0, objectives: 0 };
 var queueReasons = [];
+var queueReasonEntries = [];
 var drainable = 0;
 var parked = 0;
 try {
@@ -7198,16 +7242,31 @@ try {
   parked = system.length - drainable;
   const byReason = /* @__PURE__ */ new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
+  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
+  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
 } finally {
   store.close();
 }
+var TOO_DEEP_MULTIPLIER = 10;
 var queueContext = "";
-if (drainable >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
-  queueContext = `
+var deepThreshold = Math.max(1, config?.maintenance_queue?.deep_threshold ?? 15);
+if (drainable >= deepThreshold) {
+  const parkedNote = parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
+  if (drainable >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries.length) {
+    const topLanes = queueReasons.slice(0, 3);
+    const [topReason, topCount] = queueReasonEntries[0];
+    const topPhrase = `${topCount} item${topCount === 1 ? "" : "s"} in lane ${topReason}`;
+    const laneLead = queueReasonEntries.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
+    queueContext = `
 
-MAINTENANCE QUEUE IS DEEP \u2014 ${drainable} drainable items (${queueReasons.join(", ")})` + (parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "") + `.
+MAINTENANCE QUEUE IS VERY DEEP \u2014 ${drainable} drainable items across ${queueReasonEntries.length} lane(s)${parkedNote}.
+` + laneLead + `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest \u2014 don't try to clear the whole queue in one pass. Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back (an already-paid item closes with board_remove and NO knowledge_update). A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
+  } else {
+    queueContext = `
+
+MAINTENANCE QUEUE IS DEEP \u2014 ${drainable} drainable items (${queueReasons.join(", ")})${parkedNote}.
 Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+  }
 }
 var registryContext = "";
 if (existsSync3(registryPath())) {
@@ -7291,9 +7350,10 @@ try {
 } catch {
   maxConcurrent = 5;
 }
+var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventions(maxConcurrent) + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

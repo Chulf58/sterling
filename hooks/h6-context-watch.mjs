@@ -5982,6 +5982,50 @@ var SterlingStore = class _SterlingStore {
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
     return row.n;
   }
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts, minScore) {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore);
+    return row.n;
+  }
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  ftsMatchExpr(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
@@ -5989,8 +6033,7 @@ var SterlingStore = class _SterlingStore {
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        const joiner = opts.match_all ? " AND " : " OR ";
-        const match = terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+        const match = this.ftsMatchExpr(terms, opts.match_all);
         const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
