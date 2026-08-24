@@ -10,7 +10,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent } from '../lib/update.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
@@ -736,5 +737,48 @@ test('the fan-out delivers sterling-update.bat to each registered project (a pro
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+// board d055b150 — migrate-stores.mjs's journal previously recorded no caller
+// identity at all, so an unattributed store mutation on this machine (11
+// stores touched in one session) cost a real investigation plus one retracted
+// public attribution. migrate-stores.mjs itself now stamps invoked_by:'direct'
+// when the flag is absent; this pins the OTHER half — the update sweep must
+// name itself so the journal can tell the two apart.
+/** A minimal, genuinely pre-v2 SQLite file at <cwd>/.sterling/sterling.db —
+ *  enough for probeSchemaVersion's raw header read (user_version=1) and
+ *  machineStores' existsSync check, deterministic regardless of what this
+ *  machine's real ~/.sterling/domains happens to hold. exec is fully faked in
+ *  these tests, so the "migration" is never actually run — only the args
+ *  step() was called with are inspected. */
+function legacyStoreAt(dbPath) {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS t (id INTEGER); PRAGMA user_version = 1;');
+  } finally {
+    db.close();
+  }
+}
+
+test('the migration sweep attributes itself: migrate-stores.mjs is invoked with --invoked-by update-sweep', async () => {
+  const cwd = scratchCwd();
+  try {
+    const storePath = join(cwd, '.sterling', 'sterling.db');
+    legacyStoreAt(storePath);
+    const { exec, calls } = fakeExec({ behind: 1 });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(report.exit, 0, `the update must succeed through the migration step: ${JSON.stringify(report)}`);
+    const migrateCall = calls.find((c) => c.includes('migrate-stores.mjs') && c.includes(storePath));
+    assert.ok(migrateCall, `expected a migrate-stores.mjs call naming '${storePath}' among:\n${calls.join('\n')}`);
+    assert.match(
+      migrateCall,
+      /--invoked-by update-sweep\b/,
+      'the update sweep must attribute itself in the migration journal via --invoked-by'
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });

@@ -395,7 +395,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       return report;
     }
     if (version < 2) {
-      if (!step(`migrate store schema v${version} → v2 (${store})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', store], { show: true }).ok) return report;
+      if (!step(`migrate store schema v${version} → v2 (${store})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', store, '--invoked-by', 'update-sweep'], { show: true }).ok) return report;
       // Review fix H2: an already-open MCP server keeps the schema verdict it
       // read at open, so a session that was live during migration refuses
       // writes until restarted — say so instead of leaving a mystery refusal.
@@ -445,7 +445,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         return report;
       }
       if (projVersion < 2) {
-        if (!step(`migrate store schema v${projVersion} → v2 (${projStore})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', projStore], { show: true }).ok) return report;
+        if (!step(`migrate store schema v${projVersion} → v2 (${projStore})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', projStore, '--invoked-by', 'update-sweep'], { show: true }).ok) return report;
         log(`  ▸ migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough — MCP servers survive it) before it can write again`);
       }
     }

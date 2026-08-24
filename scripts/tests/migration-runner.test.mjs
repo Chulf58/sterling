@@ -825,3 +825,262 @@ test('S4-M4 [stable-identity-design-v2]: a promote tombstone (superseded_by name
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===========================================================================
+// board d055b150 — SUCCESSOR ELECTION + JOURNAL PROVENANCE
+//
+// The deepdots store's real multi_successor conflict (record c1bae7e0, three
+// claimants) needed a human-ruled resolution routed through this journalled
+// runner rather than a hand-edit of the SQLite file. --elect-successor
+// <oldId>=<winnerId> (repeatable) is that route: it is consumed ONLY against
+// a genuine multi_successor conflict on oldId whose claimant set contains
+// winnerId, and refuses loudly (never silently no-ops) on a mismatch or a
+// stale instruction. Separately, the runner's journal previously carried no
+// caller identity at all — argv/cwd/pid/ppid/invoked_by close that gap.
+// ===========================================================================
+
+function buildAbsentTargetElectionFixture(path) {
+  // The deepdots c1bae7e0 shape: the superseded id itself has NO local
+  // record row — only the claimants' record_links edges reference it (a
+  // project-local handoff, per the board item). Two real, healthy records
+  // (W1, W2) each independently claim to supersede it.
+  const idAbsent = randomUUID();
+  const idW1 = randomUUID();
+  const idW2 = randomUUID();
+  const db = createLegacyDb(path);
+  try {
+    insertLegacyRecord(db, idW1, 'active', null, { title: 'W1', statement: 'w1 healthy' });
+    insertLegacyRecord(db, idW2, 'active', null, { title: 'W2', statement: 'w2 healthy' });
+    insertLegacyLink(db, idW1, 'supersedes', idAbsent);
+    insertLegacyLink(db, idW2, 'supersedes', idAbsent);
+    db.exec('PRAGMA user_version = 1');
+  } finally {
+    db.close();
+  }
+  return { idAbsent, idW1, idW2 };
+}
+
+test('S4-E1 [board d055b150]: --elect-successor resolves a multi-successor conflict, dropping the losing claimant and collapsing onto the elected winner', () => {
+  const { dir, path } = tempDbPath();
+  try {
+    const fx = buildMultiSuccessorFixture(path);
+
+    const r = runMigrate(['--db', path, '--elect-successor', `${fx.idP}=${fx.idQ1}`]);
+    assert.equal(r.code, 0, `an election matching the claimant set must succeed: ${r.stderr}`);
+    const report = parseJson(r.stdout, 'runner stdout');
+    assert.equal(report.ok, true);
+
+    const store = new SterlingStore(path);
+    try {
+      const q1 = store.get(fx.idQ1);
+      assert.ok(q1, 'the elected winner Q1 survives as the terminus');
+      assert.equal(q1.version, 2, 'Q1 is now version 2 — P folded into its history by the election');
+
+      const aliasP = store.recordAliases().find((a) => a.historical_id === fx.idP);
+      assert.ok(aliasP, 'P resolves via the alias index onto the elected winner');
+      assert.equal(aliasP.canonical_id, fx.idQ1, 'P collapsed onto the ELECTED winner Q1, never the un-elected Q2');
+
+      const q2Rel = store.db
+        .prepare('SELECT count(*) AS n FROM record_relations WHERE source_id = ? OR target_id = ?')
+        .get(fx.idQ2, fx.idQ2);
+      assert.equal(q2Rel.n, 0, 'the losing claimant Q2 carries no relation to P — its edge was dropped by the election');
+    } finally {
+      store.close();
+    }
+
+    const manifest = parseJson(readFileSync(report.manifest_path, 'utf8'), 'manifest');
+    const disclosed = JSON.stringify(manifest);
+    assert.match(disclosed, /ELECTION/, 'the election is disclosed in the manifest, never silent');
+    assert.match(disclosed, new RegExp(fx.idQ2), 'the dropped losing-claimant edge names the dropped claimant');
+    assert.ok(
+      manifest.invocation?.argv?.includes('--elect-successor'),
+      'the election lands VERBATIM in the journal via argv'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-E2 [board d055b150]: --elect-successor naming a winner NOT among the claimants refuses loudly, never silently ignored', () => {
+  const { path } = tempDbPath();
+  const fx = buildMultiSuccessorFixture(path);
+  const bogusWinner = randomUUID();
+
+  const { code, stdout, stderr } = runMigrate(['--db', path, '--elect-successor', `${fx.idP}=${bogusWinner}`]);
+  assert.notEqual(code, 0, 'an election naming a non-claimant winner must refuse, never silently ignore or invent');
+  assert.equal(rawUserVersion(path), 1, 'user_version is never bumped when an election is rejected');
+
+  const combined = stdout + stderr;
+  assert.match(combined, /elect/i, 'the refusal names the election mechanism');
+  assert.match(combined, new RegExp(bogusWinner), 'the refusal names the mismatched winner it was given');
+  assert.match(
+    combined,
+    /re-run electing one of the listed claimants/i,
+    'F3: the refusal appends the corrective REMEDY, not just the mismatch'
+  );
+});
+
+test('S4-E3 [board d055b150]: --elect-successor naming a conflict that does not exist refuses as a stale instruction, never a silent no-op', () => {
+  const { path } = tempDbPath();
+  const fx = buildLegacyChainFixture(path); // a healthy chain: idA is singly-claimed, no conflict at all
+
+  const { code, stdout, stderr } = runMigrate(['--db', path, '--elect-successor', `${fx.idA}=${fx.idB}`]);
+  assert.notEqual(code, 0, 'an election for a conflict that does not exist is an error, not a no-op');
+  assert.equal(rawUserVersion(path), 1, 'user_version is never bumped when a stale election is rejected');
+
+  const combined = stdout + stderr;
+  assert.match(combined, /stale|does not exist/i, 'the refusal names the election as stale/non-matching');
+  assert.match(
+    combined,
+    /drop this --elect-successor and re-run/i,
+    'F3: the refusal appends the corrective REMEDY, not just the diagnosis'
+  );
+});
+
+test('S4-E4 [board d055b150]: election resolves a multi-successor conflict whose superseded target has NO local record row (the deepdots c1bae7e0 shape) — migration proceeds, the absence is disclosed explicitly', () => {
+  const { dir, path } = tempDbPath();
+  try {
+    const fx = buildAbsentTargetElectionFixture(path);
+
+    const r = runMigrate(['--db', path, '--elect-successor', `${fx.idAbsent}=${fx.idW1}`]);
+    assert.equal(r.code, 0, `an election on an absent target must resolve cleanly, not crash or refuse: ${r.stderr}`);
+    const report = parseJson(r.stdout, 'runner stdout');
+    assert.equal(report.ok, true);
+
+    const store = new SterlingStore(path);
+    try {
+      const w1 = store.get(fx.idW1);
+      const w2 = store.get(fx.idW2);
+      assert.ok(w1 && w2, 'both real claimants survive as ordinary live records, unaffected in content');
+
+      const aliasForAbsent = store.recordAliases().find((a) => a.historical_id === fx.idAbsent);
+      assert.equal(aliasForAbsent, undefined, 'the absent target is never aliased — there is no row to archive');
+
+      const relCount = store.db
+        .prepare('SELECT count(*) AS n FROM record_relations WHERE source_id = ? OR target_id = ?')
+        .get(fx.idAbsent, fx.idAbsent);
+      assert.equal(relCount.n, 0, 'no relation is minted for an id that never had a local record row');
+    } finally {
+      store.close();
+    }
+
+    const manifest = parseJson(readFileSync(report.manifest_path, 'utf8'), 'manifest');
+    const disclosed = JSON.stringify(manifest);
+    assert.match(disclosed, /ABSENT/, 'the absence of the superseded target is disclosed explicitly, not swept under the election');
+    assert.match(disclosed, /ELECTION/, 'the election that resolved the conflict is disclosed too');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// review fix F1 (roster review, board d055b150): the absent-target handling
+// was gated on `electionsUsed.has(oldId)`, so a SINGLY-claimed absent target
+// (no conflict at all, hence no election) fell through to collapseSuccessor,
+// became a chain root, and crashed JSON.parse(alias.row.body) inside the
+// transaction — the exact shape deepdots' own c1bae7e0 carries BEFORE any
+// human ruling (a dangling link target, singly claimed until the OTHER two
+// claimants are discovered). This must migrate cleanly, election or not.
+function buildSingleClaimAbsentTargetFixture(path) {
+  const idAbsent = randomUUID(); // no local record row at all
+  const idW1 = randomUUID();
+  const db = createLegacyDb(path);
+  try {
+    insertLegacyRecord(db, idW1, 'active', null, { title: 'W1', statement: 'w1 healthy, sole claimant' });
+    insertLegacyLink(db, idW1, 'supersedes', idAbsent);
+    db.exec('PRAGMA user_version = 1');
+  } finally {
+    db.close();
+  }
+  return { idAbsent, idW1 };
+}
+
+test('S4-E5 [board d055b150 review fix F1]: a SINGLY-claimed absent target (no conflict, no election) migrates cleanly with an ABSENT disclosure, never a crash', () => {
+  const { dir, path } = tempDbPath();
+  try {
+    const fx = buildSingleClaimAbsentTargetFixture(path);
+
+    const r = runMigrate(['--db', path]);
+    assert.equal(r.code, 0, `a singly-claimed absent target must resolve cleanly, not crash: ${r.stderr}`);
+    const report = parseJson(r.stdout, 'runner stdout');
+    assert.equal(report.ok, true);
+
+    const store = new SterlingStore(path);
+    try {
+      const w1 = store.get(fx.idW1);
+      assert.ok(w1, 'the sole claimant survives as an ordinary live record');
+      const aliasForAbsent = store.recordAliases().find((a) => a.historical_id === fx.idAbsent);
+      assert.equal(aliasForAbsent, undefined, 'the absent target is never aliased — there is no row to archive');
+      const relCount = store.db
+        .prepare('SELECT count(*) AS n FROM record_relations WHERE source_id = ? OR target_id = ?')
+        .get(fx.idAbsent, fx.idAbsent);
+      assert.equal(relCount.n, 0, 'no relation is minted for an id that never had a local record row');
+    } finally {
+      store.close();
+    }
+
+    const manifest = parseJson(readFileSync(report.manifest_path, 'utf8'), 'manifest');
+    const disclosed = JSON.stringify(manifest);
+    assert.match(disclosed, /ABSENT/, 'the absence is disclosed even with no election involved');
+    assert.doesNotMatch(disclosed, /ELECTION/, 'no election fired here — the disclosure must not falsely credit one');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// review fix F2 (roster review, board d055b150): parseElections previously
+// accepted any string on either side of '=', so a typo'd or space-padded id
+// was only caught later as stale_election/election_mismatch AFTER classify()
+// ran inside main() — i.e. AFTER the VACUUM INTO backup was already taken,
+// contradicting the function's own "before a backup is even taken" comment.
+test('S4-E6 [board d055b150 review fix F2]: a non-UUID-shaped --elect-successor id refuses BEFORE any backup or manifest is written', () => {
+  const { dir, path } = tempDbPath();
+  const fx = buildMultiSuccessorFixture(path);
+  const before_ = dirSnapshot(dir);
+
+  const { code, stdout, stderr } = runMigrate(['--db', path, '--elect-successor', `${fx.idP}=not-a-uuid`]);
+  assert.notEqual(code, 0, 'a non-UUID-shaped election id must refuse, never be silently coerced');
+  assert.equal(rawUserVersion(path), 1, 'user_version is untouched');
+
+  const combined = stdout + stderr;
+  assert.match(combined, /UUID-shaped/i, 'the refusal names the shape requirement');
+  assert.deepEqual(
+    dirSnapshot(dir),
+    before_,
+    'a syntactically invalid election refuses before any backup/manifest file is created — no litter'
+  );
+});
+
+test('S4-P1 [board d055b150]: every journal carries invocation provenance — argv, cwd, pid, ppid, invoked_by — on a successful run', () => {
+  const { dir, path } = tempDbPath();
+  try {
+    buildLegacyChainFixture(path);
+
+    const r = runMigrate(['--db', path]);
+    assert.equal(r.code, 0, `healthy chain migrates: ${r.stderr}`);
+    const report = parseJson(r.stdout, 'runner stdout');
+    const manifest = parseJson(readFileSync(report.manifest_path, 'utf8'), 'manifest');
+
+    assert.ok(manifest.invocation, 'the journal carries an invocation block');
+    assert.deepEqual(manifest.invocation.argv, ['--db', path], 'argv is the post-node args, sanitized verbatim');
+    assert.equal(typeof manifest.invocation.cwd, 'string');
+    assert.ok(manifest.invocation.cwd.length > 0, 'cwd is recorded');
+    assert.equal(typeof manifest.invocation.pid, 'number');
+    assert.ok(manifest.invocation.pid > 0, 'pid is recorded');
+    assert.equal(typeof manifest.invocation.ppid, 'number');
+    assert.ok(manifest.invocation.ppid > 0, 'ppid is recorded');
+    assert.equal(manifest.invocation.invoked_by, 'direct', 'a run with no --invoked-by attributes itself as direct');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-P2 [board d055b150]: --invoked-by is recorded verbatim, including on a run refused BEFORE any mutation — provenance must survive a refusal', () => {
+  const { path } = tempDbPath();
+  const fx = buildMultiSuccessorFixture(path);
+
+  const r = runMigrate(['--db', path, '--invoked-by', 'update-sweep']);
+  assert.notEqual(r.code, 0, 'the multi-successor conflict still refuses when no election is given');
+  const report = parseJson(r.stdout, 'runner stdout on refusal');
+  const manifest = parseJson(readFileSync(report.manifest_path, 'utf8'), 'manifest');
+  assert.equal(manifest.invocation.invoked_by, 'update-sweep', 'even a refused run is attributed to its caller');
+});
