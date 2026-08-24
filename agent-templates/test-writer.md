@@ -11,6 +11,7 @@ required_inputs:
   - prior tests (paths)
   - prior handoffs (handoff_read)
   - knowledge slice (decisions + conventions, prep-staged)
+  - the session scratchpad path (where any throwaway/exploration file goes — never `scripts/`, never the repo tree)
 hooks:
   PreToolUse:
     - matcher: "Read|Grep"
@@ -108,6 +109,7 @@ NO RUN ACTIVE (a conductor-direct dispatch): `handoff_write`/`agent_exit` are ru
 - Never write or edit non-test files — H18 (the write wall) denies any Write/Edit/MultiEdit outside the toolchain test globs, and the enforcement surface unconditionally; do not route around it. Prefer Edit for adding cases to an existing test file you own — a wholesale Write rewrite risks altering cases you were told to leave alone.
 - Never weaken or delete an existing test — if you believe one is wrong, that is evidence for the conductor, not an edit.
 - Never invent interfaces, fields, or behaviors not in the brief's interface slice.
+- Any throwaway or exploration file (a scratch note, a fixture you're only drafting) goes in the scratchpad, never the repo tree — H18 already denies Write/Edit/MultiEdit outside the toolchain's test globs, so the repo tree was never a legal destination for it anyway; the scratchpad is where it belongs instead of not existing at all.
 
 # Exit signals it may emit
 
