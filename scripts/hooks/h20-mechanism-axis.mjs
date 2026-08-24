@@ -159,6 +159,35 @@ try {
     ...store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
     ...store.query({ types: ['disconfirmed_hypothesis'], rank_terms: terms, cap: 40 }),
   ];
+
+  // MULTI-QUESTION CANDIDATE AUGMENTATION (post-commit follow-up, deny-once
+  // recall floor): `terms` above is extractAxisTerms(outgoing, MAX_RANK_TERMS)
+  // over the WHOLE combined form text, capped at 16 — a verbose sub-question
+  // can crowd a terser, genuinely-ruled sub-question's own vocabulary out of
+  // that shared top-16 before the STORE QUERY even runs, so the strict
+  // classifier never sees the record: retrieval, not scoring, starved it.
+  // Fix: for a multi-question form, ALSO query using each sub-question's OWN
+  // top-16 extraction (independently capped — no sub-question's terms compete
+  // with another's for a slot), restricted to the ruling types deny-once
+  // scores, and merge the results into the SAME candidate pool (deduped by
+  // id) before any early-exit or scoring runs. A single-question form's own
+  // text already equals `outgoing`, so this only adds work when there is
+  // more than one sub-question to protect.
+  if (isQuestion && input.tool_input.questions.length > 1) {
+    const seen = new Set(candidates.map((r) => r.id));
+    for (const q of input.tool_input.questions) {
+      const subTerms = extractAxisTerms(subQuestionText(q), MAX_RANK_TERMS);
+      if (subTerms.length < AXIS_MIN_HITS) continue;
+      for (const type of DENY_RULING_TYPES) {
+        for (const r of store.query({ types: [type], rank_terms: subTerms, cap: 40 })) {
+          if (!seen.has(r.id)) {
+            seen.add(r.id);
+            candidates.push(r);
+          }
+        }
+      }
+    }
+  }
   if (!candidates.length) allow();
 
   // DENY-ONCE PRE-STEP (decision 68332e4b) — AskUserQuestion ONLY. Runs over the

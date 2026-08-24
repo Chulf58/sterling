@@ -263,16 +263,26 @@ export function denyIntentKey(recordIds) {
   return [...new Set(recordIds ?? [])].sort().join('|');
 }
 
+function escapeForRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Whether `text` cites `id` — the full id, or its unambiguous 8-char prefix
  *  (the same prefix convention the id-resolution ladder already resolves
- *  through elsewhere in the store), case-insensitively. */
+ *  through elsewhere in the store), case-insensitively, WORD-BOUNDARIED
+ *  (post-commit follow-up review): a bare substring test let an 8-char prefix
+ *  embedded inside a LARGER token count as a citation (e.g. a longer id or an
+ *  unrelated alphanumeric string that merely happens to contain those 8
+ *  characters) — the match must not be immediately preceded or followed by
+ *  another alphanumeric character. */
 export function idCitedIn(text, id) {
   if (!id) return false;
   const hay = String(text ?? '').toLowerCase();
   const full = String(id).toLowerCase();
-  if (hay.includes(full)) return true;
+  const boundaried = (needle) => new RegExp(`(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`, 'i').test(hay);
+  if (boundaried(full)) return true;
   const prefix = full.split('-')[0];
-  return prefix.length >= 8 && hay.includes(prefix);
+  return prefix.length >= 8 && boundaried(prefix);
 }
 
 /** The denial payload: substance (not a bare sentence) for every SETTLED
