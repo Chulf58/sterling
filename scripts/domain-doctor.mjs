@@ -33,6 +33,29 @@
 //     Dry-run by default; --apply writes (and lazily creates the domain store,
 //     which is the normal §2.3 mount behavior).
 //
+//   node scripts/domain-doctor.mjs show --db <db> --id <id>
+//     READ-ONLY forensic read of ONE record, working on a store at ANY schema
+//     version (unlike migrate, this never refuses a pre-v2 store — reading a
+//     stuck store, e.g. deepdots at user_version 0, is the whole point; board
+//     d055b150). A retired v2 record's successor comes from record_relations
+//     (rel='supersedes', target_id = the resolved id), NEVER from the body,
+//     because storableBody drops status/superseded_by from every persisted v2
+//     record (packages/store/src/index.ts:598-604) — a show that only printed
+//     the body would show no successor at all for a retired v2 record. On a
+//     pre-v2 store the legacy body's own superseded_by is what's printed (no
+//     v2 tables exist to query), and every raw row sharing the requested id is
+//     printed and every distinct superseded_by claimant named — MULTIPLE
+//     claimants are a FINDING to report, never collapsed to one. Also reports
+//     record_aliases historical ids resolving to the record and the
+//     record_versions snapshot COUNT. Id resolution: an exact id always wins;
+//     otherwise an unambiguous prefix resolves and an ambiguous one is refused
+//     naming every candidate (decision 6d5a6719 — a read is recoverable, so
+//     the id ladder applies). Exit 0 found (a multi-successor conflict is
+//     still a found-and-printed record, not a refusal); exit 3 not-found
+//     (names the id and the db path searched); exit 2 malformed/unsafe input,
+//     an unparseable body, or a store that isn't (or isn't fully) a Sterling
+//     store — never a raw driver exception.
+//
 //   node scripts/domain-doctor.mjs adopt --from <db> --to <db>
 //     WOULD replacing the destination FILE with the source lose anything? The
 //     question worth asking about one logical store split across TWO physical
@@ -556,6 +579,165 @@ function adopt() {
   process.exit(3);
 }
 
+/** show --db <store.db> --id <id>: READ-ONLY forensic read of one record, on
+ *  a store at ANY schema version (unlike migrate/adopt's version gates — this
+ *  is the mode that reads a store STUCK pre-v2, e.g. deepdots, board d055b150).
+ *
+ *  Gathers everything inside ONE readOnlyProbe pass and returns a plain
+ *  {error} or {ok} object rather than calling fail() from inside `fn` — fail()
+ *  calls process.exit, which would skip readOnlyProbe's finally and leak both
+ *  the handle and the sidecar litter it exists to avoid (see the comment on
+ *  readOnlyProbe). Every refusal is raised by the caller, after the probe has
+ *  closed and cleaned up. */
+function show() {
+  const dbPath = arg('db');
+  const id = arg('id');
+  if (!dbPath) fail('--db <store.db> is required');
+  if (!id) fail('--id <id> is required');
+  if (!existsSync(dbPath)) fail(`the store '${dbPath}' does not exist. Nothing was read.`);
+
+  // schemaProbe answers "is this store v2-claiming?" for the satellite-
+  // absence disclosure below, via the header's user_version — the same probe
+  // migrate/adopt use. probeSchemaVersion() already turns a bad header into a
+  // clean {error}, but a genuinely corrupt file (or one it cannot even open
+  // for its WAL-aware fallback) can still throw — caught here rather than
+  // left to crash the process (never a raw driver exception past this file).
+  let schemaProbe;
+  try {
+    schemaProbe = probeSchemaVersion(dbPath);
+  } catch (e) {
+    fail(`'${dbPath}' could not be read as a SQLite database: ${e.message}`);
+  }
+  if (schemaProbe.error) fail(schemaProbe.error);
+
+  let result;
+  try {
+    result = readOnlyProbe(dbPath, (db) => {
+      const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
+      if (!tables.has('records')) {
+        return { error: { code: 2, msg: `the store '${dbPath}' holds no records table — it is a SQLite file, but not a Sterling knowledge store.` } };
+      }
+
+      let rawIds;
+      try {
+        rawIds = db.prepare('SELECT id FROM records').all().map((r) => r.id);
+      } catch (e) {
+        return { error: { code: 2, msg: `the 'records' table in '${dbPath}' could not be queried for ids — its column shape does not match what show() expects.` } };
+      }
+      // A NULL id is a real, observed legacy shape (mkPreV2Store's `records`
+      // table has no NOT NULL on id) — .startsWith() on a non-string crashes,
+      // so it is excluded from resolution rather than dropped silently: its
+      // count is reported as a finding, on every path, error or success.
+      const nullIdCount = rawIds.filter((x) => typeof x !== 'string').length;
+      const allIds = [...new Set(rawIds.filter((x) => typeof x === 'string'))];
+
+      let resolvedId;
+      if (allIds.includes(id)) {
+        // an exact id always wins, even when it shares a prefix with another
+        // (an exact match is not itself ambiguous — decision 6d5a6719).
+        resolvedId = id;
+      } else {
+        const matches = allIds.filter((x) => x.startsWith(id));
+        if (matches.length === 0) {
+          return { error: { code: 3, msg: `no record matching '${id}' found in '${dbPath}'.`, nullIdCount } };
+        }
+        if (matches.length > 1) {
+          return { error: { code: 2, msg: `'${id}' is an ambiguous prefix in '${dbPath}' — it matches ${matches.length} records: ${matches.join(', ')}.`, nullIdCount } };
+        }
+        [resolvedId] = matches;
+      }
+
+      let rows;
+      try {
+        rows = db.prepare('SELECT body FROM records WHERE id = ?').all(resolvedId).map((r) => JSON.parse(r.body));
+      } catch (e) {
+        return { error: { code: 2, msg: `record '${resolvedId}' in '${dbPath}' has an unparseable JSON body: ${e.message}`, nullIdCount } };
+      }
+
+      const found = { resolvedId, rows, nullIdCount };
+      // v2 provenance — only present (and only queried) on a v2 store; a
+      // pre-v2 store has none of these tables, and this must never refuse or
+      // fall back to migrate's v2-required guard for their absence (that
+      // guard is migrate's, not show's — reading a stuck store is the point
+      // of show). A store that IS v2-claiming (schema header says v2) or
+      // already has ANY v2 satellite table but is missing one of the three is
+      // half-migrated — silently saying nothing there is a FALSE CLEAN on the
+      // tool's core question ("does this record have a successor?"), so that
+      // case gets an explicit "table absent — NOT checked" disclosure,
+      // distinct from "queried, found none". Each query is wrapped: a
+      // satellite table present with the wrong column shape must fail loud
+      // (exit 2, naming the table), never a raw driver exception.
+      const v2Claiming = schemaProbe.version === SUPPORTED_SCHEMA_VERSION;
+      const anySatellite = tables.has('record_relations') || tables.has('record_aliases') || tables.has('record_versions');
+      const discloseAbsence = v2Claiming || anySatellite;
+
+      if (tables.has('record_relations')) {
+        try {
+          found.successors = db.prepare("SELECT source_id FROM record_relations WHERE target_id = ? AND rel = 'supersedes'").all(resolvedId).map((r) => r.source_id);
+        } catch (e) {
+          return { error: { code: 2, msg: `the 'record_relations' table in '${dbPath}' could not be queried — its column shape does not match what show() expects.`, nullIdCount } };
+        }
+      } else if (discloseAbsence) {
+        found.relationsAbsent = true;
+      }
+      if (tables.has('record_aliases')) {
+        try {
+          found.historicalIds = db.prepare('SELECT historical_id FROM record_aliases WHERE canonical_id = ?').all(resolvedId).map((r) => r.historical_id);
+        } catch (e) {
+          return { error: { code: 2, msg: `the 'record_aliases' table in '${dbPath}' could not be queried — its column shape does not match what show() expects.`, nullIdCount } };
+        }
+      } else if (discloseAbsence) {
+        found.aliasesAbsent = true;
+      }
+      if (tables.has('record_versions')) {
+        try {
+          found.versionCount = db.prepare('SELECT COUNT(*) AS n FROM record_versions WHERE record_id = ?').get(resolvedId).n;
+        } catch (e) {
+          return { error: { code: 2, msg: `the 'record_versions' table in '${dbPath}' could not be queried — its column shape does not match what show() expects.`, nullIdCount } };
+        }
+      } else if (discloseAbsence) {
+        found.versionsAbsent = true;
+      }
+      return { ok: found };
+    });
+  } catch (e) {
+    // A genuinely corrupt/malformed store (bad open, or a `records` table
+    // whose shape breaks the sqlite_master probe itself) must not crash past
+    // this file — deliberate exit 2, never node's default exit 1 + stack
+    // trace, and never the raw driver text.
+    fail(`'${dbPath}' could not be read as a valid SQLite/Sterling store (open or query failed unexpectedly): ${e.message}`);
+  }
+
+  if (result.error) {
+    if (result.error.nullIdCount) {
+      console.error(`domain-doctor: FINDING: ${result.error.nullIdCount} record(s) in '${dbPath}' have a null/non-string id and were excluded from id resolution.`);
+    }
+    fail(result.error.msg, result.error.code);
+  }
+
+  const {
+    resolvedId, rows, successors, historicalIds, versionCount, nullIdCount, relationsAbsent, aliasesAbsent, versionsAbsent,
+  } = result.ok;
+  if (nullIdCount) console.log(`FINDING: ${nullIdCount} record(s) in '${dbPath}' have a null/non-string id and were excluded from id resolution.`);
+  console.log(`domain-doctor show: '${id}' resolved to '${resolvedId}' in '${dbPath}'`);
+  rows.forEach((r) => console.log(`  record: ${JSON.stringify(r)}`));
+  if (relationsAbsent) {
+    console.log('  record_relations: table absent — successor provenance NOT checked');
+  } else if (successors) {
+    console.log(successors.length ? `  successor (record_relations, supersedes): ${successors.join(', ')}` : '  successor (record_relations, supersedes): none');
+  }
+  if (aliasesAbsent) {
+    console.log('  record_aliases: table absent — historical-id provenance NOT checked');
+  } else if (historicalIds) {
+    console.log(historicalIds.length ? `  historical ids (record_aliases): ${historicalIds.join(', ')}` : '  historical ids (record_aliases): none');
+  }
+  if (versionsAbsent) {
+    console.log('  record_versions: table absent — snapshot count NOT checked');
+  } else if (versionCount !== undefined) {
+    console.log(`  record_versions snapshots: ${versionCount}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 function scan() {
@@ -704,4 +886,5 @@ else if (mode === 'sweep') sweep();
 else if (mode === 'restore') restore();
 else if (mode === 'migrate') migrate();
 else if (mode === 'adopt') adopt();
-else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt … (got '${mode ?? ''}')`);
+else if (mode === 'show') show();
+else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt|show … (got '${mode ?? ''}')`);
