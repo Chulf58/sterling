@@ -24,8 +24,17 @@
 //     commit.
 //   - >=1 valid entry AND staged changes present: commit with the given
 //     message plus one `Reviewed-By-Agent: <agent_type>` trailer per valid
-//     entry (readable via the exact read scripts/direct-merge.mjs:143
-//     uses), then CONSUME: RE-READ the ledger (it may have gained a fresh
+//     entry (readable via the exact `%(trailers:key=Reviewed-By-Agent,
+//     valueonly,unfold)` format scripts/direct-merge.mjs's receipt-gate
+//     read uses). The commit is then VERIFIED against the CREATED SHA
+//     (captured via `git rev-parse HEAD` immediately after the commit —
+//     never a later, possibly-moved `HEAD` alias): the trailer is re-read
+//     with that exact format and compared as a MULTISET against the
+//     agent_types just stamped, and any mismatch (empty, partial, or
+//     unrelated values) fails loudly (exit 1, commit-exists-but-unmergeable
+//     message naming expected vs actual, ledger left un-consumed) rather
+//     than silently landing an unmergeable or under-verified commit (N2).
+//     Only on a successful verification does it CONSUME: RE-READ the ledger (it may have gained a fresh
 //     entry while `git commit` ran — hooks can take seconds) and write back
 //     every entry NOT identity-matched (agent_type + at) to the set just
 //     stamped, so a receipt promoted mid-commit survives — P4: the artifact
@@ -160,6 +169,112 @@ if (commit.error) {
 }
 if (commit.status !== 0) {
   fail(`commit-reviewed: git commit failed: ${(commit.stderr || commit.stdout || '').trim()}`);
+}
+
+// CAPTURE THE CREATED SHA (Codex P1-A): HEAD is a moving alias — a
+// SUBSEQUENT `git rev-parse HEAD` call is not safe against a concurrent ref
+// move, and in particular against a `post-commit` hook that itself commits
+// again (moving HEAD) BEFORE the `git commit` invocation above even
+// returns. Parse the sha `git commit` prints in its own summary line
+// instead (`[branch[ (root-commit)] <abbrev-sha>] <subject>`) — that line
+// is emitted by the commit-creating git process reporting the commit IT
+// just made, before any hook runs, so it names the right commit regardless
+// of what happens afterward in this working tree.
+// Anchor on the trailing bracket, not the leading branch field: a detached
+// HEAD renders the branch field as translated, SPACE-CONTAINING text
+// ('[detached HEAD abc1234] ...') and non-English locales translate the
+// field too, so a leading-field parse misses on perfectly good commits
+// (review finding). Fallback: rev-parse HEAD — a weaker target (a
+// concurrent ref move could race it), so its use is DISCLOSED in the
+// verification messages rather than silent.
+const commitShaMatch = /^\[.*?\b([0-9a-f]{7,40})\]/m.exec(commit.stdout ?? '');
+let createdSha;
+let shaSource = "git's own commit summary";
+if (commitShaMatch) {
+  createdSha = commitShaMatch[1];
+} else {
+  const revParse = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  if (revParse.status !== 0 || !(revParse.stdout ?? '').trim()) {
+    fail(
+      `commit-reviewed: COMMIT SUCCEEDED but its sha could not be parsed from git's summary line AND rev-parse HEAD failed — cannot verify the trailer. ` +
+        `git commit stdout was: ${JSON.stringify(commit.stdout)}. The review-ledger entries were NOT consumed; ` +
+        `note a retry requires amending the existing commit outside this CLI (nothing is staged any more).`
+    );
+  }
+  createdSha = revParse.stdout.trim();
+  shaSource = 'rev-parse HEAD (summary-line parse missed — weaker target, disclosed)';
+}
+
+// TRAILER SURVIVAL CHECK (N2): the commit above just landed with trailer
+// lines in its message, but git's trailer PARSER (not string-search) is the
+// only thing that decides whether direct-merge.mjs's merge gate will ever
+// see them. The required shape is a blank line SEPARATING the subject from
+// the trailer block, then a FINAL PARAGRAPH consisting ENTIRELY of
+// trailer-shaped lines (`Key: value`) — that blank line is correct and
+// necessary, not the danger. The destroyer is any NON-trailer line inside
+// that final paragraph, or any content appended AFTER it: either one makes
+// the whole paragraph unparseable as trailers, so `%(trailers:...)` returns
+// nothing even though the trailer text is sitting right there in `git log`.
+// Measured: `git commit --amend -F <file>` where the supplied message has
+// such a stray line produces exactly this shape, and six code-touching
+// commits in one session were unmergeable as a result. Re-read with the
+// EXACT format string scripts/direct-merge.mjs's receipt-gate read uses
+// (`%(trailers:key=Reviewed-By-Agent,valueonly,unfold)`), against the
+// CREATED SHA (never bare HEAD), so this check can never pass while that
+// gate would still refuse. Deliberately BEFORE ledger consumption: the
+// commit already exists either way, but if the trailer did not survive, the
+// evidence was never actually delivered — leave the ledger entries
+// un-consumed for a retry rather than discarding them on a broken commit.
+const trailerCheck = spawnSync(
+  'git',
+  ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', createdSha],
+  { cwd: target, encoding: 'utf8', timeout: 30_000 }
+);
+if (trailerCheck.error) {
+  fail(`commit-reviewed: COMMIT SUCCEEDED but the post-commit trailer verification could not run: ${trailerCheck.error.message}`);
+}
+if (trailerCheck.status !== 0) {
+  // The commit already exists — a non-zero `git log` here (e.g. a corrupt
+  // HEAD) is a git failure, not evidence the trailer was destroyed. Mirror
+  // the staged-check posture above (FIX 5): an unexpected exit is reported
+  // as exactly that, never silently folded into the empty-trailer branch.
+  fail(
+    `commit-reviewed: COMMIT SUCCEEDED but the post-commit trailer verification failed unexpectedly (git log exited ${trailerCheck.status}): ` +
+      `${(trailerCheck.stderr || trailerCheck.stdout || '').trim()} — this is a git failure, not evidence the trailer was destroyed; ` +
+      `investigate the repository state directly. The review-ledger entries were NOT consumed; ` +
+      `note a retry requires amending the existing commit outside this CLI (nothing is staged any more).`
+  );
+}
+// COMPARE AGAINST THE EXACT STAMPED MULTISET (Codex P1-A): a bare
+// non-empty check would accept ANY surviving trailer value, including a
+// PARTIAL survival (e.g. 2 of 3 stamped entries destroyed by a concurrent
+// truncation) or a value that belongs to none of the entries this
+// invocation actually stamped. Trailers are a multiset (duplicates allowed,
+// FIX/R1 above), so both sides are sorted before comparing.
+const expectedTrailerValues = [...validEntries.map((e) => e.agent_type)].sort();
+const actualTrailerValues = (trailerCheck.stdout ?? '')
+  .split('\n')
+  .map((l) => l.trim())
+  .filter((l) => l !== '')
+  .sort();
+const trailerMatches =
+  actualTrailerValues.length === expectedTrailerValues.length &&
+  actualTrailerValues.every((v, i) => v === expectedTrailerValues[i]);
+if (!trailerMatches) {
+  console.error(
+    `commit-reviewed: COMMIT SUCCEEDED (${createdSha}, target resolved from ${shaSource}) but the 'Reviewed-By-Agent' trailer is NOT readable — or does not match what was just stamped — via ` +
+      `the exact format string scripts/direct-merge.mjs's receipt-gate read uses ('git log -1 --format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)') — ` +
+      `this commit exists but is UNMERGEABLE until fixed.\n` +
+      `Expected: [${expectedTrailerValues.join(', ')}]\n` +
+      `Actual:   [${actualTrailerValues.join(', ')}]\n` +
+      `The required shape: subject, ONE blank line, then a FINAL PARAGRAPH consisting ENTIRELY of 'Key: value' trailer lines with nothing else mixed in and ` +
+      `nothing appended after it — any other line inside or after that block makes the whole paragraph unparseable as trailers, even though the text is ` +
+      `still present in the raw commit message. A known way this happens: 'git commit --amend -F <file>' where the supplied message has a stray non-trailer ` +
+      `line inside the final paragraph, or trailing content after it. Inspect the commit message with 'git log -1 --format=%B ${createdSha}', fix it with a ` +
+      `correctly-formatted amend, and re-run this same read before relying on the commit. ` +
+      `The review-ledger entries were NOT consumed — they remain available for a retry.`
+  );
+  process.exit(1);
 }
 
 // CONSUME the stamped entries: the commit that used the evidence removes it

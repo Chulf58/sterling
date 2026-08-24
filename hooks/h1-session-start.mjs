@@ -7055,11 +7055,33 @@ try {
       if (note.head_sha && head && head !== note.head_sha) {
         cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
       }
+      let commitsAheadUnverified = false;
+      if (typeof note.commits_ahead === "number") {
+        if (!note.base_branch) {
+          commitsAheadUnverified = true;
+        } else {
+          try {
+            const countR = spawnSync("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+            const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
+            if (Number.isFinite(actual)) {
+              if (actual !== note.commits_ahead) {
+                cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${note.base_branch})`);
+              }
+            } else {
+              commitsAheadUnverified = true;
+            }
+          } catch {
+            commitsAheadUnverified = true;
+          }
+        }
+      }
       const ageMs = Date.now() - Date.parse(note.at ?? "");
       if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
         cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
       }
-      const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).join("\n");
+      const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).concat(
+        typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
+      ).join("\n");
       rotationContext = `
 
 ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `

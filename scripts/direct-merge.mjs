@@ -97,9 +97,45 @@ const debt = openTodos.filter(
   (t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && (t.file_keys ?? []).some((k) => changed.has(k))
 );
 if (debt.length > 0) {
+  // GROUP BY OWNING ARTICLE (N13): one item per touched file is the mint
+  // granularity, so a branch touching one heavily-shared file can carry
+  // hundreds of near-identical items — measured 207 lines (~40KB) for a
+  // single refusal. Group by feature_link (the owning article id H7 stamps)
+  // so the refusal reads as N ARTICLES, not N items; every item id stays
+  // listed, nested under its group, so nothing here is lossy — only the
+  // presentation is denser. Items with NO feature_link (older/foreign
+  // items) all share ONE bucket — keying that bucket per-item (e.g. by
+  // t.id) reproduces the exact fragmentation this fix exists to remove for
+  // the legacy case: 50 unlinked items would headline as "across 50
+  // article(s)" instead of the 1 real article plus a single miscellaneous
+  // bucket. The headline's article count is REAL articles only — the
+  // no-article bucket, if present, is named separately and never inflates it.
+  const NO_ARTICLE_KEY = Symbol('no-owning-article');
+  const byArticle = new Map();
+  for (const t of debt) {
+    const key = t.feature_link ?? NO_ARTICLE_KEY;
+    if (!byArticle.has(key)) byArticle.set(key, []);
+    byArticle.get(key).push(t);
+  }
+  const realArticleCount = [...byArticle.keys()].filter((k) => k !== NO_ARTICLE_KEY).length;
+  const noArticleItems = byArticle.get(NO_ARTICLE_KEY) ?? [];
+  const grouped = [...byArticle.entries()]
+    .map(([article, items]) => {
+      const header = article === NO_ARTICLE_KEY ? `(no owning article) — ${items.length} item(s)` : `article ${article} — ${items.length} item(s)`;
+      // Each item keeps its OWN file_keys on its own line (Codex P2-A): a
+      // header union loses the item→files association the un-grouped
+      // format used to carry — two items in one group touching different
+      // files must not read as though either touched both.
+      return `  - ${header}\n` + items.map((t) => `      - ${t.id}  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n');
+    })
+    .join('\n');
+  const headline =
+    noArticleItems.length > 0
+      ? `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s) (plus ${noArticleItems.length} item(s) with no owning article)`
+      : `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s)`;
   fail(
-    `direct-merge: ${debt.length} open reconcile_needed item(s) cover files this branch changed — reconcile before merging:\n` +
-      debt.map((t) => `  - ${t.id}  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n') +
+    `direct-merge: ${headline} cover files this branch changed — reconcile before merging:\n` +
+      grouped +
       '\nknowledge_update the owning article (the update auto-drains its item), then rerun.'
   );
 }

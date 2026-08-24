@@ -3114,6 +3114,179 @@ test('H1 rotation restore: a HEAD moved since the note is disclosed as a CAUTION
   }
 });
 
+// --------------------------- commits_ahead (N15) ---------------------------
+// docs/feedback/sterling-plugin-*2026-08-24*: the rotation note's prose fields
+// carried counts nothing recomputed — a note said 'FOURTEEN commits', the
+// conductor told the user fifteen, the real figure was 39. rotation-note.mjs
+// now stamps a computed commits_ahead (vs the resolved base branch) at write
+// time; H1 recomputes it at injection and discloses drift exactly like the
+// existing head_sha check above.
+
+test('rotation-note.mjs (N15): stamps commits_ahead (vs the resolved base branch) at write time', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    const base = g(['branch', '--show-current']).stdout.trim(); // master (or main) — the only branch so far
+    g(['checkout', '-qb', 'feat/slice']);
+    for (const f of ['a.mjs', 'b.mjs', 'c.mjs']) {
+      writeFileSync(join(dir, f), `// ${f}\n`);
+      g(['add', '-A']);
+      g(['commit', '-qm', `add ${f}`]);
+    }
+    const r = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(r.status, 0, r.stderr);
+    const note = readRotationNote(dir);
+    // EXPECTED FAILURE SHAPE (red before the fix): the unhardened writer
+    // never computes or stamps this field at all, so `note.commits_ahead`
+    // is `undefined` — the two assertions below are the ones expected to
+    // fail red against it.
+    assert.equal(note.commits_ahead, 3, 'three commits landed on feat/slice since the base branch');
+    assert.equal(note.base_branch, base);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (N15): commits_ahead drift (more commits landed after the note was written) is disclosed, naming both counts', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    g(['checkout', '-qb', 'feat/slice']);
+    writeFileSync(join(dir, 'a.mjs'), '// a\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add a']);
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    assert.equal(readRotationNote(dir).commits_ahead, 1, 'fixture guard: the note was written at 1 commit ahead');
+
+    // More work lands on the branch AFTER the note was written but BEFORE
+    // the /clear actually happens — the note's stamped count is now stale.
+    writeFileSync(join(dir, 'b.mjs'), '// b\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add b']);
+
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    // EXPECTED FAILURE SHAPE (red before the fix): H1 recomputes head_sha
+    // drift only — it never re-runs `git rev-list --count` against the
+    // note's base_branch, so no commits_ahead disclosure is ever produced.
+    // This match is the one expected to fail red against that shape.
+    assert.match(ctx, /commits_ahead drift.*note says 1.*actual is 2/is, 'drift disclosed with both the stamped and the actual count');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (N15 roster review, control): a MATCHING commits_ahead count produces NO drift line', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    g(['checkout', '-qb', 'feat/slice']);
+    writeFileSync(join(dir, 'a.mjs'), '// a\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add a']);
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    assert.equal(readRotationNote(dir).commits_ahead, 1, 'fixture guard: the note was written at 1 commit ahead');
+
+    // NOTHING lands on the branch between the note and the /clear — the
+    // stamped count and the actual count agree.
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    // EXPECTED FAILURE SHAPE (red against an UNCONDITIONAL-emit
+    // implementation, e.g. one that always appends the drift caution
+    // whenever it runs the recount regardless of whether the numbers
+    // actually differ): this control would then ALSO show a spurious
+    // drift line even though nothing drifted. The doesNotMatch below is
+    // the one expected to fail red against that shape.
+    assert.doesNotMatch(ctx, /commits_ahead drift/i, 'a matching count must never produce a drift caution');
+    const rotationSection = ctx.slice(ctx.indexOf('ROTATION RESTORE'), ctx.indexOf('Resume from next_slice'));
+    assert.match(rotationSection, /commits_ahead: 1 \(vs /, 'the matching count is still printed plainly');
+    assert.doesNotMatch(rotationSection, /unverified/i, 'a successfully-verified matching count is not marked unverified');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (Codex P2-B): a note with NO base_branch (commits_ahead unavailable to stamp) produces NO drift line and no commits_ahead field at all', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    const note = readRotationNote(dir);
+    // Simulate the "commits_ahead unavailable at write time" shape directly
+    // (a repo with no origin/HEAD, no main, no master is hard to construct
+    // from gitProject()'s single-branch fixture) — this note otherwise
+    // matches exactly what rotation-note.mjs itself would have written.
+    delete note.base_branch;
+    delete note.commits_ahead;
+    writeFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), JSON.stringify(note, null, 2) + '\n');
+
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    assert.doesNotMatch(ctx, /commits_ahead/i, 'no commits_ahead field/caution is fabricated when the note never carried one');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (Codex P2-B): a commits_ahead present but base_branch UNRESOLVABLE at restore time is marked unverified, never claimed as drift', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    const note = readRotationNote(dir);
+    // A base that resolved at write time (e.g. a --base ref, or a branch
+    // since deleted) but no longer resolves at restore time — the recount
+    // itself fails, which must read as UNVERIFIABLE, never as drift (a
+    // failed recount is not evidence the stamped number is wrong).
+    note.base_branch = 'this-ref-does-not-exist';
+    note.commits_ahead = 3;
+    writeFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), JSON.stringify(note, null, 2) + '\n');
+
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    assert.doesNotMatch(ctx, /commits_ahead drift/i, 'an unresolvable base is never reported as drift');
+    assert.match(ctx, /commits_ahead: 3 \(vs this-ref-does-not-exist\) \(unverified — base unavailable\)/, 'the stamped count is shown with an explicit unverified marker');
+  } finally {
+    cleanup();
+  }
+});
+
+test('rotation-note.mjs (Codex P1-B): a clone with origin/main but NO local main branch still gets a numeric commits_ahead (never a false null)', () => {
+  const { dir, cleanup } = gitProject();
+  const bareOutside = mkdtempSync(join(tmpdir(), 'sterling-rotation-bare-'));
+  try {
+    const g = (args, cwd = dir) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+    // Simulate a plain clone: an origin whose default branch is 'main', but
+    // THIS working copy never checked out a local 'main' — only the
+    // feature branch it's already on. resolveBaseBranch's old
+    // unconditional `origin/main` -> `main` strip would then try to diff
+    // against a local branch that does not exist.
+    const originDir = join(bareOutside, 'origin.git');
+    assert.equal(g(['init', '--bare', '-b', 'main', originDir], bareOutside).status, 0);
+    assert.equal(g(['remote', 'add', 'origin', originDir]).status, 0);
+    assert.equal(g(['push', 'origin', 'HEAD:main']).status, 0);
+    assert.equal(g(['fetch', 'origin']).status, 0);
+    assert.equal(g(['remote', 'set-head', 'origin', 'main']).status, 0);
+    assert.equal(g(['branch', '--list', 'main']).stdout.trim(), '', 'fixture guard: no LOCAL main branch exists in this working copy');
+
+    g(['checkout', '-qb', 'feat/off-origin-main']);
+    writeFileSync(join(dir, 'a.mjs'), '// a\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add a']);
+
+    const r = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(r.status, 0, r.stderr);
+    const note = readRotationNote(dir);
+    assert.equal(note.commits_ahead, 1, 'a numeric count, not a false null, even with no local main');
+    assert.equal(note.base_branch, 'origin/main', 'the actual ref used (the remote-tracking ref) is disclosed, not a stripped name that never resolved');
+  } finally {
+    cleanup();
+    rmSync(bareOutside, { recursive: true, force: true });
+  }
+});
+
 test('H10 hard pressure names the rotation protocol: rotation note + READY TO CLEAR', () => {
   const { dir, cleanup } = gitProject();
   try {

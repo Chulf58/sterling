@@ -293,6 +293,39 @@ try {
       if (note.head_sha && head && head !== note.head_sha) {
         cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} → ${head.slice(0, 8)}) — re-verify repository state before acting on it`);
       }
+      // COMMITS-AHEAD DRIFT (N15, docs/feedback/sterling-plugin-*2026-08-24*):
+      // the note's commits_ahead is a number the writer computed, not prose —
+      // recompute it the same way at restore time and disclose any mismatch
+      // exactly like the head_sha check above, rather than trusting a stamp
+      // that may already be stale (a note written, then more commits landed
+      // before the /clear actually happened). UNVERIFIABLE IS ITS OWN STATE
+      // (Codex P2-B), distinct from both "matches" and "drifted": when the
+      // base is missing or the recount itself fails (e.g. a --base ref that
+      // no longer resolves), the stamped count is printed with an explicit
+      // "(unverified — base unavailable)" marker rather than silently
+      // presented as though it had been confirmed — and, just as important,
+      // never asserted as DRIFT either, since a failed recount is not
+      // evidence the number is wrong.
+      let commitsAheadUnverified = false;
+      if (typeof note.commits_ahead === 'number') {
+        if (!note.base_branch) {
+          commitsAheadUnverified = true;
+        } else {
+          try {
+            const countR = spawnSync('git', ['rev-list', '--count', `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: 'utf8', timeout: 5_000 });
+            const actual = countR.status === 0 ? Number((countR.stdout ?? '').trim()) : null;
+            if (Number.isFinite(actual)) {
+              if (actual !== note.commits_ahead) {
+                cautions.push(`commits_ahead drift — note says ${note.commits_ahead}, actual is ${actual} (vs ${note.base_branch})`);
+              }
+            } else {
+              commitsAheadUnverified = true;
+            }
+          } catch {
+            commitsAheadUnverified = true; // fail-open — a failed recount costs only the verification, never the restore
+          }
+        }
+      }
       const ageMs = Date.now() - Date.parse(note.at ?? '');
       if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1000) {
         cautions.push(`the note is ~${Math.round(ageMs / 3_600_000)}h old`);
@@ -300,6 +333,11 @@ try {
       const fields = ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'at']
         .filter((k) => note[k])
         .map((k) => `- ${k}: ${note[k]}`)
+        .concat(
+          typeof note.commits_ahead === 'number'
+            ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? 'unknown base'})${commitsAheadUnverified ? ' (unverified — base unavailable)' : ''}`]
+            : []
+        )
         .join('\n');
       rotationContext =
         `\n\nROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` +
