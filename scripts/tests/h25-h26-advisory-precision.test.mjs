@@ -539,3 +539,158 @@ test('H26 (i): reviewer-correctness (read-only) dispatch overlapping a live code
     cleanup();
   }
 });
+
+// ===========================================================================
+// FOLLOW-UP (outside-model review reproduced two suppression holes, now
+// fixed in the shared negation module — pinned here so they stay closed).
+// Bare negators ("never", "without", "no") get a BOUNDED reach (~5 tokens,
+// terminated at a comma) rather than swallowing the rest of the sentence;
+// H26's prohibition-marker match absorbs a soft boundary (em-dash) after
+// "DO NOT TOUCH" the same way it absorbs a colon, and its clause-splitter
+// handles CRLF the same way it handles LF.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// (1) "Never mind the old plan, use Bash to validate" — "Never" is a bare
+// negator, but the real requirement ("use Bash") sits past a comma, outside
+// its bounded reach, so the capability advisory must still fire.
+// SABOTAGE: delete the comma-terminates-negation-scope check (one line) —
+// the guard's scope then stretches past the comma and wrongly swallows the
+// real "use Bash" requirement, flipping this test red (goes silent).
+// ---------------------------------------------------------------------------
+test('H25 (follow-up 1): "Never mind the old plan, use Bash to validate" to test-writer → capability advisory still FIRES (negator scope stops at the comma)', () => {
+  const { dir, cleanup } = makeH25Project();
+  try {
+    writeAgentDef(dir, 'test-writer', TEST_WRITER_TOOLS);
+    const r = runHook(
+      H25_PATH,
+      h25TaskInput(dir, { subagent_type: 'test-writer', prompt: 'Never mind the old plan, use Bash to validate.' }),
+      dir
+    );
+    assertCapabilityWarn(r, { missingTools: ['Bash'], agentType: 'test-writer', grantSubstring: TEST_WRITER_TOOLS });
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (2) "Proceed without delay, use Bash to probe" — "without" is a bare
+// negator but its idiomatic object ("delay") is not "Bash"; the real
+// requirement again sits past a comma, outside the ~5-token bounded reach.
+// SABOTAGE: delete the ~5-token-distance cap on negation-scope reach (one
+// line) — "without" then reaches across the comma to "Bash" regardless of
+// distance, wrongly swallowing the requirement and flipping this test red.
+// ---------------------------------------------------------------------------
+test('H25 (follow-up 2): "Proceed without delay, use Bash to probe" to test-writer → capability advisory still FIRES (negator reach is token-bounded)', () => {
+  const { dir, cleanup } = makeH25Project();
+  try {
+    writeAgentDef(dir, 'test-writer', TEST_WRITER_TOOLS);
+    const r = runHook(
+      H25_PATH,
+      h25TaskInput(dir, { subagent_type: 'test-writer', prompt: 'Proceed without delay, use Bash to probe.' }),
+      dir
+    );
+    assertCapabilityWarn(r, { missingTools: ['Bash'], agentType: 'test-writer', grantSubstring: TEST_WRITER_TOOLS });
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (3) CONTROL: "You hold no Bash by design" — the bare negator "no" sits
+// immediately adjacent to "Bash" (no comma, well within the ~5-token reach),
+// so the advisory must stay silent. Pinned beside (1)/(2) as the boundary's
+// short-reach sibling (H25(c) above already pins this brief in isolation;
+// this copy establishes the full near/far contrast in one place).
+// SABOTAGE: delete the bare-negator-adjacent-tool pattern from NEGATION_RE
+// entirely (one line) — flips this test red (advisory reappears) while (1)
+// and (2), which are supposed to fire regardless, stay green.
+// ---------------------------------------------------------------------------
+test('H25 (follow-up 3) CONTROL: "You hold no Bash by design" → still silent (bare negator within its bounded reach)', () => {
+  const { dir, cleanup } = makeH25Project();
+  try {
+    writeAgentDef(dir, 'test-writer', TEST_WRITER_TOOLS);
+    const r = runHook(
+      H25_PATH,
+      h25TaskInput(dir, { subagent_type: 'test-writer', prompt: 'You hold no Bash by design.' }),
+      dir
+    );
+    assertSilent(r, 'bare negator "no" immediately adjacent to Bash');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (4a) em-dash soft boundary: "DO NOT TOUCH — scripts/enforcement-stamp.mjs
+// (another lane owns it)" must be recognized the same way the colon form is
+// — the em-dash is absorbed as a soft boundary after the prohibition marker,
+// not treated as ending the clause early. Self-controlling like H26(h): the
+// same brief also names a genuinely-intended overlapping file (server.ts,
+// live under a different entry), so a passing result cannot mean "nothing
+// matched" — the advisory must name the genuine overlap and must NOT name
+// the negated path, in one emission.
+// SABOTAGE: restrict the prohibition-marker match to a literal colon only
+// (one line, dropping the em-dash alternative) — the em-dash clause is then
+// no longer recognized as a negation, "scripts/enforcement-stamp.mjs" leaks
+// back into the candidate set, and the suppression assertions flip red.
+// ---------------------------------------------------------------------------
+test('H26 (4a): "DO NOT TOUCH — scripts/enforcement-stamp.mjs (another lane owns it)" (em-dash) never registers as the outgoing dispatch\'s territory', () => {
+  const { dir, cleanup } = makeH26Project();
+  try {
+    writeRegister(dir, [
+      liveEntry('sub-8', 'coder', ['packages/mcp-server/src/server.ts']),
+      liveEntry('sub-9', 'coder', ['scripts/enforcement-stamp.mjs']),
+    ]);
+    const r = runHook(
+      H26_PATH,
+      h26TaskInput(dir, {
+        subagent_type: 'coder',
+        prompt: 'Implement the new feature in packages/mcp-server/src/server.ts. DO NOT TOUCH — scripts/enforcement-stamp.mjs (another lane owns it).',
+      }),
+      dir
+    );
+    const ctx = parseAdditionalContext(r);
+    assert.match(ctx, pathRe('packages/mcp-server/src/server.ts'), 'must still warn on the genuine overlap (control half)');
+    assert.ok(ctx.includes('coder:sub-8'), 'must name the genuine overlap entry coder:sub-8');
+    assert.doesNotMatch(ctx, pathRe('scripts/enforcement-stamp.mjs'), 'must NOT warn on the em-dash-negated path (suppression half)');
+    assert.ok(!ctx.includes('coder:sub-9'), 'must NOT name the negated-path entry coder:sub-9');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (4b) CRLF colon-list variant: "DO NOT TOUCH:\r\nscripts/enforcement-stamp.mjs"
+// — same clause-scoping requirement as H26(h), but the prohibition marker
+// and its path sit on separate lines joined by CRLF rather than a same-line
+// colon. Same self-controlling shape as (4a).
+// SABOTAGE: the clause-splitter's newline pattern matches only `\n`, not
+// `\r\n` (one line) — the CRLF is left embedded in the "line", the
+// colon-list association between "DO NOT TOUCH:" and the path on the next
+// line is lost, and the suppression assertions flip red.
+// ---------------------------------------------------------------------------
+test('H26 (4b): "DO NOT TOUCH:\\r\\nscripts/enforcement-stamp.mjs" (CRLF colon-list) never registers as the outgoing dispatch\'s territory', () => {
+  const { dir, cleanup } = makeH26Project();
+  try {
+    writeRegister(dir, [
+      liveEntry('sub-8', 'coder', ['packages/mcp-server/src/server.ts']),
+      liveEntry('sub-9', 'coder', ['scripts/enforcement-stamp.mjs']),
+    ]);
+    const r = runHook(
+      H26_PATH,
+      h26TaskInput(dir, {
+        subagent_type: 'coder',
+        prompt: 'Implement the new feature in packages/mcp-server/src/server.ts. DO NOT TOUCH:\r\nscripts/enforcement-stamp.mjs (another lane owns it).',
+      }),
+      dir
+    );
+    const ctx = parseAdditionalContext(r);
+    assert.match(ctx, pathRe('packages/mcp-server/src/server.ts'), 'must still warn on the genuine overlap (control half)');
+    assert.ok(ctx.includes('coder:sub-8'), 'must name the genuine overlap entry coder:sub-8');
+    assert.doesNotMatch(ctx, pathRe('scripts/enforcement-stamp.mjs'), 'must NOT warn on the CRLF-negated path (suppression half)');
+    assert.ok(!ctx.includes('coder:sub-9'), 'must NOT name the negated-path entry coder:sub-9');
+  } finally {
+    cleanup();
+  }
+});

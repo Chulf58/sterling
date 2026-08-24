@@ -5073,18 +5073,51 @@ function liveDispatches(root) {
 }
 
 // scripts/hooks/lib/dispatch-advisory.mjs
-var CLAUSE_SPLIT_RE = /[!?;\n–—]|\.(?=\s|$)/;
-function splitClauses(text) {
-  return String(text ?? "").split(CLAUSE_SPLIT_RE);
-}
-var NEGATOR_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bnever\b|\bno\b|\bwithout\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
 var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
-var NEGATOR_TEST = new RegExp(NEGATOR_RE, "i");
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
 var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
 var SUBJECT_VERB_WINDOW = 40;
+var BARE_NEGATOR_WINDOW = 5;
+function splitClauses(text) {
+  const s = String(text ?? "");
+  const clauses = [];
+  let clauseStart = 0;
+  HARD_BOUNDARY_RE.lastIndex = 0;
+  let m;
+  while (m = HARD_BOUNDARY_RE.exec(s)) {
+    const boundaryStart = m.index;
+    const boundaryEnd = boundaryStart + m[0].length;
+    const isHard = m[1] !== void 0 || m[2] !== void 0 || m[3] !== void 0;
+    if (isHard) {
+      clauses.push(s.slice(clauseStart, boundaryStart));
+      clauseStart = boundaryEnd;
+      continue;
+    }
+    const soFar = s.slice(clauseStart, boundaryStart);
+    if (PROHIBITION_TEST.test(soFar)) continue;
+    clauses.push(soFar);
+    clauseStart = boundaryEnd;
+  }
+  clauses.push(s.slice(clauseStart));
+  return clauses;
+}
 function isNegatedContext(clause, index) {
   const text = String(clause ?? "");
-  return NEGATOR_TEST.test(text.slice(0, Math.max(0, index)));
+  const before = text.slice(0, Math.max(0, index));
+  if (PROHIBITION_TEST.test(before)) return true;
+  BARE_NEGATOR_TEST.lastIndex = 0;
+  let m;
+  while (m = BARE_NEGATOR_TEST.exec(before)) {
+    const gap = before.slice(m.index + m[0].length);
+    if (gap.includes(",")) continue;
+    const tokenCount = (gap.match(/\S+/g) || []).length;
+    if (tokenCount <= BARE_NEGATOR_WINDOW) return true;
+  }
+  return false;
 }
 function isSubjectOfChangeContext(clause, index) {
   const text = String(clause ?? "");
