@@ -708,7 +708,7 @@ export type DurableRecord =
  * the shape has to be unwrapped rather than read off the top — and reference_
  * material chains two refinements, hence the loop rather than one step.
  */
-function objectShapeFor(type: string): Record<string, unknown> | undefined {
+export function objectShapeFor(type: string): Record<string, unknown> | undefined {
   const entry = RECORD_TYPES[type];
   if (!entry) return undefined;
   let schema: unknown = entry.schema;

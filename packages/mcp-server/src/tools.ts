@@ -289,6 +289,33 @@ export interface KnowledgeSplitInput {
   resolves?: string[];
 }
 
+/**
+ * The unforgeable envelope: every write REFUSES these by name (board 617e97d4
+ * hoisted this out of refuseServerOwnedFields so knowledge_schema's
+ * server_owned mask derives from the SAME list this refusal guard consumes).
+ * Exported at MODULE scope (invariant 1 — one definition) so server.ts's typed
+ * knowledge_create input schema (decision 7c7f6db1) strips exactly this set
+ * from every per-type variant instead of re-deriving or copying it.
+ */
+export const WRITE_REFUSED_FIELDS: readonly string[] = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type', 'lifecycle', 'freshness', 'file_baselines'];
+
+/**
+ * knowledge_schema's server-owned mask, widened from WRITE_REFUSED_FIELDS by
+ * `version` — the counter this surface owns and always overwrites at create.
+ * Exported alongside WRITE_REFUSED_FIELDS for the same reason: server.ts's
+ * typed create variants must drop `version` too, not just the refused set.
+ */
+export const SERVER_OWNED_FIELDS: readonly string[] = [...WRITE_REFUSED_FIELDS, 'version'];
+
+/**
+ * Envelope fields knowledge_create DEFAULTS when absent (author 'conductor',
+ * links [], scope 'project', stack_tags []) — caller-SUPPLIABLE but never
+ * caller-REQUIRED. Exported so the typed create variants mark these
+ * `.optional()` exactly like knowledge_schema already reports them, keeping
+ * the two surfaces in lockstep (decision 7c7f6db1).
+ */
+export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 'scope', 'stack_tags'];
+
 export class SterlingTools {
   private store: ToolStore;
   private config: SterlingConfig;
@@ -578,7 +605,7 @@ export class SterlingTools {
    * throws first), kept as defense-in-depth; the shared list binds the two
    * surfaces that must agree, the guard and the projection.
    */
-  private static readonly WRITE_REFUSED_FIELDS = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type', 'lifecycle', 'freshness', 'file_baselines'];
+  private static readonly WRITE_REFUSED_FIELDS = WRITE_REFUSED_FIELDS;
 
   private refuseServerOwnedFields(
     fields: Record<string, unknown>,
@@ -2040,7 +2067,7 @@ export class SterlingTools {
    * measured, a caller followed the projection's required[] verbatim and
    * composed a write the guard refused.
    */
-  private static readonly SERVER_OWNED_FIELDS = [...SterlingTools.WRITE_REFUSED_FIELDS, 'version'];
+  private static readonly SERVER_OWNED_FIELDS = SERVER_OWNED_FIELDS;
 
   /**
    * Envelope fields knowledge_create DEFAULTS when absent (author 'conductor',
@@ -2049,7 +2076,7 @@ export class SterlingTools {
    * 617e97d4: with these masked, required[] is exactly what a create must
    * supply). Keep in lockstep with the `??` defaults in knowledgeCreate.
    */
-  private static readonly CREATE_DEFAULTED_FIELDS = ['author', 'links', 'scope', 'stack_tags'];
+  private static readonly CREATE_DEFAULTED_FIELDS = CREATE_DEFAULTED_FIELDS;
 
   /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
   private static slugify(text: string): string {

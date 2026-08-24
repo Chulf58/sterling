@@ -27,6 +27,7 @@ export {
   DRAIN_VERBS,
   RECORD_TYPES,
   validateRecord,
+  objectShapeFor,
   knownFieldsFor,
   unknownFieldsIn,
   schemaFor,
