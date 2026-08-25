@@ -73,7 +73,24 @@
 // included, because the laundering it admits compares EQUAL and would otherwise
 // pass silently; the deny path additionally names the (B) writes it applied to.
 // Never a silent fallback to a per-run key.
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, lstatSync, readlinkSync, realpathSync } from 'node:fs';
+// v3.7 (board 55fcccac): the BOUNDED-RESOURCE layer. Every read/walk this hook
+// performs used to be unbounded — the dirty-set hash read whole files into
+// memory, the untracked-dir walks materialized a full directory listing before
+// charging anything, and the temp records + stamp were readFileSync+JSON.parse
+// with no size guard. An OOM or a hook-runner TIMEOUT mid-check kills the
+// process, and a killed process exits NON-2, which the platform treats as
+// NON-BLOCKING: a fail-OPEN reachable BY ACCIDENT (a big dirty tree, no
+// attacker). The fix is NOT a byte cap on the dirty set — that shape was tried
+// and reverted, because ONE legitimate >16MiB dirty file (build artifact,
+// dataset, video) would then deny EVERY subsequent Bash command. Instead:
+// (1) STREAMING hashes (constant memory, NO size cap anywhere on the hashing
+// path, so a large legit file can never deny by itself); (2) INCREMENTAL
+// directory iteration (opendirSync) that charges a walk budget per entry as it
+// goes, instead of readdirSync materializing a million-entry listing before the
+// first charge; (3) STRUCTURAL walk budgets (nodes + depth) whose overflow is
+// the hook's own BLOCKING deny naming the tripped budget, never an OOM/timeout;
+// (4) BOUNDED, size-prechecked JSON reads for the stamp and the temp records.
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, readlinkSync, realpathSync, constants as FS } from 'node:fs';
 import { join, dirname, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -86,6 +103,235 @@ import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 // settings.local.json is enforcement surface but git is blind to it).
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
 const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
+
+// ---------------------------------------------------------------------------
+// THE BOUNDED-RESOURCE LAYER (board 55fcccac). Everything below exists so that
+// no input this hook reads — a file, a directory tree, a temp record — can put
+// the PROCESS outside its own fail-closed control flow, where AC9 cannot reach
+// it. Two different bounding shapes, deliberately, because the two hazards are
+// different:
+//   * BYTES ARE STREAMED, NEVER CAPPED. A dirty file's size is the USER's, not
+//     the attacker's: a size cap on the hashing path denies a legitimate
+//     workflow (the disqualified fix), while streaming makes the memory cost
+//     constant no matter how large the file is. There is deliberately NO
+//     per-file and NO total-bytes budget anywhere on the hashing path.
+//   * STRUCTURE IS BUDGETED, AND OVERFLOW DENIES. A walk's node count and depth
+//     are unbounded WORK, not bounded memory — streaming cannot fix them, and
+//     the honest disposition for "this tree is too large to attest inside a
+//     hook's time" is the hook's own BLOCKING deny (exit 2) naming the budget,
+//     which is strictly better than the OOM/timeout kill it replaces (that kill
+//     exits non-2 and the platform ALLOWS the write).
+// ---------------------------------------------------------------------------
+
+// Fixed read buffer for every streamed hash — constant memory, reused per file.
+const HASH_CHUNK_BYTES = 64 * 1024;
+
+// Structural walk budgets. Sized far above ordinary use and far below the
+// pathological shapes that kill the process: a normal dirty untracked tree is
+// tens to hundreds of entries and a handful of levels deep, while the shapes
+// that OOM/timeout a hook are tens of thousands of entries or hundreds of
+// levels. CUMULATIVE PER HOOK INVOCATION (not per path): 100k files spread over
+// many small dirty directories is the same unbounded work as 100k in one, so
+// the counter is charged across the whole sweep — the cumulative TIME bound the
+// board asks for, expressed as node count rather than a wall clock (a clock
+// makes the verdict depend on machine speed, i.e. non-deterministic denials).
+const MAX_WALK_NODES = 10_000;
+const MAX_WALK_DEPTH = 64;
+
+// Per-CLASS size budgets for the small JSON metadata this hook reads back.
+// Unlike the dirty set, these are records H17 WRITES ITSELF (the (A) state +
+// attribution records, the (B) content baseline) or that a conductor CLI writes
+// (the stamp), so a cap here cannot false-deny a user's legitimate large file —
+// it can only refuse a record that is not the shape H17 produced. The (B)
+// baseline is the largest by construction (base64 of the small enforcement set;
+// 717 KB measured live), so 16 MiB is ~20x headroom, while the stamp is a list
+// of {path, sha256} entries and never approaches 8 MiB.
+const MAX_RECORD_BYTES = 16 * 1024 * 1024;
+const MAX_STAMP_BYTES = 8 * 1024 * 1024;
+
+// A tripped structural budget, distinguishable from every other throw so the
+// two call sites can dispose of it differently: PRE records it as an
+// unattestable snapshot and lets the command run (a snapshot stage must never
+// deny for the SIZE of the tree it found — that is the false-deny class this
+// redesign exists to avoid); POST lets it reach the fail-closed catch, which
+// DENIES (exit 2) naming the budget. `budget` names which one tripped.
+class WalkBudgetError extends Error {
+  constructor(message, budget) {
+    super(message);
+    this.name = 'WalkBudgetError';
+    this.budget = budget;
+  }
+}
+
+// ONE budget object threaded through every walk of a single hook invocation.
+function newWalkBudget() {
+  return {
+    nodes: 0,
+    // Charged PER ENTRY as the entry is produced — which is why the walks use
+    // opendirSync's incremental iteration rather than readdirSync: readdirSync
+    // materializes the WHOLE listing (and every Dirent) before a single charge
+    // could happen, so a million-entry flat directory OOMs before the budget is
+    // ever consulted. The budget must be able to stop a walk MID-DIRECTORY.
+    chargeNode(rel) {
+      if (++this.nodes > MAX_WALK_NODES) {
+        throw new WalkBudgetError(
+          `walk-node budget exceeded (limit ${MAX_WALK_NODES} entries) while walking '${rel}' — refusing to enumerate an unbounded tree inside a hook. ` +
+            `An unbounded walk that OOMs or times out kills this process, and a killed guard exits non-2, which the platform treats as NON-BLOCKING (the write would be ALLOWED). ` +
+            `This denial is the bounded alternative: commit, clean or ignore the oversized untracked tree, then rerun.`,
+          'node'
+        );
+      }
+    },
+    chargeDepth(depth, rel) {
+      if (depth > MAX_WALK_DEPTH) {
+        throw new WalkBudgetError(
+          `walk-depth budget exceeded (limit ${MAX_WALK_DEPTH} levels) at '${rel}' — refusing to recurse into an unbounded directory chain inside a hook. ` +
+            `Unbounded recursion that overflows or times out kills this process, and a killed guard exits non-2, which the platform treats as NON-BLOCKING (the write would be ALLOWED). ` +
+            `This denial is the bounded alternative: commit, clean or ignore the oversized untracked tree, then rerun.`,
+          'depth'
+        );
+      }
+    },
+  };
+}
+
+// sha256 of a file's RAW bytes, STREAMED (board 55fcccac clause 1). Replaces
+// createHash().update(readFileSync(abs)) — which allocated the WHOLE file
+// (twice, counting the digest's own copy) and so made the guard's memory a
+// function of the user's dirty tree. Memory here is HASH_CHUNK_BYTES flat, for
+// a 20 MiB file and a 20 GiB one alike, so there is no size at which this path
+// needs a cap and no size at which it can false-deny.
+// The open is O_RDONLY | O_NONBLOCK and the fstat is on the OPEN DESCRIPTOR
+// (Codex F2): openSync(path,'r') on a fifo/socket that was swapped in under the
+// gate BLOCKS in the open() call itself — before any fstat could reject it —
+// and a blocked hook is killed by the host timeout into a non-2 (fail-OPEN)
+// exit. O_NONBLOCK makes the open return immediately for those types so the
+// fstat regular-file check can reject them; a regular file ignores O_NONBLOCK,
+// so its reads behave exactly as before. A prior lstat cannot substitute — it
+// leaves the fifo-swap race between the lstat and the open. (The descriptor is
+// NOT yet the no-follow anchor of decision h17-windows-detect-and-abort — the
+// O_NOFOLLOW/identity-verification layer is that decision's own slice.)
+// BOUNDED READ, NOT A SIZE CAP (Codex F3): the read is bounded to the INITIAL
+// fstat size and re-fstats afterward, throwing on any size/mtime/ctime change.
+// An unbounded read-until-EOF loop chases a file appended-to faster than the
+// hash advances FOREVER (timeout -> non-2 -> fail-open); reading exactly the
+// bytes present at open, then confirming the file did not change, bounds the
+// work WITHOUT capping the size (memory stays HASH_CHUNK_BYTES flat for a file
+// of any size, so a large legit dirty file still can never deny by itself).
+// A file mutating mid-hash is itself a violation signal, so the throw (-> deny)
+// is correct on both counts. Throws on any I/O error, as the readFileSync it
+// replaces did.
+function sha256OfFileStreamed(abs) {
+  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  let primary;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new Error(`'${abs}' is not a regular file (fstat) — refusing to stream-hash it; only a regular file's bytes are hashable`);
+    }
+    const expectedSize = st.size;
+    const hash = createHash('sha256');
+    const buf = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+    let total = 0;
+    while (total < expectedSize) {
+      const want = Math.min(HASH_CHUNK_BYTES, expectedSize - total);
+      const n = readSync(fd, buf, 0, want, null); // null position: sequential, the fd's own offset advances
+      if (n <= 0) break; // shrank/EOF-early → caught by the size re-check below
+      hash.update(n === HASH_CHUNK_BYTES ? buf : buf.subarray(0, n)); // update COPIES into the digest, so the buffer is safe to reuse
+      total += n;
+    }
+    const st2 = fstatSync(fd);
+    if (total !== expectedSize || st2.size !== expectedSize || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
+      throw new Error(
+        `'${abs}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) — refusing a torn hash; a file mutating mid-hash is itself a violation signal`
+      );
+    }
+    return hash.digest('hex');
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeErr) {
+      // A leaked descriptor marches toward EMFILE, and an EMFILE mid-check is
+      // itself a non-2 fail-open (Codex F5). Swallow the close error ONLY while
+      // a primary exception is already driving a deny; with no primary pending,
+      // the leaked fd IS the failure and must propagate to the fail-closed catch.
+      if (!primary) throw closeErr;
+    }
+  }
+}
+
+// A SIZE-PRECHECKED read for the small JSON records this hook reads back (board
+// 55fcccac clause 4). The order is load-bearing: fstat FIRST, refuse an
+// over-budget size BEFORE any buffer is allocated — a guard that allocates and
+// then measures has already paid the cost it was meant to refuse. Reads at most
+// size+1 bytes and requires the read to land EXACTLY on the fstat size, then
+// re-fstats to confirm size/mtime/ctime did not move, so a record swapped under
+// the gate produces a refusal rather than a torn parse. Every caller already
+// wraps its read in a fail-closed catch, so a throw here lands on the SAME deny
+// the corrupt-record path has always produced.
+// O_NONBLOCK + fstat-on-descriptor (Codex F2): openSync(path,'r') on a
+// fifo/device swapped in under the gate blocks in the open() itself, before any
+// fstat could reject it, and a blocked hook is timeout-killed into a non-2
+// fail-open. O_NONBLOCK returns immediately for those types so the regular-file
+// check can reject them; a regular file ignores the flag. A prior lstat cannot
+// substitute — it leaves the swap race between the lstat and the open.
+// EXACT-SIZE, NOT just NOT-GREW (Codex F4): the old check accepted total < size
+// — a record TRUNCATED after the fstat to a shorter-but-valid JSON (`{}`/`[]`)
+// read as authoritative, and an empty baseline makes every current (B) file
+// look like an unauthorized addition and get REMOVED. Requiring total === size
+// AND an unchanged re-fstat rejects a truncation as loudly as a growth.
+function readBoundedFile(abs, maxBytes, what) {
+  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  let primary;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`${what} '${abs}' is not a regular file (fstat) — refusing to read it`);
+    if (st.size > maxBytes) {
+      throw new Error(`${what} '${abs}' is ${st.size} bytes, over the ${maxBytes}-byte budget for this record class — refusing to allocate or parse it`);
+    }
+    const cap = st.size + 1; // +1 so a file that grew is DETECTED rather than silently truncated
+    const buf = Buffer.allocUnsafe(cap);
+    let total = 0;
+    for (;;) {
+      const n = readSync(fd, buf, total, cap - total, null);
+      if (n <= 0) break;
+      total += n;
+      if (total >= cap) break;
+    }
+    if (total !== st.size) {
+      throw new Error(`${what} '${abs}' read ${total} bytes but its fstat size was ${st.size} — refusing a torn read (the record grew or was truncated under the gate)`);
+    }
+    const st2 = fstatSync(fd);
+    if (st2.size !== st.size || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
+      throw new Error(`${what} '${abs}' changed while being read (size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) — refusing to trust a record mutated under the gate`);
+    }
+    return buf.subarray(0, total).toString('utf8');
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeErr) {
+      // Codex F5: propagate a close failure only when no primary exception is
+      // already driving a deny — a leaked fd marches toward an EMFILE fail-open.
+      if (!primary) throw closeErr;
+    }
+  }
+}
+
+function readBoundedJsonFile(abs, maxBytes, what) {
+  return JSON.parse(readBoundedFile(abs, maxBytes, what));
+}
+
+// THE invocation's walk budget. One hook call is one process, so a module-level
+// object is exactly "cumulative across this invocation" — every walk in this
+// process charges the same counter, which is the point: the work that kills a
+// hook is the SUM of its walks, not the largest one.
+const WALK_BUDGET = newWalkBudget();
 
 // The baseline path is PROJECT-UNIQUE (audit finding 7/43): two concurrent
 // Sterling sessions in different projects previously shared os.tmpdir()/
@@ -268,7 +514,12 @@ function indexEntriesFor(cwd, rels) {
 // keeps that escape visible. A symlink's target is read with readlink and NEVER
 // followed. An unsupported file type (fifo, socket, device) throws -> AC9
 // fail-closed, never a silent "unchanged".
-function pathState(cwd, rel, idx) {
+// BOUNDED (board 55fcccac): the BYTES term is STREAMED (constant memory, no
+// size cap — a legitimately huge dirty file must never deny by itself) and the
+// DIRECTORY term is walked INCREMENTALLY against a cumulative structural budget
+// (`budget`, `depth`), because a collapsed untracked directory is an
+// attacker-or-accident-controlled amount of WORK that streaming cannot bound.
+function pathState(cwd, rel, idx, budget = WALK_BUDGET, depth = 0) {
   const abs = join(cwd, rel);
   const index = idx.get(rel) ?? null;
   let st;
@@ -280,7 +531,7 @@ function pathState(cwd, rel, idx) {
   }
   const mode = st.mode & 0o7777; // PERMISSION bits only; the type is its own term
   if (st.isSymbolicLink()) return { exists: true, type: 'symlink', mode, index, target: readlinkSync(abs) };
-  if (st.isFile()) return { exists: true, type: 'file', mode, index, sha256: createHash('sha256').update(readFileSync(abs)).digest('hex') };
+  if (st.isFile()) return { exists: true, type: 'file', mode, index, sha256: sha256OfFileStreamed(abs) };
   if (st.isDirectory()) {
     // An untracked directory reaches the sweep as its COLLAPSED path (`?? dir/`),
     // so comparing the directory alone would let a write to a file inside it pass
@@ -288,14 +539,68 @@ function pathState(cwd, rel, idx) {
     // a child literally named `__proto__` must be an ordinary key here, never a
     // prototype write (the same hazard review finding 4(b) names on the record's
     // own lookup).
+    budget.chargeDepth(depth, rel);
     const children = Object.create(null);
-    for (const name of readdirSync(abs)) {
-      const childRel = `${rel}/${name}`;
-      children[childRel] = pathState(cwd, childRel, idx);
+    // opendirSync + readSync, NOT readdirSync (board 55fcccac clause 3): the
+    // materializing form builds the entire listing — every Dirent of a
+    // million-entry flat directory — before the first budget charge could fire,
+    // so the process dies before its own bound is consulted. The incremental
+    // form charges as each entry arrives, which is what lets the budget stop a
+    // walk MID-DIRECTORY. The handle is closed in `finally`, including on the
+    // budget throw, so a tripped budget leaks no descriptor.
+    const dir = opendirSync(abs);
+    let primary;
+    try {
+      for (;;) {
+        const de = dir.readSync();
+        if (de === null) break;
+        budget.chargeNode(rel);
+        const childRel = `${rel}/${de.name}`;
+        children[childRel] = pathState(cwd, childRel, idx, budget, depth + 1);
+      }
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      try {
+        dir.closeSync();
+      } catch (closeErr) {
+        // Codex F5: a swallowed close error leaks the dir handle toward an
+        // EMFILE fail-open. Propagate it ONLY when no primary exception (a
+        // tripped budget, an unattestable entry) is already driving the verdict.
+        if (!primary) throw closeErr;
+      }
     }
     return { exists: true, type: 'dir', mode, index, children };
   }
   throw new Error(`unsupported file type at '${rel}' — cannot snapshot its state, so this command's writes are unverifiable`);
+}
+
+// The state PRE records for a directory whose walk tripped a structural budget
+// (board 55fcccac clause 3). PRE deliberately does NOT deny here: the snapshot
+// stage denying for the SIZE of a tree it merely FOUND is the false-deny class
+// this redesign exists to avoid, and at Pre the command has not run yet, so
+// there is nothing to verify and nothing to protect. What Pre owes instead is
+// an honest record that this path was NOT attested — hence the explicit
+// `walk_budget_exceeded` marker, which `sameState` and `stampCouldAttest` treat
+// as NEVER equal and NEVER attestable. The marker is what makes the empty
+// `children` map safe: without it, a command that DELETED every entry of an
+// over-budget dirty enforcement directory would compare EQUAL to this snapshot
+// and launder a mass deletion as "unchanged".
+// A path whose walk overflows is a directory by construction (only the
+// directory branch recurses), but that is re-checked rather than assumed — if
+// it is not one now, the original budget error is rethrown unchanged.
+function walkBudgetExceededState(cwd, rel, idx, err) {
+  const st = lstatSync(join(cwd, rel));
+  if (!st.isDirectory()) throw err;
+  return {
+    exists: true,
+    type: 'dir',
+    mode: st.mode & 0o7777,
+    index: idx.get(rel) ?? null,
+    children: Object.create(null),
+    walk_budget_exceeded: err.budget,
+  };
 }
 
 // Term-by-term equality. Each term is checked SEPARATELY and observably (never
@@ -312,6 +617,12 @@ function sameState(a, b) {
   if (a.type === 'symlink') return a.target === b.target; // SYMLINK TARGET (readlink)
   if (a.type === 'file') return a.sha256 === b.sha256; // BYTES (raw-byte sha256, whole file)
   if (a.type === 'dir') {
+    // AN UNATTESTED WALK IS NEVER "UNCHANGED" (board 55fcccac clause 3): a
+    // recorded state carrying `walk_budget_exceeded` says the tree was too
+    // large to enumerate at Pre, so its (empty) children map is not evidence of
+    // anything and must never compare equal — least of all to a directory the
+    // command has since emptied.
+    if (a.walk_budget_exceeded || b.walk_budget_exceeded) return false;
     // NO `?? {}` FALLBACK (review finding 4(a)): reading a missing children map
     // as an empty object made a recorded directory state that OMITS `children`
     // compare EQUAL to a really-empty directory, so emptying a dirty untracked
@@ -349,7 +660,12 @@ const STATE_FIELDS = {
   absent: ['exists', 'index'],
   file: ['exists', 'type', 'mode', 'index', 'sha256'],
   symlink: ['exists', 'type', 'mode', 'index', 'target'],
-  dir: ['exists', 'type', 'mode', 'index', 'children'],
+  // `walk_budget_exceeded` is OPTIONAL and appears only on a Pre snapshot whose
+  // walk tripped a structural budget (board 55fcccac). Admitting it to the
+  // allowed set opens nothing: its only effect anywhere is to make a state
+  // NEVER equal and NEVER stamp-attestable, so a crafted record that adds it
+  // can only make the comparison stricter.
+  dir: ['exists', 'type', 'mode', 'index', 'children', 'walk_budget_exceeded'],
 };
 
 // Returns a reason when `v` carries any OWN field outside `allowed`, else null.
@@ -391,6 +707,9 @@ function stateShapeError(cwd, v, where) {
   // non-empty requirement would false-DENY a real snapshot. The crafted
   // empty-children pair stays in the forged-record class accepted by 2422e76a.
   if (!isStateObject(v.children)) return `'${where}' is a directory with no explicit 'children' object`;
+  if (v.walk_budget_exceeded !== undefined && typeof v.walk_budget_exceeded !== 'string') {
+    return `'${where}' carries a non-string 'walk_budget_exceeded' (${JSON.stringify(v.walk_budget_exceeded)})`;
+  }
   const stray = strayFieldError(v, STATE_FIELDS.dir, where);
   if (stray) return stray;
   for (const k of ownKeys(v.children)) {
@@ -421,6 +740,10 @@ function stampCouldAttest(recorded, current) {
   if (current.type === 'file') return true; // only the bytes can still differ
   if (current.type === 'symlink') return false; // link TARGET: unattestable
   if (current.type === 'dir') {
+    // An over-budget Pre walk (board 55fcccac) recorded NO children, so there
+    // is no per-child difference for a stamp to speak for — unattestable, the
+    // same disposition an added/removed child already gets below.
+    if (recorded.walk_budget_exceeded || current.walk_budget_exceeded) return false;
     // A directory attests through its child FILES (stampAttestsDirectory walks
     // what is there NOW), so a child that was ADDED or REMOVED leaves nothing
     // for the walk to attest — fail closed on any change to the child key set,
@@ -563,7 +886,16 @@ function readStamp(cwd) {
   const stampPath = join(cwd, '.sterling', 'transient', 'enforcement-stamp.json');
   const kind = lstatKind(stampPath);
   if (kind !== 'file') return { present: kind !== 'absent', entries: null };
-  const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
+  // BOUNDED (board 55fcccac clause 4): the stamp lives in gitignored
+  // .sterling/transient/, which no gate protects, so an oversize file there
+  // could OOM the readFileSync+JSON.parse this replaces — killing the guard
+  // outside its own control flow. Size-prechecked and refused before
+  // allocation; the throw joins the parse error's existing route (every caller
+  // catches it and treats the stamp as attesting NOTHING). That is what makes
+  // an unreadable stamp fail closed exactly WHERE IT MATTERS and nowhere else:
+  // "no attestation available" only bites on a path that needs attestation, so
+  // a garbage stamp for a window with nothing to attest changes no verdict.
+  const stamp = readBoundedJsonFile(stampPath, MAX_STAMP_BYTES, 'enforcement stamp');
   return { present: true, entries: Array.isArray(stamp) ? stamp : null };
 }
 
@@ -573,9 +905,12 @@ function readStamp(cwd) {
 // a stamped enforcement file with a link to an out-of-repo file holding the
 // stamped bytes, which the hook loader would then execute from outside every
 // sweep's reach.
+// STREAMED (board 55fcccac clause 1): constant memory, no size cap — a stamped
+// enforcement file of any size is hashable without the guard's heap tracking
+// it.
 function sha256OfRegularFile(abs) {
   if (lstatKind(abs) !== 'file') return null;
-  return createHash('sha256').update(readFileSync(abs)).digest('hex');
+  return sha256OfFileStreamed(abs);
 }
 
 function toRel(cwd, abs) {
@@ -952,21 +1287,48 @@ function stampAttestsCurrentBytes(cwd, rel) {
 function stampAttestsDirectory(cwd, relDir) {
   try {
     const files = [];
-    const walk = (rel) => {
-      for (const de of readdirSync(join(cwd, rel), { withFileTypes: true })) {
-        const childRel = `${rel}/${de.name}`;
-        // Review finding 3: Dirent classification is lstat-shaped, and this
-        // walk keeps it that way — a symlink is never recursed into and never
-        // counted as an attestable file, so the recursion cannot leave the repo
-        // and no child's bytes are ever hashed through a link. Anything that is
-        // neither a real directory nor a regular file aborts the walk into the
-        // catch below (fail-closed: the directory attests nothing).
-        if (de.isDirectory()) walk(childRel);
-        else if (de.isFile()) files.push(childRel);
-        else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
+    // INCREMENTAL + BUDGETED (board 55fcccac clause 3), for the same reason
+    // pathState's walk is: this walk runs on an agent-influenced dirty
+    // directory, so its size is not ours to assume. A tripped budget throws
+    // into the catch below and the directory simply attests NOTHING — the
+    // fail-closed answer this function already gives for every other walk
+    // failure (the caller then restores and denies).
+    const walk = (rel, depth) => {
+      WALK_BUDGET.chargeDepth(depth, rel);
+      const dir = opendirSync(join(cwd, rel));
+      let primary;
+      try {
+        for (;;) {
+          const de = dir.readSync();
+          if (de === null) break;
+          WALK_BUDGET.chargeNode(rel);
+          const childRel = `${rel}/${de.name}`;
+          // Review finding 3: Dirent classification is lstat-shaped, and this
+          // walk keeps it that way — a symlink is never recursed into and never
+          // counted as an attestable file, so the recursion cannot leave the repo
+          // and no child's bytes are ever hashed through a link. Anything that is
+          // neither a real directory nor a regular file aborts the walk into the
+          // catch below (fail-closed: the directory attests nothing).
+          if (de.isDirectory()) walk(childRel, depth + 1);
+          else if (de.isFile()) files.push(childRel);
+          else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
+        }
+      } catch (e) {
+        primary = e;
+        throw e;
+      } finally {
+        try {
+          dir.closeSync();
+        } catch (closeErr) {
+          // Codex F5: propagate a leaked-handle close error only when no primary
+          // exception is already driving the verdict; a swallowed leak marches
+          // toward an EMFILE fail-open. (The outer catch here turns any throw
+          // into an unattested `return false`, so this stays fail-safe.)
+          if (!primary) throw closeErr;
+        }
       }
     };
-    walk(relDir);
+    walk(relDir, 0);
     if (!files.length) return false;
     return files.every((f) => stampAttestsCurrentBytes(cwd, f));
   } catch {
@@ -1088,7 +1450,27 @@ if (event === 'PreToolUse') {
     // one: writing the legacy per-run copy as well would leave a shared file
     // behind after the per-call one is consumed, which is precisely the shared
     // transient state this keying removes (P4).
-    writeFileSync(baselineFile(cwd, runId, key), JSON.stringify(collectBaseline(cwd)));
+    // SIZE INVARIANT ENFORCED AT PRE, SYMMETRICALLY WITH POST (Codex F-REGRESSION):
+    // Post reads this baseline back through readBoundedJsonFile(..., MAX_RECORD_BYTES)
+    // and DENIES an over-budget record. base64 expands the (B) bytes ~4/3, so a
+    // large legit protected file (e.g. a ~12MiB file under .claude/agents/**)
+    // could push the serialized baseline past MAX_RECORD_BYTES — and if Pre wrote
+    // it anyway, EVERY Post for that call would false-deny H17's own enforcement
+    // set (a self-DoS). Enforce the IDENTICAL bound HERE so an oversize (B)
+    // enforcement set fails LOUDLY at Pre, before the command runs, rather than as
+    // a silent Post false-deny after. This bounds ONLY the retained (B) baseline
+    // content — NOT the dirty-set hashing path (which is streamed, uncapped by
+    // construction, board 55fcccac clause 1). The (B) set is the small enforcement
+    // surface (.claude/agents/**, settings, config; 717 KB measured live), so
+    // MAX_RECORD_BYTES is ~20x headroom and tripping it is a genuine anomaly.
+    const baselineJson = JSON.stringify(collectBaseline(cwd));
+    const baselineBytes = Buffer.byteLength(baselineJson, 'utf8');
+    if (baselineBytes > MAX_RECORD_BYTES) {
+      throw new Error(
+        `(B) content baseline serialized to ${baselineBytes} bytes, over the ${MAX_RECORD_BYTES}-byte budget the Post consumer enforces — refusing at Pre so an oversize (B) enforcement set denies LOUDLY and SYMMETRICALLY before the command runs, never as a silent Post false-deny after`
+      );
+    }
+    writeFileSync(baselineFile(cwd, runId, key), baselineJson);
     // Attribution record for the (A) branch: without it, Post can only see that a
     // tracked path is dirty NOW, not whether this command made it so. KEYED PER
     // CALL under the SAME `key` as the (B) baseline and the (A) STATE record
@@ -1111,7 +1493,22 @@ if (event === 'PreToolUse') {
     if (key) {
       const idx = indexEntriesFor(cwd, dirtyRels);
       const states = {};
-      for (const rel of dirtyRels) states[rel] = pathState(cwd, rel, idx);
+      for (const rel of dirtyRels) {
+        try {
+          states[rel] = pathState(cwd, rel, idx, WALK_BUDGET, 0);
+        } catch (e) {
+          // A STRUCTURAL BUDGET is the one snapshot failure Pre does not deny
+          // on (board 55fcccac clause 3): the tree's size is the user's, the
+          // command has not run yet, and a Pre that denies every Bash call
+          // because some untracked directory is large is the workflow-breaking
+          // false-deny that got the previous attempt reverted. Record the
+          // honest "not attested" state instead and let POST — which is where
+          // verification actually happens — deny naming the budget. Every
+          // OTHER snapshot failure still denies here, unchanged.
+          if (!(e instanceof WalkBudgetError)) throw e;
+          states[rel] = walkBudgetExceededState(cwd, rel, idx, e);
+        }
+      }
       writeFileSync(stateFile(cwd, runId, key), JSON.stringify(states));
     }
     allow();
@@ -1270,7 +1667,11 @@ try {
     }
     let recordedDirty;
     try {
-      recordedDirty = JSON.parse(readFileSync(dPath, 'utf8'));
+      // BOUNDED (board 55fcccac clause 4): os.tmpdir() is writable by the very
+      // command being audited, so an oversize record here could OOM the guard
+      // outside its own control flow. Size-refused before allocation; the throw
+      // lands on the SAME corrupt-record deny below, unchanged.
+      recordedDirty = readBoundedJsonFile(dPath, MAX_RECORD_BYTES, 'attribution record');
     } catch {
       deny(
         environmentDefectDenial('H17', `attribution record '${dPath}' corrupt/unparseable — cannot attribute writes; failing closed (P5).` + sharedNote, {
@@ -1403,7 +1804,7 @@ try {
       }
       let recorded;
       try {
-        recorded = JSON.parse(readFileSync(sPath, 'utf8'));
+        recorded = readBoundedJsonFile(sPath, MAX_RECORD_BYTES, 'per-call Pre-STATE record'); // BOUNDED, board 55fcccac clause 4
       } catch {
         deny(
           environmentDefectDenial('H17', `per-call Pre-STATE record '${sPath}' corrupt/unparseable — cannot compare pre-existing dirt; failing closed (P5).`, {
@@ -1581,7 +1982,15 @@ try {
           // `changedPreDirty` — DENIED and NOT restored.
           wasState = recordedChild ?? { exists: false, index: null };
         }
-        const nowState = pathState(cwd, rel, postIndex);
+        // POST is where a tripped structural budget DENIES (board 55fcccac
+        // clause 3), unlike Pre: here the command has already run and this walk
+        // is the verification itself, so a tree too large to enumerate means
+        // the writes are unverifiable. The WalkBudgetError is deliberately NOT
+        // caught — it reaches the outer fail-closed catch, which denies (exit
+        // 2) with the tripped budget named. That is strictly better than the
+        // OOM/timeout it replaces: a killed hook exits non-2 and the platform
+        // ALLOWS the write.
+        const nowState = pathState(cwd, rel, postIndex, WALK_BUDGET, 0);
         if (sameState(wasState, nowState)) continue; // (1) verified by observation
         // (2) conductor-attested — but ONLY where a stamp can actually speak
         // for the difference (review finding 2). A {path, sha256} /
@@ -1659,7 +2068,7 @@ try {
     }
     let baseline;
     try {
-      baseline = JSON.parse(readFileSync(bPath, 'utf8'));
+      baseline = readBoundedJsonFile(bPath, MAX_RECORD_BYTES, '(B) content baseline'); // BOUNDED, board 55fcccac clause 4
     } catch {
       deny(
         environmentDefectDenial('H17', `Baseline '${bPath}' corrupt/unparseable — cannot verify the enforcement surface; failing closed (P5).`, {
