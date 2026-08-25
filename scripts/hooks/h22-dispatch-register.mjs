@@ -4,11 +4,16 @@
 // session_id, files, at} to .sterling/transient/dispatch-register.json, Stop
 // removes the entry whose agent_id matches — EXCEPT for a reviewer-class
 // entry (agent_type starting with the literal prefix 'reviewer-'), which is
-// first PROMOTED as {agent_type, files, at} into the durable review ledger
+// first PROMOTED as {agent_type, files, at, session_id, branch, base_sha}
+// into the durable review ledger
 // at .sterling/review-ledger.json (STORE ROOT, not transient/, so it
 // survives H1's session wipe — decision 12a26ca6-a301-466d-a45c-5e1eeff36694,
 // slug review-receipt-ledger) and then removed from the register exactly as
-// before. The register is what makes live fan-out a DISCLOSED FACT rather
+// before. The last three fields are the receipt's IDENTITY (decision
+// review-ledger-receipt-expiry, 0408b295): they are what lets
+// scripts/commit-reviewed.mjs refuse to stamp a receipt that outlived the
+// session/branch that earned it, instead of spending it on an unrelated later
+// commit — the measured stale-spend leak (board 09e03d76). The register is what makes live fan-out a DISCLOSED FACT rather
 // than conductor memory — H10 reads it at Stop and defers file duties owned
 // by a live dispatch, instead of reading an agent's work-in-progress as
 // conductor negligence (570832d4: the same capture_pending minted three
@@ -50,6 +55,7 @@
 // "accept the lost update" posture would be the wrong call applied to a file
 // with no self-healing mechanism.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { lastDispatchBlocks, extractPathCandidates } from './lib/dispatch-prompt.mjs';
@@ -64,6 +70,58 @@ function loadExclusiveResourceNames(cwd) {
   } catch {
     return [];
   }
+}
+
+// RECEIPT IDENTITY (decision review-ledger-receipt-expiry, 0408b295) — the git
+// half of what a promoted receipt records about WHERE it was earned.
+//
+// BRANCH: `git symbolic-ref --quiet --short HEAD`, deliberately not
+// `rev-parse --abbrev-ref HEAD`. Under a DETACHED HEAD (a case neither the
+// decision nor board 09e03d76 defines) rev-parse invents the literal string
+// 'HEAD', which two unrelated detached states would SHARE — a receipt earned in
+// one would then read as same-branch in the other. symbolic-ref returns nothing
+// there, so this records null: "this receipt has no branch identity", which is
+// the honest statement and degrades to unjudgeable-hence-eligible downstream
+// rather than to a false match.
+//
+// BASE_SHA: HEAD AT PROMOTION TIME — the commit the reviewed working tree was
+// based on. Deliberately NOT a merge-base with a default branch: that needs an
+// origin/HEAD (or a guessed 'main') probe which simply does not resolve in a
+// repo without a remote, so it would record NOTHING in exactly the cases a
+// plain HEAD records the right thing; and what the receipt needs to state is
+// WHAT WAS REVIEWED, which HEAD-at-review names exactly.
+//
+// Both degrade to null and NEVER throw: a cwd with no git repository at all
+// must still promote the receipt, because this hook never denies a stop.
+function gitReceiptIdentity(cwd) {
+  const git = (args) => {
+    try {
+      const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 5_000 });
+      return r.status === 0 ? normIdentity(r.stdout) : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    branch: git(['symbolic-ref', '--quiet', '--short', 'HEAD']),
+    base_sha: git(['rev-parse', 'HEAD']),
+  };
+}
+
+// EMPTY IS NULL AT THE WRITING END TOO (Codex review, MEDIUM). A promoted
+// receipt must never carry `session_id: ''` or `branch: ''`: an empty string is
+// PRESENT evidence that means nothing, and it invites every reader to disagree
+// about whether it is an identity or an absence. Normalizing here means the
+// only two states that ever reach the ledger are "a usable identity" and null,
+// so scripts/commit-reviewed.mjs's matching normalization (its own normIdentity)
+// has nothing left to disambiguate. Trimming matches what that CLI already did
+// to STERLING_SESSION_ID, so a session_id arriving with stray whitespace cannot
+// read as foreign against its own session.
+function normIdentity(v) {
+  if (typeof v === 'string') return v.trim() === '' ? null : v.trim();
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  if (typeof v === 'boolean') return String(v);
+  return null; // null/undefined/object/array → no usable identity, recorded as absence
 }
 
 // PER-BLOCK ATTRIBUTION (decision 5d3747c1, slug h22-per-block-attribution) —
@@ -323,6 +381,10 @@ try {
       // here would be a permanent loss of reviewer evidence rather than a
       // bounded, self-healing one.
       const sterlingDir = join(input.cwd, '.sterling');
+      // Probed OUTSIDE the lock: two git spawns are the slowest thing on this
+      // path, and holding the ledger mutex across them would push concurrent
+      // reviewer stops toward the unlocked-timeout fallback for no reason.
+      const identity = gitReceiptIdentity(input.cwd);
       withLedgerLock(sterlingDir, () => {
         const ledgerPath = join(sterlingDir, 'review-ledger.json');
         let ledger = [];
@@ -335,7 +397,23 @@ try {
           ledger = []; // malformed ledger degrades to empty (same posture as the
           // register above) and is rewritten valid below — never exit 2 for this
         }
-        ledger.push({ agent_type: departing.agent_type, files: departing.files, at: departing.at });
+        // session_id comes from the REGISTER entry, not from stdin: it is the
+        // session that dispatched the reviewer. (The prune above already
+        // guarantees the two are equal — the fallback exists so a hand-written
+        // or pre-expiry register entry still yields a total shape rather than
+        // a missing key, since commit-reviewed treats a MISSING identity as
+        // unjudgeable and an identity that is merely null as the same.)
+        // Both candidates go through normIdentity, so an empty-string session_id
+        // on the register entry falls through to stdin's rather than being
+        // written as a meaningless '' the reader must then interpret.
+        ledger.push({
+          agent_type: departing.agent_type,
+          files: departing.files,
+          at: departing.at,
+          session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
+          branch: identity.branch,
+          base_sha: identity.base_sha,
+        });
         const ledgerTmpPath = join(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
         writeFileSync(ledgerTmpPath, JSON.stringify(ledger));
         renameSync(ledgerTmpPath, ledgerPath);

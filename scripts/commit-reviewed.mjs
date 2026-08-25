@@ -22,6 +22,26 @@
 //     all treated as empty): refuse (exit 1) with guidance — dispatch a
 //     reviewer, or commit bare and answer at the merge gate — and make NO
 //     commit.
+//   - RECEIPT EXPIRY (decision review-ledger-receipt-expiry, 0408b295; board
+//     09e03d76): a valid entry whose recorded `session_id` differs from THIS
+//     session's, or whose recorded `branch` differs from the branch checked
+//     out here, is FOREIGN — DISCLOSED BUT NOT STAMPED. It is named on stderr
+//     (the foreign value verbatim + the receipt's age in the same 'Xh'
+//     convention the staleness advisory uses), never turned into a trailer,
+//     and never consumed: it stays in the ledger for H1 to report at the next
+//     SessionStart. A receipt that records NO identity (the pre-expiry
+//     {agent_type, files, at} shape), or whose identity cannot be judged
+//     because this side is unknown (no session marker, no branch — e.g. a
+//     detached HEAD), is UNJUDGEABLE and stays eligible: this mechanism only
+//     ever withholds a stamp on positive evidence of foreignness, so its
+//     failure direction is exactly today's behavior.
+//   - HOW THIS CLI LEARNS THE CURRENT SESSION: hooks get session_id on stdin;
+//     a bare CLI does not. H1 (SessionStart) writes the one it was handed to
+//     .sterling/transient/session.json — a latest-value cell superseded by the
+//     next SessionStart (P4), the same shape H10's pressure/gauge markers use
+//     — and this reads it. STERLING_SESSION_ID overrides that file when set:
+//     an explicit escape hatch for a non-hook context, and the seam the
+//     receipt-expiry tests plumb their fixtures through.
 //   - >=1 valid entry AND staged changes present: commit with the given
 //     message plus one `Reviewed-By-Agent: <agent_type>` trailer per valid
 //     entry (readable via the exact `%(trailers:key=Reviewed-By-Agent,
@@ -154,6 +174,126 @@ if (validEntries.length === 0) {
   fail(guidance);
 }
 
+// ===========================================================================
+// RECEIPT EXPIRY (decision review-ledger-receipt-expiry, 0408b295) — the
+// lifecycle half of board 09e03d76. The measured leak: a code-touching commit
+// made with bare `git commit` never consumes the receipts its reviews earned,
+// so they survive and are all spent at once on a LATER commit they never
+// reviewed. The shipped advisories DISCLOSE that at spend time; this WITHHOLDS
+// the spend, because the receipt's life is bound to the session/branch that
+// earned it (P4) and stamping it anywhere else is the defect, not a warning.
+//
+// NEVER DELETES. A foreign receipt is real reviewer evidence: it is left in
+// the ledger untouched so H1 reports it at the next SessionStart and a human
+// decides. Withholding a stamp is reversible; discarding the evidence is not.
+// ===========================================================================
+
+/** IDENTITY NORMALIZATION, applied at BOTH ends of every comparison below
+ *  (Codex review, MEDIUM). The defect it closes: `session_id: ''` is PRESENT
+ *  evidence in the ledger but read as ABSENCE by a bare `typeof === 'string'`
+ *  test, so an empty identity could masquerade as differing-yet-ignored. One
+ *  function, used on the receipt's value AND on this side's value, means '' can
+ *  never mean one thing in one place and another elsewhere: empty-after-trim IS
+ *  absence, everywhere, and the fail direction stays positive-evidence-only.
+ *  Trimming matches what STERLING_SESSION_ID already got, so a marker written
+ *  with a stray newline cannot read as foreign against its own session.
+ *  A non-primitive (object/array) carries no usable identity and returns null —
+ *  UNJUDGEABLE, hence eligible; String()-ing it would both risk a throw (a
+ *  ledger value is arbitrary JSON — the {toString:null} class, pin P10) and
+ *  manufacture a '[object Object]' that compares foreign against everything,
+ *  withholding stamps on garbage rather than on evidence. */
+function normIdentity(v) {
+  if (typeof v === 'string') return v.trim() === '' ? null : v.trim();
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  if (typeof v === 'boolean') return String(v);
+  return null; // null/undefined/object/array/symbol/bigint/NaN → no usable identity
+}
+
+/** THIS session's id. Env first (explicit override + the tests' fixture seam),
+ *  then H1's SessionStart cell. null = unknown, which makes session identity
+ *  UNJUDGEABLE — every receipt then stays eligible on the session axis, i.e.
+ *  pre-expiry behavior, rather than being withheld on an absence. */
+function currentSessionId() {
+  const override = normIdentity(process.env.STERLING_SESSION_ID);
+  if (override !== null) return override;
+  try {
+    const cell = JSON.parse(readFileSync(join(target, '.sterling', 'transient', 'session.json'), 'utf8'));
+    return normIdentity(cell && cell.session_id);
+  } catch {
+    return null; // no marker yet (a session started before this shipped), or unreadable
+  }
+}
+
+/** The branch checked out here — same derivation H22 records with
+ *  (symbolic-ref, so a detached HEAD is null/unknown rather than the shared
+ *  literal 'HEAD'). null = unjudgeable on the branch axis. */
+function currentBranch() {
+  try {
+    const r = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+    return r.status === 0 ? normIdentity(r.stdout) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Age in the 'X.Xh' convention the STALE RECEIPT advisory below already uses. */
+function ageLabel(at) {
+  const t = typeof at === 'string' ? Date.parse(at) : NaN;
+  return Number.isNaN(t) ? 'of unknown age (no usable timestamp)' : `${((Date.now() - t) / 3_600_000).toFixed(1)}h old`;
+}
+
+const thisSession = currentSessionId();
+const thisBranch = currentBranch();
+const eligibleEntries = [];
+// Disclosures are collected as well as printed: a warning that reaches only
+// stderr is invisible to anything reading this CLI's own JSON report, and what
+// was NOT spent is exactly what the reader needs to weigh. (Kept separate from
+// spendWarnings, which is declared further down — this runs before it.)
+const foreignDisclosures = [];
+for (const e of validEntries) {
+  // POSITIVE EVIDENCE ONLY on both axes: the receipt must CARRY a usable
+  // identity AND this side must know its own, before a mismatch can withhold a
+  // stamp. A pre-expiry receipt (no session_id/branch at all) is unjudgeable
+  // and stays eligible — this must never retroactively strand receipts earned
+  // before the field existed. Both sides go through normIdentity, so an empty
+  // or whitespace-only value is absence on either side, never a phantom
+  // mismatch (and never a phantom MATCH: two nulls do not satisfy `!== null`).
+  const receiptSession = normIdentity(e.session_id);
+  const receiptBranch = normIdentity(e.branch);
+  const foreignSession = receiptSession !== null && thisSession !== null && receiptSession !== thisSession;
+  const foreignBranch = receiptBranch !== null && thisBranch !== null && receiptBranch !== thisBranch;
+  if (!foreignSession && !foreignBranch) {
+    eligibleEntries.push(e);
+    continue;
+  }
+  // safeLabel is a hoisted, side-effect-free function declaration defined
+  // below (with the review finding that motivated it): ledger values are
+  // arbitrary JSON, and raw interpolation of one can THROW.
+  const why = [
+    foreignSession ? `a DIFFERENT session (receipt session_id ${safeLabel(e.session_id)}, this session ${safeLabel(thisSession)})` : null,
+    foreignBranch ? `a DIFFERENT branch (receipt branch ${safeLabel(e.branch)}, checked out here ${safeLabel(thisBranch)})` : null,
+  ]
+    .filter(Boolean)
+    .join(' and ');
+  foreignDisclosures.push(
+    `commit-reviewed: FOREIGN RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt is ${ageLabel(e.at)} and was earned in ${why}. ` +
+      `A review receipt's life is bound to the session and branch that earned it (decision review-ledger-receipt-expiry): stamping it onto this commit would ` +
+      `claim a review that never looked at this diff, which is exactly the stale-spend leak board 09e03d76 measured. It stays in the ledger untouched — H1 ` +
+      `reports it at the next SessionStart; consume it deliberately from its own branch/session, or remove it by hand once you have judged it.`
+  );
+}
+for (const line of foreignDisclosures) console.error(line);
+if (eligibleEntries.length === 0) {
+  // Every receipt present is foreign. Refuse exactly as a ledger with zero
+  // valid entries does — a bare commit here would silently ship an unreviewed
+  // diff wearing no trailer, which the merge gate would then refuse anyway.
+  // Nothing is consumed: the foreign receipts above survive verbatim.
+  fail(
+    `commit-reviewed: every un-consumed review receipt is FOREIGN (see the ${foreignDisclosures.length} disclosure(s) above) — none of them reviewed work in this ` +
+      `session on this branch, so none is stamped and none is consumed. Dispatch a reviewer for THIS diff, or commit bare with 'git commit' and answer at the merge gate.`
+  );
+}
+
 const staged = spawnSync('git', ['diff', '--cached', '--quiet'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
 if (staged.error) {
   fail(`commit-reviewed: git diff --cached --quiet failed: ${staged.error.message}`);
@@ -205,7 +345,10 @@ const stagedFiles = new Set(
     .filter(Boolean)
     .map(normalizePath)
 );
-for (const e of validEntries) {
+// eligibleEntries, not validEntries: a foreign receipt is not being spent on
+// this commit, so warning that its sabotage does not target this diff would be
+// noise about a receipt this invocation deliberately leaves alone.
+for (const e of eligibleEntries) {
   if (!Array.isArray(e.sabotage_targets)) continue;
   for (const t of e.sabotage_targets) {
     if (typeof t !== 'string' || !t || stagedFiles.has(normalizePath(t))) continue;
@@ -267,18 +410,22 @@ function safeLabel(v) {
 // proceeds untouched — an advisory can lose its own voice, but it can never
 // cost a commit. Nothing inside this block writes, commits, or filters
 // entries, so skipping it is always safe.
+// Every advisory below is about WHAT IS BEING SPENT, so all of them iterate
+// eligibleEntries — the foreign entries were already disclosed above, by a
+// mechanism that WITHHOLDS rather than warns, and re-warning about them here
+// would double-report a receipt this commit never touches.
 try {
-  if (validEntries.length > MULTI_SPEND_WARN_ABOVE) {
+  if (eligibleEntries.length > MULTI_SPEND_WARN_ABOVE) {
     warnSpend(
-      `commit-reviewed: MULTI-SPEND — ${validEntries.length} review receipts are being stamped on ONE commit (advisory threshold: more than ${MULTI_SPEND_WARN_ABOVE}); ` +
-        `all ${validEntries.length} are consumed in this single act, so any that reviewed OTHER work is permanently spent here. Receipts: ` +
-        `${validEntries.map((e) => `${e.agent_type}@${safeLabel(e.at)}`).join(', ')}. ` +
+      `commit-reviewed: MULTI-SPEND — ${eligibleEntries.length} review receipts are being stamped on ONE commit (advisory threshold: more than ${MULTI_SPEND_WARN_ABOVE}); ` +
+        `all ${eligibleEntries.length} are consumed in this single act, so any that reviewed OTHER work is permanently spent here. Receipts: ` +
+        `${eligibleEntries.map((e) => `${e.agent_type}@${safeLabel(e.at)}`).join(', ')}. ` +
         `A stretch of receipts usually means an earlier code-touching commit was made with bare 'git commit' and never consumed its own. ` +
         `This is a warning, not a refusal — nothing is rejected or deduped.`
     );
   }
 
-  for (const e of validEntries) {
+  for (const e of eligibleEntries) {
     const entryFiles = Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : [];
     if (entryFiles.length === 0) {
       // A receipt naming NO files is the STRONGEST form of unverifiable
@@ -302,7 +449,7 @@ try {
     }
   }
 
-  for (const e of validEntries) {
+  for (const e of eligibleEntries) {
     const recordedAt = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
     if (Number.isNaN(recordedAt)) {
       warnSpend(
@@ -329,7 +476,7 @@ try {
   );
 }
 
-const trailerLines = validEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
+const trailerLines = eligibleEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
 const fullMessage = `${message}\n\n${trailerLines.join('\n')}`;
 
 const commit = spawnSync('git', ['commit', '-m', fullMessage], { cwd: target, encoding: 'utf8', timeout: 30_000 });
@@ -423,7 +570,7 @@ if (trailerCheck.status !== 0) {
 // truncation) or a value that belongs to none of the entries this
 // invocation actually stamped. Trailers are a multiset (duplicates allowed,
 // FIX/R1 above), so both sides are sorted before comparing.
-const expectedTrailerValues = [...validEntries.map((e) => e.agent_type)].sort();
+const expectedTrailerValues = [...eligibleEntries.map((e) => e.agent_type)].sort();
 const actualTrailerValues = (trailerCheck.stdout ?? '')
   .split('\n')
   .map((l) => l.trim())
@@ -453,8 +600,9 @@ if (!trailerMatches) {
 // (P4). RE-READ rather than reuse `ledger` — `git commit` runs hooks inline
 // and can take seconds, during which a reviewer's SubagentStop may have
 // promoted a fresh entry into the ledger; that entry must survive. Only
-// entries identity-matched (agent_type + at) to what was just stamped are
-// removed. Lock-guarded (FIX 2) against a concurrent H22 promotion write.
+// entries identity-matched (agent_type + at + the partition fields
+// session_id/branch/base_sha) to what was just stamped are removed.
+// Lock-guarded (FIX 2) against a concurrent H22 promotion write.
 try {
   withLedgerLock(join(target, '.sterling'), () => {
     let freshLedger = [];
@@ -468,8 +616,8 @@ try {
     }
     // R1: identity is a MULTISET, not a Set. Two stamped entries can share
     // an identity key (same agent_type + Start-timestamp millisecond, e.g.
-    // a parallel dispatch batch) — the ledger entry shape stays frozen
-    // ({agent_type, files, at}), so identity collisions are handled here by
+    // a parallel dispatch batch, which now share their session/branch too), so
+    // identity collisions are handled here by
     // counting stamped occurrences and removing exactly one matching
     // re-read entry per stamped occurrence. Any excess occurrence (a fresh
     // receipt appended mid-commit that happens to collide with a stamped
@@ -515,15 +663,37 @@ try {
       }
       return true;
     };
+    // THE PARTITION FIELDS ARE PART OF THE IDENTITY (Codex review, HIGH).
+    // agent_type + at alone is no longer a sufficient key now that a ledger can
+    // hold BOTH an eligible and a foreign receipt: parallel reviewer dispatches
+    // genuinely produce the same agent_type at the same Start-millisecond, so a
+    // FOREIGN entry could be spliced away IN PLACE OF the eligible one it
+    // collides with — three failures at once (the never-consumed guarantee
+    // broken, foreign_receipts reporting a receipt that is now gone, and the
+    // eligible receipt left behind to be spent a second time on the next
+    // commit). Including session_id/branch/base_sha makes the very fields that
+    // decided the partition decide the consume, so the two can never disagree.
+    // NULL-SAFE via `?? null`: a legacy pre-expiry entry carries none of the
+    // three, and absence normalizes identically on both sides (both reads come
+    // from the same file), so those entries still match exactly as before.
+    const identityField = (e, k) => (e[k] === undefined ? null : e[k]);
     const sameIdentity = (fresh, stamped) =>
       typeof fresh.agent_type === 'string' &&
       fresh.agent_type === stamped.agent_type &&
-      boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP);
+      boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP) &&
+      ['session_id', 'branch', 'base_sha'].every((k) =>
+        boundedDeepEqual(identityField(fresh, k), identityField(stamped, k), IDENTITY_DEPTH_CAP)
+      );
     // MULTISET consume by splicing the stamped list: each fresh entry claims at
     // most one still-unclaimed stamped occurrence, so two identical stamped
     // entries consume exactly two matching fresh ones and any excess fresh
     // occurrence survives. O(n^2) is irrelevant at ledger scale (tens).
-    const unclaimedStamped = [...validEntries];
+    // The STAMPED set — eligibleEntries, never validEntries: a foreign receipt
+    // was never stamped, so it must never be identity-matched away here. That
+    // is the "never silently deleted" half of the expiry ruling, and it holds
+    // structurally (the foreign entry simply is not in this list) rather than
+    // by a filter that could be got wrong.
+    const unclaimedStamped = [...eligibleEntries];
     const survivors = freshLedger.filter((e) => {
       if (!e || typeof e !== 'object') return true; // a malformed fresh entry was never stamped — it survives untouched
       const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
@@ -554,7 +724,10 @@ try {
 console.log(
   JSON.stringify({
     committed: true,
-    reviewed_by: validEntries.map((e) => e.agent_type),
+    reviewed_by: eligibleEntries.map((e) => e.agent_type),
     spend_warnings: spendWarnings,
+    // What was deliberately NOT spent, for the same reason spend_warnings are
+    // echoed here: a reader of this report must see the withheld receipts too.
+    foreign_receipts: foreignDisclosures,
   })
 );
