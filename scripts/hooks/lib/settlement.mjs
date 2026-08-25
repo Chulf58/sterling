@@ -348,12 +348,51 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
  * article, or no named files cannot be re-verified this way — it stays LIVE
  * (the safe direction: never let an item silently drop out of a refusal on
  * evidence we could not check).
+ *
+ * Thin wrapper over explainReconcileDebtLiveness (board 92f7e826): the verdict
+ * is computed in ONE place, and callers that must SAY WHY (direct-merge's loud
+ * stale-item report) read the same evaluation this boolean does — a second
+ * copy of the reasoning in the caller is exactly the drift invariant 4's
+ * no-duplicate-logic discipline forbids.
  */
 export function isLiveReconcileDebt(store, root, item) {
+  return explainReconcileDebtLiveness(store, root, item).live;
+}
+
+/**
+ * The SAME liveness evaluation as isLiveReconcileDebt, with the REASON
+ * attached — added for board 92f7e826's recurrence (2026-08-25): the gate
+ * already excluded stale rows from its refusal, but excluded them SILENTLY,
+ * so eight no-op items were invisible at the gate, "closed" with board_remove
+ * (which never moves the article's file_baselines) and re-minted within
+ * minutes. Nothing here removes or rewrites a queue row — the verdict is
+ * evidence for a human/conductor to close deliberately, never an auto-close.
+ *
+ * Returns { live, code, ...paths } where code is one of:
+ *   live=true   'no_feature_link' | 'no_files_named' | 'article_unresolvable'
+ *               (UNEVALUABLE — fail closed, the item still blocks)
+ *               'drifted' (the debt is real: `drifted` names the paths, which
+ *               includes a baselined path whose bytes cannot be read at all —
+ *               contentChangedAgainstBaseline reads unreadable-with-a-baseline
+ *               as drift, so an unreadable governed file still blocks)
+ *   live=false  'all_exempt' (every named path is a generated projection,
+ *               ruling e1275166) | 'baseline_match' | 'baseline_absent' |
+ *               'baseline_match_and_absent'
+ *
+ * 'baseline_absent' is an ABSTENTION, not a verified-clean: the article
+ * records no baseline for the path, so there is nothing to compare (the
+ * settled predicate's documented rule — see the module header). It is
+ * deliberately NOT promoted to blocking here: an article that has dropped a
+ * path from files[]/file_baselines can never re-stamp it, so blocking on it
+ * would deadlock the gate with no available remedy. It is reported as its own
+ * code precisely so the caller can name it as unverified rather than clean.
+ */
+export function explainReconcileDebtLiveness(store, root, item) {
   const files = item.file_keys ?? [];
-  if (!item.feature_link || !files.length) return true;
+  if (!item.feature_link) return { live: true, code: 'no_feature_link' };
+  if (!files.length) return { live: true, code: 'no_files_named' };
   const article = store.get(item.feature_link);
-  if (!article) return true;
+  if (!article) return { live: true, code: 'article_unresolvable' };
   // GENERATED-PROJECTIONS EXEMPTION (e1275166): drop exempt paths BEFORE the
   // liveness check. An item whose file_keys are ONLY exempt paths is
   // therefore NOT live, even when those files are genuinely drifted; an item
@@ -364,6 +403,17 @@ export function isLiveReconcileDebt(store, root, item) {
   // everything named HAS been checked and cleared.
   const exempt = loadGeneratedProjections(root);
   const considered = files.filter((f) => !exempt.has(f));
-  if (!considered.length) return false;
-  return considered.some((f) => contentChangedAgainstBaseline(root, f, article.file_baselines));
+  if (!considered.length) return { live: false, code: 'all_exempt', exempt_paths: [...files] };
+  const drifted = considered.filter((f) => contentChangedAgainstBaseline(root, f, article.file_baselines));
+  if (drifted.length) return { live: true, code: 'drifted', drifted };
+  // Not live. Split WHY, because the two are not the same fact: a path whose
+  // current bytes hash to the recorded baseline is VERIFIED clean, while a
+  // path with no baseline entry was never comparable at all (the abstention
+  // documented above). A caller printing "stale" over the second without
+  // saying so would be claiming evidence it does not have (P5).
+  const baselines = article.file_baselines ?? {};
+  const matched = considered.filter((f) => baselines[f] !== undefined);
+  const unbaselined = considered.filter((f) => baselines[f] === undefined);
+  const code = unbaselined.length === 0 ? 'baseline_match' : matched.length === 0 ? 'baseline_absent' : 'baseline_match_and_absent';
+  return { live: false, code, matched, unbaselined };
 }
