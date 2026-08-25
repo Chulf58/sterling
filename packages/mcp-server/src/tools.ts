@@ -272,6 +272,17 @@ const BOARD_SCAN_CAP = 1000;
 // deletion item — which is the safe direction, since that lane demands work and
 // the parked lane does not.
 const PARKED_REF_PROBE_CAP = 40;
+// The three-way verdict parkedOnRef reaches for a file absent from the working
+// tree (board e939fd21): 'parked' names the ref still holding it; 'never_tracked'
+// means every reachable ref was checked and NONE ever held the blob — the
+// deletion_candidate lane; 'confirmed_absent' means some ref held it once but
+// only as a fully-merged ancestor of base — real git history, so the classic
+// reconcile_needed reading stands; 'probe_failed' means git itself could not be
+// consulted (no repo, no git, a corrupt ref) and MUST NOT be read as a
+// confirmation of anything — it degrades to the same reconcile_needed reading
+// as 'confirmed_absent', never to the new, more assertive deletion_candidate
+// lane, because a failed probe proves nothing.
+type MissingFileProbe = { status: 'parked'; ref: string } | { status: 'never_tracked' | 'confirmed_absent' | 'probe_failed' };
 // board-provenance-measured-at-head: the ONE git log --name-only walk
 // board_query runs per call (never per item) is bounded by this many commits
 // back from HEAD, so a repo with a long history cannot turn one query into an
@@ -494,13 +505,20 @@ export class SterlingTools {
    * merged — case not satisfied), and checked by blob presence otherwise
    * (case (b), unmerged work).
    *
-   * Every git failure is swallowed to undefined, which degrades to today's
-   * behaviour — a deletion item. That direction is deliberate: a missing git, a
-   * non-repo tree root, or a corrupt ref must not SUPPRESS a real deletion
-   * finding, because the informational lane demands nothing and the reconcile
-   * lane is the one that gets acted on.
+   * Every git failure degrades to PROBE_FAILED, which reads as today's
+   * pre-ancestry behaviour — a reconcile_needed deletion item. That direction is
+   * deliberate: a missing git, a non-repo tree root, or a corrupt ref must not
+   * SUPPRESS a real deletion finding, and it must not be mistaken for a
+   * CONFIRMED verdict either — the deletion_candidate lane (board e939fd21) is
+   * for a file whose HISTORY (not just its live ref tips) proves it was NEVER
+   * tracked anywhere this repo can reach — `git rev-list --all -- <path>`,
+   * exhaustive over every ref and not subject to PARKED_REF_PROBE_CAP; a file
+   * deleted from a merged-into-base ancestor DOES have history (confirmed_absent,
+   * the classic reconcile_needed reading) even though no live tip holds it. A
+   * probe that could not run proved nothing, so it gets the old, safer reading
+   * rather than the new, more assertive one.
    */
-  private parkedOnRef(rel: string, treeRoot: string): string | undefined {
+  private parkedOnRef(rel: string, treeRoot: string): MissingFileProbe {
     const run = (args: string[]) => {
       try {
         return spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
@@ -508,6 +526,14 @@ export class SterlingTools {
         return undefined;
       }
     };
+    // CONFIRM THIS IS A USABLE GIT REPO before trusting an empty scan as a real
+    // verdict (board e939fd21, AC2/AC4 of file-parked-ancestry.test.ts): without
+    // this, "no repo at all" and "a repo that genuinely never tracked the file"
+    // both scan to nothing and were indistinguishable — the first must stay on
+    // the old reconcile_needed reading, the second is what earns the new
+    // deletion_candidate lane.
+    const repoCheck = run(['rev-parse', '--is-inside-work-tree']);
+    if (repoCheck?.status !== 0) return { status: 'probe_failed' };
     const has = (ref: string): boolean => run(['cat-file', '-e', `${ref}:${rel}`])?.status === 0;
     const resolveBase = (): string | undefined => {
       const symbolic = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
@@ -526,9 +552,9 @@ export class SterlingTools {
       return r?.status === 0;
     };
     try {
-      if (has('HEAD')) return 'HEAD';
+      if (has('HEAD')) return { status: 'parked', ref: 'HEAD' };
       const refs = run(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
-      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return undefined;
+      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return { status: 'probe_failed' };
       const branches = refs.stdout
         .split('\n')
         .map((s) => s.trim())
@@ -536,18 +562,37 @@ export class SterlingTools {
         .slice(0, PARKED_REF_PROBE_CAP);
       const base = resolveBase();
       if (base === undefined) {
-        for (const b of branches) if (has(b)) return b;
-        return undefined;
+        for (const b of branches) {
+          if (has(b)) return { status: 'parked', ref: b };
+        }
+      } else {
+        for (const b of branches) {
+          if (!has(b)) continue;
+          if (b === base) return { status: 'parked', ref: b }; // case (a): base itself still has it
+          if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
+          return { status: 'parked', ref: b }; // case (b): unmerged branch still holds it
+        }
       }
-      for (const b of branches) {
-        if (!has(b)) continue;
-        if (b === base) return b; // case (a): base itself still has it
-        if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
-        return b; // case (b): unmerged branch still holds it
-      }
-      return undefined;
+      // NOT parked on any ref TIP scanned. A tip-only scan cannot tell "deleted,
+      // but real git history exists" (confirmed_absent — the classic, closeable
+      // reconcile_needed case: file-parked-ancestry.test.ts AC2, a blob
+      // surviving only as a merged-into-base ancestor) from "never existed at
+      // all" (never_tracked — the new deletion_candidate lane, board e939fd21).
+      // HISTORY, not tips, answers that: one exhaustive `git rev-list --all --
+      // <path>` walks every commit reachable from EVERY ref (branches, tags,
+      // remote-tracking — not just refs/heads) and is NOT bounded by
+      // PARKED_REF_PROBE_CAP the way the tip scan above is (fixer round 2,
+      // findings 1+2 — the two collapse into one fix: never_tracked no longer
+      // depends on the capped per-ref tip loop at all, so a truncated tip scan
+      // can only ever under-detect a live PARK — an already-accepted, documented
+      // degrade (decision 30d18443: a failed or bounded probe must never SUPPRESS
+      // a real deletion finding) — never inflate into a false never_tracked).
+      // One subprocess per already-rare missing file is the accepted cost here.
+      const history = run(['rev-list', '--all', '--', rel]);
+      if (history?.status !== 0 || typeof history.stdout !== 'string') return { status: 'probe_failed' };
+      return { status: history.stdout.trim().length > 0 ? 'confirmed_absent' : 'never_tracked' };
     } catch {
-      return undefined;
+      return { status: 'probe_failed' };
     }
   }
 
@@ -1405,15 +1450,23 @@ export class SterlingTools {
           // by design; this wire has no deletion arm — that is the feature-
           // article check's job for files an article owns).
           if (stat && stat.mtimeMs > Date.parse(r.source_date) && !this.isGeneratedProjection(rel) && this.contentChanged(rel, r.file_baselines, tree.root)) {
-            const open = this.maintenanceQuery({ system_reason: 'refresh_reference', file_keys: [rel], cap: 1000 });
-            if (open.length === 0) {
-              this.maintenanceEnqueue({
-                reason: 'refresh_reference',
-                text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
-                file_keys: [rel],
-                feature_link: r.id,
-              });
-            }
+            // NO PRE-CHECK (board e939fd21): maintenanceEnqueue's atomic choke
+            // point (SterlingStore.enqueueSystemTodo) already keys on
+            // (system_reason, feature_link, file_keys) inside its own
+            // transaction, so a re-enqueued open item returns rather than
+            // duplicates. This pre-check queried on (system_reason, file_keys)
+            // alone — WITHOUT feature_link — which is a weaker key than the
+            // choke point's: two different reference_material records sharing
+            // a path would have the first one's open item silently suppress
+            // the second SUBJECT's finding, and duplicating the dedup rule
+            // here is exactly how the four hand-rolled copies drifted apart
+            // (decision 194f43e4).
+            this.maintenanceEnqueue({
+              reason: 'refresh_reference',
+              text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
+              file_keys: [rel],
+              feature_link: r.id,
+            });
             return { ...record, verify_before_use: true };
           }
         }
@@ -1440,7 +1493,7 @@ export class SterlingTools {
         // absorbed the second's drift into a fresh baseline. The finding neither
         // queued nor survived. One item per FILE is also what makes an item
         // actionable: it names the thing that changed.
-        const drifts: { path: string; missing: boolean }[] = [];
+        const drifts: { path: string; missing: boolean; neverTracked?: boolean }[] = [];
         const parkedFiles: { path: string; ref: string }[] = [];
         // Owned bytes that actually exist — the evidence for the state check below.
         // Free here: the stat is already being taken for the drift comparison.
@@ -1457,12 +1510,19 @@ export class SterlingTools {
             // pushed a drain toward exactly the no-op version bumps the closing
             // rule calls drift. Ask git before concluding anything: `ls` proves
             // working-tree absence and nothing else.
-            const ref = this.parkedOnRef(f.path, treeRoot);
-            if (ref) {
-              parkedFiles.push({ path: f.path, ref });
+            const probe = this.parkedOnRef(f.path, treeRoot);
+            if (probe.status === 'parked') {
+              parkedFiles.push({ path: f.path, ref: probe.ref });
               continue; // the article is CORRECT — the path returns on merge
             }
-            drifts.push({ path: f.path, missing: true });
+            // 'never_tracked' (every reachable ref checked, none EVER held the
+            // blob) is the only verdict that earns deletion_candidate (board
+            // e939fd21). 'confirmed_absent' (real git history, but only as a
+            // merged-into-base ancestor) and 'probe_failed' (git could not be
+            // consulted at all) both keep the classic reconcile_needed reading
+            // — a failed probe proves nothing and must not be read as strong a
+            // signal as a genuine, exhaustive "never existed here" verdict.
+            drifts.push({ path: f.path, missing: true, neverTracked: probe.status === 'never_tracked' });
             continue;
           }
           liveBytes += stat.size;
@@ -1493,30 +1553,66 @@ export class SterlingTools {
             const disclaimed = this.disclaimsOwnership(roleFor(d.path))
               ? ` NOTE: this article's own files[] role for ${d.path} disclaims ownership of it, so this item will recur on every future edit to that file and each one will be a no-op. Consider REMOVING ${d.path} from files[] instead of reconciling — check the co-owners first (knowledge_query file_keys:["${d.path}"]) so the path is not left orphaned.`
               : '';
+            // A file NEVER TRACKED on any git ref this repo can reach (board
+            // e939fd21) is not a RECONCILE — no write can ever close "the file
+            // no longer exists", so reconcile_needed for this shape re-mints
+            // forever (the config.ts incident). It gets its own gated lane
+            // instead — deletion_candidate, whose deed is confirming/undoing
+            // the deletion, never editing the article's prose. A file that WAS
+            // once tracked (real git history, now a merged-into-base ancestor)
+            // or a file the probe could not check at all (no repo, no git) both
+            // keep the classic reconcile_needed reading — the former IS a
+            // normal, closeable editorial fact, and the latter's probe proved
+            // nothing, so it must not be read as the stronger verdict.
+            const deletionCandidate = d.missing && d.neverTracked;
             this.maintenanceEnqueue({
-              reason: 'reconcile_needed',
+              reason: deletionCandidate ? 'deletion_candidate' : 'reconcile_needed',
               text:
                 (d.missing
-                  ? `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
+                  ? deletionCandidate
+                    ? `owned file ${d.path} of article '${a.slug}' no longer exists (out-of-band deletion) and was never tracked on any git ref this repo can reach — DELETION CANDIDATE, not a reconcile: confirm the deletion (drop ${d.path} from files[]) or restore the file, then close this via the deletion_candidate drain`
+                    : `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
                   : `reconcile article '${a.slug}' — owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`) + disclaimed,
               file_keys: [d.path],
               feature_link: a.id,
             });
           }
           if (drifts.length > DRIFT_ITEMS_PER_READ) {
-            // Never truncate SILENTLY (P5): the remainder is named on the item
-            // that did land, so a reader knows the queue is a floor here.
-            this.maintenanceEnqueue({
-              reason: 'reconcile_needed',
-              text:
-                `reconcile article '${a.slug}' — ${drifts.length} owned files drifted in one read; ` +
-                `the first ${DRIFT_ITEMS_PER_READ} have their own items and the remainder (${drifts
-                  .slice(DRIFT_ITEMS_PER_READ)
-                  .map((d) => d.path)
-                  .join(', ')}) are covered by this one. A drift this wide usually means a whole-area change — reconcile the article as a whole.`,
-              file_keys: drifts.slice(DRIFT_ITEMS_PER_READ).map((d) => d.path),
-              feature_link: a.id,
-            });
+            // Never truncate SILENTLY (P5): the remainder is named on the item(s)
+            // that land, so a reader knows the queue is a floor here. LANE-HONEST
+            // (board e939fd21, fixer round 2, finding 4): a deletion_candidate is
+            // a DIFFERENT, gated deed from a reconcile — collapsing the overflow
+            // into one hard-coded reconcile_needed summary either misclassifies a
+            // genuinely never-tracked file as an editable reconcile (re-minting
+            // it forever, the exact defect this change exists to close) or buries
+            // a real editorial fact inside a deletion-candidate summary. Split the
+            // overflow BY LANE and emit one truthful summary per lane actually
+            // represented, rather than one summary naming the wrong deed.
+            const overflow = drifts.slice(DRIFT_ITEMS_PER_READ);
+            const overflowDeletions = overflow.filter((d) => d.missing && d.neverTracked);
+            const overflowReconciles = overflow.filter((d) => !(d.missing && d.neverTracked));
+            if (overflowReconciles.length) {
+              this.maintenanceEnqueue({
+                reason: 'reconcile_needed',
+                text:
+                  `reconcile article '${a.slug}' — ${overflowReconciles.length} owned files drifted in one read beyond the first ${DRIFT_ITEMS_PER_READ} (which have their own items); the remainder (${overflowReconciles
+                    .map((d) => d.path)
+                    .join(', ')}) is covered by this one. A drift this wide usually means a whole-area change — reconcile the article as a whole.`,
+                file_keys: overflowReconciles.map((d) => d.path),
+                feature_link: a.id,
+              });
+            }
+            if (overflowDeletions.length) {
+              this.maintenanceEnqueue({
+                reason: 'deletion_candidate',
+                text:
+                  `article '${a.slug}' — ${overflowDeletions.length} owned files beyond the first ${DRIFT_ITEMS_PER_READ} are DELETION CANDIDATES: never tracked on any git ref this repo can reach (${overflowDeletions
+                    .map((d) => d.path)
+                    .join(', ')}). Confirm the deletions (drop them from files[]) or restore the files, then close via the deletion_candidate drain.`,
+                file_keys: overflowDeletions.map((d) => d.path),
+                feature_link: a.id,
+              });
+            }
           }
           return { ...record, verify_before_use: true };
         }

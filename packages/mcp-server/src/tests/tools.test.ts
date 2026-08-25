@@ -2477,20 +2477,37 @@ test('a parked file is recorded ONCE however many times the article is read', ()
   }
 });
 
-test('a file that exists on NO ref still flags as an out-of-band deletion — the arm is trustworthy, not disabled', () => {
+// test-repair 2026-08-24 (board e939fd21, consult-approved, coordinator-directed):
+// a file confirmed missing on ALL refs now classifies as the gated
+// 'deletion_candidate' lane, NEVER the old 'reconcile_needed' — that item
+// could never be closed by any write (nothing makes a deleted file
+// reappear) and re-minted on every read. This pin MUST fail under the old
+// behavior: the one-line sabotage that turns it red is minting
+// 'reconcile_needed' again for this shape (i.e. reverting the classifier).
+// The file_parked arm (present on SOME ref) is untouched by this change —
+// see 'a file parked on an unmerged branch is file_parked...' above, which
+// is the control proving classification stays ref-aware rather than
+// collapsing every missing file into deletion_candidate.
+test('a file that exists on NO ref is classified deletion_candidate, never the unclosable reconcile_needed — the arm is trustworthy, not disabled', () => {
   const { dir, tools, git, cleanup } = gitRepo();
   try {
     writeFileSync(join(dir, 'seed.txt'), 'x\n');
     git('add', '-A');
     git('commit', '-qm', 'seed');
 
-    mkArticle(tools, 'really-gone', 'src/never-existed.ts');
+    const article = mkArticle(tools, 'really-gone', 'src/never-existed.ts');
     tools.knowledgeQuery({ types: ['feature_article'] });
     const queue = systemQueue(tools);
     assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0, 'nothing to park — it lives nowhere');
-    const reconciles = queue.filter((t) => t.system_reason === 'reconcile_needed');
-    assert.equal(reconciles.length, 1, 'the deletion finding survives the change');
-    assert.match(reconciles[0].text, /no longer exists \(out-of-band deletion\)/);
+    assert.equal(
+      queue.filter((t) => t.system_reason === 'reconcile_needed').length,
+      0,
+      'the old, unclosable lane must NOT fire for this shape any longer'
+    );
+    const candidates = queue.filter((t) => t.system_reason === 'deletion_candidate');
+    assert.equal(candidates.length, 1, 'the deletion finding survives the change, now in its own gated lane');
+    assert.equal(candidates[0].feature_link, article.id);
+    assert.match(candidates[0].text, /no longer exists \(out-of-band deletion\)/);
   } finally {
     cleanup();
   }
@@ -2560,6 +2577,32 @@ test('knowledge_update does NOT auto-drain a file_parked item — no write chang
   } finally {
     cleanup();
   }
+});
+
+test('a deletion_candidate item is minted ONCE across repeated reads (the atomic choke still dedups this lane, board e939fd21)', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    mkArticle(tools, 'really-gone-thrice', 'src/gone-thrice.ts');
+    for (let i = 0; i < 3; i++) tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(
+      systemQueue(tools).filter((t) => t.system_reason === 'deletion_candidate').length,
+      1,
+      'a pure-function-of-disk read path must not pile up copies just because the lane is new'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("'deletion_candidate' is a registered SYSTEM_REASON, not an ad hoc string the drain SOP has no verb for (board e939fd21)", async () => {
+  const { SYSTEM_REASONS } = await import('@sterling/schemas');
+  assert.ok(
+    Array.isArray(SYSTEM_REASONS) && (SYSTEM_REASONS as string[]).includes('deletion_candidate'),
+    "SYSTEM_REASONS must carry 'deletion_candidate' — an unregistered reason sits in the queue undrainable"
+  );
 });
 
 test('an article whose own role text DISCLAIMS a path is told so on the item (§2.10 forever-item)', () => {

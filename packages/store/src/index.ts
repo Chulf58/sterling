@@ -1054,9 +1054,29 @@ export class SterlingStore {
       freshness: 'fresh',
       version: 1,
     });
-    const candidate = validateRecord(prepared.input) as DurableRecord & { source?: string; system_reason?: string; file_keys?: string[]; text?: string };
+    const candidate = validateRecord(prepared.input) as DurableRecord & {
+      source?: string;
+      system_reason?: string;
+      file_keys?: string[];
+      text?: string;
+      feature_link?: string;
+    };
     if (candidate.type !== 'todo' || candidate.source !== 'system') {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? 'no source'}`);
+    }
+    // A LINKLESS state_review HAS NO IDENTITY (board e939fd21, fixer round 2,
+    // finding 6): the lane exception below keys it on {system_reason,
+    // feature_link} ALONE — file_keys is deliberately excluded — so without a
+    // feature_link the key degenerates to system_reason alone (files is always
+    // []), and two DIFFERENT linkless mints sharing boilerplate text would
+    // silently collapse, the second one's file_keys lost. Every real caller
+    // (the feature-article state-honesty check) always supplies feature_link —
+    // it IS the article being reviewed — so refusing here costs nothing today
+    // and fails loud rather than silently merging two unrelated obligations.
+    if (candidate.system_reason === 'state_review' && !candidate.feature_link) {
+      throw new Error(
+        `enqueueSystemTodo: a state_review item requires feature_link — this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`
+      );
     }
     // AN ITEM WITH NEITHER A feature_link NOR file_keys HAS NO IDENTITY BEYOND
     // ITS TEXT, so the text joins the key for exactly those. Without this, two
@@ -1066,14 +1086,48 @@ export class SterlingStore {
     // items stay distinct. A consequence worth naming: for those lanes the
     // text-differs-so-update branch can never fire, because a different text is
     // by definition a different item.
+    // STATE_REVIEW LANE EXCEPTION (board e939fd21, per-file refinement 194f43e4
+    // still stands for every OTHER lane): the call site chooses this lane's
+    // file_keys as unverifiedPaths-else-first-3-owned, which SHIFTS from read to
+    // read as the unverified set or the owned-files order changes, while the
+    // semantic cause — "review this article's state honesty" — has not. Keying
+    // on the moving file set re-mints a duplicate on every shift (four minted in
+    // one measured session). state_review's identity is the article itself, so
+    // this lane is keyed on {system_reason, feature_link} alone; it is a
+    // lane-specific exception at this one choke point, not a universal key
+    // change.
     const keyOf = (t: { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string }) => {
-      const files = [...(t.file_keys ?? [])].sort();
+      const files = t.system_reason === 'state_review' ? [] : [...(t.file_keys ?? [])].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? '', t.feature_link ?? '', files, identified ? '' : (t.text ?? '')]);
     };
     const wantKey = keyOf(candidate as unknown as { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string });
 
-    let existing: (DurableRecord & { text?: string }) | undefined;
+    // TEXT EQUIVALENCE FOR THE ESCALATION CHECK, state_review NORMALIZED (board
+    // e939fd21, fixer round 3, finding 3): this lane's text embeds the exact
+    // live-byte count ("... hold NNN bytes of code on disk"), a number that
+    // shifts on every read whenever ANY file the article owns changes size for
+    // a reason unrelated to the state-honesty verdict itself (an unrelated
+    // sibling file mid-edit, say) — under plain string equality that re-fires
+    // the escalation branch below on nearly every read, an unbounded
+    // version-bump/snapshot/FTS-refresh churn (the same no-op-remint pathology
+    // the stable-key fix above closed, moved from item COUNT to item VERSION).
+    // NORMALIZE ONLY THAT ONE VOLATILE TOKEN, never every digit run (round-3
+    // correction: a blanket \d+ strip also normalized digits INSIDE PATHS —
+    // scripts/hooks/h10-*.mjs and h19-*.mjs collapsed to the same string, so a
+    // genuine unverified-file-set move from h10 to h19 was wrongly read as "no
+    // change" and silently swallowed). A GENUINE change — the state is fixed, a
+    // different file's role goes unverified, the wording itself changes — still
+    // differs after normalizing this one token and still escalates exactly as
+    // before. Every OTHER lane keeps EXACT text equality (decision 194f43e4's
+    // escalating-severity behavior, e.g. edited→deleted, is unaffected).
+    const textsEquivalent = (a: string, b: string): boolean => {
+      if (candidate.system_reason !== 'state_review') return a === b;
+      const strip = (s: string) => s.replace(/\d+(?= bytes of code on disk)/g, '#');
+      return strip(a) === strip(b);
+    };
+
+    let existing: (DurableRecord & { text?: string; file_keys?: string[] }) | undefined;
     let textUpdated = false;
     this.tx(() => {
       // The read happens INSIDE the write transaction — that is the whole point.
@@ -1091,16 +1145,37 @@ export class SterlingStore {
         this.insertRecord(candidate);
         return;
       }
-      if ((existing.text ?? '') !== (candidate.text ?? '')) {
+      // FILE_KEYS REFRESH IS INDEPENDENT OF THE TEXT-EQUALITY BRANCH (board
+      // e939fd21, fixer round 3, finding 3b — hoisted OUT of the
+      // textsEquivalent branch it used to live inside): a file_keys-only change
+      // — the unverified set moves from one path to another while the rest of
+      // the wording is untouched — must still refresh file_keys even when text
+      // is (correctly) read as unchanged; gating the refresh on textChanged
+      // meant a text-suppressed escalation ALSO suppressed the file_keys
+      // refresh, so the surviving item could name a path forever after the
+      // real debt had moved elsewhere. Compared as a SET: every other lane's
+      // file_keys is already part of the match key, so a match there always
+      // already carries the same set and this is a no-op — never a spurious
+      // extra reindex.
+      const priorFiles = [...((existing as unknown as { file_keys?: string[] }).file_keys ?? [])].sort();
+      const nextFiles = [...(candidate.file_keys ?? [])].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? '', candidate.text ?? '');
+      if (textChanged || filesChanged) {
         // The versioned core, joining THIS transaction (tx is reentrant): version
         // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
         existing = this.applyInPlace(
           'enqueueSystemTodo',
           existing.id,
-          (cur) => ({ ...(cur as unknown as Record<string, unknown>), text: candidate.text, updated_at: candidate.updated_at }),
+          (cur) => ({
+            ...(cur as unknown as Record<string, unknown>),
+            updated_at: candidate.updated_at,
+            ...(textChanged ? { text: candidate.text } : {}),
+            ...(filesChanged ? { file_keys: candidate.file_keys } : {}),
+          }),
           {}
-        ) as DurableRecord & { text?: string };
-        textUpdated = true;
+        ) as DurableRecord & { text?: string; file_keys?: string[] };
+        textUpdated = textChanged;
       }
     });
     // The stored bodies scanned above carry no status/superseded_by (they are

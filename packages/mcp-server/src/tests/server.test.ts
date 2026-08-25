@@ -490,6 +490,100 @@ test('§3.2.5 repo-located docs: only a real content change (not an mtime-only b
   }
 });
 
+// ---------------------------------------------------------------------------
+// refresh_reference DEDUP UNCHANGED BY PRE-CHECK REMOVAL (board e939fd21). A
+// redundant pre-check sat upstream of the atomic enqueueSystemTodo choke,
+// keyed weaker than the choke itself — by path alone, ignoring feature_link —
+// so it could suppress a mint for a genuinely DIFFERENT subject that happens
+// to cite the same path. The fix removes that pre-check and relies solely on
+// the atomic choke. CONTROL FIRST: a single subject re-detected repeatedly
+// must still dedupe to one item (proves the choke alone still does its job);
+// only once that holds does "two subjects, two items" mean the fix is
+// correct rather than "dedup broke entirely".
+// ---------------------------------------------------------------------------
+
+test('refresh_reference CONTROL: an identical re-detection of the SAME subject still dedupes to one item once the redundant pre-check is removed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-refsame-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, repoRoot: dir });
+  try {
+    const docPath = join(dir, 'docs', 'spec.md');
+    writeFileSync(docPath, 'v1');
+    utimesSync(docPath, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+    const { record: doc } = tools.knowledgeCreate('reference_material', {
+      title: 'Build Spec',
+      kind: 'doc',
+      location: 'docs/spec.md',
+      summary: 'section map',
+      source_date: '2026-06-01T00:00:00.000Z',
+      capture_date: '2026-06-01T00:00:00.000Z',
+    });
+    writeFileSync(docPath, 'v2');
+    utimesSync(docPath, new Date('2026-06-10T00:00:00Z'), new Date('2026-06-10T00:00:00Z'));
+    for (let i = 0; i < 3; i++) tools.knowledgeQuery({ types: ['reference_material'] });
+    const queue = tools.maintenanceQuery({ system_reason: 'refresh_reference' }) as unknown as { feature_link?: string }[];
+    assert.equal(
+      queue.length,
+      1,
+      'CONTROL: removing the redundant pre-check must not reopen the duplicate-mint bug the atomic choke already closes — ' +
+        'SABOTAGE: bypassing enqueueSystemTodo for this lane (or dropping feature_link from its key) makes this go RED (3 items instead of 1)'
+    );
+    assert.equal(queue[0].feature_link, doc.id);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('refresh_reference: a DIFFERENT subject sharing the same path is NOT suppressed — both items exist (board e939fd21)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-refshare-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, repoRoot: dir });
+  try {
+    const docPath = join(dir, 'docs', 'spec.md');
+    writeFileSync(docPath, 'v1');
+    utimesSync(docPath, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+
+    const { record: doc1 } = tools.knowledgeCreate('reference_material', {
+      title: 'Build Spec — overview',
+      kind: 'doc',
+      location: 'docs/spec.md',
+      summary: 'section map',
+      source_date: '2026-06-01T00:00:00.000Z',
+      capture_date: '2026-06-01T00:00:00.000Z',
+    });
+    const { record: doc2 } = tools.knowledgeCreate('reference_material', {
+      title: 'Build Spec — appendix',
+      kind: 'doc',
+      location: 'docs/spec.md',
+      summary: 'a genuinely different subject citing the SAME path',
+      source_date: '2026-06-01T00:00:00.000Z',
+      capture_date: '2026-06-01T00:00:00.000Z',
+    });
+
+    writeFileSync(docPath, 'v2');
+    utimesSync(docPath, new Date('2026-06-10T00:00:00Z'), new Date('2026-06-10T00:00:00Z'));
+    tools.knowledgeQuery({ types: ['reference_material'] });
+
+    const queue = tools.maintenanceQuery({ system_reason: 'refresh_reference' }) as unknown as { feature_link?: string }[];
+    const links = new Set(queue.map((q) => q.feature_link));
+    assert.equal(
+      queue.length,
+      2,
+      'two distinct subjects citing one path must mint TWO items — ' +
+        'SABOTAGE: reintroducing a path-only pre-check ahead of the atomic choke makes this go RED (collapses back to 1)'
+    );
+    assert.ok(links.has(doc1.id) && links.has(doc2.id), "each subject gets its OWN item, addressed by its own id — never merged under the shared path");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('§3.2.3 article drift: only a real content change (not an mtime-only merge bump) or deletion flags; no baseline → abstain; reconciliation clears; H7 items dedup', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-art-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
