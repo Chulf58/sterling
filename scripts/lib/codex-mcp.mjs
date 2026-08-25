@@ -75,3 +75,40 @@ const REASON_TEXT = {
 export function codexSkipLine(reason) {
   return `codex mcp: skipped — ${REASON_TEXT[reason] ?? reason}`;
 }
+
+// ---------------------------------------------------------------------------
+// CONSULT-TIME failure surfacing (board 923e3836) — distinct from the
+// init-time probe above. probeCodex only answers "is codex wire-eligible at
+// init?"; it says nothing about a MID-SESSION consult (a real
+// mcp__codex__codex / mcp__codex__codex-reply exchange) failing later
+// because the copied ChatGPT OAuth token (C:/Users/<user>/.codex/auth.json
+// -> ~/.codex/auth.json, finding codex-mcp-live-probe-this-machine) expired.
+// That failure shape is explicitly UNMEASURED (board 923e3836), so this
+// classifies by pattern-matching obvious auth markers in the raw error text
+// rather than a closed reason enum like REASON_TEXT above — and the generic
+// (non-auth) branch always carries the raw error text, so the first real
+// failure measures the shape instead of being swallowed by a wrong guess
+// (P5: fail loud, never a silent skip or a bare stack trace).
+const AUTH_MARKER_RE = /\b(401|unauthorized|auth|token expired)\b/i;
+
+// True when `errorText` looks auth-shaped (401 / unauthorized / auth / token
+// expired, case-insensitive) — a heuristic, not a confirmed error contract,
+// because the real auth-expiry error shape has not yet been observed.
+export function looksLikeAuthFailure(errorText) {
+  return AUTH_MARKER_RE.test(String(errorText ?? ''));
+}
+
+// Turns a consult-time failure (any error/rejection surfacing from an
+// mcp__codex__codex or mcp__codex__codex-reply call) into a LOUD, actionable
+// message — never a silent skip, never a bare stack trace. Auth-shaped
+// errors get the actionable recovery hint (re-copy the token / codex login);
+// anything else gets a generic transport-failure message that still carries
+// the raw error text, so an unmeasured failure shape gets captured the
+// moment it is first observed.
+export function consultFailureMessage(error) {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  if (looksLikeAuthFailure(raw)) {
+    return `Codex consult failed — likely auth expiry: re-copy the token / run \`codex login\`. Raw error: ${raw}`;
+  }
+  return `Codex consult failed — transport error (not auth-shaped): ${raw}`;
+}

@@ -5300,6 +5300,20 @@ var SterlingStore = class _SterlingStore {
    * undefined = a normal, writable store at the supported version.
    */
   legacySchemaVersion;
+  /**
+   * PRAGMA user_version as of the moment this handle finished opening (board
+   * d5942fa0 gap (b) — the LIVE write guard, extending the open-time guard
+   * above to a store that stays open across a migration). undefined ONLY
+   * during the brief window inside the constructor itself: assertLiveSchemaVersion
+   * no-ops then, because the open-time guard already owns that window and the
+   * fresh-store stamp-forward transaction below would otherwise be comparing
+   * against a baseline it hasn't captured yet. Every public write re-reads
+   * PRAGMA user_version against this captured baseline immediately before
+   * mutating; a mismatch means a SECOND process (MCP server or TUI) migrated
+   * the file while this handle stayed open, and the write is refused with
+   * nothing written — matching the open-time guard's loud-failure style.
+   */
+  openedSchemaVersion;
   constructor(path) {
     this.db = new DatabaseSync2(path);
     this.db.exec("PRAGMA busy_timeout=5000");
@@ -5312,6 +5326,7 @@ var SterlingStore = class _SterlingStore {
       const objects = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n;
       if (objects > 0) {
         this.legacySchemaVersion = foundSchemaVersion;
+        this.openedSchemaVersion = foundSchemaVersion;
         return;
       }
     }
@@ -5336,6 +5351,7 @@ var SterlingStore = class _SterlingStore {
       this.db.close();
       throw e;
     }
+    this.openedSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
   }
   journalMode() {
     return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
@@ -5353,12 +5369,36 @@ var SterlingStore = class _SterlingStore {
     }
   }
   /**
-   * The refusal seam for a pre-migration store. Called at the top of every
-   * public write and, as a backstop, from tx() — reads stay allowed on purpose
-   * (AC3: read-only pre-migration).
+   * The LIVE write guard (board d5942fa0 gap (b), pin group B): re-reads
+   * PRAGMA user_version fresh and compares it against the baseline captured
+   * at open. A process that ALREADY HOLDS the store open when another process
+   * (MCP server or TUI) migrates the file underneath it would otherwise keep
+   * serving writes on a stale in-memory handle with no re-check until a full
+   * restart — this closes that gap. Reads are deliberately NOT re-checked
+   * (spec: read exemption) — only assertWritable's write callers reach this.
+   *
+   * No-ops while `openedSchemaVersion` is still undefined (mid-constructor):
+   * the open-time guard above already owns that narrow window, and the
+   * fresh-store stamp-forward transaction is itself a write that runs before
+   * the baseline can be captured.
+   */
+  assertLiveSchemaVersion(operation) {
+    if (this.openedSchemaVersion === void 0)
+      return;
+    const current = this.db.prepare("PRAGMA user_version").get().user_version;
+    if (current !== this.openedSchemaVersion) {
+      throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
+    }
+  }
+  /**
+   * The refusal seam for a pre-migration store, extended to the live write
+   * guard above. Called at the top of every public write and, as a backstop,
+   * from tx() — reads stay allowed on purpose (AC3: read-only pre-migration;
+   * live re-check exemption: pin group B).
    */
   assertWritable(operation) {
     this.assertV2Surface(operation);
+    this.assertLiveSchemaVersion(operation);
   }
   /**
    * The DERIVED served status: the whole API-compatibility hinge of the v2
@@ -7538,7 +7578,7 @@ try {
   if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     disclosureParts.push(
-      `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}] \u2014 duty re-arms when they land`
+      `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}] \u2014 duty re-arms when they land (repeats by design while the dispatch(es) stay live \u2014 fan-out-aware duty deferral, decision ec9eacaa; not a stuck nag)`
     );
   }
   const touchedKeys = new Set(touchedExisting.map(joinKey));

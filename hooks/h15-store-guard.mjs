@@ -5173,7 +5173,7 @@ var GIT_READONLY_SUBVERBS = /* @__PURE__ */ new Set([
   "status",
   "rev-parse"
 ]);
-var GIT_WRITE_SUBVERBS = /* @__PURE__ */ new Set(["checkout", "restore", "clean", "rm", "stash"]);
+var GIT_WRITE_SUBVERBS = /* @__PURE__ */ new Set(["checkout", "restore", "clean", "rm", "stash", "mv"]);
 var GIT_GLOBAL_VALUE_FLAGS = /* @__PURE__ */ new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 var GIT_GLOBAL_BARE_FLAGS = /* @__PURE__ */ new Set(["--no-pager", "-p", "-P", "--paginate", "--no-optional-locks"]);
 function skipGitGlobalFlags(argsText) {

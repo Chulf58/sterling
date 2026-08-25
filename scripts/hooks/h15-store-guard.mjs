@@ -84,6 +84,19 @@ const command = String(input.tool_input?.command ?? '');
 // too; the lookahead keeps suffixed names (.sterling-backups, .sterling2) out
 // of it.
 const STORE_MENTION_RE = /\.sterling(?![\w.-])|sterling\.db/i;
+
+// DB_MENTION_RE seals sterling.db to shell for every verb (AC5). Kept
+// DELIBERATELY UNANCHORED. An anchored variant (board 3edfb9fd, to stop the
+// `notsterling.db`/`mysterling.db` false-POSITIVE) was built and REVERTED
+// 2026-08-25: two independent reviewers (roster-security + Codex outside-
+// family) showed a boundary-char whitelist opens a false-ALLOW read-exfil —
+// `cat *sterling.db`, `grep --file=sterling.db`, `${unused:-sterling.db}` —
+// because the char preceding the mention in raw text need not be its runtime
+// path delimiter (shell expansion). No raw-text regex closes that; it is the
+// shell-tokenizer wall the store guard has parked twice (decision
+// h15-shell-tokenizer-attempt-parked-again). Over-sealing an unrelated
+// `notsterling.db` is accepted friction until the tokenizer question is
+// solved; a read-exfil hole is not. See board 3edfb9fd.
 const DB_MENTION_RE = /sterling\.db/i;
 
 // A quote-concatenated store path (`.st''erling/config.json`) never contains
@@ -245,7 +258,13 @@ const GIT_READONLY_SUBVERBS = new Set([
 
 // git sub-verbs that rewrite/delete working-tree files — always a write when
 // the fragment names a store path, regardless of quoting.
-const GIT_WRITE_SUBVERBS = new Set(['checkout', 'restore', 'clean', 'rm', 'stash']);
+// `mv` renames/moves a tracked file (board 682ce7fc): `git mv .sterling/x
+// elsewhere` (or the reverse) moves a store path exactly like a raw shell
+// `mv`, and without it here the fragment fell through to the "unrecognized
+// git sub-verb" branch, which only denies when the store path is a genuine
+// UNQUOTED argument to the git invocation itself — the escape a git-mv gap
+// would otherwise open.
+const GIT_WRITE_SUBVERBS = new Set(['checkout', 'restore', 'clean', 'rm', 'stash', 'mv']);
 
 // git GLOBAL flags precede the sub-verb and must be skipped before extracting
 // it — `git -C <path> log ...` reads sub-verb "log", not "-C". Without this,

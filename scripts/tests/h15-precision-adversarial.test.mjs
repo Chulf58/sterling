@@ -493,3 +493,106 @@ test('ADV-6c (expect RED, accepted fail-closed cost): `awk \'{print $1}\' <abs>/
     cleanup();
   }
 });
+
+// =========================================================================
+// ADV-7: `git mv` guard (board 682ce7fc — spec-only, written from the board
+// record's MECHANISM note, not from reading the hook). GIT_WRITE_SUBVERBS
+// currently omits `mv`, so `git mv` of a store path is not classified as a
+// git write at all and slips through. FIX SHAPE (per the board): add `mv` to
+// GIT_WRITE_SUBVERBS so a git mv naming a store path (in ANY argument
+// position — source or destination, quoted or not) denies; a git mv of
+// wholly non-store paths must stay allowed.
+//
+// IMPORTANT ATTRIBUTION NOTE for the sterling.db-specific cases below: this
+// repo's DB seal (AC5 in h15-precision.test.mjs — "sterling.db is NEVER
+// shell-accessible regardless of verb") is a UNIVERSAL check that already
+// fires on ANY fragment whose text mentions sterling.db, independent of
+// which command/verb carries it. That means `git mv .sterling/sterling.db
+// elsewhere` may ALREADY deny TODAY via the pre-existing DB seal — defense
+// in depth, not evidence the git-mv-specific fix landed. The tests tagged
+// "(expect GREEN today — DB-seal defense-in-depth)" below do NOT pin the
+// GIT_WRITE_SUBVERBS fix by themselves; the NON-db-path tests immediately
+// after them are what actually go red today and pin the real fix, matching
+// the board's own worked example (`git mv ".sterling/x" /tmp/y`).
+// =========================================================================
+
+test('ADV-7-control (expect GREEN): `git mv src/a.ts src/b.ts` stays allowed — a git mv touching no store path at all must not be blanket-denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git mv src/a.ts src/b.ts', dir);
+    assert.equal(
+      r.code,
+      0,
+      'git mv of two ordinary non-store paths must stay allowed — proves the fix is path-scoped, not a blanket deny of the mv subverb'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('ADV-7a (expect GREEN today — DB-seal defense-in-depth, not yet proof of the mv-subverb fix): `git mv .sterling/sterling.db elsewhere` is denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git mv .sterling/sterling.db elsewhere', dir);
+    assert.equal(r.code, 2, 'moving the sealed db file via git mv must be denied — today via the universal DB seal, after the fix also via the mv-subverb classification');
+    assert.match(r.stderr, /\.sterling\/sterling\.db/, 'the denial should name the store db path involved');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ADV-7b (expect GREEN today — DB-seal defense-in-depth): quoted-path variant `git mv ".sterling/sterling.db" x` is denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git mv ".sterling/sterling.db" x', dir);
+    assert.equal(r.code, 2, 'quoting the db path must not escape the guard');
+    assert.match(r.stderr, /sterling\.db/, 'the denial should name the store db path even though it was quoted in the command');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ADV-7c (expect RED — the real gap: mv is not yet in GIT_WRITE_SUBVERBS): `git mv .sterling/x /tmp/y` (non-db store path, unquoted) is denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git mv .sterling/x /tmp/y', dir);
+    assert.equal(
+      r.code,
+      2,
+      'moving a non-db store file OUT of the store via git mv must be denied; today mv is absent from GIT_WRITE_SUBVERBS so this fragment is not classified as a write and wrongly passes'
+    );
+    assert.match(r.stderr, /\.sterling\/x/, 'the denial should name the store path git mv is moving');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ADV-7d (expect RED — the board\'s own worked example): quoted non-db store path `git mv ".sterling/x" /tmp/y` is denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git mv ".sterling/x" /tmp/y', dir);
+    assert.equal(
+      r.code,
+      2,
+      'this is the exact escape shape named in board 682ce7fc: a quoted non-db store path in git mv must not slip through for lack of mv being a recognized write subverb'
+    );
+    assert.match(r.stderr, /\.sterling\/x/, 'the denial should name the store path even though it was quoted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ADV-7e (expect RED): `git mv /tmp/y .sterling/x` — the store path in the DESTINATION argument — is denied', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook('git mv /tmp/y .sterling/x', dir);
+    assert.equal(
+      r.code,
+      2,
+      'the store path can be the source OR the destination argument of git mv — "any argument resolves into the sealed store" must deny regardless of position'
+    );
+    assert.match(r.stderr, /\.sterling\/x/, 'the denial should name the store path in the destination position');
+  } finally {
+    cleanup();
+  }
+});

@@ -641,7 +641,8 @@ try {
   if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     disclosureParts.push(
-      `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}] — duty re-arms when they land`
+      `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}] — duty re-arms when they land ` +
+        `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral, decision ec9eacaa; not a stuck nag)`
     );
   }
   // Only a stale entry that WOULD HAVE DEFERRED something is worth saying: one
