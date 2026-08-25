@@ -135,8 +135,29 @@ function baselineFile(cwd, runId, key) {
 // the (B) baseline, deliberately — the baseline's key-validation loop is the most
 // security-critical code in this hook and adding a field would force a change to
 // it (smallest safe implementation).
-function dirtyFile(cwd, runId) {
-  return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}.dirty.json`);
+// KEYED PER BASH CALL when the platform gives us a usable tool_use_id (board
+// 489554d4), for exactly the reason the (A) STATE record (7021526c) and the (B)
+// content baseline (11609d1f) already are: a run-keyed attribution record is ONE
+// FILE SHARED BY EVERY CONCURRENT LANE and each Pre OVERWRITES it. The DESTRUCTIVE
+// laundering direction here is worse than a missed denial — if lane B's Pre lands
+// after lane A's Pre and OMITS a path that was genuinely dirty at lane A's Pre
+// (because B's command already cleaned or reverted it, or simply raced), lane A's
+// Post reads the overwritten record, finds NO covering pre-dirty entry, falls to
+// the clean-at-Pre arm and HEAD-restores (DELETES) that pre-existing dirty path:
+// real conductor work destroyed, the harm class of board 7dd39b85.
+// THE FILENAME DELIBERATELY DOES NOT COLLIDE WITH EITHER OTHER PER-CALL RECORD:
+// the (A) STATE record is `…-<runId>-call-<hex>.json` and the (B) baseline is
+// `…-<runId>-call-<hex>.baseline.json`, so this attribution record carries its
+// own `.dirty` token — `…-<runId>-call-<hex>.dirty.json`. Two files cannot share
+// one path, and a `-call-<hex>.dirty` middle segment is not all-hex, so it can
+// never be mistaken for the STATE record's `-call-<hex>.json` name.
+// A NULL KEY IS NOT A SILENT FALL BACK: it returns the legacy per-run name (the
+// only way today's no-tool_use_id platforms keep working), and Post discloses the
+// shared-record exposure LOUDLY on every path (see `attributionShared`). Never a
+// silent fallback to a per-run key.
+function dirtyFile(cwd, runId, key) {
+  const tag = projectTag(cwd);
+  return join(tmpdir(), key ? `sterling-enforce-${tag}-${runId}-call-${key}.dirty.json` : `sterling-enforce-${tag}-${runId}.dirty.json`);
 }
 
 /** Repo-relative paths of everything git reports as changed, Pre-snapshot shape. */
@@ -317,6 +338,28 @@ function ownKeys(o) {
   return Object.keys(o).filter((k) => Object.prototype.hasOwnProperty.call(o, k));
 }
 
+// The EXACT field set a per-path state carries, per shape (board 1f4b7af0 item
+// 3). pathState emits precisely these and nothing else, so any own field
+// outside the set is a crafted shape — an absent state carrying a type/mode/
+// digest, a file carrying stray `children`/`target`, a directory carrying a
+// `sha256`. An unexpected field is refused so validation is EXACT rather than
+// merely "the required fields are present" (AC12/AC14: an unexpected shape
+// denies).
+const STATE_FIELDS = {
+  absent: ['exists', 'index'],
+  file: ['exists', 'type', 'mode', 'index', 'sha256'],
+  symlink: ['exists', 'type', 'mode', 'index', 'target'],
+  dir: ['exists', 'type', 'mode', 'index', 'children'],
+};
+
+// Returns a reason when `v` carries any OWN field outside `allowed`, else null.
+function strayFieldError(v, allowed, where) {
+  for (const k of ownKeys(v)) {
+    if (!allowed.includes(k)) return `'${where}' carries an unexpected field '${k}' (allowed for this shape: ${allowed.join(', ')})`;
+  }
+  return null;
+}
+
 // Per-path VALUE validation for the Pre-STATE record (review finding 4). The
 // loader used to validate only the top-level object and its KEYS, so any value
 // shape at all was trusted by the comparison — and two shapes then compared
@@ -331,18 +374,25 @@ function stateShapeError(cwd, v, where) {
   if (!isStateObject(v)) return `'${where}' is not a state object`;
   if (typeof v.exists !== 'boolean') return `'${where}' has no boolean 'exists'`;
   if (!(v.index === null || typeof v.index === 'string')) return `'${where}' has a non-string, non-null 'index'`;
-  if (!v.exists) return null; // absence carries existence + index and nothing else
+  if (!v.exists) return strayFieldError(v, STATE_FIELDS.absent, where); // absence carries existence + index and NOTHING else
   if (v.type !== 'file' && v.type !== 'symlink' && v.type !== 'dir') return `'${where}' has an unrecognized 'type' (${JSON.stringify(v.type)})`;
   if (!Number.isInteger(v.mode) || v.mode < 0 || v.mode > 0o7777) return `'${where}' has an invalid 'mode' (${JSON.stringify(v.mode)})`;
   if (v.type === 'file') {
     if (typeof v.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(v.sha256)) return `'${where}' is a file with no sha256 digest`;
-    return null;
+    return strayFieldError(v, STATE_FIELDS.file, where);
   }
   if (v.type === 'symlink') {
     if (typeof v.target !== 'string') return `'${where}' is a symlink with no string 'target'`;
-    return null;
+    return strayFieldError(v, STATE_FIELDS.symlink, where);
   }
+  // NOTE: an EMPTY `children` map is deliberately NOT rejected here. A gitlink /
+  // submodule (index mode 160000) whose worktree directory is dirty produces a
+  // genuine `{exists:true,type:'dir',...,children:{}}` at the top level, so a
+  // non-empty requirement would false-DENY a real snapshot. The crafted
+  // empty-children pair stays in the forged-record class accepted by 2422e76a.
   if (!isStateObject(v.children)) return `'${where}' is a directory with no explicit 'children' object`;
+  const stray = strayFieldError(v, STATE_FIELDS.dir, where);
+  if (stray) return stray;
   for (const k of ownKeys(v.children)) {
     if (!validateStateKey(cwd, k)) return `'${where}' carries a child key that is not a repo-relative path inside the project ('${k}')`;
     const bad = stateShapeError(cwd, v.children[k], k);
@@ -1040,9 +1090,17 @@ if (event === 'PreToolUse') {
     // transient state this keying removes (P4).
     writeFileSync(baselineFile(cwd, runId, key), JSON.stringify(collectBaseline(cwd)));
     // Attribution record for the (A) branch: without it, Post can only see that a
-    // tracked path is dirty NOW, not whether this command made it so.
+    // tracked path is dirty NOW, not whether this command made it so. KEYED PER
+    // CALL under the SAME `key` as the (B) baseline and the (A) STATE record
+    // (board 489554d4): a run-keyed record is one file every concurrent lane
+    // overwrites, and an overwrite that OMITS a genuinely pre-dirty path makes
+    // Post restore-delete it. Written ONCE — per-call when there is a key, the
+    // legacy per-run name (degraded, disclosed LOUDLY at Post) when there is not;
+    // writing the legacy copy as well would leave a shared file behind after the
+    // per-call one is consumed, exactly the shared transient state this keying
+    // removes (P4).
     const dirtyRels = dirtyTrackedRels(cwd);
-    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyRels));
+    writeFileSync(dirtyFile(cwd, runId, key), JSON.stringify(dirtyRels));
     // PER-CALL Pre-STATE record (7021526c): the STATE of every dirty path, so
     // Post can compare rather than deny the whole result for being unable to.
     // Written ONLY when tool_use_id is usable — a null key degrades LOUDLY at
@@ -1165,8 +1223,37 @@ try {
   // mixes (A) and (B)) so the shared-baseline disclosure can name exactly the
   // writes it applies to.
   const baselineViolations = [];
+  // Set when the (A) ATTRIBUTION record had to fall back to the SHARED per-run
+  // file because this call carries no usable tool_use_id (board 489554d4), the
+  // mirror of `baselineShared` on the (B) side. Disclosed NON-FATALLY on stderr
+  // the moment the fallback is taken, ALLOW path included: the destructive
+  // laundering it admits (a genuinely pre-dirty path missing from an overwritten
+  // shared record is HEAD-restored as this command's write) produces a DENY, but
+  // a clean-allow degraded call must still say the pre-dirty set it trusted was
+  // not this call's own. A degraded key that changes what the guard trusts and
+  // says nothing is the defect, not the degradation.
+  let attributionShared = null;
   if (!storeErr) {
-    const dPath = dirtyFile(cwd, runId);
+    const dPath = dirtyFile(cwd, runId, callId);
+    if (!callId) {
+      attributionShared =
+        'this hook call carries no usable `tool_use_id` (absent, empty/whitespace, or not a string), so the (A) ATTRIBUTION record in play is the ' +
+        'legacy PER-RUN, RUN-KEYED file SHARED by every concurrent Bash lane in this run instead of one keyed to this call — while it is shared, a ' +
+        "second lane's Pre can OVERWRITE it after this lane's Pre ran, and a path that was genuinely dirty at this lane's Pre but MISSING from the " +
+        'overwritten record is then treated as clean-at-Pre and HEAD-restored (DELETED) as this command\'s write, destroying pre-existing conductor ' +
+        'work (that is exactly why the per-call key exists, board 489554d4, and why this fallback is reported rather than assumed harmless)';
+    }
+    // The two early-deny paths just below (a MISSING or CORRUPT attribution
+    // record) return BEFORE the "on every path" stderr disclosure at the end of
+    // this block would fire, so without this they would omit that the record
+    // consulted was the legacy SHARED per-run file (Codex review, the mirror of
+    // the (B) F1 lesson: degraded-loud on EVERY path, deny paths included). When
+    // the key was unusable, the record's very absence or corruption IS a
+    // degraded-mode observation, so the deny says so. Verdict-safe: text only, on
+    // an already-DENY path.
+    const sharedNote = attributionShared
+      ? ` DEGRADED MODE — the record consulted here is the legacy SHARED per-run attribution file, not one keyed to this call: ${attributionShared}. Its absence or corruption is itself a degraded-mode observation, not necessarily a Pre that never ran.`
+      : '';
     if (!existsSync(dPath)) {
       // Same posture as the missing (B) baseline: unverifiable attribution denies.
       // Reached when Pre did not run, when a run boundary moved the runId between
@@ -1175,7 +1262,8 @@ try {
         environmentDefectDenial(
           'H17',
           `attribution record '${dPath}' absent at Post — cannot tell this command's writes from pre-existing ones; failing closed (P5). ` +
-            `If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`,
+            `If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.` +
+            sharedNote,
           { agentId: input.agent_id }
         )
       );
@@ -1185,10 +1273,42 @@ try {
       recordedDirty = JSON.parse(readFileSync(dPath, 'utf8'));
     } catch {
       deny(
-        environmentDefectDenial('H17', `attribution record '${dPath}' corrupt/unparseable — cannot attribute writes; failing closed (P5).`, {
+        environmentDefectDenial('H17', `attribution record '${dPath}' corrupt/unparseable — cannot attribute writes; failing closed (P5).` + sharedNote, {
           agentId: input.agent_id,
         })
       );
+    }
+    // LIFECYCLE-BOUND (P4, board 489554d4): a PER-CALL attribution record's life
+    // ends with the Post that read it — the paths are already in memory, so the
+    // unlink is best-effort and can never change the verdict, and the validation
+    // below runs on `recordedDirty` in memory, not on the file. The legacy per-run
+    // file is deliberately left alone: it is not this call's to consume (a
+    // concurrent lane may still need it) and the next Pre overwrites it as before.
+    if (callId) {
+      try {
+        rmSync(dPath, { force: true });
+      } catch {
+        /* leaked temp record only; the attribution already happened in memory */
+      }
+    }
+    // DEGRADED-LOUD ON EVERY PATH (board 489554d4), the (A) mirror of
+    // `baselineShared`'s stderr disclosure: the moment the attribution record fell
+    // back to the SHARED per-run file, say so — allow path included — because the
+    // destructive laundering a shared record admits (a genuinely pre-dirty path
+    // missing from an overwritten record HEAD-restored as this command's write)
+    // must never be inferred from silence. Best-effort/wrapped exactly like
+    // mintRestorePerformed: a throwing stderr must never flip the verdict.
+    if (attributionShared) {
+      try {
+        process.stderr.write(
+          `H17: DEGRADED (A) ATTRIBUTION — this Bash call carries no usable \`tool_use_id\`, so the attribution record it compared against was the ` +
+            `legacy PER-RUN, RUN-KEYED file SHARED by every concurrent lane in this run, not one keyed to this call. A concurrent lane's Pre could have ` +
+            `OVERWRITTEN it after this lane's Pre ran — in which case a genuinely pre-dirty path MISSING from it is treated as this command's write and ` +
+            `HEAD-restored (deleted). The verdict stands; what is unverifiable is that the pre-dirty set it trusted belonged to this call. (board 489554d4)\n`
+        );
+      } catch {
+        /* best-effort trace — a failed write must never change the verdict */
+      }
     }
     // VALIDATE AND NORMALIZE EVERY ENTRY before the set is trusted — the same
     // posture the per-call STATE record's keys already get (validateStateKey),
@@ -1232,6 +1352,28 @@ try {
             `An entry that cannot be matched silently withdraws restore protection from everything under it, so it is refused BEFORE the sweep runs; ` +
             `no write performed, failing closed (P5). NOTE the limit of this check: it rejects malformed SHAPES, and cannot detect a tampered entry that ` +
             `names a different WELL-FORMED path — that residual is the forged-record class decision 2422e76a already accepts.`
+        );
+      }
+      // Beyond the malformed-SHAPE check above, mirror the per-call STATE
+      // record's key posture (validateStateKey, AC10/AC14) on this loaded entry:
+      // it must be a repo-relative POSIX path CONTAINED under the project root —
+      // no absolute path, no drive prefix, no NUL, no traversal resolving out
+      // (board 1f4b7af0 item 2). The attribution record became a PROTECTIVE input
+      // when coverage went ancestor-aware (board 7dd39b85): a recorded ancestor
+      // EXEMPTS its descendants from restore, so an entry that fails validation
+      // must DENY — the stated invariant "a recorded path failing key validation
+      // denies" — never be silently added to a set where it matches no
+      // enforcement predicate and is quietly ignored. validateStateKey is used
+      // here ONLY as a validator: its backslash-normalized RESULT is discarded and
+      // the original backslash-preserved `norm` is what enters preDirty, because
+      // preDirty keys are matched against raw porcelain paths and normalizing a
+      // POSIX backslash would wedge every sweep touching such a file (the same
+      // reason stated above for not normalizing backslashes here).
+      if (!validateStateKey(cwd, norm)) {
+        deny(
+          `H17: crafted attribution record entry rejected (${JSON.stringify(entry)} — not a repo-relative path contained within the project root: ` +
+            `absolute, drive-prefixed, NUL-bearing, or escaping the root). A recorded path that fails key validation is a PROTECTIVE input that cannot be ` +
+            `trusted, so it is refused BEFORE the sweep runs rather than silently ignored (board 1f4b7af0 item 2); no write performed, failing closed (P5).`
         );
       }
       preDirty.add(norm);
@@ -1681,6 +1823,18 @@ try {
         `H17: DEGRADED (B) VERIFICATION — the (B)-set path(s) above (${baselineViolations.join(', ')}) were compared and restored against a SHARED ` +
           `PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the ` +
           `pre-image it restored was this call's own.`
+      );
+    }
+    // DEGRADED-LOUD ON THE (A) SIDE (board 489554d4), the mirror of the (B) block
+    // above: a tracked path HEAD-restored while the attribution record was the
+    // shared per-run file may have been PRE-EXISTING dirt missing from an
+    // overwritten record rather than this command's write. Composed only when the
+    // (A) stage actually restored something (P1).
+    if (attributionShared && restoredPaths.length) {
+      parts.push(
+        `H17: DEGRADED (A) ATTRIBUTION — the tracked path(s) HEAD-restored above (${restoredPaths.join(', ')}) were attributed to this command against a ` +
+          `SHARED PER-RUN attribution record, not one keyed to this Bash call: ${attributionShared}. The verdict stands; what is degraded is the ` +
+          `confidence that a restored path was this command's own write rather than pre-existing dirt missing from an overwritten shared record.`
       );
     }
     if (preExisting.length) {

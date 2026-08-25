@@ -13,7 +13,7 @@ export const AUTHOR_RE = /^(user|conductor|system|agent:[a-z0-9_-]+)$/;
 export const SCOPE_RE = /^(project|domain:[a-z0-9_-]+)$/;
 
 // ---------------------------------------------------------------------------
-// Schema v2 identity fields (stable-identity wave S2, decision
+// Schema v2 identity fields (stable-identity slice S2, decision
 // [stable-identity-design-v2]). LIFECYCLE + FRESHNESS are the AUTHORITATIVE
 // pair that replaces stored status/superseded_by:
 //   lifecycle  'live' | 'retired'          — retired ONLY via the supersede /

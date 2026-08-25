@@ -852,8 +852,8 @@ export class SterlingTools {
   /**
    * Refuse a write that tries to ASSIGN a server-owned envelope key, instead of
    * stripping it in silence. The stripping itself is correct and stays (finding
-   * 14/43 — a caller must not be able to forge an id, a clock, or a status); what
-   * was wrong is that the caller was told the write succeeded.
+   * 14/43 — a caller must not be able to fabricate an id, a clock, or a status);
+   * what was wrong is that the caller was told the write succeeded.
    *
    * MEASURED 2026-07-29, and this is the sharpest instance of the whole class: a
    * project trying to retire a duplicate passed {status:'superseded',
@@ -2190,7 +2190,7 @@ export class SterlingTools {
   /**
    * digestRecord, plus the two identity numbers a WRITE receipt exists to
    * report ([stable-identity-design-v2] contract 1): `version` and, on an
-   * in-place write, `previous_version`. The whole visible contract of the wave
+   * in-place write, `previous_version`. The whole visible contract of the pass
    * is "the id did not move, the version did" — a receipt that dropped the
    * version would hide exactly the thing the caller needs to see, and the
    * default receipt IS the digest. Only the write echo is widened; the read-side
@@ -2880,7 +2880,7 @@ export class SterlingTools {
    * version that id is now at, because the whole promise of the alias table is
    * that a citation written anywhere keeps resolving: telling the caller "no
    * such record" when the record is alive under another id is the false
-   * negative the wave exists to remove. knowledge_get intercepts this and
+   * negative the pass exists to remove. knowledge_get intercepts this and
    * serves the archived snapshot instead; every write tool lets it through,
    * because a write must land on the live record, never on a version-pinned
    * dead id.
@@ -2978,7 +2978,7 @@ export class SterlingTools {
     // ALIASES COUNT AS RESOLUTION ([stable-identity-design-v2] contract 3): a
     // HISTORICAL id resolves — knowledge_get serves its archived snapshot with a
     // legacy_resolution block — so warning "fabricated or mistyped" on it would
-    // be exactly the FALSE POSITIVE the wave promises never to produce, on every
+    // be exactly the FALSE POSITIVE the pass promises never to produce, on every
     // migrated citation in the store's own prose. No new wording for this case,
     // deliberately: a citation that resolves produces NO warning, whichever
     // index resolved it.

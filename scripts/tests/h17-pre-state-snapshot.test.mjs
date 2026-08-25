@@ -391,7 +391,7 @@ function perCallRecords(fx) {
   const all = tempRecords(projectTag);
   const byName = all.filter((p) => isStateRecord(p, fx));
   if (byName.length > 0) return byName;
-  return all.filter((p) => p !== baselinePath && p !== dirtyPath && !/baseline/i.test(recordName(p)));
+  return all.filter((p) => p !== baselinePath && p !== dirtyPath && !/baseline/i.test(recordName(p)) && !recordName(p).endsWith('.dirty.json'));
 }
 
 // The (B) CONTENT BASELINE record(s) this call's Pre wrote, under EITHER key —
@@ -400,7 +400,18 @@ function perCallRecords(fx) {
 // that the key is run-scoped, which is the very thing 11609d1f changes.
 function baselineRecords(fx) {
   const { projectTag, dirtyPath } = fx;
-  return tempRecords(projectTag).filter((p) => p !== dirtyPath && !isStateRecord(p, fx));
+  return tempRecords(projectTag).filter((p) => p !== dirtyPath && !isStateRecord(p, fx) && !recordName(p).endsWith('.dirty.json'));
+}
+
+// The PER-CALL attribution record(s) — the '(A) attribution record' is now
+// keyed per call too (board 489554d4 rules the run-keyed name a HIGH defect),
+// so a call's own `.dirty.json` no longer has the predictable legacy
+// per-run name (`fx.dirtyPath`). Selection is by suffix, excluding the
+// legacy per-run path, mirroring the (A) state record / (B) baseline
+// selection idiom above.
+function attributionRecords(fx) {           // the per-call .dirty.json under this call's key
+  const legacy = recordName(fx.dirtyPath);
+  return tempRecords(fx.projectTag).filter(p => recordName(p).endsWith('.dirty.json') && recordName(p) !== legacy);
 }
 
 // run h17 in Pre (snapshot) or Post (verify+sweep) mode. agent_id + tool_use_id
@@ -888,7 +899,7 @@ test('PIN-NO-RECORD: a MISSING per-call snapshot record DENIES (fail-closed) eve
       existsSync(baselinePath) || baselineRecords(fx).length >= 1,
       `the (B) content baseline for this call is deliberately left intact, isolating this branch — none found under either key. Temp files present for this project tag: ${tempRecords(fx.projectTag).map(recordName).join(', ') || '(none)'}`
     );
-    assert.equal(existsSync(dirtyPath), true, 'the per-run attribution record is deliberately left intact, isolating this branch');
+    assert.ok(existsSync(dirtyPath) || attributionRecords(fx).length >= 1, 'the attribution record for this call is left intact, isolating this branch');
 
     const r = h17(dir, 'PostToolUse', L);
     assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
@@ -2628,14 +2639,15 @@ test('PIN-RECORD-KEY-TRAILING-SLASH: a recorded pre-dirty ancestor keyed WITH a 
     const L = lane('trailingslash');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0);
 
-    assert.equal(existsSync(dirtyPath), true, 'PRECONDITION: the per-run attribution record exists after Pre');
-    const parsed = JSON.parse(readFileSync(dirtyPath, 'utf8'));
+    const [attrPath] = attributionRecords(fx);
+    assert.ok(attrPath, 'PRECONDITION: the per-call attribution record exists after Pre');
+    const parsed = JSON.parse(readFileSync(attrPath, 'utf8'));
     const hits = addTrailingSlash(parsed, 'hooks/newdir');
     assert.ok(
       hits >= 1,
       'PRECONDITION: the attribution record must record the recorded directory path in its normal (no trailing slash) form for this tamper to be unambiguous — if this fails, the fixture is not exercising the defect'
     );
-    writeFileSync(dirtyPath, JSON.stringify(parsed));
+    writeFileSync(attrPath, JSON.stringify(parsed));
 
     git(dir, ['add', '-A'], { must: true });
     assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: staging makes the child its own porcelain entry, the same trigger as PIN-CHILD-SURVIVES-STAGE');
@@ -2746,14 +2758,15 @@ test('PIN-RECORD-MALFORMED-ENTRY-REFUSED-AT-LOAD: a malformed non-empty attribut
     const L = lane('malformedentry');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0);
 
-    assert.equal(existsSync(dirtyPath), true, 'PRECONDITION: the per-run attribution record exists after Pre');
-    const parsed = JSON.parse(readFileSync(dirtyPath, 'utf8'));
+    const [attrPath] = attributionRecords(fx);
+    assert.ok(attrPath, 'PRECONDITION: the per-call attribution record exists after Pre');
+    const parsed = JSON.parse(readFileSync(attrPath, 'utf8'));
     const hits = addTrailingSlash(parsed, 'hooks/newdir', 'hooks/newdir/.');
     assert.ok(
       hits >= 1,
       'PRECONDITION: the attribution record must record the recorded directory path in its normal (no trailing slash) form for this tamper to be unambiguous — if this fails, the fixture is not exercising the defect, and the pin would otherwise pass for the wrong reason'
     );
-    writeFileSync(dirtyPath, JSON.stringify(parsed));
+    writeFileSync(attrPath, JSON.stringify(parsed));
 
     git(dir, ['add', '-A'], { must: true });
     assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: staging makes the child its own porcelain entry, the same trigger as PIN-CHILD-SURVIVES-STAGE and PIN-RECORD-KEY-TRAILING-SLASH');
@@ -2780,3 +2793,350 @@ test('PIN-RECORD-MALFORMED-ENTRY-REFUSED-AT-LOAD: a malformed non-empty attribut
     cleanup();
   }
 });
+
+// #########################################################################
+// ##  H17 v3.4 SLICE B HARDENING — board 1f4b7af0 items 2 & 3, board       ##
+// ##  7675ebbc. Authored BLIND to                                          ##
+// ##  scripts/hooks/h17-bash-write-sweep.mjs, exactly like every pin       ##
+// ##  above — built from the store's account of the two board items and   ##
+// ##  the h17-bash-write-sweep article (AC12/AC13/AC14), never from hook   ##
+// ##  source.                                                              ##
+// #########################################################################
+
+// append `entry` into the per-call attribution record's dirty-path array
+// (board 1f4b7af0 item 2 describes it as `new Set(JSON.parse(...))` — a flat
+// JSON array of path strings) — mirrors PIN-RECORD-KEY-TRAILING-SLASH's
+// established idiom for tampering this same record.
+function appendAttributionEntry(fx, entry) {
+  const [attrPath] = attributionRecords(fx);
+  assert.ok(attrPath, 'PRECONDITION: the per-call attribution record exists after Pre');
+  const parsed = JSON.parse(readFileSync(attrPath, 'utf8'));
+  assert.ok(Array.isArray(parsed), 'PRECONDITION: the attribution record is a flat array of recorded pre-dirty paths (per 1f4b7af0\'s own account: new Set(JSON.parse(...)))');
+  parsed.push(entry);
+  writeFileSync(attrPath, JSON.stringify(parsed));
+}
+
+// add a `path -> state` entry into the per-call STATE record (a JSON OBJECT
+// mapping path to state, per the coder's corrected fixture — the shape
+// perCallRecords/soleRecordPath already resolve) — the state-record
+// analogue of appendAttributionEntry above, used to make an attribution-array
+// key PRESENT-AND-CONSISTENT in both records so it does not trip the
+// separate attribution/state "disagree" deny-cause.
+function addStateEntry(fx, path, state) {
+  const rec = soleRecordPath(fx, `adding a consistent state entry for ${path}`);
+  const parsed = JSON.parse(readFileSync(rec, 'utf8'));
+  parsed[path] = state;
+  writeFileSync(rec, JSON.stringify(parsed));
+}
+
+// =========================================================================
+// PIN-RECORD-KEY-VALIDATION-CRAFTED — 1f4b7af0 item 2, REWRITTEN per
+// coordinator/coder correction (the first draft's control was hollow). Two
+// record shapes are load-bearing here, and getting them wrong is what broke
+// it:
+//   * the ATTRIBUTION record ('-call-<hash>.dirty.json', found via
+//     attributionRecords(fx)) is a JSON ARRAY of repo-relative path strings.
+//   * the per-call STATE record ('-call-<hash>.json', found via
+//     perCallRecords(fx)/soleRecordPath(fx, why)) is a JSON OBJECT mapping
+//     path -> state.
+// A path present in the attribution array but ABSENT from (or disagreeing
+// with) the state object trips a SEPARATE "disagree" deny-cause. A pure
+// exit-code assertion cannot isolate validateStateKey from that second
+// cause: a crafted key that survived loading UNCHECKED would still be
+// denied — via disagreement, not via key validation — the instant it lacks
+// a matching state entry, so the pin would read green even with Fix 1
+// deleted. That is exactly what happened to the first draft's control
+// ('foo\bar' appended to the attribution array ONLY, no matching state
+// entry): it tripped the disagreement deny, for a reason that has nothing
+// to do with key validation.
+//
+// THE FIX: make the CONTROL key PRESENT-AND-CONSISTENT in BOTH records —
+// appended to the attribution array AND given a matching state entry, using
+// the simplest valid state, absent-state `{"exists": false, "index": null}`,
+// with the path genuinely absent on disk so the live-computed state at Post
+// agrees with the recorded one (unchanged -> allow, no disagreement, no key
+// violation). The two CRAFTED arms then add ONLY the malformed key to the
+// attribution array — the state record is never touched — so any deny they
+// draw is attributable to the key's shape alone, never to a manufactured
+// mismatch.
+//
+// WHY ONLY TWO CRAFTED SHAPES (`C:/x`, a literal-NUL `data\u0000.txt`) AND
+// NOT THE FIRST DRAFT'S FOUR: `/etc/passwd` (absolute) and
+// `hooks/x/../../../etc/passwd` (root-escaping) are caught by a
+// PRE-EXISTING malformed-segment check — the same one
+// PIN-RECORD-MALFORMED-ENTRY-REFUSED-AT-LOAD already pins for
+// `hooks/newdir/.` — so denying on those two would prove nothing new about
+// Fix 1 specifically; they do not isolate it. The two kept here are denied
+// ONLY by validateStateKey.
+//
+// THE ANTI-HOLLOW ANCHOR: each crafted arm additionally asserts stderr does
+// NOT match /disagree/i. Without this negative assertion, a Fix-1-less
+// build could still deny the crafted arm via the disagreement path (the key
+// has no state entry) and the "crafted attribution record entry" + phrase
+// matches could still coincidentally hold — the /disagree/i negative is
+// what pins the deny to validateStateKey specifically rather than to the
+// second deny-cause.
+//
+// THE NUL-ARM PHRASE IS A DISCLOSED BEST-GUESS, not confirmed by execution:
+// this test-writer holds no Bash (H4) and cannot run the suite to read the
+// actual deny text. `/NUL|null byte|contains a null/i` is the coordinator's
+// own stated fallback; the conductor must confirm it against the real
+// stderr on the first run and correct the regex here if it does not match
+// (a PRECONDITION-style failure on THIS assertion, not a defect in Fix 1).
+//
+// EXPECTED FAILURE SHAPE (RED under the named sabotage): delete the
+// validateStateKey deny in the attribution-load loop — the crafted entry
+// then survives loading unchecked, has no matching state entry, and is
+// denied via the DISAGREEMENT path instead of key validation (or allowed
+// outright, if the disagreement check only fires on paths git currently
+// reports dirty and this crafted path is not one). Either way the
+// `/crafted attribution record entry/i` match and/or the arm's unique
+// phrase match vanish, and/or the `/disagree/i` negative assertion fires —
+// the arm goes red on at least one of its four assertions.
+// =========================================================================
+
+test('PIN-RECORD-KEY-VALIDATION-CRAFTED: a crafted attribution-record entry (drive-prefixed / NUL-bearing) DENIES via validateStateKey specifically, never the disagreement check — control: a well-formed, present-and-consistent key still ALLOWS', { skip: GIT_SKIP }, () => {
+  const CRAFTED = [
+    ['drive-prefixed', 'C:/x', /drive-prefixed|contained within the project root|escaping the root/i],
+    ['NUL-bearing', 'data\u0000.txt', /NUL|null byte|contains a null/i],
+  ];
+
+  // ---- CONTROL ARM (place first, must pass for the OPPOSITE reason): a
+  // well-formed key, present AND consistent in BOTH records, must ALLOW.
+  {
+    const fx = makeGitProject();
+    const { dir, cleanup } = fx;
+    try {
+      writeFileSync(join(dir, 'hooks', 'real-dirty.mjs'), '// genuinely dirty legit enforcement path, uncommitted\n');
+      assert.match(porcelain(dir), /real-dirty\.mjs/, 'PRECONDITION: the legit enforcement path is dirty at Pre, so both records get a real baseline entry');
+
+      const L = lane('keyvalid-control');
+      assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre runs with a usable tool_use_id');
+
+      const ctrlPath = join(dir, 'hooks', 'ctrl.mjs');
+      assert.equal(existsSync(ctrlPath), false, 'PRECONDITION: hooks/ctrl.mjs does not exist on disk — the absent-state entry must be genuine, not a lie');
+
+      appendAttributionEntry(fx, 'hooks/ctrl.mjs');
+      addStateEntry(fx, 'hooks/ctrl.mjs', { exists: false, index: null });
+
+      const r = h17(dir, 'PostToolUse', L);
+      assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+      assert.equal(
+        r.code,
+        0,
+        `CONTROL: a well-formed key present-and-consistent in BOTH records (attribution array + a matching absent-state entry) must ALLOW — if THIS fails, the crafted arms below prove nothing, because the anti-hollow /disagree/i negative cannot be trusted without a passing positive case first — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+      );
+    } finally {
+      cleanup();
+    }
+  }
+
+  // ---- CRAFTED ARMS: malformed key in the attribution array ONLY — the
+  // state record is never touched, so any deny is attributable to the key's
+  // shape alone, not to a manufactured attribution/state mismatch.
+  for (const [label, entry, phrase] of CRAFTED) {
+    const fx = makeGitProject();
+    const { dir, cleanup } = fx;
+    try {
+      writeFileSync(join(dir, 'hooks', 'real-dirty.mjs'), '// genuinely dirty legit enforcement path, uncommitted\n');
+      assert.match(porcelain(dir), /real-dirty\.mjs/, 'PRECONDITION: the legit enforcement path is dirty at Pre, so both records get a real baseline entry');
+
+      const L = lane('keyvalid-' + label.replace(/[^a-z0-9]/gi, ''));
+      assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre runs with a usable tool_use_id');
+
+      appendAttributionEntry(fx, entry); // attribution record ONLY — deliberately no matching state entry
+
+      const r = h17(dir, 'PostToolUse', L);
+      assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+      assert.equal(r.code, 2, `a crafted ${label} attribution-record entry must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+      assert.match(r.stderr, /crafted attribution record entry/i, `the refusal must name the crafted entry (${label}) — stderr: ${oneLine(r.stderr)}`);
+      assert.match(r.stderr, phrase, `the refusal must carry the ${label}-specific phrase — stderr: ${oneLine(r.stderr)}`);
+      assert.doesNotMatch(
+        r.stderr,
+        /disagree/i,
+        `THE ANTI-HOLLOW ANCHOR: the deny must come from validateStateKey, never from the attribution/state disagreement check — a /disagree/i match here means this arm is hollow — stderr: ${oneLine(r.stderr)}`
+      );
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+// harvest the per-call STATE for `keyIncludes` from a FRESH Pre in `dir`,
+// then remove that harvest record so it cannot interfere with anything else
+// in the project — the exact PIN-RECORD-PROTO idiom, extracted so the three
+// arms of PIN-RECORD-STRAY-FIELD can each harvest a donor class without
+// guessing its field names.
+function harvestState(fx, dir, keyIncludes, tag) {
+  const before = perCallRecords(fx);
+  const H = lane('harvest-' + tag);
+  assert.equal(h17(dir, 'PreToolUse', H).code, 0, `harvest Pre for ${keyIncludes}`);
+  const recPath = perCallRecords(fx).find((p) => !before.includes(p));
+  assert.ok(recPath, `PRECONDITION: the harvest Pre wrote its OWN per-call record for ${keyIncludes} (per-call keying — PIN-KEY)`);
+  const parsed = JSON.parse(readFileSync(recPath, 'utf8'));
+  const key = Object.keys(parsed).find((k) => k.includes(keyIncludes));
+  assert.ok(key, `PRECONDITION: the harvested record keys the ${keyIncludes} path (keys seen: ${Object.keys(parsed).join(', ')})`);
+  const state = parsed[key];
+  rmSync(recPath, { force: true });
+  return state;
+}
+
+// =========================================================================
+// PIN-RECORD-STRAY-FIELD — board 1f4b7af0 item 3(b): a per-call STATE record
+// entry carrying a field FOREIGN to its own existence class — an ABSENT
+// state carrying a `type`; a FILE state carrying `children` or `target`; a
+// DIRECTORY state carrying `sha256` — is a shape no genuine snapshot can
+// produce (each class's fields are read directly off what actually exists
+// at that path: an absent path has no file to type, a plain file has no
+// children/symlink target, a directory has no byte digest) and must DENY.
+//
+// HARVEST, NEVER GUESS (the established idiom in this file —
+// PIN-RECORD-PROTO): every field NAME and VALUE below is taken from a
+// GENUINE per-call record for that existence class, on this same host and
+// this same build, rather than assumed. A PRECONDITION asserts the donor
+// class actually carries the field and the recipient class genuinely lacks
+// it — if either assumption is wrong for the shipped schema, the
+// PRECONDITION fails loudly instead of the pin silently proving nothing (a
+// real, disclosed risk: this test-writer is blind to the actual field
+// names per H4, and the PRECONDITIONs are what make that risk loud rather
+// than a silent false pass).
+//
+// CONTROL (place first): a canonical, untampered pre-dirty file record —
+// exactly the fields a real snapshot produces, nothing foreign — must still
+// ALLOW when nothing else changes. This rules out "the harness's own tamper
+// technique breaks validation" before any pin arm is trusted.
+//
+// EXPECTED FAILURE SHAPE (RED before this fix): each PIN arm's
+// `assert.equal(r.code, 2)` fires with actual 0 — comparison never inspects
+// the stray field (it is not part of that class's own comparison), so a
+// recorded state with a foreign extra field still compares equal to the
+// unchanged live state and Post ALLOWS.
+//
+// CATCHES SABOTAGE: remove strayFieldError (or the shape check it
+// implements) — the stray-field record loads, comparison proceeds as if the
+// extra field were not there, and every PIN arm reverts to the ALLOW above.
+// =========================================================================
+
+test('PIN-RECORD-STRAY-FIELD: a state object carrying a field foreign to its own shape (absent+type, file+children, dir+sha256) DENIES — control: a canonical untampered record still ALLOWS', { skip: GIT_SKIP }, () => {
+  // ---- CONTROL (place first): canonical, untampered record -> allow.
+  {
+    const { dir, cleanup } = makeGitProject();
+    try {
+      preDirtyBundle(dir, '// control: canonical file state, untouched\n');
+      const L = lane('strayfield-control');
+      assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+      const r = h17(dir, 'PostToolUse', L); // nothing changes in-window; the record is untampered
+      assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+      assert.equal(r.code, 0, `CONTROL: a canonical, untampered record must still allow — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+    } finally {
+      cleanup();
+    }
+  }
+
+  // ---- PIN 1: ABSENT state carrying a stray `type` field (borrowed from FILE).
+  {
+    const fx = makeGitProject();
+    const { dir, cleanup } = fx;
+    try {
+      preDirtyBundle(dir, '// donor file for the stray-type harvest\n');
+      const fileState = harvestState(fx, dir, 'h3-contract-gate', 'donorfile-abs');
+
+      const absentPath = join(dir, 'hooks', 'stray-absent.mjs');
+      writeFileSync(absentPath, '// tracked, about to be deleted\n');
+      git(dir, ['add', '-A'], { must: true });
+      git(dir, ['commit', '-q', '-m', 'add stray-absent'], { must: true });
+      rmSync(absentPath, { force: true });
+      assert.match(porcelain(dir), /stray-absent/, 'PRECONDITION: the deleted tracked file is pre-dirty (absent) at Pre');
+
+      const L = lane('strayabsent');
+      assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+      const rec = soleRecordPath(fx, 'the absent+type stray-field tamper');
+      const parsed = JSON.parse(readFileSync(rec, 'utf8'));
+      const key = Object.keys(parsed).find((k) => k.includes('stray-absent'));
+      assert.ok(key, `PRECONDITION: the record keys the deleted path (keys seen: ${Object.keys(parsed).join(', ')})`);
+      const absentState = parsed[key];
+      assert.ok('type' in fileState, `PRECONDITION: the harvested FILE state carries a 'type' field (keys: ${Object.keys(fileState).join(', ')})`);
+      assert.ok(!('type' in absentState), `PRECONDITION: the genuine ABSENT state does NOT carry 'type' (keys: ${Object.keys(absentState).join(', ')}) — otherwise this is not a stray field`);
+      parsed[key] = { ...absentState, type: fileState.type };
+      writeFileSync(rec, JSON.stringify(parsed));
+      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
+
+      const r = h17(dir, 'PostToolUse', L);
+      assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
+      assert.equal(r.code, 2, `an ABSENT state carrying a stray 'type' field must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+    } finally {
+      cleanup();
+    }
+  }
+
+  // ---- PIN 2: FILE state carrying a stray `children` field (borrowed from DIRECTORY).
+  {
+    const fx = makeGitProject();
+    const { dir, cleanup } = fx;
+    try {
+      mkdirSync(join(dir, 'hooks', 'donordir'), { recursive: true });
+      writeFileSync(join(dir, 'hooks', 'donordir', 'a.mjs'), '// donor directory child\n');
+      const dirState = harvestState(fx, dir, 'donordir', 'donordir-file');
+
+      const fileBytes = '// recipient FILE state\n';
+      const bundle = preDirtyBundle(dir, fileBytes);
+      const L = lane('strayfilechildren');
+      assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+      const rec = soleRecordPath(fx, 'the file+children stray-field tamper');
+      const parsed = JSON.parse(readFileSync(rec, 'utf8'));
+      const key = Object.keys(parsed).find((k) => k.includes('h3-contract-gate'));
+      assert.ok(key, `PRECONDITION: the record keys the pre-dirty file (keys seen: ${Object.keys(parsed).join(', ')})`);
+      const fileState = parsed[key];
+      assert.ok('children' in dirState, `PRECONDITION: the harvested DIRECTORY state carries a 'children' field (keys: ${Object.keys(dirState).join(', ')})`);
+      assert.ok(!('children' in fileState), `PRECONDITION: the genuine FILE state does NOT carry 'children' (keys: ${Object.keys(fileState).join(', ')}) — otherwise this is not a stray field`);
+      parsed[key] = { ...fileState, children: dirState.children };
+      writeFileSync(rec, JSON.stringify(parsed));
+      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
+
+      const r = h17(dir, 'PostToolUse', L);
+      assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
+      assert.equal(r.code, 2, `a FILE state carrying a stray 'children' field must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+      assert.equal(readFileSync(bundle, 'utf8'), fileBytes, 'the file itself is untouched throughout (unchanged pre-dirty path, no restore)');
+    } finally {
+      cleanup();
+    }
+  }
+
+  // ---- PIN 3: DIRECTORY state carrying a stray `sha256` field (borrowed from FILE).
+  {
+    const fx = makeGitProject();
+    const { dir, cleanup } = fx;
+    try {
+      preDirtyBundle(dir, '// donor file for sha256 harvest\n');
+      const fileState = harvestState(fx, dir, 'h3-contract-gate', 'donorfile-dir');
+
+      const newDir = join(dir, 'hooks', 'strayshadir');
+      mkdirSync(newDir, { recursive: true });
+      writeFileSync(join(newDir, 'a.mjs'), '// recipient DIRECTORY state\n');
+      assert.match(porcelain(dir), /strayshadir/, 'PRECONDITION: the untracked directory is dirty at Pre');
+
+      const L = lane('strayshadir');
+      assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+      const rec = soleRecordPath(fx, 'the dir+sha256 stray-field tamper');
+      const parsed = JSON.parse(readFileSync(rec, 'utf8'));
+      const key = Object.keys(parsed).find((k) => k.replace(/\/+$/, '') === 'hooks/strayshadir');
+      assert.ok(key, `PRECONDITION: the record keys the top-level pre-dirty directory (keys seen: ${Object.keys(parsed).join(', ')})`);
+      const dirState = parsed[key];
+      assert.ok('sha256' in fileState, `PRECONDITION: the harvested FILE state carries a 'sha256' field (keys: ${Object.keys(fileState).join(', ')})`);
+      assert.ok(!('sha256' in dirState), `PRECONDITION: the genuine DIRECTORY state does NOT carry 'sha256' (keys: ${Object.keys(dirState).join(', ')}) — otherwise this is not a stray field`);
+      parsed[key] = { ...dirState, sha256: fileState.sha256 };
+      writeFileSync(rec, JSON.stringify(parsed));
+      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
+
+      const r = h17(dir, 'PostToolUse', L);
+      assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
+      assert.equal(r.code, 2, `a DIRECTORY state carrying a stray 'sha256' field must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
