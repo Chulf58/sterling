@@ -41,6 +41,18 @@
 //     that uses the evidence removes exactly that evidence, nothing more.
 //     This read-modify-write is lock-guarded (withLedgerLock below) against
 //     a concurrent H22 promotion write.
+//   - SPEND ADVISORIES (board 09e03d76, warning-only — see the block above
+//     the trailer lines): before committing, three anomalies in WHAT is being
+//     spent are named on stderr and echoed in the reported summary's
+//     `spend_warnings` — more than 3 receipts stamped on one commit, a
+//     receipt whose recorded `files` do not overlap the staged diff, a
+//     receipt recording no files at all, and a receipt older than a 12h
+//     horizon. None of them rejects an entry, refuses, or changes the
+//     no-dedupe rule: the `files` attribution is known-unreliable, so a gate
+//     keyed on it would discard real reviews. The whole block is FAIL-OPEN
+//     (guarded interpolation + a try/catch that degrades to one stderr note),
+//     because a warning-only check that can abort a commit inverts its own
+//     ruling.
 //   - >=1 valid entry but NOTHING STAGED: refuse (exit 1), do NOT consume
 //     the ledger (P5 — never mint an empty commit that silently eats real
 //     review evidence for nothing).
@@ -203,6 +215,120 @@ for (const e of validEntries) {
   }
 }
 
+// SPEND ADVISORIES (board 09e03d76-0986-431a-aa30-6262e01d399c): the ledger
+// leaks — a code-touching commit made with bare `git commit` never consumes
+// the receipts its reviews earned (measured: cb0d5a67, ea8a91da, both
+// trailer-less), so they survive and are all spent at once on a LATER commit
+// they never reviewed (measured: 32e4210 stamped 8, 35dfcad stamped 13).
+// This block DISCLOSES that shape at the moment of spending. It is WARNING
+// ONLY, by design and by the board item's explicit ruling: no entry is
+// rejected, nothing is deduped, no path here can refuse. The reason a
+// refusal would be wrong is the `files` attribution itself — it comes from
+// H22's transcript-based dispatch-prompt extractor, which was measured
+// attributing a real review's territory to the PREVIOUS slice's files, so a
+// gate keyed on it would discard genuine reviews and train `--waive-reviews`.
+// Until a receipt records its files from something authoritative, naming the
+// anomaly and leaving the judgement to the human is the honest ceiling.
+const MULTI_SPEND_WARN_ABOVE = 3; // 3 = the measured legitimate ceiling (one diff, three reviewer rounds: commit 30b2abf2)
+const STALE_RECEIPT_HOURS = 12; // a receipt older than this predates the working session in every measured case
+const spendWarnings = [];
+function warnSpend(line) {
+  spendWarnings.push(line);
+  console.error(line);
+}
+
+// SAFE INTERPOLATION OF LEDGER-SUPPLIED VALUES (Codex review, HIGH): a ledger
+// entry is JSON written by a hook, and every field except the regex-validated
+// agent_type is arbitrary. Template interpolation calls toString, so a
+// JSON-REPRESENTABLE entry can make `${e.at}` THROW — `{"at": {"toString":
+// null}}` raises a TypeError, and so does String() on the same value, which is
+// why the fallback below never reaches for it. A throw inside a warning-only
+// block would abort a commit that is otherwise perfectly reviewed: the exact
+// inversion of this feature's ruling. Every advisory interpolates through this.
+// LABEL CONVENTIONS (conductor ruling, so pins can be exact): an ABSENT field
+// is absent, not unserializable; a string prints QUOTED (at="n/a"), which is
+// what makes an empty string, a stray space, or a look-alike numeric value
+// visible in the advisory at all; everything else goes through a guarded
+// JSON.stringify, and only a genuine serialization failure reads
+// '<unserializable>'.
+function safeLabel(v) {
+  if (v === undefined) return '<absent>';
+  try {
+    const j = JSON.stringify(v);
+    return typeof j === 'string' ? j : '<unserializable>'; // BigInt/symbol-valued and other non-representable inputs
+  } catch {
+    return '<unserializable>'; // circular graphs, throwing getters
+  }
+}
+
+// FAIL-OPEN WRAPPER (Codex review, HIGH): safeLabel closes the KNOWN throw
+// class; this closes the unknown ones. Any unforeseen throw anywhere in the
+// advisory computation degrades to ONE disclosed stderr note and the commit
+// proceeds untouched — an advisory can lose its own voice, but it can never
+// cost a commit. Nothing inside this block writes, commits, or filters
+// entries, so skipping it is always safe.
+try {
+  if (validEntries.length > MULTI_SPEND_WARN_ABOVE) {
+    warnSpend(
+      `commit-reviewed: MULTI-SPEND — ${validEntries.length} review receipts are being stamped on ONE commit (advisory threshold: more than ${MULTI_SPEND_WARN_ABOVE}); ` +
+        `all ${validEntries.length} are consumed in this single act, so any that reviewed OTHER work is permanently spent here. Receipts: ` +
+        `${validEntries.map((e) => `${e.agent_type}@${safeLabel(e.at)}`).join(', ')}. ` +
+        `A stretch of receipts usually means an earlier code-touching commit was made with bare 'git commit' and never consumed its own. ` +
+        `This is a warning, not a refusal — nothing is rejected or deduped.`
+    );
+  }
+
+  for (const e of validEntries) {
+    const entryFiles = Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : [];
+    if (entryFiles.length === 0) {
+      // A receipt naming NO files is the STRONGEST form of unverifiable
+      // territory, not the weakest — there is nothing to compare against the
+      // diff at all — and H22's extractor can produce exactly this shape
+      // (roster review). Reported distinctly from a non-overlap so the two
+      // are never read as the same finding.
+      warnSpend(
+        `commit-reviewed: RECEIPT RECORDS NO FILES — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records no usable file paths at all ` +
+          `(files=${safeLabel(e.files)}), so the territory it reviewed cannot be checked against this diff in either direction. That is the ` +
+          `STRONGEST form of cannot-verify, not the weakest. ADVISORY ONLY, never a refusal: H22's transcript-based extractor can legitimately ` +
+          `record nothing for a real review, so the entry is stamped and consumed exactly as before.`
+      );
+    } else if (!entryFiles.some((f) => stagedFiles.has(normalizePath(f)))) {
+      warnSpend(
+        `commit-reviewed: RECEIPT FILES DO NOT OVERLAP THIS DIFF — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) names [${entryFiles.join(', ')}], ` +
+          `none of which this commit stages. ADVISORY ONLY, and deliberately not a refusal: the recorded files come from H22's transcript-based ` +
+          `dispatch-prompt extractor, which was MEASURED attributing a real review's territory to the wrong turn entirely (board 09e03d76), so a ` +
+          `non-overlap is evidence to look at, never proof the review was unrelated. The entry is stamped and consumed exactly as before.`
+      );
+    }
+  }
+
+  for (const e of validEntries) {
+    const recordedAt = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
+    if (Number.isNaN(recordedAt)) {
+      warnSpend(
+        `commit-reviewed: RECEIPT AGE UNVERIFIABLE — ${e.agent_type}'s receipt carries no usable timestamp (at=${safeLabel(e.at)}), so the ` +
+          `${STALE_RECEIPT_HOURS}h staleness horizon could not be checked against it. Advisory only — the entry is stamped and consumed as normal.`
+      );
+      continue;
+    }
+    const ageHours = (Date.now() - recordedAt) / 3_600_000;
+    if (ageHours > STALE_RECEIPT_HOURS) {
+      warnSpend(
+        `commit-reviewed: STALE RECEIPT — ${e.agent_type}'s receipt is ${ageHours.toFixed(1)}h old (recorded ${safeLabel(e.at)}; advisory horizon ` +
+          `${STALE_RECEIPT_HOURS}h, i.e. almost certainly an earlier session than this commit). A receipt that outlived its own session was not ` +
+          `consumed by the commit its review was for — most often because that commit was made with bare 'git commit'. Advisory only: it is still ` +
+          `stamped and consumed here, so verify it actually reviewed THIS diff before relying on the trailer at the merge gate.`
+      );
+    }
+  }
+} catch (err) {
+  warnSpend(
+    `commit-reviewed: SPEND ADVISORIES SKIPPED — the advisory computation itself threw (${safeLabel(err && err.message ? err.message : err)}). ` +
+      `Disclosed and NON-FATAL: the commit proceeds and every receipt is stamped and consumed exactly as it would have been, because a ` +
+      `warning-only check must never abort a commit. Some or all spend advisories for this commit are missing — inspect the ledger by hand if you need them.`
+  );
+}
+
 const trailerLines = validEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
 const fullMessage = `${message}\n\n${trailerLines.join('\n')}`;
 
@@ -348,19 +474,62 @@ try {
     // re-read entry per stamped occurrence. Any excess occurrence (a fresh
     // receipt appended mid-commit that happens to collide with a stamped
     // identity) is left over and survives.
-    const stampedCounts = new Map();
-    for (const e of validEntries) {
-      const key = `${e.agent_type} ${e.at}`;
-      stampedCounts.set(key, (stampedCounts.get(key) || 0) + 1);
-    }
-    const survivors = freshLedger.filter((e) => {
-      const key = e && `${e.agent_type} ${e.at}`;
-      const remaining = key && stampedCounts.get(key);
-      if (remaining) {
-        stampedCounts.set(key, remaining - 1);
-        return false; // consumes exactly one stamped occurrence
+    //
+    // IDENTITY IS COMPARED BY VALUE, NEVER THROUGH A SERIALIZED KEY. Two
+    // earlier shapes of this comparison both failed, in opposite directions:
+    //   - TEMPLATE INTERPOLATION (`${e.at}`) THREW 'Cannot convert object to
+    //     primitive value' on the JSON-VALID entry `"at": {"toString": null}`
+    //     (measured 2026-08-25, pin P10). The commit had already landed, so
+    //     the throw surfaced as the post-commit consume failure and left the
+    //     STAMPED entry in the ledger — exactly the stale-receipt leak board
+    //     09e03d76 exists to close, reached from ledger DATA rather than from
+    //     a missed commit.
+    //   - A GUARDED-STRINGIFY KEY cured the throw but was total without being
+    //     INJECTIVE, and its collisions fell the WRONG way (Codex review):
+    //     two different too-deep values both hit JSON.stringify's RangeError
+    //     and collapsed onto one token, and `at: 1e400` parses to Infinity
+    //     whose stringify is the literal "null" — colliding with a genuine
+    //     `at: null`. Either collision lets an UNSTAMPED fresh receipt spend
+    //     a stamped count and be DESTROYED, the one outcome this path must
+    //     never produce.
+    // So: agent_type by strict string equality (already regex-validated), and
+    // `at` by identity-or-bounded-deep-equality, with no serialization
+    // anywhere. EVERY false case fails toward SURVIVAL — a type mismatch, a
+    // differing key set, or hitting the depth cap all read as "not matched",
+    // so the fresh entry stays in the ledger and is re-offered on the next
+    // invocation, loudly, through the staleness/unverifiable advisories
+    // above. Deep equality also ignores key ORDER, so an entry rewritten with
+    // reordered keys between the two reads now MATCHES, where a serialized
+    // key would have missed it.
+    const IDENTITY_DEPTH_CAP = 64; // deeper than any real receipt; a pathological value hits the cap, is NOT matched, and SURVIVES
+    const boundedDeepEqual = (a, b, depth) => {
+      if (a === b) return true; // strings, finite numbers, Infinity, null, booleans, undefined, same reference
+      if (depth <= 0) return false; // cap reached — not matched, so the fresh entry survives
+      if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+      if (Array.isArray(a) !== Array.isArray(b)) return false;
+      const keysA = Object.keys(a);
+      if (keysA.length !== Object.keys(b).length) return false;
+      for (const k of keysA) {
+        if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+        if (!boundedDeepEqual(a[k], b[k], depth - 1)) return false;
       }
       return true;
+    };
+    const sameIdentity = (fresh, stamped) =>
+      typeof fresh.agent_type === 'string' &&
+      fresh.agent_type === stamped.agent_type &&
+      boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP);
+    // MULTISET consume by splicing the stamped list: each fresh entry claims at
+    // most one still-unclaimed stamped occurrence, so two identical stamped
+    // entries consume exactly two matching fresh ones and any excess fresh
+    // occurrence survives. O(n^2) is irrelevant at ledger scale (tens).
+    const unclaimedStamped = [...validEntries];
+    const survivors = freshLedger.filter((e) => {
+      if (!e || typeof e !== 'object') return true; // a malformed fresh entry was never stamped — it survives untouched
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
+      if (i === -1) return true;
+      unclaimedStamped.splice(i, 1);
+      return false; // consumes exactly one stamped occurrence
     });
     const tmpPath = join(target, '.sterling', `review-ledger.json.tmp-${process.pid}`);
     writeFileSync(tmpPath, JSON.stringify(survivors));
@@ -370,10 +539,22 @@ try {
   // FIX 3: the commit ALREADY EXISTS — this is not a refusal, it is a
   // distinct failure mode where evidence was used but could not be removed.
   // Loud and specific, never conflated with a normal refusal message.
+  // safeLabel (not raw interpolation): this very message must not itself throw
+  // while reporting a failure — the P10 defect above reached the reader only
+  // because the thrown value happened to be a plain Error.
   console.error(
-    `commit-reviewed: COMMIT SUCCEEDED but the review ledger was NOT consumed (${(e && e.message) || e}) — ${ledgerPath} still carries the entries just stamped into this commit; remove them by hand before the next commit-reviewed invocation`
+    `commit-reviewed: COMMIT SUCCEEDED but the review ledger was NOT consumed (${safeLabel(e && e.message ? e.message : e)}) — ${ledgerPath} still carries the entries just stamped into this commit; remove them by hand before the next commit-reviewed invocation`
   );
   process.exit(1);
 }
 
-console.log(JSON.stringify({ committed: true, reviewed_by: validEntries.map((e) => e.agent_type) }));
+// The reported summary carries the advisories too (board 09e03d76): a warning
+// printed only on stderr is invisible to anything that reads this CLI's own
+// report, and the spend it names is exactly what the reader needs to weigh.
+console.log(
+  JSON.stringify({
+    committed: true,
+    reviewed_by: validEntries.map((e) => e.agent_type),
+    spend_warnings: spendWarnings,
+  })
+);
