@@ -50,6 +50,29 @@
 // install an inherited state). (5) RESOURCE SHAPE — the record stores a
 // per-path raw-byte sha256 instead of base64 bytes (717 KB measured live), and
 // the index query is chunked and --literal-pathspecs.
+// v3.5 (board 128fedb7): EVERY write/create/delete/restore primitive guards its
+// ANCESTOR path components (assertRealAncestors), not just its final one —
+// guarding the leaf is not enough when a PARENT can be a link, because mkdir
+// -p, a recursive rmSync and `git checkout -- <path>` all resolve the whole
+// string first. The (B) delete arm and the (A) tracked restore, previously
+// unguarded, now take the same walk the (B) read/write side already took; the
+// (B) delete also lost its `recursive` flag (its keys are only ever regular
+// files). Disposition on ANY ancestor/type ambiguity: DENY WITHOUT RESTORING.
+// Still racing by construction (lstat-then-act); that residual is accepted and
+// tracked at board 6c1e0890, not closed here.
+// v3.6 (board 11609d1f): the (B) CONTENT BASELINE is keyed PER BASH CALL —
+// sterling-enforce-<tag>-<runId>-call-<sha256(tool_use_id)>.baseline.json — the
+// same laundering fix 7021526c applied to the (A) STATE record, because a
+// run-keyed baseline is one file every concurrent lane overwrites: lane B's Pre
+// landing after lane A's tamper made both Posts compare the tamper against
+// itself, and on the (B) side the adopted pre-image is then WRITTEN back. Post
+// consumes and unlinks the per-call baseline (P4). No usable tool_use_id keeps
+// the legacy per-run file — the only way today's no-tool_use_id platforms keep
+// working — and the fallback is DISCLOSED ON EVERY PATH (reviewer F1): a
+// non-fatal stderr line fires the moment the shared baseline is used, allow path
+// included, because the laundering it admits compares EQUAL and would otherwise
+// pass silently; the deny path additionally names the (B) writes it applied to.
+// Never a silent fallback to a per-run key.
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { join, dirname, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -81,8 +104,30 @@ function projectTag(cwd) {
   return createHash('sha256').update(root).digest('hex').slice(0, 16);
 }
 
-function baselineFile(cwd, runId) {
-  return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}.json`);
+// KEYED PER BASH CALL when the platform gives us a usable tool_use_id (board
+// 11609d1f), for exactly the reason the (A) STATE record already is (7021526c
+// binding 2, AC14): a run-keyed baseline is ONE FILE SHARED BY EVERY CONCURRENT
+// LANE and each Pre OVERWRITES it, so lane A's Pre snapshots a clean file, lane
+// A's command tampers, lane B's Pre lands before lane A's Post and overwrites
+// the shared baseline with the TAMPERED state, and both Posts then compare the
+// tamper against itself and allow it. On the (B) side that is worse than a
+// missed denial: this is the branch that RESTORES BY WRITING FILE CONTENT, so
+// an adopted-tamper baseline turns the guard into a writer of
+// attacker-influenced bytes.
+// THE FILENAME DELIBERATELY DOES NOT COLLIDE WITH THE (A) STATE RECORD'S
+// (`…-<runId>-call-<hex>.json`): two files cannot share one path, and the (A)
+// record is identified BY that exact shape, so the (B) baseline carries a
+// further `.baseline` token — `…-<runId>-call-<hex>.baseline.json`.
+// A NULL KEY IS NOT A SILENT FALL BACK: it returns the legacy per-run name, and
+// the fallback is disclosed on EVERY path — a non-fatal stderr line the moment
+// the shared baseline is used, allow path included, plus a named part in any
+// denial the (B) writes compose (see `baselineShared` at Post). Keeping the legacy name for the degraded case —
+// rather than refusing to verify (B) at all — is what preserves today's
+// behaviour for a platform that does not carry tool_use_id, and the disclosure
+// is what stops that fallback from being invisible.
+function baselineFile(cwd, runId, key) {
+  const tag = projectTag(cwd);
+  return join(tmpdir(), key ? `sterling-enforce-${tag}-${runId}-call-${key}.baseline.json` : `sterling-enforce-${tag}-${runId}.json`);
 }
 
 // The (A) attribution record (decision f76d7c5c): which TRACKED paths were
@@ -506,10 +551,13 @@ function toRel(cwd, abs) {
 // on the first symlink or other non-regular kind found at ANY component,
 // intermediate or final — so a directory is always classified BEFORE it is
 // walked or listed, never interleaved with the walk itself.
-// OUT OF SCOPE (boarded separately): the check/use TOCTOU between this
-// classification and the read/write that follows — a descriptor-based
+// OUT OF SCOPE (boarded separately, 6c1e0890): the check/use TOCTOU between
+// this classification and the read/write that follows — a descriptor-based
 // O_NOFOLLOW open is a platform-parity design question (Windows included).
-function classifyPathComponents(cwd, rel) {
+// `what` names the surface in the refusal so one walk can serve the (B) read,
+// the (B) restore write, the (B) delete arm and the (A) tracked restore
+// without four copies of the most security-critical loop in this hook.
+function classifyPathComponents(cwd, rel, what = '(B) baseline') {
   const segments = rel.split('/');
   let abs = cwd;
   let soFar = '';
@@ -521,12 +569,48 @@ function classifyPathComponents(cwd, rel) {
     if (i === segments.length - 1) return kind;
     if (kind !== 'dir') {
       throw new Error(
-        `(B) baseline path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
+        `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
           `through it; a symlink or other non-regular ancestor is denied on sight, never followed`
       );
     }
   }
   return 'absent'; // unreachable — rel is always non-empty
+}
+
+// THE ANCESTOR GUARD EVERY WRITE, CREATE, DELETE AND RESTORE PRIMITIVE TAKES
+// FIRST (board 128fedb7). Guarding the FINAL component is not enough when a
+// PARENT can be a link: `mkdirSync(dirname(abs), {recursive:true})` traverses
+// every ancestor, `rmSync(abs, {recursive:true})` resolves the whole string
+// before it starts deleting, and `git checkout HEAD -- <rel>` writes wherever
+// the resolved path lands — so a symlink planted at `.claude`, `.sterling`, or
+// any directory inside a normal `hooks/`/`.claude/agents` tree re-aims the
+// primitive OUTSIDE the repository even when the leaf lstat is clean.
+// THE DISPOSITION IS THE SETTLED CHEAP ONE, not descriptor-based no-follow I/O:
+// on ANY type ambiguity in the ancestor chain this THROWS, which reaches the
+// caller's fail-closed catch and DENIES WITHOUT RESTORING — the same answer the
+// (A) side already settled on for attribution ambiguity (decision
+// h17-coverage-is-ancestor-aware-and-an-ambiguous-descendant-denies-without-
+// restoring): removing the write from the ambiguous case entirely rather than
+// trying to make it safe. This check STILL RACES with the primitive that
+// follows it (lstat-then-write is not atomic); that residual is knowingly
+// accepted and tracked separately (board 6c1e0890) — an lstat guard shrinks the
+// window, only an O_NOFOLLOW descriptor closes it, and that is a Windows-parity
+// design question this slice deliberately does not open.
+// Returns the IMMEDIATE PARENT's own kind ('dir' when it is already there,
+// 'absent' when the primitive may create it fresh — nothing to follow yet);
+// throws on anything else, and on the first non-directory component above it.
+function assertRealAncestors(cwd, rel, what) {
+  const segments = rel.replace(/\/+$/, '').split('/');
+  const ancestorRel = segments.slice(0, -1).join('/');
+  if (!ancestorRel) return 'dir'; // a repo-root child: the root is the trust anchor, never lstat'd
+  const kind = classifyPathComponents(cwd, ancestorRel, what);
+  if (kind !== 'dir' && kind !== 'absent') {
+    throw new Error(
+      `${what}: refusing to act on '${rel}' — its ancestor '${ancestorRel}' is not a directory (lstat kind: ${kind}); a symlink or other ` +
+        `non-regular ancestor is never created through, written through, deleted through or restored through`
+    );
+  }
+  return kind;
 }
 
 // Snapshot every existing (B)-set file as { repoRelPath -> raw bytes, base64 }.
@@ -659,22 +743,11 @@ function validateBaselineKey(key) {
 function writeUnder(cwd, rel, content) {
   const abs = join(cwd, rel);
   // Every ancestor directory must be real (never a symlink) BEFORE mkdirSync
-  // or writeFileSync touches any of them. classifyPathComponents itself
-  // throws on the first non-directory ancestor it finds; its return value
-  // here is the ANCESTOR directory's own kind, which must be 'dir' (already
-  // there) or 'absent' (mkdirSync will create it fresh — safe, nothing to
-  // follow yet).
-  const segments = rel.split('/');
-  const ancestorRel = segments.slice(0, -1).join('/');
-  if (ancestorRel) {
-    const ancestorKind = classifyPathComponents(cwd, ancestorRel);
-    if (ancestorKind !== 'dir' && ancestorKind !== 'absent') {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': ancestor '${ancestorRel}' is not a directory (lstat kind: ${ancestorKind}) — a symlink or ` +
-          `other non-regular ancestor is never created through or written through by a restore`
-      );
-    }
-  }
+  // or writeFileSync touches any of them — see assertRealAncestors, which
+  // throws on the first non-directory component and whose return value here is
+  // the immediate parent's own kind ('dir' already there, or 'absent' so
+  // mkdirSync creates it fresh — safe, nothing to follow yet).
+  assertRealAncestors(cwd, rel, `(B) baseline restore of '${rel}'`);
   // The FINAL component's own kind — by the ancestor check above, every
   // component of `abs` up to but not including this final segment is already
   // confirmed a real directory, so this lstat cannot be fooled by an
@@ -688,6 +761,34 @@ function writeUnder(cwd, rel, content) {
   }
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, Buffer.from(content, 'base64'));
+}
+
+// The (B) sweep's DELETE primitive (board 128fedb7 site 2) — a delete aimed the
+// same way writeUnder can be aimed, and previously the only (B) primitive with
+// no guard of its own: `rmSync(join(cwd, rel), {recursive:true, force:true})`
+// resolves the WHOLE path before it deletes, so a linked ancestor pointed the
+// recursive delete at a tree outside the repository. collectBaseline's own
+// no-follow walk denies before this is normally reached, but a primitive that
+// can be AIMED is never trusted to be safe only because an earlier scan said so
+// (the reasoning writeUnder already carries).
+// Two narrowings, both deliberate:
+//   * `recursive` is GONE — every key collectBaseline produces is a REGULAR
+//     FILE (`de.isFile()`), so recursion was never needed here, and a hook that
+//     holds no recursive-delete primitive cannot have one aimed.
+//   * the final component must be a regular file (or already absent): a (B)
+//     entry that turned into a symlink/directory since the walk is a TYPE
+//     AMBIGUITY, and the settled disposition is deny WITHOUT touching it.
+function removeUnder(cwd, rel) {
+  assertRealAncestors(cwd, rel, `(B) baseline removal of '${rel}'`);
+  const abs = join(cwd, rel);
+  const kind = lstatKind(abs);
+  if (kind !== 'file' && kind !== 'absent') {
+    throw new Error(
+      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) — a symlink, directory or other ` +
+        `non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
+    );
+  }
+  rmSync(abs, { force: true });
 }
 
 // Parse `git status --porcelain -z`: NUL-separated entries `XY <path>`; a
@@ -879,8 +980,23 @@ function mintRestorePerformed(cwd, paths, agentId) {
 
 // Restore a tracked path: in HEAD → git checkout (modified/deleted/rename-origin);
 // not in HEAD → new/untracked/added → remove (file or `?? dir/`).
+// ANCESTOR-GUARDED (board 128fedb7 site 3): both arms are aimable primitives —
+// `git checkout HEAD -- <rel>` writes wherever the resolved path lands and the
+// recursive `rmSync` resolves the whole string before deleting, so a symlink at
+// any DIRECTORY component (a linked `hooks/`, or a linked subdirectory inside a
+// legitimately dirty untracked tree) redirects the restore or the delete out of
+// the repository. A non-directory ancestor throws → the caller's fail-closed
+// catch → deny WITHOUT restoring.
+// The FINAL component is deliberately NOT kind-restricted here, unlike the (B)
+// primitives: `git checkout` replaces a symlink standing in for a tracked file
+// with HEAD's blob without following it (which is exactly what makes the
+// clean-at-Pre symlink swap recoverable), and unlinking a planted symlink leaf
+// removes the LINK, never its target — refusing there would leave an
+// attacker-planted link live at an enforcement path, which is strictly worse
+// than removing it.
 function restoreTracked(cwd, relRaw) {
   const rel = relRaw.replace(/\/+$/, ''); // untracked dir collapses to `?? dir/`
+  assertRealAncestors(cwd, rel, `(A) tracked restore of '${rel}'`);
   const inHead = spawnSync('git', ['-C', cwd, 'cat-file', '-e', 'HEAD:' + rel], { encoding: 'utf8' }).status === 0;
   if (inHead) {
     const r = spawnSync('git', ['-C', cwd, 'checkout', 'HEAD', '--', rel], { encoding: 'utf8' });
@@ -912,7 +1028,17 @@ if (event === 'PreToolUse') {
     } finally {
       store?.close();
     }
-    writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
+    // ONE key for this Bash call, used by BOTH per-call records below (board
+    // 11609d1f): the (B) content baseline and the (A) Pre-STATE snapshot are
+    // keyed identically, so they can never disagree about which call they
+    // belong to. A null key writes the legacy per-run baseline and NO state
+    // record — degraded, and Post says so on both counts.
+    const key = callKey(input.tool_use_id);
+    // The (B) baseline is written ONCE, under the per-call key when there is
+    // one: writing the legacy per-run copy as well would leave a shared file
+    // behind after the per-call one is consumed, which is precisely the shared
+    // transient state this keying removes (P4).
+    writeFileSync(baselineFile(cwd, runId, key), JSON.stringify(collectBaseline(cwd)));
     // Attribution record for the (A) branch: without it, Post can only see that a
     // tracked path is dirty NOW, not whether this command made it so.
     const dirtyRels = dirtyTrackedRels(cwd);
@@ -924,7 +1050,6 @@ if (event === 'PreToolUse') {
     // to a per-run key. Derived from the SAME git status as the attribution
     // record above, so the two records can never disagree about which paths
     // were dirty.
-    const key = callKey(input.tool_use_id);
     if (key) {
       const idx = indexEntriesFor(cwd, dirtyRels);
       const states = {};
@@ -951,6 +1076,11 @@ try {
   // of which need a working store to resolve). The original deny still fires,
   // but only AFTER the restore (and its mint attempt) had their chance —
   // denying immediately here is exactly what silently dropped the restore.
+  // ONE key for this Bash call, resolved before anything reads a record: BOTH
+  // per-call records (the (A) Pre-STATE snapshot and the (B) content baseline,
+  // board 11609d1f) are addressed by it, and both degrade LOUDLY — never
+  // silently — when it is unusable.
+  const callId = callKey(input.tool_use_id);
   let storeErr = null;
   let store = null;
   try {
@@ -1022,6 +1152,19 @@ try {
   // denial and `degradedReason` says why (degraded LOUD, never silent).
   let preState = null;
   let degradedReason = null;
+  // Set when the (B) stage had to fall back to the SHARED per-run baseline
+  // because this call carries no usable tool_use_id (board 11609d1f). Disclosed
+  // NON-FATALLY on stderr on EVERY path the moment the fallback is taken
+  // (reviewer F1 — the laundering it admits compares EQUAL and allows, so a
+  // disclosure gated on a violation is silent when it matters), and ADDITIONALLY
+  // named in the denial alongside the (B) paths it acted on. A degraded key that
+  // changes what the guard trusts and says nothing is the defect, not the
+  // degradation.
+  let baselineShared = null;
+  // The (B) paths this Post restored/removed, kept beside `violations` (which
+  // mixes (A) and (B)) so the shared-baseline disclosure can name exactly the
+  // writes it applies to.
+  const baselineViolations = [];
   if (!storeErr) {
     const dPath = dirtyFile(cwd, runId);
     if (!existsSync(dPath)) {
@@ -1099,7 +1242,7 @@ try {
     // corrupt -> AC9 fail-closed (a pre-dirty path whose Pre state cannot be
     // read is exactly as unverifiable as it ever was). No usable tool_use_id ->
     // the record was never written, so the OLD blanket denial stands and says so.
-    const key = callKey(input.tool_use_id);
+    const key = callId;
     if (!key) {
       degradedReason =
         'this hook call carries no usable `tool_use_id` (absent, empty, or not a string), so there is no per-call Pre-STATE record to compare against — ' +
@@ -1344,14 +1487,30 @@ try {
   // The storeErr deny below still fires; only the (A) tracked-restore sweep
   // above (which needs no runId for its glob-only violations) runs regardless.
   if (!storeErr) {
-    const bPath = baselineFile(cwd, runId);
+    // PER-CALL when this call carries a usable tool_use_id (board 11609d1f);
+    // the legacy per-run file only when it does not — and that fallback is
+    // DISCLOSED ON EVERY PATH (a non-fatal stderr line at the end of the (B)
+    // sweep, allow path included, plus a named part in any denial the (B) writes
+    // compose — `baselineShared` below), never silent, because a shared baseline
+    // is the laundering hole itself: one lane's Pre overwrites another's and a
+    // tamper is adopted as the legitimate pre-image, and that tamper compares
+    // EQUAL — so a disclosure gated on a violation would be silent when it matters.
+    const bPath = baselineFile(cwd, runId, callId);
+    if (!callId) {
+      baselineShared =
+        'this hook call carries no usable `tool_use_id` (absent, empty/whitespace, or not a string), so the (B) content baseline in play is the ' +
+        'legacy PER-RUN, RUN-KEYED file SHARED by every concurrent Bash lane in this run instead of one keyed to this call — while it is shared, a ' +
+        'second lane\'s Pre can overwrite it after this lane\'s command has already written, and the overwritten state would be adopted as this ' +
+        'lane\'s legitimate pre-image (that is exactly why the per-call key exists, and why this fallback is reported rather than assumed harmless)';
+    }
     if (!existsSync(bPath)) {
       deny(
         environmentDefectDenial(
           'H17',
           `Baseline '${bPath}' absent at Post (no Pre snapshot) — cannot verify the enforcement surface; failing closed (P5). ` +
             `Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and ` +
-            `Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`,
+            `Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); ` +
+            `plus one more since the baseline became per-call: the tool_use_id carried at Pre and at Post must be the SAME Bash call's. Rerun the command.`,
           { agentId: input.agent_id }
         )
       );
@@ -1365,6 +1524,18 @@ try {
           agentId: input.agent_id,
         })
       );
+    }
+    // LIFECYCLE-BOUND (P4, board 11609d1f): a PER-CALL baseline's life ends with
+    // the Post that read it — the bytes are already in memory, so the unlink is
+    // best-effort and can never change the verdict. The legacy per-run file is
+    // deliberately left alone: it is not this call's to consume (a concurrent
+    // lane may still need it), and the next Pre overwrites it exactly as before.
+    if (callId) {
+      try {
+        rmSync(bPath, { force: true });
+      } catch {
+        /* leaked temp record only; the comparison already happened in memory */
+      }
     }
 
     // Validate EVERY key BEFORE any restore write — a bad key (traversal/absolute/
@@ -1392,15 +1563,45 @@ try {
       if (!(rel in current)) {
         writeUnder(cwd, rel, content); // baseline file deleted → recreate
         violations.push(rel);
+        baselineViolations.push(rel);
       } else if (current[rel] !== content) {
         writeUnder(cwd, rel, content); // modified → restore bytes
         violations.push(rel);
+        baselineViolations.push(rel);
       }
     }
     for (const rel of Object.keys(current)) {
       if (!(rel in valid)) {
-        rmSync(join(cwd, rel), { recursive: true, force: true }); // new → delete
+        removeUnder(cwd, rel); // new → delete, ancestor- and kind-guarded (board 128fedb7)
         violations.push(rel);
+        baselineViolations.push(rel);
+      }
+    }
+    // DEGRADED-LOUD ON EVERY PATH (board 11609d1f, reviewer F1). The deny-path
+    // notice below fires only when the (B) comparison found a DIFFERENCE — but
+    // the laundering failure the per-call key exists to close produces NO
+    // difference (a shared baseline overwritten with already-tampered bytes
+    // compares EQUAL and the call ALLOWs), so a disclosure gated on a violation
+    // stays silent exactly when the shared baseline was most dangerous. Emit a
+    // NON-FATAL stderr line the moment the fallback was taken — allow path
+    // included — using the same fire-and-continue idiom mintRestorePerformed
+    // uses: it changes no verdict, no allow/deny outcome, and no key. This is
+    // the ONLY audible trace on a clean-allow degraded call.
+    if (baselineShared) {
+      // WRAPPED (delta-review LOW): this write is UNGUARDED inside the outer
+      // fail-closed try, so a throwing stderr (EPIPE/EBADF) on the clean-ALLOW
+      // path would reach the outer catch and flip allow -> deny — a verdict
+      // change. mintRestorePerformed wraps its body for exactly this reason;
+      // match it so a best-effort trace can never alter the outcome.
+      try {
+        process.stderr.write(
+          `H17: DEGRADED (B) VERIFICATION — this Bash call carries no usable \`tool_use_id\`, so the (B) content baseline it verified against was the ` +
+            `legacy PER-RUN, RUN-KEYED file SHARED by every concurrent lane in this run, not one keyed to this call. A concurrent lane's Pre could have ` +
+            `OVERWRITTEN it after this lane's command already wrote — in which case a tamper would compare EQUAL and be adopted as this call's legitimate ` +
+            `pre-image. The verdict stands; what is unverifiable is that the pre-image belonged to this call. (board 11609d1f)\n`
+        );
+      } catch {
+        /* best-effort trace — a failed write must never change the verdict */
       }
     }
   }
@@ -1467,6 +1668,19 @@ try {
         `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(', ')} — exit contract-violated, never route around. ` +
           `A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check — ` +
           `only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
+      );
+    }
+    // DEGRADED-LOUD ON THE (B) SIDE (board 11609d1f), the mirror of
+    // `degradedReason` on the (A) side: the verdict above stands, but it was
+    // reached against a baseline SHARED with every other lane in this run, so
+    // the exposure is stated rather than left for a reader to infer. Composed
+    // only when the (B) stage actually acted — a call that touched no (B) path
+    // gains nothing from the notice (P1).
+    if (baselineShared && baselineViolations.length) {
+      parts.push(
+        `H17: DEGRADED (B) VERIFICATION — the (B)-set path(s) above (${baselineViolations.join(', ')}) were compared and restored against a SHARED ` +
+          `PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the ` +
+          `pre-image it restored was this call's own.`
       );
     }
     if (preExisting.length) {

@@ -33,6 +33,21 @@ if (!nextSlice) {
   fail('--next-slice "<the exact next execution slice>" is required and must be non-empty — a note without a next slice restores nothing actionable');
 }
 
+// --reason=code-reload (board d5942fa0, fix candidate d): an OPTIONAL, explicit
+// flag for the one case the rotation mechanism cannot serve on its own — a
+// rotation that requires a code reload (migration, update, rebuild) BEFORE the
+// /clear that consumes this note. H1's source=clear gate is deliberate and
+// unchanged (a note prepared for a rotation that hasn't happened must survive
+// an unrelated restart) — this flag only sharpens the wording, additive to the
+// unconditional guidance already printed/injected below. Validated against the
+// one supported value rather than accepted as free text: a typo'd reason would
+// otherwise silently fail to trigger the sequence it exists to state (P5).
+const reasonArg = arg('reason');
+if (reasonArg !== null && reasonArg !== 'code-reload') {
+  fail(`--reason '${reasonArg}' is not recognized — the only supported value is 'code-reload' (flags that a server/hook code reload is required before the next slice can proceed)`);
+}
+const reason = reasonArg; // null, or 'code-reload'
+
 const git = (args) => {
   try {
     const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 5_000 });
@@ -97,6 +112,7 @@ const note = {
   head_sha: git(['rev-parse', 'HEAD']),
   base_branch: baseBranch,
   commits_ahead: commitsAhead,
+  reason,
   at: new Date().toISOString(),
 };
 
@@ -110,6 +126,10 @@ process.stdout.write(
     (note.commits_ahead !== null
       ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})\n`
       : 'commits_ahead: unavailable (no origin/HEAD, main, or master to diff against — pass --into to a future version if this recurs)\n') +
-    `Tell the user READY TO CLEAR — on /clear, H1 restores and consumes this note automatically.\n` +
-    `If server/hook CODE changed since this session started (migration, update, rebuild), /clear alone will not reload it — EXIT AND RELAUNCH the Claude Code CLI first, THEN /clear.\n`
+    (note.reason === 'code-reload'
+      ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +
+        `  1. exit and relaunch the Claude Code CLI now\n` +
+        `  2. THEN /clear — H1 restores and consumes this note automatically\n`
+      : `Tell the user READY TO CLEAR — on /clear, H1 restores and consumes this note automatically.\n` +
+        `If server/hook CODE changed since this session started (migration, update, rebuild), /clear alone will not reload it — EXIT AND RELAUNCH the Claude Code CLI first, THEN /clear.\n`)
 );

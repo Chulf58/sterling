@@ -6924,8 +6924,9 @@ function projectTag(cwd2) {
   }
   return createHash("sha256").update(root).digest("hex").slice(0, 16);
 }
-function baselineFile(cwd2, runId) {
-  return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}.json`);
+function baselineFile(cwd2, runId, key) {
+  const tag = projectTag(cwd2);
+  return join2(tmpdir(), key ? `sterling-enforce-${tag}-${runId}-call-${key}.baseline.json` : `sterling-enforce-${tag}-${runId}.json`);
 }
 function dirtyFile(cwd2, runId) {
   return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}.dirty.json`);
@@ -7153,7 +7154,7 @@ function sha256OfRegularFile(abs) {
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
 }
-function classifyPathComponents(cwd2, rel) {
+function classifyPathComponents(cwd2, rel, what = "(B) baseline") {
   const segments = rel.split("/");
   let abs = cwd2;
   let soFar = "";
@@ -7165,11 +7166,23 @@ function classifyPathComponents(cwd2, rel) {
     if (i === segments.length - 1) return kind;
     if (kind !== "dir") {
       throw new Error(
-        `(B) baseline path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+        `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
       );
     }
   }
   return "absent";
+}
+function assertRealAncestors(cwd2, rel, what) {
+  const segments = rel.replace(/\/+$/, "").split("/");
+  const ancestorRel = segments.slice(0, -1).join("/");
+  if (!ancestorRel) return "dir";
+  const kind = classifyPathComponents(cwd2, ancestorRel, what);
+  if (kind !== "dir" && kind !== "absent") {
+    throw new Error(
+      `${what}: refusing to act on '${rel}' \u2014 its ancestor '${ancestorRel}' is not a directory (lstat kind: ${kind}); a symlink or other non-regular ancestor is never created through, written through, deleted through or restored through`
+    );
+  }
+  return kind;
 }
 function collectBaseline(cwd2) {
   const map = {};
@@ -7238,16 +7251,7 @@ function validateBaselineKey(key) {
 }
 function writeUnder(cwd2, rel, content) {
   const abs = join2(cwd2, rel);
-  const segments = rel.split("/");
-  const ancestorRel = segments.slice(0, -1).join("/");
-  if (ancestorRel) {
-    const ancestorKind = classifyPathComponents(cwd2, ancestorRel);
-    if (ancestorKind !== "dir" && ancestorKind !== "absent") {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': ancestor '${ancestorRel}' is not a directory (lstat kind: ${ancestorKind}) \u2014 a symlink or other non-regular ancestor is never created through or written through by a restore`
-      );
-    }
-  }
+  assertRealAncestors(cwd2, rel, `(B) baseline restore of '${rel}'`);
   const kind = lstatKind(abs);
   if (kind !== "file" && kind !== "absent") {
     throw new Error(
@@ -7256,6 +7260,17 @@ function writeUnder(cwd2, rel, content) {
   }
   mkdirSync2(dirname3(abs), { recursive: true });
   writeFileSync(abs, Buffer.from(content, "base64"));
+}
+function removeUnder(cwd2, rel) {
+  assertRealAncestors(cwd2, rel, `(B) baseline removal of '${rel}'`);
+  const abs = join2(cwd2, rel);
+  const kind = lstatKind(abs);
+  if (kind !== "file" && kind !== "absent") {
+    throw new Error(
+      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink, directory or other non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
+    );
+  }
+  rmSync(abs, { force: true });
 }
 function parsePorcelainZ(out) {
   const tokens = out.split("\0");
@@ -7377,6 +7392,7 @@ function mintRestorePerformed(cwd2, paths, agentId) {
 }
 function restoreTracked(cwd2, relRaw) {
   const rel = relRaw.replace(/\/+$/, "");
+  assertRealAncestors(cwd2, rel, `(A) tracked restore of '${rel}'`);
   const inHead = spawnSync("git", ["-C", cwd2, "cat-file", "-e", "HEAD:" + rel], { encoding: "utf8" }).status === 0;
   if (inHead) {
     const r = spawnSync("git", ["-C", cwd2, "checkout", "HEAD", "--", rel], { encoding: "utf8" });
@@ -7399,10 +7415,10 @@ if (event === "PreToolUse") {
     } finally {
       store?.close();
     }
-    writeFileSync(baselineFile(cwd, runId), JSON.stringify(collectBaseline(cwd)));
+    const key = callKey(input.tool_use_id);
+    writeFileSync(baselineFile(cwd, runId, key), JSON.stringify(collectBaseline(cwd)));
     const dirtyRels = dirtyTrackedRels(cwd);
     writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyRels));
-    const key = callKey(input.tool_use_id);
     if (key) {
       const idx = indexEntriesFor(cwd, dirtyRels);
       const states = {};
@@ -7415,6 +7431,7 @@ if (event === "PreToolUse") {
   }
 }
 try {
+  const callId = callKey(input.tool_use_id);
   let storeErr = null;
   let store = null;
   try {
@@ -7461,6 +7478,8 @@ try {
   let preDirty = /* @__PURE__ */ new Set();
   let preState = null;
   let degradedReason = null;
+  let baselineShared = null;
+  const baselineViolations = [];
   if (!storeErr) {
     const dPath = dirtyFile(cwd, runId);
     if (!existsSync3(dPath)) {
@@ -7500,7 +7519,7 @@ try {
       }
       preDirty.add(norm);
     }
-    const key = callKey(input.tool_use_id);
+    const key = callId;
     if (!key) {
       degradedReason = "this hook call carries no usable `tool_use_id` (absent, empty, or not a string), so there is no per-call Pre-STATE record to compare against \u2014 and H17 will NOT fall back to a per-run key, because one shared record lets a second lane adopt the first lane's tampered bytes as its own baseline";
     } else {
@@ -7605,12 +7624,15 @@ try {
   }
   if (restoredPaths.length) mintRestorePerformed(cwd, restoredPaths, input.agent_id);
   if (!storeErr) {
-    const bPath = baselineFile(cwd, runId);
+    const bPath = baselineFile(cwd, runId, callId);
+    if (!callId) {
+      baselineShared = "this hook call carries no usable `tool_use_id` (absent, empty/whitespace, or not a string), so the (B) content baseline in play is the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent Bash lane in this run instead of one keyed to this call \u2014 while it is shared, a second lane's Pre can overwrite it after this lane's command has already written, and the overwritten state would be adopted as this lane's legitimate pre-image (that is exactly why the per-call key exists, and why this fallback is reported rather than assumed harmless)";
+    }
     if (!existsSync3(bPath)) {
       deny(
         environmentDefectDenial(
           "H17",
-          `Baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); rerun the command.`,
+          `Baseline '${bPath}' absent at Post (no Pre snapshot) \u2014 cannot verify the enforcement surface; failing closed (P5). Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and Post so the runId in the filename moved, or realpathSync succeeded at one end and threw at the other (two project tags); plus one more since the baseline became per-call: the tool_use_id carried at Pre and at Post must be the SAME Bash call's. Rerun the command.`,
           { agentId: input.agent_id }
         )
       );
@@ -7625,6 +7647,12 @@ try {
         })
       );
     }
+    if (callId) {
+      try {
+        rmSync(bPath, { force: true });
+      } catch {
+      }
+    }
     const valid = {};
     for (const key of Object.keys(baseline)) {
       const norm = validateBaselineKey(key);
@@ -7638,15 +7666,27 @@ try {
       if (!(rel in current)) {
         writeUnder(cwd, rel, content);
         violations.push(rel);
+        baselineViolations.push(rel);
       } else if (current[rel] !== content) {
         writeUnder(cwd, rel, content);
         violations.push(rel);
+        baselineViolations.push(rel);
       }
     }
     for (const rel of Object.keys(current)) {
       if (!(rel in valid)) {
-        rmSync(join2(cwd, rel), { recursive: true, force: true });
+        removeUnder(cwd, rel);
         violations.push(rel);
+        baselineViolations.push(rel);
+      }
+    }
+    if (baselineShared) {
+      try {
+        process.stderr.write(
+          `H17: DEGRADED (B) VERIFICATION \u2014 this Bash call carries no usable \`tool_use_id\`, so the (B) content baseline it verified against was the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent lane in this run, not one keyed to this call. A concurrent lane's Pre could have OVERWRITTEN it after this lane's command already wrote \u2014 in which case a tamper would compare EQUAL and be adopted as this call's legitimate pre-image. The verdict stands; what is unverifiable is that the pre-image belonged to this call. (board 11609d1f)
+`
+        );
+      } catch {
       }
     }
   }
@@ -7683,6 +7723,11 @@ try {
     if (violations.length) {
       parts.push(
         `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
+      );
+    }
+    if (baselineShared && baselineViolations.length) {
+      parts.push(
+        `H17: DEGRADED (B) VERIFICATION \u2014 the (B)-set path(s) above (${baselineViolations.join(", ")}) were compared and restored against a SHARED PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the pre-image it restored was this call's own.`
       );
     }
     if (preExisting.length) {

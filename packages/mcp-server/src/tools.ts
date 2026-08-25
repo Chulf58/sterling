@@ -3817,17 +3817,29 @@ export class SterlingTools {
     // zero-tag record is unreachable by every stack_tags-filtered query while
     // the project original sits tombstoned. Warned, never blocked (P1).
 
-    const promoted = this.store.create({
-      ...content,
-      stack_tags: keptStackTags,
-      id: this.newId(),
-      created_at: ts,
-      updated_at: ts,
-      status: 'active',
-      superseded_by: null,
-      scope: `domain:${domain}`,
-      links: [{ rel: 'informed_by', target_id: originalId }],
-    });
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 5, adjudicated): a `domain`
+    // outside SCOPE_RE (project|domain:[a-z0-9_-]+ — e.g. an uppercase or
+    // space-bearing name) fails MountedStores.create's own validateRecord call
+    // BEFORE its unmounted-domain routing check ever runs, throwing a raw
+    // ZodError across this boundary — caught and re-rendered the same way as
+    // the other sites (958df5e) rather than leaking the raw issue array.
+    let promoted: DurableRecord;
+    try {
+      promoted = this.store.create({
+        ...content,
+        stack_tags: keptStackTags,
+        id: this.newId(),
+        created_at: ts,
+        updated_at: ts,
+        status: 'active',
+        superseded_by: null,
+        scope: `domain:${domain}`,
+        links: [{ rel: 'informed_by', target_id: originalId }],
+      });
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, original.type, 'knowledge_promote');
+      throw err;
+    }
     // tombstone the project original, pointing forward to the promoted copy —
     // 'promoted' (not the default 'retired') so the activity feed names this
     // for what it is (board 39d6462d)
@@ -5276,12 +5288,31 @@ export class SterlingTools {
         );
       }
     }
-    const handoff = this.store.writeHandoff(run.id, args.handoff, this.now());
-    return { written: true, phase_id: handoff.phase_id };
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 3): store.writeHandoff
+    // re-parses the handoff against handoffSchema and throws the raw ZodError
+    // across the store boundary — caught and re-rendered the same way as
+    // board_update's/knowledge_supersede's own store-validation catch (958df5e),
+    // rather than leaking the raw issue array on this caller-triggerable surface.
+    try {
+      const handoff = this.store.writeHandoff(run.id, args.handoff, this.now());
+      return { written: true, phase_id: handoff.phase_id };
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, 'handoff', 'handoff_write');
+      throw err;
+    }
   }
 
   handoffRead(args: { run_id?: string; phase_id?: string; files?: string[] } = {}): unknown[] {
     const run = this.requireWireRun('handoff_read', args.run_id);
-    return this.store.readHandoffs(run.id, { phase_id: args.phase_id, files: args.files });
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 4): store.readHandoffs
+    // re-parses each stored handoff body against handoffSchema — a malformed
+    // or legacy row would otherwise leak the raw ZodError across the store
+    // boundary the same way site 3's write path did.
+    try {
+      return this.store.readHandoffs(run.id, { phase_id: args.phase_id, files: args.files });
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, 'handoff', 'handoff_read');
+      throw err;
+    }
   }
 }

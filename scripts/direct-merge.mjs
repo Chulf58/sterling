@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { arg, fail, openProject } from './lib/project.mjs';
 import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
-import { mintSettlementReconcile, isLiveReconcileDebt } from './hooks/lib/settlement.mjs';
+import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
 import { matchesGlob } from '@sterling/schemas';
 
 const target = arg('--target') ?? process.cwd();
@@ -105,29 +105,43 @@ const changed = new Set(diff.stdout.split('\n').map((l) => l.trim()).filter(Bool
 // against the LIVE predicate (current content vs the owning article's CURRENT
 // baseline) — a stale row (already reconciled since it minted, or an
 // edit-then-revert) must never block the merge on its own authority.
+// A row the live predicate CLEARS is NAMED, never silently dropped (board
+// 92f7e826, recurrence 2026-08-25): the exclusion already worked, but it was
+// invisible, so eight no-op items were "closed" with board_remove — which
+// never moves the owning article's file_baselines — and re-minted within
+// minutes, blocking the merge twice. The gate now reports every cleared row so
+// the close can be deliberate. It still closes NOTHING itself.
 const { store: settleStore } = openProject(target);
 let debt;
+let cleared;
 let settlementError;
 try {
   mintSettlementReconcile(settleStore, target, [...changed]);
-  debt = settleStore
+  const covering = settleStore
     .query({ types: ['todo'], cap: 1000 })
-    .filter(
-      (t) =>
-        t.source === 'system' &&
-        t.system_reason === 'reconcile_needed' &&
-        (t.file_keys ?? []).some((k) => changed.has(k)) &&
-        // R5(b) (board c198866d round-3 fixer): widen-in-place can group a
-        // path this branch never touched into the same item as one it did
-        // (grouping is per ARTICLE, not per branch) — evaluating liveness
-        // over the FULL item would let that unrelated path's drift refuse
-        // THIS merge. Scope the live check to item.file_keys ∩ this branch's
-        // changed files (the merge gate's own scope, decision 9df61181) by
-        // passing a view of the item carrying only the intersecting keys —
-        // always non-empty here, since the .some() above already guarantees
-        // at least one overlapping key.
-        isLiveReconcileDebt(settleStore, target, { ...t, file_keys: (t.file_keys ?? []).filter((k) => changed.has(k)) })
-    );
+    .filter((t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && (t.file_keys ?? []).some((k) => changed.has(k)));
+  debt = [];
+  cleared = [];
+  for (const t of covering) {
+    // R5(b) (board c198866d round-3 fixer): widen-in-place can group a path
+    // this branch never touched into the same item as one it did (grouping is
+    // per ARTICLE, not per branch) — evaluating liveness over the FULL item
+    // would let that unrelated path's drift refuse THIS merge. Scope the live
+    // check to item.file_keys ∩ this branch's changed files (the merge gate's
+    // own scope, decision 9df61181) by passing a view of the item carrying
+    // only the intersecting keys — always non-empty here, since the .some()
+    // above already guarantees at least one overlapping key.
+    //
+    // ONE SCOPE, BLOCKING AND REPORTING ALIKE (conductor ruling, board
+    // 92f7e826): an item covering no file this branch changed is out of this
+    // gate's business entirely — it cannot block, so naming it here is output
+    // nobody acts on at a merge (P1). Stale rows beyond the branch diff are
+    // /sterling:drain's lane, which already verifies queue items against HEAD.
+    const scopedFiles = (t.file_keys ?? []).filter((k) => changed.has(k));
+    const verdict = explainReconcileDebtLiveness(settleStore, target, { ...t, file_keys: scopedFiles });
+    if (verdict.live) debt.push(t);
+    else cleared.push({ item: t, scopedFiles, verdict });
+  }
 } catch (e) {
   settlementError = e;
 } finally {
@@ -138,6 +152,79 @@ try {
 // of a loud, attributable refusal (P5) — fail() here, never a bare crash.
 if (settlementError) {
   fail(`direct-merge: settlement mint/live-check failed (${settlementError?.message ?? settlementError}) — refusing rather than merging on an unverified reconcile state`);
+}
+// THE CLEARED ROWS, NAMED (board 92f7e826). Printed to STDERR only — stdout is
+// the gate's machine-readable JSON result and stays exactly that. Printed
+// BEFORE the refusal below, so it appears on BOTH paths: a merge that proceeds
+// and a merge refused on OTHER, genuinely-live debt. Nothing is removed or
+// rewritten here; the remedy text says why board_remove alone is the wrong
+// close, which is the trap this report exists to stop.
+if (cleared.length > 0) {
+  const why = (v) => {
+    switch (v.code) {
+      case 'all_exempt':
+        return `every named path is a generated projection (config.generated_projections, ruling e1275166): ${v.exempt_paths.join(', ')}`;
+      case 'baseline_match':
+        return `content now MATCHES the owning article's current baseline (already reconciled, or edited and reverted): ${v.matched.join(', ')}`;
+      case 'baseline_absent':
+        return `UNVERIFIED, not clean — the owning article records NO baseline for ${v.unbaselined.join(', ')}, so there was nothing to compare (the settlement predicate abstains rather than inventing drift); this row cannot be cleared by a baseline re-stamp`;
+      case 'baseline_match_and_absent':
+        return (
+          `content matches the current baseline for ${v.matched.join(', ')}; ` +
+          `and the article records NO baseline for ${v.unbaselined.join(', ')} (UNVERIFIED, not clean — nothing to compare)`
+        );
+      default:
+        return `live predicate false (${v.code})`;
+    }
+  };
+  // THE REMEDY IS PER-REASON, never one prescription for all of them (both
+  // reviewers, board 92f7e826): a universal "re-stamp the baseline" footer
+  // directly contradicts a baseline_absent row, which has no baseline TO
+  // re-stamp — and a footer that contradicts the line above it teaches the
+  // reader to ignore both. Each remedy line is emitted only when at least one
+  // row above actually earns it.
+  const hasRestampable = cleared.some(({ verdict }) => verdict.code !== 'baseline_absent' && verdict.code !== 'all_exempt');
+  const hasAbsent = cleared.some(({ verdict }) => verdict.code === 'baseline_absent' || verdict.code === 'baseline_match_and_absent');
+  const hasExempt = cleared.some(({ verdict }) => verdict.code === 'all_exempt');
+  console.error(
+    [
+      '',
+      `direct-merge: ${cleared.length} open reconcile_needed item(s) cover this branch's files but their LIVE predicate no longer holds —`,
+      `evaluated over the paths this branch changed (file_keys ∩ branch-changed, the merge gate's own scope), so the`,
+      `verdict is re-checkable against exactly those paths and says nothing about any other path on the same item.`,
+      `They do NOT block this merge, and NOTHING here closed them (a gate never closes debt on its own authority):`,
+      ...cleared.map(
+        ({ item, scopedFiles, verdict }) =>
+          `  - ${item.id}  [${scopedFiles.join(', ')}]${item.feature_link ? `  article ${item.feature_link}` : ''}\n      ${why(verdict)}`
+      ),
+      `Close each one DELIBERATELY — the right close depends on the reason given above, and there is no single one:`,
+      ...(hasRestampable
+        ? [
+            `  · a row reported as MATCHING the owning article's baseline: close it with a VERSIONED article write`,
+            `    that re-stamps the baseline (knowledge_update / knowledge_append naming the item in \`resolves\`).`,
+            `    Close it with an article write, and not with board_remove alone: removal never moves the owning`,
+            `    article's file_baselines, so an item whose files still differ from a stale baseline re-mints within`,
+            `    minutes (board 92f7e826, measured twice on 2026-08-25).`,
+          ]
+        : []),
+      ...(hasAbsent
+        ? [
+            `  · a row reported as UNVERIFIED because NO baseline is recorded: a re-stamp is not the remedy — there is`,
+            `    nothing to re-stamp. Either re-add that path to the owning article's files[] (the write mints its`,
+            `    baseline, and the item then discharges by being named in \`resolves\`), or — if the article genuinely no`,
+            `    longer owns the path — drop the path from the item (board_update) and close what remains on its own`,
+            `    reason. Do not read this row as verified-clean; nothing was compared.`,
+          ]
+        : []),
+      ...(hasExempt
+        ? [
+            `  · a generated-projection row: nothing needs re-stamping (ruling e1275166). Settlement no longer mints`,
+            `    exempt paths and a later widen drops them from a legacy item, so closing it directly is safe.`,
+          ]
+        : []),
+      '',
+    ].join('\n')
+  );
 }
 if (debt.length > 0) {
   // GROUP BY OWNING ARTICLE (N13): one item per touched file is the mint

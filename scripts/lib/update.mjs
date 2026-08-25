@@ -512,7 +512,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       (report.contract_drift
         ? 'CONTRACT DRIFT in a sibling project — see the stamp-contract block above. Tolerated here (a sibling CLAUDE.md never blocks this clone), and it does NOT self-heal: resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.\n'
         : '') +
-      'RESTART THE SESSION before working: the MCP server and every project subagent load at session start, so the code now on disk is not the code running.'
+      'RESTART THE SESSION before working — that means EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough, MCP servers survive it): the MCP server and every project subagent load at CLI start, so the code now on disk is not the code running.'
   );
   return report;
 }
