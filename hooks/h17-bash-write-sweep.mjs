@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, readlinkSync, realpathSync, constants as FS } from "node:fs";
 import { join as join2, dirname as dirname3, relative, resolve as resolve2, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
@@ -4976,6 +4976,16 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // exemption register, article slug -> justifying decision id. Consulted at
+  // the article_oversize minting site (articleOversizeWarnings,
+  // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
+  // maintenance item — the exemption suppresses the mint ONLY while the cited
+  // decision resolves and is live (status active, not superseded/retired) in
+  // the store the minting code already has open. A missing/unresolvable/dead
+  // citation VOIDS the exemption; the mint proceeds with the void reason
+  // appended to the item text — never a silent suppression (P5).
+  article_oversize_exempt: external_exports.record(external_exports.string(), external_exports.string()).default({}),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
   // with more entries than this keeps the first article_history_genesis_entries
   // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
@@ -6916,6 +6926,122 @@ function scopeCheck({ brief, debugScope, rel, amendments = [] }) {
 // scripts/hooks/h17-bash-write-sweep.mjs
 var BASELINE_GLOBS = [".claude/agents/**", ".sterling/config.json", ".claude/settings*.json"];
 var NO_RUN = "no-run";
+var HASH_CHUNK_BYTES = 64 * 1024;
+var MAX_WALK_NODES = 1e4;
+var MAX_WALK_DEPTH = 64;
+var MAX_RECORD_BYTES = 16 * 1024 * 1024;
+var MAX_STAMP_BYTES = 8 * 1024 * 1024;
+var WalkBudgetError = class extends Error {
+  constructor(message, budget) {
+    super(message);
+    this.name = "WalkBudgetError";
+    this.budget = budget;
+  }
+};
+function newWalkBudget() {
+  return {
+    nodes: 0,
+    // Charged PER ENTRY as the entry is produced — which is why the walks use
+    // opendirSync's incremental iteration rather than readdirSync: readdirSync
+    // materializes the WHOLE listing (and every Dirent) before a single charge
+    // could happen, so a million-entry flat directory OOMs before the budget is
+    // ever consulted. The budget must be able to stop a walk MID-DIRECTORY.
+    chargeNode(rel) {
+      if (++this.nodes > MAX_WALK_NODES) {
+        throw new WalkBudgetError(
+          `walk-node budget exceeded (limit ${MAX_WALK_NODES} entries) while walking '${rel}' \u2014 refusing to enumerate an unbounded tree inside a hook. An unbounded walk that OOMs or times out kills this process, and a killed guard exits non-2, which the platform treats as NON-BLOCKING (the write would be ALLOWED). This denial is the bounded alternative: commit, clean or ignore the oversized untracked tree, then rerun.`,
+          "node"
+        );
+      }
+    },
+    chargeDepth(depth, rel) {
+      if (depth > MAX_WALK_DEPTH) {
+        throw new WalkBudgetError(
+          `walk-depth budget exceeded (limit ${MAX_WALK_DEPTH} levels) at '${rel}' \u2014 refusing to recurse into an unbounded directory chain inside a hook. Unbounded recursion that overflows or times out kills this process, and a killed guard exits non-2, which the platform treats as NON-BLOCKING (the write would be ALLOWED). This denial is the bounded alternative: commit, clean or ignore the oversized untracked tree, then rerun.`,
+          "depth"
+        );
+      }
+    }
+  };
+}
+function sha256OfFileStreamed(abs) {
+  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  let primary;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new Error(`'${abs}' is not a regular file (fstat) \u2014 refusing to stream-hash it; only a regular file's bytes are hashable`);
+    }
+    const expectedSize = st.size;
+    const hash = createHash("sha256");
+    const buf = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+    let total = 0;
+    while (total < expectedSize) {
+      const want = Math.min(HASH_CHUNK_BYTES, expectedSize - total);
+      const n = readSync(fd, buf, 0, want, null);
+      if (n <= 0) break;
+      hash.update(n === HASH_CHUNK_BYTES ? buf : buf.subarray(0, n));
+      total += n;
+    }
+    const st2 = fstatSync(fd);
+    if (total !== expectedSize || st2.size !== expectedSize || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
+      throw new Error(
+        `'${abs}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) \u2014 refusing a torn hash; a file mutating mid-hash is itself a violation signal`
+      );
+    }
+    return hash.digest("hex");
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeErr) {
+      if (!primary) throw closeErr;
+    }
+  }
+}
+function readBoundedFile(abs, maxBytes, what) {
+  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  let primary;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`${what} '${abs}' is not a regular file (fstat) \u2014 refusing to read it`);
+    if (st.size > maxBytes) {
+      throw new Error(`${what} '${abs}' is ${st.size} bytes, over the ${maxBytes}-byte budget for this record class \u2014 refusing to allocate or parse it`);
+    }
+    const cap = st.size + 1;
+    const buf = Buffer.allocUnsafe(cap);
+    let total = 0;
+    for (; ; ) {
+      const n = readSync(fd, buf, total, cap - total, null);
+      if (n <= 0) break;
+      total += n;
+      if (total >= cap) break;
+    }
+    if (total !== st.size) {
+      throw new Error(`${what} '${abs}' read ${total} bytes but its fstat size was ${st.size} \u2014 refusing a torn read (the record grew or was truncated under the gate)`);
+    }
+    const st2 = fstatSync(fd);
+    if (st2.size !== st.size || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
+      throw new Error(`${what} '${abs}' changed while being read (size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) \u2014 refusing to trust a record mutated under the gate`);
+    }
+    return buf.subarray(0, total).toString("utf8");
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeErr) {
+      if (!primary) throw closeErr;
+    }
+  }
+}
+function readBoundedJsonFile(abs, maxBytes, what) {
+  return JSON.parse(readBoundedFile(abs, maxBytes, what));
+}
+var WALK_BUDGET = newWalkBudget();
 function projectTag(cwd2) {
   let root = cwd2;
   try {
@@ -6988,7 +7114,7 @@ function indexEntriesFor(cwd2, rels) {
   for (const [p, list] of staged) map.set(p, list.sort().join(","));
   return map;
 }
-function pathState(cwd2, rel, idx) {
+function pathState(cwd2, rel, idx, budget = WALK_BUDGET, depth = 0) {
   const abs = join2(cwd2, rel);
   const index = idx.get(rel) ?? null;
   let st;
@@ -7000,16 +7126,45 @@ function pathState(cwd2, rel, idx) {
   }
   const mode = st.mode & 4095;
   if (st.isSymbolicLink()) return { exists: true, type: "symlink", mode, index, target: readlinkSync(abs) };
-  if (st.isFile()) return { exists: true, type: "file", mode, index, sha256: createHash("sha256").update(readFileSync2(abs)).digest("hex") };
+  if (st.isFile()) return { exists: true, type: "file", mode, index, sha256: sha256OfFileStreamed(abs) };
   if (st.isDirectory()) {
+    budget.chargeDepth(depth, rel);
     const children = /* @__PURE__ */ Object.create(null);
-    for (const name of readdirSync(abs)) {
-      const childRel = `${rel}/${name}`;
-      children[childRel] = pathState(cwd2, childRel, idx);
+    const dir = opendirSync(abs);
+    let primary;
+    try {
+      for (; ; ) {
+        const de = dir.readSync();
+        if (de === null) break;
+        budget.chargeNode(rel);
+        const childRel = `${rel}/${de.name}`;
+        children[childRel] = pathState(cwd2, childRel, idx, budget, depth + 1);
+      }
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      try {
+        dir.closeSync();
+      } catch (closeErr) {
+        if (!primary) throw closeErr;
+      }
     }
     return { exists: true, type: "dir", mode, index, children };
   }
   throw new Error(`unsupported file type at '${rel}' \u2014 cannot snapshot its state, so this command's writes are unverifiable`);
+}
+function walkBudgetExceededState(cwd2, rel, idx, err) {
+  const st = lstatSync(join2(cwd2, rel));
+  if (!st.isDirectory()) throw err;
+  return {
+    exists: true,
+    type: "dir",
+    mode: st.mode & 4095,
+    index: idx.get(rel) ?? null,
+    children: /* @__PURE__ */ Object.create(null),
+    walk_budget_exceeded: err.budget
+  };
 }
 function sameState(a, b) {
   if (!isStateObject(a) || !isStateObject(b)) return false;
@@ -7021,6 +7176,7 @@ function sameState(a, b) {
   if (a.type === "symlink") return a.target === b.target;
   if (a.type === "file") return a.sha256 === b.sha256;
   if (a.type === "dir") {
+    if (a.walk_budget_exceeded || b.walk_budget_exceeded) return false;
     if (!isStateObject(a.children) || !isStateObject(b.children)) return false;
     const ak = ownKeys(a.children).sort();
     const bk = ownKeys(b.children).sort();
@@ -7043,7 +7199,12 @@ var STATE_FIELDS = {
   absent: ["exists", "index"],
   file: ["exists", "type", "mode", "index", "sha256"],
   symlink: ["exists", "type", "mode", "index", "target"],
-  dir: ["exists", "type", "mode", "index", "children"]
+  // `walk_budget_exceeded` is OPTIONAL and appears only on a Pre snapshot whose
+  // walk tripped a structural budget (board 55fcccac). Admitting it to the
+  // allowed set opens nothing: its only effect anywhere is to make a state
+  // NEVER equal and NEVER stamp-attestable, so a crafted record that adds it
+  // can only make the comparison stricter.
+  dir: ["exists", "type", "mode", "index", "children", "walk_budget_exceeded"]
 };
 function strayFieldError(v, allowed, where) {
   for (const k of ownKeys(v)) {
@@ -7067,6 +7228,9 @@ function stateShapeError(cwd2, v, where) {
     return strayFieldError(v, STATE_FIELDS.symlink, where);
   }
   if (!isStateObject(v.children)) return `'${where}' is a directory with no explicit 'children' object`;
+  if (v.walk_budget_exceeded !== void 0 && typeof v.walk_budget_exceeded !== "string") {
+    return `'${where}' carries a non-string 'walk_budget_exceeded' (${JSON.stringify(v.walk_budget_exceeded)})`;
+  }
   const stray = strayFieldError(v, STATE_FIELDS.dir, where);
   if (stray) return stray;
   for (const k of ownKeys(v.children)) {
@@ -7086,6 +7250,7 @@ function stampCouldAttest(recorded, current) {
   if (current.type === "file") return true;
   if (current.type === "symlink") return false;
   if (current.type === "dir") {
+    if (recorded.walk_budget_exceeded || current.walk_budget_exceeded) return false;
     if (!isStateObject(recorded.children) || !isStateObject(current.children)) return false;
     const ak = ownKeys(recorded.children);
     const bk = ownKeys(current.children);
@@ -7159,12 +7324,12 @@ function readStamp(cwd2) {
   const stampPath = join2(cwd2, ".sterling", "transient", "enforcement-stamp.json");
   const kind = lstatKind(stampPath);
   if (kind !== "file") return { present: kind !== "absent", entries: null };
-  const stamp = JSON.parse(readFileSync2(stampPath, "utf8"));
+  const stamp = readBoundedJsonFile(stampPath, MAX_STAMP_BYTES, "enforcement stamp");
   return { present: true, entries: Array.isArray(stamp) ? stamp : null };
 }
 function sha256OfRegularFile(abs) {
   if (lstatKind(abs) !== "file") return null;
-  return createHash("sha256").update(readFileSync2(abs)).digest("hex");
+  return sha256OfFileStreamed(abs);
 }
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
@@ -7347,15 +7512,32 @@ function stampAttestsCurrentBytes(cwd2, rel) {
 function stampAttestsDirectory(cwd2, relDir) {
   try {
     const files = [];
-    const walk = (rel) => {
-      for (const de of readdirSync(join2(cwd2, rel), { withFileTypes: true })) {
-        const childRel = `${rel}/${de.name}`;
-        if (de.isDirectory()) walk(childRel);
-        else if (de.isFile()) files.push(childRel);
-        else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
+    const walk = (rel, depth) => {
+      WALK_BUDGET.chargeDepth(depth, rel);
+      const dir = opendirSync(join2(cwd2, rel));
+      let primary;
+      try {
+        for (; ; ) {
+          const de = dir.readSync();
+          if (de === null) break;
+          WALK_BUDGET.chargeNode(rel);
+          const childRel = `${rel}/${de.name}`;
+          if (de.isDirectory()) walk(childRel, depth + 1);
+          else if (de.isFile()) files.push(childRel);
+          else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
+        }
+      } catch (e) {
+        primary = e;
+        throw e;
+      } finally {
+        try {
+          dir.closeSync();
+        } catch (closeErr) {
+          if (!primary) throw closeErr;
+        }
       }
     };
-    walk(relDir);
+    walk(relDir, 0);
     if (!files.length) return false;
     return files.every((f) => stampAttestsCurrentBytes(cwd2, f));
   } catch {
@@ -7431,13 +7613,27 @@ if (event === "PreToolUse") {
       store?.close();
     }
     const key = callKey(input.tool_use_id);
-    writeFileSync(baselineFile(cwd, runId, key), JSON.stringify(collectBaseline(cwd)));
+    const baselineJson = JSON.stringify(collectBaseline(cwd));
+    const baselineBytes = Buffer.byteLength(baselineJson, "utf8");
+    if (baselineBytes > MAX_RECORD_BYTES) {
+      throw new Error(
+        `(B) content baseline serialized to ${baselineBytes} bytes, over the ${MAX_RECORD_BYTES}-byte budget the Post consumer enforces \u2014 refusing at Pre so an oversize (B) enforcement set denies LOUDLY and SYMMETRICALLY before the command runs, never as a silent Post false-deny after`
+      );
+    }
+    writeFileSync(baselineFile(cwd, runId, key), baselineJson);
     const dirtyRels = dirtyTrackedRels(cwd);
     writeFileSync(dirtyFile(cwd, runId, key), JSON.stringify(dirtyRels));
     if (key) {
       const idx = indexEntriesFor(cwd, dirtyRels);
       const states = {};
-      for (const rel of dirtyRels) states[rel] = pathState(cwd, rel, idx);
+      for (const rel of dirtyRels) {
+        try {
+          states[rel] = pathState(cwd, rel, idx, WALK_BUDGET, 0);
+        } catch (e) {
+          if (!(e instanceof WalkBudgetError)) throw e;
+          states[rel] = walkBudgetExceededState(cwd, rel, idx, e);
+        }
+      }
       writeFileSync(stateFile(cwd, runId, key), JSON.stringify(states));
     }
     allow();
@@ -7513,7 +7709,7 @@ try {
     }
     let recordedDirty;
     try {
-      recordedDirty = JSON.parse(readFileSync2(dPath, "utf8"));
+      recordedDirty = readBoundedJsonFile(dPath, MAX_RECORD_BYTES, "attribution record");
     } catch {
       deny(
         environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).` + sharedNote, {
@@ -7575,7 +7771,7 @@ try {
       }
       let recorded;
       try {
-        recorded = JSON.parse(readFileSync2(sPath, "utf8"));
+        recorded = readBoundedJsonFile(sPath, MAX_RECORD_BYTES, "per-call Pre-STATE record");
       } catch {
         deny(
           environmentDefectDenial("H17", `per-call Pre-STATE record '${sPath}' corrupt/unparseable \u2014 cannot compare pre-existing dirt; failing closed (P5).`, {
@@ -7648,7 +7844,7 @@ try {
           const recordedChild = recordedDescendantState(wasState, coveringPre, rel);
           wasState = recordedChild ?? { exists: false, index: null };
         }
-        const nowState = pathState(cwd, rel, postIndex);
+        const nowState = pathState(cwd, rel, postIndex, WALK_BUDGET, 0);
         if (sameState(wasState, nowState)) continue;
         if (stampCouldAttest(wasState, nowState)) {
           if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
@@ -7679,7 +7875,7 @@ try {
     }
     let baseline;
     try {
-      baseline = JSON.parse(readFileSync2(bPath, "utf8"));
+      baseline = readBoundedJsonFile(bPath, MAX_RECORD_BYTES, "(B) content baseline");
     } catch {
       deny(
         environmentDefectDenial("H17", `Baseline '${bPath}' corrupt/unparseable \u2014 cannot verify the enforcement surface; failing closed (P5).`, {

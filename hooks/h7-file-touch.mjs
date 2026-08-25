@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h7-file-touch.mjs
 import { writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
-import { join as join2, dirname as dirname3 } from "node:path";
+import { join as join3, dirname as dirname3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4962,6 +4962,16 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // exemption register, article slug -> justifying decision id. Consulted at
+  // the article_oversize minting site (articleOversizeWarnings,
+  // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
+  // maintenance item — the exemption suppresses the mint ONLY while the cited
+  // decision resolves and is live (status active, not superseded/retired) in
+  // the store the minting code already has open. A missing/unresolvable/dead
+  // citation VOIDS the exemption; the mint proceeds with the void reason
+  // appended to the item text — never a silent suppression (P5).
+  article_oversize_exempt: external_exports.record(external_exports.string(), external_exports.string()).default({}),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
   // with more entries than this keeps the first article_history_genesis_entries
   // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
@@ -6846,6 +6856,7 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/settlement.mjs
 import { readFileSync as readFileSync2, mkdirSync as mkdirSync2, rmSync, statSync } from "node:fs";
+import { join as join2 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
@@ -6914,6 +6925,16 @@ function parseTouchesContent(raw) {
   }
   return out;
 }
+function loadGeneratedProjections(root) {
+  try {
+    const raw = readFileSync2(join2(root, ".sterling", "config.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    const list = parsed?.generated_projections;
+    return new Set(Array.isArray(list) ? list : []);
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
 
 // scripts/hooks/h7-file-touch.mjs
 var input = readStdin();
@@ -6925,11 +6946,16 @@ if (!store) allow();
 try {
   const run = store.getRun();
   if (run) {
-    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
-    for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
+    const exempt = loadGeneratedProjections(input.cwd);
+    if (!exempt.has(rel)) {
+      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+      for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
+    } else {
+      store.updateRunOptimistic(run.id, (current) => current.reconcile_needed ? current : { ...current, reconcile_needed: [] });
+    }
   } else {
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const touchesPath = join2(input.cwd, ".sterling", "transient", "touches.json");
+    const touchesPath = join3(input.cwd, ".sterling", "transient", "touches.json");
     mkdirSync3(dirname3(touchesPath), { recursive: true });
     withFileLock(
       touchesPath,
