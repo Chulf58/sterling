@@ -2016,10 +2016,46 @@ export class SterlingTools {
     const threshold = this.config.article_oversize_chars;
     if (size <= threshold) return [];
     const a = record as unknown as { slug: string; files?: { path: string }[] };
+
+    // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+    // exemption register, config.article_oversize_exempt[slug] -> justifying
+    // decision id. The exemption suppresses the mint ONLY while the cited
+    // decision resolves through the SAME id ladder as knowledge_get and is
+    // live (status active, not superseded/retired) in the store this method
+    // already has open. A missing, unresolvable, or dead citation VOIDS the
+    // exemption — the mint proceeds, with the void reason appended to the
+    // item text — never a silent suppression (P5).
+    const exemptDecisionId = Object.hasOwn(this.config.article_oversize_exempt, a.slug)
+      ? this.config.article_oversize_exempt[a.slug]
+      : undefined;
+    let voidReason: string | null = null;
+    if (exemptDecisionId) {
+      let cited: DurableRecord | undefined;
+      let resolveErr: string | null = null;
+      try {
+        cited = this.resolveRecordId(exemptDecisionId, 'article_oversize_exempt');
+      } catch (err) {
+        // Carry the resolver's real refusal (collision/ambiguity/torn store)
+        // instead of asserting a cause this code did not determine.
+        resolveErr = err instanceof Error ? err.message : String(err);
+        cited = undefined;
+      }
+      if (!cited) {
+        voidReason = `exemption for '${a.slug}' VOID: cited decision '${exemptDecisionId}' is unresolvable (${resolveErr ?? 'does not resolve in the store'})`;
+      } else if (cited.type !== 'decision') {
+        voidReason = `exemption for '${a.slug}' VOID: cited record ${cited.id} is a ${cited.type}, not a decision`;
+      } else if (cited.status !== 'active') {
+        const supersededBy = (cited as unknown as { superseded_by?: string | null }).superseded_by;
+        voidReason = `exemption for '${a.slug}' VOID: cited decision ${cited.id} is ${cited.status}${supersededBy ? ` (superseded_by ${supersededBy})` : ''}`;
+      } else {
+        return []; // exemption holds — suppress the mint entirely
+      }
+    }
+
     const remedy =
       'split it (one feature_article per concept FAMILY — the concept-article granularity rubric; a sub-concept splits out only when it accrues its own intent + interactions distinct from the parent) ' +
       'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
-    const text = `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}`;
+    const text = `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}${voidReason ? ` (${voidReason})` : ''}`;
     const fileKeys = (a.files ?? []).map((f) => f.path);
     // Dedup on the SLUG, here at the site that owns the text format (board
     // 3acb0126): the generic enqueue dedup keys on the exact sorted file set,
