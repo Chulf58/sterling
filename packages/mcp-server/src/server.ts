@@ -6,11 +6,129 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z } from 'zod';
-import { parseConfig, NO_CAPTURE_LANES } from '@sterling/schemas';
+import { parseConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor } from '@sterling/schemas';
 import { MountedStores, resolveDomainMounts } from '@sterling/store';
-import { SterlingTools } from './tools.js';
+import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
+
+/**
+ * knowledge_create's typed `fields` body (decision 7c7f6db1, probe
+ * research_finding 15c8e6b5) — REPLACES the passthrough with a per-type
+ * z.discriminatedUnion('type', ...) derived MECHANICALLY from RECORD_TYPES, so
+ * a malformed first write is refused at PARSE TIME with a variant-scoped zod
+ * error instead of round-tripping through knowledgeCreate's own schema.parse.
+ * knowledge_update and knowledge_supersede deliberately KEEP passthrough (see
+ * the decision): update needs a hand-derived PARTIAL variant per type that
+ * would drift, and the token cost of typing all three tools is ~3x this one.
+ *
+ * WHY THE UNION MUST BE NESTED (not the top-level tool inputSchema): a
+ * z.discriminatedUnion has no `.shape`, and the SDK's tools/list handler calls
+ * `normalizeObjectSchema(tool.inputSchema)` to build the served JSON Schema —
+ * when that returns undefined (verified empirically against this repo's
+ * installed @modelcontextprotocol/sdk 1.29.0: a top-level discriminated union
+ * input schema serves as `{type:"object",properties:{}}`, EMPTY, not a bare
+ * `anyOf`) the tool is served with NO schema at all, strictly worse than the
+ * passthrough it replaces. Nesting the union as the VALUE of a normal object
+ * property (`fields`) sidesteps this entirely: the outer object DOES have
+ * `.shape`, normalizeObjectSchema succeeds on it, and zod-to-json-schema then
+ * recurses into `fields` and renders the union as the bare `anyOf` research_
+ * finding 15c8e6b5 actually measured. This was re-verified against the
+ * installed SDK build for this exact shape before settling on it.
+ *
+ * WHY THE DISCRIMINATOR LITERAL THEREFORE LIVES INSIDE `fields` (fields.type),
+ * matching the decision's own words ("fields body BECOMES the union") and the
+ * served description's hint ("Set fields.type to select one schema branch"):
+ * z.discriminatedUnion requires the discriminant key to be a property of the
+ * union members themselves — there is no way to discriminate `fields` by a
+ * SIBLING key. This collides with a PINNED invariant this slice does not
+ * own — tools.test.ts's "knowledge_schema: the whole unforgeable envelope is
+ * server_owned ... (board 617e97d4)" asserts `tools.knowledgeCreate('decision',
+ * {...body, type: 'decision'})` THROWS /SERVER-OWNED/ even when the value
+ * MATCHES the real type, because refuseServerOwnedFields (tools.ts) refuses
+ * ANY `type` key inside the fields object it receives, unconditionally. The
+ * fix stays entirely on THIS side of the boundary: the tool HANDLER (below)
+ * strips the now-validated `fields.type` back out — after confirming it
+ * matches the outer `type` argument, so a caller who sets the two
+ * inconsistently is refused loudly rather than silently routed to the wrong
+ * schema — before ever calling `tools.knowledgeCreate`. tools.ts's guard never
+ * sees the key; the pinned test is untouched; the discriminator still lives
+ * exactly where the decision and the served schema both say it does.
+ *
+ * Each RECORD_TYPES schema is base.extend({...}).superRefine(...) — a
+ * ZodEffects wrapping the real ZodObject — so objectShapeFor (already
+ * exported by records.ts for knownFieldsFor/schemaFor) unwraps it to a raw
+ * shape. The dropped superRefine refinements need no re-home at this layer:
+ * knowledgeCreate re-validates every candidate against the FULL registered
+ * schema server-side (schema.parse at tools.ts), which stays the authoritative
+ * check — this layer only narrows the shape a well-formed request can take.
+ *
+ * Per variant: SERVER_OWNED_FIELDS (WRITE_REFUSED_FIELDS + version — id,
+ * created_at, updated_at, status, superseded_by, type, lifecycle, freshness,
+ * file_baselines, version) are DROPPED from the raw shape entirely, never
+ * merely marked optional — knowledgeCreate assigns every one of them itself,
+ * and a caller-supplied value would have been silently discarded (the same
+ * defect refuseServerOwnedFields exists to name loudly). `type` is then
+ * RE-ADDED as the per-variant z.literal discriminator the decision names.
+ * CREATE_DEFAULTED_FIELDS (author/links/scope/stack_tags) are KEPT but marked
+ * `.optional()` since knowledgeCreate defaults every one when absent — this
+ * mirrors knowledge_schema's required/optional split exactly (decision
+ * 7c7f6db1: "keep the two surfaces consistent"). `dedup_override` is a
+ * create-time directive stripped by knowledgeCreate before it ever reaches a
+ * record body (tools.ts), never a stored field, so it is admitted on every
+ * variant as an optional boolean rather than folded into any one type's shape.
+ *
+ * Each variant stays `.strict()` — additionalProperties:false — so an unknown
+ * field inside `fields` still refuses loudly at parse time exactly as the
+ * passthrough body did via knowledgeCreate's own refuseUnknownFields; this
+ * layer just makes the SAME refusal fire one step earlier, before the write
+ * path is even entered, and names the type's actual allowed set in the zod
+ * error rather than a generic "unknown field" message.
+ *
+ * Served as a bare `anyOf` (research_finding 15c8e6b5 measured this against
+ * the SDK's actual zod-to-json-schema conversion, re-confirmed above): each
+ * variant carries its own accurate `properties` / `required[]` /
+ * `type:{const:...}` literal even though the discriminator keyword itself is
+ * lost, so a model can still infer the right branch, and parse-time
+ * validation (the part that actually matters) is correct and variant-scoped:
+ * a wrong-variant body is refused naming exactly that variant's missing/extra
+ * fields, never a generic union failure.
+ */
+const KNOWLEDGE_CREATE_FIELD_VARIANTS = Object.keys(RECORD_TYPES).map((type) => {
+  const rawShape = objectShapeFor(type);
+  if (!rawShape) throw new Error(`knowledge_create input schema: '${type}' is registered but has no unwrappable object shape`);
+  const defaulted = new Set(CREATE_DEFAULTED_FIELDS);
+  const fieldsShape: z.ZodRawShape = {};
+  for (const [key, node] of Object.entries(rawShape)) {
+    if (SERVER_OWNED_FIELDS.includes(key)) continue; // dropped entirely — server-assigned, never caller-supplied
+    fieldsShape[key] = defaulted.has(key) ? (node as z.ZodTypeAny).optional() : (node as z.ZodTypeAny);
+  }
+  // the per-variant discriminator the decision names — re-added after the
+  // SERVER_OWNED_FIELDS strip above (which also matches bare 'type').
+  fieldsShape.type = z.literal(type);
+  // create-time directive, never a stored field (the tool handler strips it
+  // before the candidate is built) — admitted on every variant, not type-specific.
+  fieldsShape.dedup_override = z.boolean().optional();
+  return z.object(fieldsShape).strict();
+});
+
+// z.discriminatedUnion needs a TUPLE of at least two ZodObjects at the type
+// level; KNOWLEDGE_CREATE_FIELD_VARIANTS is built by a runtime .map over the
+// RECORD_TYPES registry (invariant 1 — the variant LIST must never be
+// hand-duplicated), so TypeScript only ever sees `ZodObject[]`. The cast is
+// the seam between "derived mechanically" and "typed as a tuple"; the runtime
+// assertion below is what actually protects it — a shrunk registry (< 2
+// types) would make z.discriminatedUnion itself throw at import time, loud
+// and immediate, never a silent single-variant union.
+if (KNOWLEDGE_CREATE_FIELD_VARIANTS.length < 2) {
+  throw new Error(
+    `knowledge_create input schema: RECORD_TYPES registered only ${KNOWLEDGE_CREATE_FIELD_VARIANTS.length} type(s) — z.discriminatedUnion needs at least 2`
+  );
+}
+const knowledgeCreateFieldsSchema = z.discriminatedUnion(
+  'type',
+  KNOWLEDGE_CREATE_FIELD_VARIANTS as unknown as [z.ZodDiscriminatedUnionOption<'type'>, ...z.ZodDiscriminatedUnionOption<'type'>[]]
+);
 
 /**
  * Every tool's TOP-LEVEL parameters are STRICT: an unknown key is a loud
@@ -33,6 +151,25 @@ const passthrough = z.object({}).passthrough();
  * self-correct from (§5.2). Record BODIES stay `passthrough`: fields /
  * body / payload / handoff carry arbitrary validated-downstream shapes, and it is
  * only the parameter names that are a closed set.
+ *
+ * A z.discriminatedUnion is verified the SAME way, separately (decision
+ * 7c7f6db1, probe research_finding 15c8e6b5, re-confirmed empirically against
+ * this same installed SDK build): `normalizeObjectSchema` only ever runs on
+ * the TOP-LEVEL tool.inputSchema, and it requires `.shape` — a union has none,
+ * so a union AS the top-level inputSchema serves EMPTY (`{properties:{}}`),
+ * not a bare `anyOf`. knowledge_create's union therefore lives NESTED, as the
+ * value of the `fields` property on a normal top-level ZodObject (`strict({
+ * type, fields: <union>, projection })`, same as always) — the outer object
+ * DOES normalize, and zod-to-json-schema then recurses into `fields` and
+ * renders the union as the bare `anyOf` the probe measured (discriminator
+ * keyword lost, per-variant properties/required kept accurate). For tools/call
+ * parsing, the union validates as part of the outer object's own `.parse` —
+ * ordinary nested-schema validation, no special-casing — and produces zod's
+ * own discriminated-union behavior at that nested path: variant-scoped
+ * errors, never a generic union failure. See knowledge_create's
+ * KNOWLEDGE_CREATE_FIELD_VARIANTS above for the one call site that relies on
+ * this, and its handler below for why `type` is validated as part of `fields`
+ * (the discriminator) yet still passed to `tools.knowledgeCreate` separately.
  */
 const strict = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
 
@@ -55,17 +192,38 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_create',
     {
       description:
-        'Create a knowledge record. Schema-validated against the registered record types; unregistered types are rejected. The echoed record defaults to its one-line digest receipt (id + headline) — the write landed either way; pass projection:"full" if you need the stored record back.',
-      inputSchema: strict({ type: z.string(), fields: passthrough, projection: z.enum(['full', 'digest']).optional() }),
+        'Create a knowledge record. `fields` is TYPED PER `type` (decision 7c7f6db1): each of the 9 registered record types gets its own shape — unknown fields inside `fields` are refused loudly at parse time, naming that type\'s actual allowed set, before the write path is ever entered. Server-owned fields (id/created_at/updated_at/status/superseded_by/lifecycle/freshness/file_baselines/version) are not part of any variant\'s `fields` shape — the server assigns them. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type` argument.',
+      inputSchema: strict({ type: z.string(), fields: knowledgeCreateFieldsSchema, projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ type, fields, projection }) => json(tools.writeProjected(tools.knowledgeCreate(type, fields), projection))
+    ({ type, fields, projection }) => {
+      // `fields.type` is the schema's own discriminator (see the design note
+      // above for why it has to live here, not on a sibling key) — it is
+      // VALIDATED as part of `fields` but is not itself a stored field, so it
+      // is stripped back out here, after confirming it agrees with the outer
+      // `type` argument (a caller setting the two inconsistently is refused
+      // loudly rather than silently routed to whichever branch parsed).
+      // tools.knowledgeCreate never sees a `type` key inside fields — its own
+      // refuseServerOwnedFields guard (tools.ts) refuses that unconditionally,
+      // matching (correctly) even a value equal to the real type.
+      const { type: fieldsType, ...restFields } = fields as { type: string } & Record<string, unknown>;
+      if (fieldsType !== type) {
+        // Two causes reach this mismatch, each with its own remedy (decision
+        // d0b88e27): an unregistered OUTER type (the union side is literal,
+        // the outer param is a bare string) vs two registered types disagreeing.
+        if (!(type in RECORD_TYPES)) {
+          throw new Error(`knowledge_create: outer 'type' ('${type}') is not a registered record type — fields.type is '${fieldsType}'; registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
+        }
+        throw new Error(`knowledge_create: outer 'type' ('${type}') does not match fields.type ('${fieldsType}') — set both to the same registered type`);
+      }
+      return json(tools.writeProjected(tools.knowledgeCreate(type, restFields), projection));
+    }
   );
 
   server.registerTool(
     'knowledge_query',
     {
       description:
-        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. matched_filter counts the FILTER only — rank_terms order that set, they never narrow it. projection:"digest" returns one headline line per record (id + slug/title, anti_pattern trigger, research_finding clocks) instead of full bodies: use it to SEE THE LANDSCAPE cheaply — a wide digest then knowledge_get on the few that matter beats a capped full-body window you can neither complete nor trust. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read.',
+        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. derived_unconfirmed excluded unless include_unconfirmed. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. matched_filter counts the FILTER only — rank_terms order that set, they never narrow it. projection:"digest" returns one headline line per record (id + slug/title, anti_pattern trigger, research_finding clocks) instead of full bodies: use it to SEE THE LANDSCAPE cheaply — a wide digest then knowledge_get on the few that matter beats a capped full-body window you can neither complete nor trust. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read. min_score (requires rank_terms) answers the ABSENCE QUESTION a capped window cannot: the result gains above_threshold, the count of records scoring >= min_score over the FULL match set (never the capped `records` window), so above_threshold:0 is a usable "nothing is ruled about this". SCALE: the score is `-bm25(records_fts)` — SQLite FTS5\'s bm25() is lower-is-better and unbounded below, so this negates it: HIGHER means more relevant, a bare keyword match sits near 0, and there is no fixed upper bound.',
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
@@ -74,6 +232,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         include_unconfirmed: z.boolean().optional(),
         cap: z.number().int().positive().optional(),
         projection: z.enum(['full', 'digest', 'count']).optional(),
+        min_score: z.number().optional(),
       }),
     },
     (opts) => json(tools.knowledgeQueryResult(opts))
@@ -137,7 +296,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_schema',
     {
       description:
-        'Ask what a record type requires BEFORE writing it, instead of learning by rejection. Returns {type, fields:[{name, required, type, enum_values?}], required[], optional[]} — derived from the registered zod schema, so it cannot drift from what a write will accept. Use it when you are unsure of a field name, whether a field is mandatory, whether it takes a string or an array of objects, or what a closed enum permits (volatility_hint is fast|medium|stable — "low" is refused). An unregistered type lists the registered ones.',
+        'Ask what a record type requires BEFORE writing it, instead of learning by rejection. Returns {type, fields:[{name, required, type, enum_values?, server_owned?}], required[], optional[]} — derived from the registered zod schema, so it cannot drift from what a write will accept. A field marked server_owned:true (id, created_at, status, superseded_by, …) is set by the server and refused if you pass it — it still appears in `fields` so you know it exists, but never in `required`/`optional`, because those two lists answer "what may I supply", not "what does this record hold". required[] means required FROM THE CALLER on a create, not every field the raw schema declares. Use it when you are unsure of a field name, whether a field is mandatory, whether it takes a string or an array of objects, or what a closed enum permits (volatility_hint is fast|medium|stable — "low" is refused). An unregistered type lists the registered ones.',
       inputSchema: strict({ type: z.string() }),
     },
     ({ type }) => json(tools.knowledgeSchema(type))
@@ -177,7 +336,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description:
-        'Versioned update IN PLACE: the record\'s id NEVER changes, the server-owned version counter bumps by one, and the full prior body is archived (read it back with knowledge_get version:<n>). REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. Pass expected_version:<the version you read> to make the write conditional: a stale token is refused naming both versions with nothing written. A `version` inside body is server-owned and ignored (disclosed as a warning). The ONE exception to in-place: an attestation update is a concept replacement (new id, prior retired), because an inspection verdict is immutable. This write does NOT auto-close any maintenance item: pass resolves:[<item ids>] to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write — a bad id refuses the whole call, and the drain rides the write\'s own transaction); anything left unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt carrying version + previous_version (body dropped — you just authored it); pass projection:"full" for the whole stored record.',
+        'Versioned update IN PLACE: the record\'s id NEVER changes, the server-owned version counter bumps by one, and the full prior body is archived (read it back with knowledge_get version:<n>). REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. `body` is a PARTIAL PATCH, not a knowledge_create body — provide only the changed mutable fields; omitted fields are preserved. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. Pass expected_version:<the version you read> to make the write conditional: a stale token is refused naming both versions with nothing written. A `version` inside body is server-owned and ignored (disclosed as a warning). The ONE exception to in-place: an attestation update is a concept replacement (new id, prior retired), because an inspection verdict is immutable. This write does NOT auto-close any maintenance item: pass resolves:[<item ids>] to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write — a bad id refuses the whole call, and the drain rides the write\'s own transaction); anything left unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt carrying version + previous_version (body dropped — you just authored it); pass projection:"full" for the whole stored record.',
       inputSchema: strict({
         id: z.string(),
         body: passthrough,
@@ -241,17 +400,17 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_promote',
     {
       description:
-        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome.',
-      inputSchema: strict({ id: z.string(), domain: z.string() }),
+        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome. METADATA SANITISATION (board ff07e314): file_keys never crosses (repo-relative paths are project-scoped) and stack_tags is INTERSECTED with the target domain rather than copied wholesale — both disclosed on the receipt (dropped_file_keys/dropped_stack_tags/kept_stack_tags) alongside a warn-only scan for suspicious project-local labels (slice labels, repo-relative path mentions) still sitting in the promoted prose. The echoed record defaults to its one-line digest under `promoted`; pass projection:"full" for the whole stored record.',
+      inputSchema: strict({ id: z.string(), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, domain }) => json(tools.knowledgePromote(id, domain))
+    ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection))
   );
 
   server.registerTool(
     'board_add',
     {
       description:
-        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). EVERY user-source add answers parentage via `objective` (decision a8d2ce6c): when the task is a SLICE of a larger objective — the conductor slicing a big ask mints one board_add per slice, all sharing the objective name — pass objective:"<name>"; a freestanding task passes objective:"standalone" (exact lowercase, stored as ungrouped). The TUI groups slices under their objective, so declared parentage is what keeps the board readable as N objectives instead of N×slices. Omitting objective never loses the task — it saves ungrouped with a loud notice, and board_update can group it later. system-source items never take an objective (lane-keyed by system_reason). The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
+        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). EVERY user-source add answers parentage via `objective` (decision a8d2ce6c): when the task is a SLICE of a larger objective — the conductor slicing a big ask mints one board_add per slice, all sharing the objective name — pass objective:"<name>"; a freestanding task passes objective:"standalone" (exact lowercase, stored as ungrouped). The TUI groups slices under their objective, so declared parentage is what keeps the board readable as N objectives instead of N×slices. Omitting objective never loses the task — it saves ungrouped with a loud notice, and board_update can group it later. system-source items never take an objective (lane-keyed by system_reason). measured_at_head (decision board-provenance-measured-at-head) is server-stamped to HEAD unless you supply a resolvable 40-hex sha yourself — an unresolvable one is refused, never silently replaced. The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
@@ -261,6 +420,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         feature_link: z.string().optional(),
         system_reason: z.string().optional(),
         stack_tags: z.array(z.string()).optional(),
+        measured_at_head: z.string().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -271,13 +431,14 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description:
-        'List open board items. source=user is the board; source=system is the maintenance queue. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, records}: capped=true means more items matched than are shown — raise cap before concluding the board or queue is shorter than it is. projection:"digest" returns one clipped line per item instead of its full text — board items run to several KB each, so prefer it for auditing or triaging the whole board and read the full text only for the items you act on.',
+        'List open board items. source=user is the board; source=system is the maintenance queue. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, offset, provenance, records}: capped=true means more items matched than are shown past this page — raise cap or page with offset before concluding the board or queue is shorter than it is. offset (default 0) pages through a DETERMINISTIC order (updated_at DESC, stable) — offset:0, offset:cap, offset:2*cap, … visits every matching item exactly once. provenance (decision board-provenance-measured-at-head) states whether the one-shot git walk behind the per-item "⚠ file_keys changed in N commits since this item\'s evidence was measured (<sha7>)" annotation ran: \'checked\', or \'unavailable:<reason>\' when it could not (no git, detached HEAD, no eligible file_keys, or the walk\'s commit cap was hit) — an absent warning is never proof of freshness. projection:"digest" returns one clipped line per item instead of its full text; projection:"headline" is smaller still (id, priority, objective, first 80 chars of text — no source/status/type/size_chars) for auditing or paging a large board cheaply; read the full item only for the ones you act on.',
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         file_keys: z.array(z.string()).optional(),
         contains: z.string().optional(),
         cap: z.number().int().positive().optional(),
-        projection: z.enum(['full', 'digest']).optional(),
+        offset: z.number().int().nonnegative().optional(),
+        projection: z.enum(['full', 'digest', 'headline']).optional(),
       }),
     },
     (args) => json(tools.boardQueryResult(args))
@@ -307,13 +468,14 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_update',
     {
       description:
-        'IN-PLACE edit of a board/queue item — text/priority/file_keys/objective only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). objective (re)groups a task under a larger objective (decision a8d2ce6c — the remedy for a slice saved ungrouped or a late-discovered slice); objective:"standalone" un-groups it. Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one updatable field is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
+        'IN-PLACE edit of a board/queue item — text/priority/file_keys/objective/measured_at_head only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). objective (re)groups a task under a larger objective (decision a8d2ce6c — the remedy for a slice saved ungrouped or a late-discovered slice); objective:"standalone" un-groups it. A text or file_keys change re-stamps measured_at_head to the current HEAD automatically (decision board-provenance-measured-at-head — new evidence); a priority/objective-only patch leaves it untouched; pass measured_at_head yourself (a resolvable 40-hex sha) to re-verify without rewriting text — an unresolvable sha is refused, never silently replaced. Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one updatable field is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
       inputSchema: strict({
         id: z.string(),
         text: z.string().optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         file_keys: z.array(z.string()).optional(),
         objective: z.string().optional(),
+        measured_at_head: z.string().optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -452,14 +614,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_query',
     {
       description:
-        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax), or feature_slug (narrows to items owned by ONE article, resolved from its slug and CHAIN-AWARE — an item raised against an earlier superseded version of the article still matches; every filter combines as a genuine AND). An unresolvable feature_slug narrows to nothing rather than erroring. Returns {matched_filter, returned, cap, capped, records}: capped=true means the queue is DEEPER than what is shown — a drain that stops at the cap leaves the tail behind, so raise cap until capped is false. projection:"digest" returns one clipped line per item (with its system_reason lane) — the cheap way to size and sort a deep queue before draining it.',
+        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax), or feature_slug (narrows to items owned by ONE article, resolved from its slug and CHAIN-AWARE — an item raised against an earlier superseded version of the article still matches; every filter combines as a genuine AND). An unresolvable feature_slug narrows to nothing rather than erroring. Returns {matched_filter, returned, cap, capped, offset, records}: capped=true means the queue is DEEPER than what is shown past this page — a drain that stops at the cap leaves the tail behind, so raise cap or page with offset until capped is false. offset (default 0) pages a DETERMINISTIC order (updated_at DESC, stable) — offset:0, offset:cap, offset:2*cap, … visits every item exactly once, even a 186-item queue a single capped call cannot see past item 1 of. projection:"digest" returns one clipped line per item (with its system_reason lane); projection:"headline" is smaller still (id, priority, system_reason, first 80 chars of text) — the cheap way to size, sort, and page a deep queue before draining it.',
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         contains: z.string().optional(),
         feature_slug: z.string().optional(),
         cap: z.number().int().positive().optional(),
-        projection: z.enum(['full', 'digest']).optional(),
+        offset: z.number().int().nonnegative().optional(),
+        projection: z.enum(['full', 'digest', 'headline']).optional(),
       }),
     },
     (args) => json(tools.maintenanceQueryResult(args))

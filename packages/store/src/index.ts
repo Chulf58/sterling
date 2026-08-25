@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 `;
 
 // ---------------------------------------------------------------------------
-// Schema-version guard (stable-identity wave S1, extended by S2; decision
+// Schema-version guard (stable-identity S1, extended by S2; decision
 // [stable-identity-design-v2] / 2176748e): refuse-until-migrated. PRAGMA
 // user_version (research_finding 5555895c: a 32-bit application-owned integer
 // at header offset 60 — NEVER SQLite's own PRAGMA schema_version) is checked at
@@ -315,6 +315,8 @@ export interface QueryOptions {
   match_all?: boolean;
   /** Filter by todo body source ('user' | 'system') BEFORE the cap (finding 38/43). */
   source?: string;
+  /** ABSENCE QUERY floor (board a577a69d) — see SterlingStore.countAboveScore for the scale (`-bm25`, higher is more relevant). Not itself a query() filter: query()'s returned window is unaffected by it. */
+  min_score?: number;
 }
 
 // The store surface the §10 tool layer drives — exactly the methods SterlingTools
@@ -329,6 +331,9 @@ export type ToolStore = Pick<
   | 'enqueueSystemTodo'
   | 'query'
   | 'count'
+  // knowledge_query's min_score ABSENCE QUERY (board a577a69d) — the
+  // uncapped, full-match-set threshold count beside query()'s own window.
+  | 'countAboveScore'
   | 'get'
   // knowledge_get resolves 8-char id PREFIXES through this index (decision
   // 27f148c2) — the citation format the whole repo writes, which get() alone
@@ -776,8 +781,8 @@ export class SterlingStore {
    * which fields may change.
    *
    * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of the wave.
-   * lifecycle is likewise preserved: retirement happens ONLY through
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
    * supersede/retireInFavorOf.
    */
   updateRecord(id: string, patch: unknown, opts: RecordWriteOptions = {}): DurableRecord {
@@ -1049,9 +1054,29 @@ export class SterlingStore {
       freshness: 'fresh',
       version: 1,
     });
-    const candidate = validateRecord(prepared.input) as DurableRecord & { source?: string; system_reason?: string; file_keys?: string[]; text?: string };
+    const candidate = validateRecord(prepared.input) as DurableRecord & {
+      source?: string;
+      system_reason?: string;
+      file_keys?: string[];
+      text?: string;
+      feature_link?: string;
+    };
     if (candidate.type !== 'todo' || candidate.source !== 'system') {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? 'no source'}`);
+    }
+    // A LINKLESS state_review HAS NO IDENTITY (board e939fd21, fixer round 2,
+    // finding 6): the lane exception below keys it on {system_reason,
+    // feature_link} ALONE — file_keys is deliberately excluded — so without a
+    // feature_link the key degenerates to system_reason alone (files is always
+    // []), and two DIFFERENT linkless mints sharing boilerplate text would
+    // silently collapse, the second one's file_keys lost. Every real caller
+    // (the feature-article state-honesty check) always supplies feature_link —
+    // it IS the article being reviewed — so refusing here costs nothing today
+    // and fails loud rather than silently merging two unrelated obligations.
+    if (candidate.system_reason === 'state_review' && !candidate.feature_link) {
+      throw new Error(
+        `enqueueSystemTodo: a state_review item requires feature_link — this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`
+      );
     }
     // AN ITEM WITH NEITHER A feature_link NOR file_keys HAS NO IDENTITY BEYOND
     // ITS TEXT, so the text joins the key for exactly those. Without this, two
@@ -1061,14 +1086,48 @@ export class SterlingStore {
     // items stay distinct. A consequence worth naming: for those lanes the
     // text-differs-so-update branch can never fire, because a different text is
     // by definition a different item.
+    // STATE_REVIEW LANE EXCEPTION (board e939fd21, per-file refinement 194f43e4
+    // still stands for every OTHER lane): the call site chooses this lane's
+    // file_keys as unverifiedPaths-else-first-3-owned, which SHIFTS from read to
+    // read as the unverified set or the owned-files order changes, while the
+    // semantic cause — "review this article's state honesty" — has not. Keying
+    // on the moving file set re-mints a duplicate on every shift (four minted in
+    // one measured session). state_review's identity is the article itself, so
+    // this lane is keyed on {system_reason, feature_link} alone; it is a
+    // lane-specific exception at this one choke point, not a universal key
+    // change.
     const keyOf = (t: { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string }) => {
-      const files = [...(t.file_keys ?? [])].sort();
+      const files = t.system_reason === 'state_review' ? [] : [...(t.file_keys ?? [])].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? '', t.feature_link ?? '', files, identified ? '' : (t.text ?? '')]);
     };
     const wantKey = keyOf(candidate as unknown as { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string });
 
-    let existing: (DurableRecord & { text?: string }) | undefined;
+    // TEXT EQUIVALENCE FOR THE ESCALATION CHECK, state_review NORMALIZED (board
+    // e939fd21, fixer round 3, finding 3): this lane's text embeds the exact
+    // live-byte count ("... hold NNN bytes of code on disk"), a number that
+    // shifts on every read whenever ANY file the article owns changes size for
+    // a reason unrelated to the state-honesty verdict itself (an unrelated
+    // sibling file mid-edit, say) — under plain string equality that re-fires
+    // the escalation branch below on nearly every read, an unbounded
+    // version-bump/snapshot/FTS-refresh churn (the same no-op-remint pathology
+    // the stable-key fix above closed, moved from item COUNT to item VERSION).
+    // NORMALIZE ONLY THAT ONE VOLATILE TOKEN, never every digit run (round-3
+    // correction: a blanket \d+ strip also normalized digits INSIDE PATHS —
+    // scripts/hooks/h10-*.mjs and h19-*.mjs collapsed to the same string, so a
+    // genuine unverified-file-set move from h10 to h19 was wrongly read as "no
+    // change" and silently swallowed). A GENUINE change — the state is fixed, a
+    // different file's role goes unverified, the wording itself changes — still
+    // differs after normalizing this one token and still escalates exactly as
+    // before. Every OTHER lane keeps EXACT text equality (decision 194f43e4's
+    // escalating-severity behavior, e.g. edited→deleted, is unaffected).
+    const textsEquivalent = (a: string, b: string): boolean => {
+      if (candidate.system_reason !== 'state_review') return a === b;
+      const strip = (s: string) => s.replace(/\d+(?= bytes of code on disk)/g, '#');
+      return strip(a) === strip(b);
+    };
+
+    let existing: (DurableRecord & { text?: string; file_keys?: string[] }) | undefined;
     let textUpdated = false;
     this.tx(() => {
       // The read happens INSIDE the write transaction — that is the whole point.
@@ -1086,16 +1145,37 @@ export class SterlingStore {
         this.insertRecord(candidate);
         return;
       }
-      if ((existing.text ?? '') !== (candidate.text ?? '')) {
+      // FILE_KEYS REFRESH IS INDEPENDENT OF THE TEXT-EQUALITY BRANCH (board
+      // e939fd21, fixer round 3, finding 3b — hoisted OUT of the
+      // textsEquivalent branch it used to live inside): a file_keys-only change
+      // — the unverified set moves from one path to another while the rest of
+      // the wording is untouched — must still refresh file_keys even when text
+      // is (correctly) read as unchanged; gating the refresh on textChanged
+      // meant a text-suppressed escalation ALSO suppressed the file_keys
+      // refresh, so the surviving item could name a path forever after the
+      // real debt had moved elsewhere. Compared as a SET: every other lane's
+      // file_keys is already part of the match key, so a match there always
+      // already carries the same set and this is a no-op — never a spurious
+      // extra reindex.
+      const priorFiles = [...((existing as unknown as { file_keys?: string[] }).file_keys ?? [])].sort();
+      const nextFiles = [...(candidate.file_keys ?? [])].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? '', candidate.text ?? '');
+      if (textChanged || filesChanged) {
         // The versioned core, joining THIS transaction (tx is reentrant): version
         // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
         existing = this.applyInPlace(
           'enqueueSystemTodo',
           existing.id,
-          (cur) => ({ ...(cur as unknown as Record<string, unknown>), text: candidate.text, updated_at: candidate.updated_at }),
+          (cur) => ({
+            ...(cur as unknown as Record<string, unknown>),
+            updated_at: candidate.updated_at,
+            ...(textChanged ? { text: candidate.text } : {}),
+            ...(filesChanged ? { file_keys: candidate.file_keys } : {}),
+          }),
           {}
-        ) as DurableRecord & { text?: string };
-        textUpdated = true;
+        ) as DurableRecord & { text?: string; file_keys?: string[] };
+        textUpdated = textChanged;
       }
     });
     // The stored bodies scanned above carry no status/superseded_by (they are
@@ -1362,6 +1442,52 @@ export class SterlingStore {
     return row.n;
   }
 
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts: QueryOptions, minScore: number): number {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error('min_score requires rank_terms — there is no ranked score to threshold without them.');
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(' AND ')} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  private ftsMatchExpr(terms: string[], matchAll: boolean | undefined): string {
+    const joiner = matchAll ? ' AND ' : ' OR ';
+    return terms.map((t) => (t.endsWith('*') && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`)).join(joiner);
+  }
+
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts: QueryOptions = {}): DurableRecord[] {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
@@ -1370,12 +1496,7 @@ export class SterlingStore {
     if (opts.rank_terms !== undefined) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        // a trailing '*' marks an FTS5 prefix query ("stor*" matches "store") —
-        // the star must sit OUTSIDE the quoted token to act as the prefix operator
-        const joiner = opts.match_all ? ' AND ' : ' OR ';
-        const match = terms
-          .map((t) => (t.endsWith('*') && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`))
-          .join(joiner);
+        const match = this.ftsMatchExpr(terms, opts.match_all);
         const sql = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(' AND ')} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;

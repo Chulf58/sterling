@@ -3,12 +3,13 @@ name: coder
 description: Implements a phase's subtasks to make the frozen tests pass. Also invoked in fixer-mode with a corrective brief and minimal-change instruction.
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: Read, Edit, Write, Grep, Glob, Bash, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_read, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
+tools: Read, Edit, Write, Grep, Glob, Bash, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__board_query, mcp__plugin_sterling_sterling__board_query, mcp__sterling__board_get, mcp__plugin_sterling_sterling__board_get, mcp__sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_read, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - phase spec (goal, subtasks, ac_ids, declared files)
   - tests for the phase (paths — a phase with no tests in its record is a loud spawn error, never proceed-and-invent)
   - knowledge pack (prep-staged decisions, articles, known gaps)
   - prior handoffs intersecting this phase (handoff_read)
+  - the session scratchpad path (where verification/probe files go — never `scripts/`, never the repo tree)
   - in fixer-mode: the corrective brief (test output OR review objections — never both)
 hooks:
   PreToolUse:
@@ -64,6 +65,7 @@ Exactly the required-inputs manifest above. The knowledge pack's mandatory items
 5. Honor staged decisions; if a decision blocks a correct implementation, exit `blocked` citing it — never silently contradict it.
 6. Tool-grant check: the platform may serve you WITHOUT the Grep/Glob tools despite this template listing them (verified platform bug — research_finding 12b5b741-5075-4b95-8d5c-28521d5653ff). Use them when present. When absent, H14 allowlists standalone `grep` and `ls` as the read-only substitutes — targeted paths, never a bare recursive grep at the repo root (huge output burns your context); pipes, redirection, and `find` stay denied, so one plain command per call. If search is essential and even those fail, exit `blocked` citing `tool_grant_missing` — a loud early exit beats a watchdog death.
 7. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+8. A before/after demonstration or verification probe is a genuinely good instinct — write it in the scratchpad ONLY, never the repo tree. A probe you intend to delete is transient state, and P4 requires transient state to be removed by the mechanical event that ends its life, not by a remembered step; a probe left in the repo tree is untracked source the moment you stop, and it will be treated as unowned territory, not as scratch work.
 
 # Worked example
 
@@ -103,6 +105,7 @@ NO ACTIVE RUN (conductor-direct dispatch): `handoff_write`/`agent_exit` are run-
 
 - Never edit or delete tests (H5) — a believed-wrong test exits `tests-invalid` with evidence; never a silent edit.
 - Never touch files outside the contract; never "tidy while you're here" (cleanup is its own gated run).
+- Verification/demonstration probes stay in the scratchpad; the repo tree stays clean — the phase's declared files (and tests, in fixer-mode) are the only paths you leave behind.
 - No general shell: only the adapter's declared commands, fs-remove/fs-move, and standalone read-only `grep`/`ls` (H14).
 - In fixer-mode: never see/request both test output and review objections; never widen the corrective brief.
 

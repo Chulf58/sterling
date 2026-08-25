@@ -2146,12 +2146,125 @@ test('knowledge_schema is derived from the live schema — every registered type
     for (const type of ['decision', 'anti_pattern', 'research_finding', 'reference_material', 'feature_article', 'todo', 'brief']) {
       const s = tools.knowledgeSchema(type);
       assert.ok(s.fields.length > 0, `${type} reports fields`);
-      assert.ok(s.required.includes('type'), `${type} reports the envelope`);
+      // flipped 2026-08-24 (board 617e97d4): the envelope is still REPORTED,
+      // but as server_owned — required[] means "required FROM THE CALLER", and
+      // knowledge_create refuses a caller-supplied `type`.
+      assert.ok(!s.required.includes('type'), `${type}: 'type' is server-owned, never caller-required`);
+      assert.equal(s.fields.find((f) => f.name === 'type')?.server_owned, true, `${type} still reports the envelope, marked server_owned`);
       assert.ok(
         s.fields.every((f) => typeof f.type === 'string' && f.type !== 'unknown'),
         `${type} has no undescribed field types`
       );
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_schema: the whole unforgeable envelope is server_owned and absent from required/optional — and the mask cannot diverge from the write refusal (board 617e97d4)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const s = tools.knowledgeSchema('decision');
+    // The four fields the measured failure supplied (id/type/clocks) join the
+    // three already masked (version/status/superseded_by), plus the v2 identity
+    // pair (review finding: the store HONORS a caller-forged lifecycle/freshness,
+    // so lifecycle:'retired' minted an already-invisible record).
+    for (const name of ['id', 'type', 'created_at', 'updated_at', 'status', 'superseded_by', 'version', 'lifecycle', 'freshness']) {
+      const f = s.fields.find((f) => f.name === name);
+      assert.equal(f?.server_owned, true, `${name} is marked server_owned`);
+      assert.ok(!s.required.includes(name), `${name} is not caller-required`);
+      assert.ok(!s.optional.includes(name), `${name} is not caller-optional either — both lists answer "what may I supply"`);
+    }
+
+    // DERIVATION PIN: every field the projection marks server_owned is actually
+    // refused (or, for version, stripped-with-disclosure) by knowledge_create —
+    // the projection and the write guard describe ONE truth, in both directions.
+    const body = { title: 'derivation pin', statement: 's', alternatives_rejected: [], rationale: 'r' };
+    const sampleValue: Record<string, unknown> = {
+      id: randomUUID(),
+      type: 'decision',
+      created_at: '2026-08-24T00:00:00.000Z',
+      updated_at: '2026-08-24T00:00:00.000Z',
+      status: 'active',
+      superseded_by: null,
+      lifecycle: 'retired',
+      freshness: 'flagged_stale',
+    };
+    const serverOwned = s.fields.filter((f) => f.server_owned).map((f) => f.name);
+    for (const name of serverOwned) {
+      if (name === 'version') continue; // stripped, not refused — pinned below
+      assert.throws(
+        () => tools.knowledgeCreate('decision', { ...body, title: `refused via ${name}`, [name]: sampleValue[name] }),
+        /SERVER-OWNED/,
+        `knowledge_create refuses caller-supplied '${name}' — so marking it server_owned is honest`
+      );
+    }
+    const { record, warnings } = tools.knowledgeCreate('decision', { ...body, version: 9 });
+    assert.equal((record as unknown as { version: number }).version, 1, 'version is server-owned at birth: caller value never seeds the counter');
+    assert.ok(warnings.some((w) => w.includes('version')), 'the strip is disclosed, never silent');
+
+    // The forgery paths themselves (review finding, both reviewers): a caller
+    // could previously mint an already-invisible record (lifecycle:'retired' →
+    // derived status 'superseded') or forge staleness — now refused loudly.
+    assert.throws(() => tools.knowledgeCreate('decision', { ...body, title: 'forged retired', lifecycle: 'retired' }), /SERVER-OWNED/);
+    assert.throws(() => tools.knowledgeCreate('decision', { ...body, title: 'forged stale', freshness: 'flagged_stale' }), /SERVER-OWNED/);
+    // file_baselines is server-computed and was silently overwritten before.
+    const artSchema = tools.knowledgeSchema('feature_article');
+    assert.equal(artSchema.fields.find((f) => f.name === 'file_baselines')?.server_owned, true, 'file_baselines is server-owned on feature_article');
+    assert.throws(
+      () => tools.knowledgeCreate('feature_article', { ...articleFields('forged-baseline'), file_baselines: { 'src/x.ts': 'deadbeef' } }),
+      /SERVER-OWNED/,
+      'a caller-supplied baseline is refused, never silently overwritten'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_schema: a create supplying exactly required[] and nothing else SUCCEEDS — the projection composes an accepted write (board 617e97d4)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // The measured defect verbatim: a caller followed required[] and the guard
+    // refused the write. This pins the end-to-end contract, not a name list.
+    const body: Record<string, unknown> = {
+      slug: 'fidelity-pin',
+      title: 'fidelity pin',
+      what_it_does: 'w',
+      intended_behavior: 'i',
+      files: [],
+      current_ac: [],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'built',
+      history: [{ date: '2026-08-24T00:00:00.000Z', event: 'created' }],
+      live_test_refs: [],
+    };
+    const required = tools.knowledgeSchema('feature_article').required;
+    assert.deepEqual(Object.keys(body).sort(), [...required].sort(), 'the test body is EXACTLY required[] — nothing extra, nothing missing');
+    const { record } = tools.knowledgeCreate('feature_article', body);
+    assert.ok(record.id, 'the write the schema described is the write the guard accepts');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_schema: create-defaulted envelope fields are optional, and required[] is exactly the caller-required set (board 617e97d4)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // author/links/scope/stack_tags are defaulted by knowledge_create — a caller
+    // MAY supply them, so they belong in optional[], never in required[].
+    const dec = tools.knowledgeSchema('decision');
+    for (const name of ['author', 'links', 'scope', 'stack_tags']) {
+      assert.ok(!dec.required.includes(name), `${name} is defaulted at create — not caller-required`);
+      assert.ok(dec.optional.includes(name), `${name} is still caller-suppliable — reported optional`);
+    }
+    // The measured defect: feature_article's required[] listed 18 names, 8 of
+    // which the write refuses or defaults. Pin the exact caller-required set.
+    const art = tools.knowledgeSchema('feature_article');
+    assert.deepEqual(
+      [...art.required].sort(),
+      ['current_ac', 'dependencies', 'files', 'history', 'intended_behavior', 'live_test_refs', 'slug', 'state', 'title', 'what_it_does'],
+      'required[] is exactly what a create must supply — following the schema now composes a write the guard accepts'
+    );
   } finally {
     cleanup();
   }
@@ -2364,20 +2477,37 @@ test('a parked file is recorded ONCE however many times the article is read', ()
   }
 });
 
-test('a file that exists on NO ref still flags as an out-of-band deletion — the arm is trustworthy, not disabled', () => {
+// test-repair 2026-08-24 (board e939fd21, consult-approved, coordinator-directed):
+// a file confirmed missing on ALL refs now classifies as the gated
+// 'deletion_candidate' lane, NEVER the old 'reconcile_needed' — that item
+// could never be closed by any write (nothing makes a deleted file
+// reappear) and re-minted on every read. This pin MUST fail under the old
+// behavior: the one-line sabotage that turns it red is minting
+// 'reconcile_needed' again for this shape (i.e. reverting the classifier).
+// The file_parked arm (present on SOME ref) is untouched by this change —
+// see 'a file parked on an unmerged branch is file_parked...' above, which
+// is the control proving classification stays ref-aware rather than
+// collapsing every missing file into deletion_candidate.
+test('a file that exists on NO ref is classified deletion_candidate, never the unclosable reconcile_needed — the arm is trustworthy, not disabled', () => {
   const { dir, tools, git, cleanup } = gitRepo();
   try {
     writeFileSync(join(dir, 'seed.txt'), 'x\n');
     git('add', '-A');
     git('commit', '-qm', 'seed');
 
-    mkArticle(tools, 'really-gone', 'src/never-existed.ts');
+    const article = mkArticle(tools, 'really-gone', 'src/never-existed.ts');
     tools.knowledgeQuery({ types: ['feature_article'] });
     const queue = systemQueue(tools);
     assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0, 'nothing to park — it lives nowhere');
-    const reconciles = queue.filter((t) => t.system_reason === 'reconcile_needed');
-    assert.equal(reconciles.length, 1, 'the deletion finding survives the change');
-    assert.match(reconciles[0].text, /no longer exists \(out-of-band deletion\)/);
+    assert.equal(
+      queue.filter((t) => t.system_reason === 'reconcile_needed').length,
+      0,
+      'the old, unclosable lane must NOT fire for this shape any longer'
+    );
+    const candidates = queue.filter((t) => t.system_reason === 'deletion_candidate');
+    assert.equal(candidates.length, 1, 'the deletion finding survives the change, now in its own gated lane');
+    assert.equal(candidates[0].feature_link, article.id);
+    assert.match(candidates[0].text, /no longer exists \(out-of-band deletion\)/);
   } finally {
     cleanup();
   }
@@ -2447,6 +2577,32 @@ test('knowledge_update does NOT auto-drain a file_parked item — no write chang
   } finally {
     cleanup();
   }
+});
+
+test('a deletion_candidate item is minted ONCE across repeated reads (the atomic choke still dedups this lane, board e939fd21)', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    mkArticle(tools, 'really-gone-thrice', 'src/gone-thrice.ts');
+    for (let i = 0; i < 3; i++) tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(
+      systemQueue(tools).filter((t) => t.system_reason === 'deletion_candidate').length,
+      1,
+      'a pure-function-of-disk read path must not pile up copies just because the lane is new'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("'deletion_candidate' is a registered SYSTEM_REASON, not an ad hoc string the drain SOP has no verb for (board e939fd21)", async () => {
+  const { SYSTEM_REASONS } = await import('@sterling/schemas');
+  assert.ok(
+    Array.isArray(SYSTEM_REASONS) && (SYSTEM_REASONS as string[]).includes('deletion_candidate'),
+    "SYSTEM_REASONS must carry 'deletion_candidate' — an unregistered reason sits in the queue undrainable"
+  );
 });
 
 test('an article whose own role text DISCLAIMS a path is told so on the item (§2.10 forever-item)', () => {

@@ -78,7 +78,7 @@ try {
   deny(
     isTestDir
       ? `H4: '${rel}' is a TEST directory, not implementation (§6 H4) — content-mode Grep on a directory shows no content here regardless of its kind. Scope content to a specific test FILE inside it (matching a declared test glob), or locate first with output_mode files_with_matches.`
-      : `H4: '${rel}' is implementation — the test-writer never reads code (§6 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
+      : `H4: '${rel}' is implementation — the test-writer never reads code (§6 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating. Need a record shape (a field name, its required-ness, an enum) rather than the code itself? Use knowledge_schema — it is the sanctioned route, not a file read.`
   );
 } catch (e) {
   deny(environmentDefectDenial('H4', `Read-wall evaluation failed (${(e && e.message) || e}) — failing closed (P5).`));

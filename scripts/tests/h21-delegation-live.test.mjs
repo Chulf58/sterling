@@ -194,10 +194,12 @@ test('H21 article-write watch: fires on knowledge_update, citing decision dac3d2
 test('H21 article-write watch: covers knowledge_append and knowledge_edit too, under the mcp__plugin_sterling_sterling__ prefix as well', () => {
   const { dir, cleanup } = makeProject();
   try {
-    let r = runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeAppend()), dir);
-    assert.ok(additionalContextOf(r), 'knowledge_append fires the advisory');
-    r = runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeEdit('mcp__plugin_sterling_sterling__')), dir);
+    // decision h21-downgraded-to-once-per-session: only the FIRST qualifying write
+    // advises, so verb/prefix coverage is proven by the first advisory + the count.
+    let r = runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeEdit('mcp__plugin_sterling_sterling__')), dir);
     assert.ok(additionalContextOf(r), 'knowledge_edit under the PLUGIN prefix fires the advisory (anti-pattern 837015c4)');
+    r = runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeAppend()), dir);
+    assert.equal(additionalContextOf(r), null, 'knowledge_append is still COUNTED but stays silent — once per session (decision h21-downgraded-to-once-per-session)');
     const writes = articleWritesOf(dir);
     assert.equal(writes.count, 2, 'both calls incremented the same running count');
   } finally {
@@ -205,16 +207,17 @@ test('H21 article-write watch: covers knowledge_append and knowledge_edit too, u
   }
 });
 
-test('H21 article-write watch: increments on EVERY call and advises every time (not once-per-session)', () => {
+test('H21 article-write watch: counts EVERY call but advises only ONCE per session (decision h21-downgraded-to-once-per-session)', () => {
   const { dir, cleanup } = makeProject();
   try {
-    runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeUpdate()), dir);
+    const first = runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeUpdate()), dir);
+    const firstCtx = additionalContextOf(first);
+    assert.ok(firstCtx, 'the FIRST call advises');
+    assert.match(firstCtx, /once per session/i, 'the advisory discloses its once-per-session ceiling');
     runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeUpdate()), dir);
     const third = runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeUpdate()), dir);
-    const ctx = additionalContextOf(third);
-    assert.ok(ctx, 'the THIRD call still gets an advisory — this is not a once-per-session guard');
-    assert.match(ctx, /\b3\b/, 'the running count (3) is named on the third call');
-    assert.equal(articleWritesOf(dir).count, 3);
+    assert.equal(additionalContextOf(third), null, 'the THIRD call stays silent — the advisory already fired this session');
+    assert.equal(articleWritesOf(dir).count, 3, 'the running count still increments on every call');
   } finally {
     cleanup();
   }
@@ -377,7 +380,7 @@ test('H21 streak reset: a Task dispatch resets read_paths/searches/nagged to emp
   }
 });
 
-test('H21 streak reset: an Agent dispatch resets the streak too; a fresh episode can nag AGAIN later in the same session', () => {
+test('H21 streak reset: an Agent dispatch resets the streak, but a second episode stays SILENT — the once-per-session latch survives the reset (decision h21-downgraded-to-once-per-session)', () => {
   const { dir, cleanup } = makeProject({ ...CONFIG, delegation_watch: { streak_threshold: 2 } });
   try {
     runHook('h21-delegation-live.mjs', hookInput(dir, readOf(dir, 'src/a.mjs')), dir);
@@ -389,7 +392,7 @@ test('H21 streak reset: an Agent dispatch resets the streak too; a fresh episode
     const afterReset1 = runHook('h21-delegation-live.mjs', hookInput(dir, readOf(dir, 'src/c.mjs')), dir);
     assert.equal(additionalContextOf(afterReset1), null, 'below threshold again after the reset');
     const afterReset2 = runHook('h21-delegation-live.mjs', hookInput(dir, readOf(dir, 'src/d.mjs')), dir);
-    assert.ok(additionalContextOf(afterReset2), 'a SECOND episode in the same session nags again — reset is not a one-shot latch');
+    assert.equal(additionalContextOf(afterReset2), null, 'a SECOND episode crossing the threshold stays silent — the once-per-session latch survives the episode reset (decision h21-downgraded-to-once-per-session)');
   } finally {
     cleanup();
   }
@@ -406,9 +409,11 @@ test('H21 streak reset: article-writes count is NOT touched by a Task/Agent disp
     assert.equal(articleWritesOf(dir).count, 2, 'a dispatch must not reset the article-write tally');
 
     const r = runHook('h21-delegation-live.mjs', hookInput(dir, knowledgeUpdate()), dir);
-    const ctx = additionalContextOf(r);
-    assert.match(ctx, /\b3\b/, 'the count continues from 2 -> 3 across the dispatch, not restarting at 1');
-    assert.equal(articleWritesOf(dir).count, 3);
+    // decision h21-downgraded-to-once-per-session: the tally continues across the
+    // dispatch, but the advisory fired on write #1 already, so this one is silent —
+    // the count assertion below is what pins the whole-session tally now.
+    assert.equal(additionalContextOf(r), null, 'no repeat advisory — once per session');
+    assert.equal(articleWritesOf(dir).count, 3, 'the count continues from 2 -> 3 across the dispatch, not restarting at 1');
   } finally {
     cleanup();
   }

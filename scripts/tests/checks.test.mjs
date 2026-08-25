@@ -399,6 +399,33 @@ test("store_authority: 'secondary' reports unresolved citations and passes; 'pri
   }
 });
 
+test('check-agent-registry scans scripts/hooks/ for dead terms (the convention-injection surface, board f4221f8a)', () => {
+  // H1 (scripts/hooks/h1-session-start.mjs) is the surface whose text is
+  // injected into EVERY session, ahead of every conductor — reading it is not
+  // optional the way a template stamp is. The dead-term scan previously only
+  // covered templates/commands/skills; a banned term shipped in H1 for weeks
+  // undetected while an otherwise-correct copy of that same text INTO a
+  // template failed the merge for carrying the very term H1 itself carried.
+  // Unique per run (review finding): a fixed probe name collides across two
+  // concurrent runs of this file — one run's cleanup deletes the other's probe
+  // mid-flight, or the day-one arm below sees the foreign probe and fails.
+  const probeName = `__dead_term_probe__-${randomUUID().slice(0, 8)}.mjs`;
+  const probe = join(root, 'scripts', 'hooks', probeName);
+  writeFileSync(probe, "// leftover wave of brainstormer residue\n");
+  try {
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'check-agent-registry.mjs')], {
+      encoding: 'utf8',
+      cwd: root,
+      timeout: 120_000,
+    });
+    assert.equal(r.status, 1, 'a dead term planted in scripts/hooks/ must fail the check');
+    assert.match(r.stderr, /dead_term/);
+    assert.ok(r.stderr.includes(probeName), 'the refusal names the planted file');
+  } finally {
+    rmSync(probe, { force: true });
+  }
+});
+
 test('all day-one check scripts pass on the current repo (empty sets pass — invariant 3)', () => {
   // check-bundles-fresh joined the list with R2 7cde1448 (bundle freshness is a
   // tree invariant). check-projection-fresh stays gate-bound only (direct-merge

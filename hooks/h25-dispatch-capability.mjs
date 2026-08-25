@@ -4133,6 +4133,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4411,7 +4419,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5025,9 +5039,95 @@ function loadConfig(cwd) {
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 
+// scripts/hooks/lib/dispatch-advisory.mjs
+var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+var SUBJECT_VERB_WINDOW = 40;
+var BARE_NEGATOR_WINDOW = 5;
+function splitClauses(text) {
+  const s = String(text ?? "");
+  const clauses = [];
+  let clauseStart = 0;
+  HARD_BOUNDARY_RE.lastIndex = 0;
+  let m;
+  while (m = HARD_BOUNDARY_RE.exec(s)) {
+    const boundaryStart = m.index;
+    const boundaryEnd = boundaryStart + m[0].length;
+    const isHard = m[1] !== void 0 || m[2] !== void 0 || m[3] !== void 0;
+    if (isHard) {
+      clauses.push(s.slice(clauseStart, boundaryStart));
+      clauseStart = boundaryEnd;
+      continue;
+    }
+    const soFar = s.slice(clauseStart, boundaryStart);
+    if (PROHIBITION_TEST.test(soFar)) continue;
+    clauses.push(soFar);
+    clauseStart = boundaryEnd;
+  }
+  clauses.push(s.slice(clauseStart));
+  return clauses;
+}
+function isNegatedContext(clause, index) {
+  const text = String(clause ?? "");
+  const before = text.slice(0, Math.max(0, index));
+  if (PROHIBITION_TEST.test(before)) return true;
+  BARE_NEGATOR_TEST.lastIndex = 0;
+  let m;
+  while (m = BARE_NEGATOR_TEST.exec(before)) {
+    const gap = before.slice(m.index + m[0].length);
+    if (gap.includes(",")) continue;
+    const tokenCount = (gap.match(/\S+/g) || []).length;
+    if (tokenCount <= BARE_NEGATOR_WINDOW) return true;
+  }
+  return false;
+}
+function isSubjectOfChangeContext(clause, index) {
+  const text = String(clause ?? "");
+  const before = text.slice(0, Math.max(0, index));
+  const near = before.slice(Math.max(0, before.length - SUBJECT_VERB_WINDOW));
+  return SUBJECT_VERB_TEST.test(near);
+}
+function isSuppressedContext(clause, index, checkSubjectVerb = true) {
+  if (isNegatedContext(clause, index)) return true;
+  return checkSubjectVerb && isSubjectOfChangeContext(clause, index);
+}
+function hasUnsuppressedMatch(text, pattern, { checkSubjectVerb = true } = {}) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const global = new RegExp(pattern.source, flags);
+  for (const clause of splitClauses(text)) {
+    global.lastIndex = 0;
+    let m;
+    while (m = global.exec(clause)) {
+      if (!isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
+      if (m.index === global.lastIndex) global.lastIndex++;
+    }
+  }
+  return false;
+}
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function isReviewerClass(type) {
+  return !!type && type.startsWith("reviewer-");
+}
+
 // scripts/hooks/h25-dispatch-capability.mjs
 import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
 import { join as join2 } from "node:path";
+var BUILTIN_AGENT_TYPES = /* @__PURE__ */ new Set([
+  "general-purpose",
+  "claude",
+  "Explore",
+  "Plan",
+  "fork",
+  "claude-code-guide",
+  "statusline-setup"
+]);
 var PLATFORM_TOOLS = [
   "Bash",
   "PowerShell",
@@ -5072,16 +5172,16 @@ var MCP_SHORT_NAMES = [
 ];
 var KNOWN_TOOLS = [...PLATFORM_TOOLS, ...MCP_SHORT_NAMES];
 var MCP_SET = new Set(MCP_SHORT_NAMES);
-function escapeRe(s) {
+function escapeRe2(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function wholeTokenRe(tok) {
-  return new RegExp(`(?:^|[^\\w])(?:mcp__\\w+__)?${escapeRe(tok)}\\b`, "i");
+  return new RegExp(`(?:^|[^\\w])(?:mcp__\\w+__)?${escapeRe2(tok)}\\b`, "i");
 }
 function findMentionedTools(text) {
   const t = String(text ?? "");
   if (!t) return [];
-  return KNOWN_TOOLS.filter((tok) => wholeTokenRe(tok).test(t));
+  return KNOWN_TOOLS.filter((tok) => hasUnsuppressedMatch(t, wholeTokenRe(tok)));
 }
 function isGranted(tool, grantList) {
   if (MCP_SET.has(tool)) {
@@ -5124,11 +5224,14 @@ function hasPathTrigger(text, cwd) {
   }
   const globs = (config?.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   if (!globs.length) return false;
-  const candidates = extractPathCandidates(text);
-  return candidates.some((path) => globs.some((glob) => matchesGlob(path, glob)));
+  const candidates = extractPathCandidates(text).filter((path) => globs.some((glob) => matchesGlob(path, glob)));
+  return candidates.some((path) => hasUnsuppressedMatch(text, new RegExp(escapeRe(path)), { checkSubjectVerb: false }));
 }
 function testAuthoringAdvisory(subagentType, prompt, cwd) {
-  if (!subagentType || !PIPELINE_AGENT_TYPES.has(subagentType) || subagentType === "test-writer") return null;
+  if (!subagentType || !PIPELINE_AGENT_TYPES.has(subagentType) || subagentType === "test-writer" || // board a6b76e8c item 4: a reviewer-class dispatch REVIEWS tests, it
+  // does not author them — never fires the test-authoring advisory.
+  isReviewerClass(subagentType))
+    return null;
   const text = String(prompt ?? "");
   if (!text) return null;
   if (!hasVerbOrTddTrigger(text) && !hasPathTrigger(text, cwd)) return null;
@@ -5160,6 +5263,7 @@ try {
   const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
   const agentPath = join2(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
   if (!existsSync2(agentPath)) {
+    if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
     finish(
       `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
     );

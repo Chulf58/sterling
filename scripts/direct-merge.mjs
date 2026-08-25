@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { arg, fail, openProject } from './lib/project.mjs';
 import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
+import { mintSettlementReconcile, isLiveReconcileDebt } from './hooks/lib/settlement.mjs';
 import { matchesGlob } from '@sterling/schemas';
 
 const target = arg('--target') ?? process.cwd();
@@ -23,7 +24,6 @@ if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 // disposal + promotion first — never route a run merge through here (P5).
 const { store, config } = openProject(target);
 const active = store.getRun();
-const openTodos = store.query({ types: ['todo'], cap: 1000 });
 store.close();
 if (active) {
   fail(`direct-merge: run '${active.id}' is active (${active.machine_state}) — a run merges through merge-gate.mjs, not direct-merge`);
@@ -93,13 +93,92 @@ if (dirtyLines.length > 0) {
 const diff = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--name-only', '--end-of-options', `${into}...${branch}`], { cwd: target, encoding: 'utf8', timeout: 60_000 });
 if (diff.status !== 0) fail(`direct-merge: git diff ${into}...${branch} failed: ${(diff.stderr || '').trim()}`);
 const changed = new Set(diff.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
-const debt = openTodos.filter(
-  (t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && (t.file_keys ?? []).some((k) => changed.has(k))
-);
+
+// SETTLEMENT BOUNDARY (b) — the pre-merge HARD BACKSTOP (board c198866d, H7
+// CANDIDATE-ONLY + SETTLEMENT-TIME MINTING). H7's direct-mode Arm 1 no longer
+// mints reconcile_needed at touch time — only the direct-session Stop
+// (h10-direct-capture.mjs) and this gate ever mint it now, so a branch whose
+// session died before reaching Stop-settlement (the design's NAMED HOLE) still
+// gets its debt minted HERE, against every file this branch actually changed,
+// before the refusal below ever reads the queue. Every SURVIVING
+// reconcile_needed item covering this branch's files is then re-evaluated
+// against the LIVE predicate (current content vs the owning article's CURRENT
+// baseline) — a stale row (already reconciled since it minted, or an
+// edit-then-revert) must never block the merge on its own authority.
+const { store: settleStore } = openProject(target);
+let debt;
+let settlementError;
+try {
+  mintSettlementReconcile(settleStore, target, [...changed]);
+  debt = settleStore
+    .query({ types: ['todo'], cap: 1000 })
+    .filter(
+      (t) =>
+        t.source === 'system' &&
+        t.system_reason === 'reconcile_needed' &&
+        (t.file_keys ?? []).some((k) => changed.has(k)) &&
+        // R5(b) (board c198866d round-3 fixer): widen-in-place can group a
+        // path this branch never touched into the same item as one it did
+        // (grouping is per ARTICLE, not per branch) — evaluating liveness
+        // over the FULL item would let that unrelated path's drift refuse
+        // THIS merge. Scope the live check to item.file_keys ∩ this branch's
+        // changed files (the merge gate's own scope, decision 9df61181) by
+        // passing a view of the item carrying only the intersecting keys —
+        // always non-empty here, since the .some() above already guarantees
+        // at least one overlapping key.
+        isLiveReconcileDebt(settleStore, target, { ...t, file_keys: (t.file_keys ?? []).filter((k) => changed.has(k)) })
+    );
+} catch (e) {
+  settlementError = e;
+} finally {
+  settleStore.close();
+}
+// F5 (board c198866d fixer round): a mint/live-check throw left `debt`
+// undefined, so the `debt.length` read below raised a raw TypeError instead
+// of a loud, attributable refusal (P5) — fail() here, never a bare crash.
+if (settlementError) {
+  fail(`direct-merge: settlement mint/live-check failed (${settlementError?.message ?? settlementError}) — refusing rather than merging on an unverified reconcile state`);
+}
 if (debt.length > 0) {
+  // GROUP BY OWNING ARTICLE (N13): one item per touched file is the mint
+  // granularity, so a branch touching one heavily-shared file can carry
+  // hundreds of near-identical items — measured 207 lines (~40KB) for a
+  // single refusal. Group by feature_link (the owning article id H7 stamps)
+  // so the refusal reads as N ARTICLES, not N items; every item id stays
+  // listed, nested under its group, so nothing here is lossy — only the
+  // presentation is denser. Items with NO feature_link (older/foreign
+  // items) all share ONE bucket — keying that bucket per-item (e.g. by
+  // t.id) reproduces the exact fragmentation this fix exists to remove for
+  // the legacy case: 50 unlinked items would headline as "across 50
+  // article(s)" instead of the 1 real article plus a single miscellaneous
+  // bucket. The headline's article count is REAL articles only — the
+  // no-article bucket, if present, is named separately and never inflates it.
+  const NO_ARTICLE_KEY = Symbol('no-owning-article');
+  const byArticle = new Map();
+  for (const t of debt) {
+    const key = t.feature_link ?? NO_ARTICLE_KEY;
+    if (!byArticle.has(key)) byArticle.set(key, []);
+    byArticle.get(key).push(t);
+  }
+  const realArticleCount = [...byArticle.keys()].filter((k) => k !== NO_ARTICLE_KEY).length;
+  const noArticleItems = byArticle.get(NO_ARTICLE_KEY) ?? [];
+  const grouped = [...byArticle.entries()]
+    .map(([article, items]) => {
+      const header = article === NO_ARTICLE_KEY ? `(no owning article) — ${items.length} item(s)` : `article ${article} — ${items.length} item(s)`;
+      // Each item keeps its OWN file_keys on its own line (Codex P2-A): a
+      // header union loses the item→files association the un-grouped
+      // format used to carry — two items in one group touching different
+      // files must not read as though either touched both.
+      return `  - ${header}\n` + items.map((t) => `      - ${t.id}  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n');
+    })
+    .join('\n');
+  const headline =
+    noArticleItems.length > 0
+      ? `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s) (plus ${noArticleItems.length} item(s) with no owning article)`
+      : `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s)`;
   fail(
-    `direct-merge: ${debt.length} open reconcile_needed item(s) cover files this branch changed — reconcile before merging:\n` +
-      debt.map((t) => `  - ${t.id}  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n') +
+    `direct-merge: ${headline} cover files this branch changed — reconcile before merging:\n` +
+      grouped +
       '\nknowledge_update the owning article (the update auto-drains its item), then rerun.'
   );
 }

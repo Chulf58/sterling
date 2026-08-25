@@ -254,16 +254,22 @@ test('AC2c: the exemption is scoped to the exact declared extensions, not a broa
 
 // --------------------------- AC3: regression, bulk hand-writes still advise ---------------------------
 
-test('AC3: a burst of several large hand-run store writes in a row, no dispatch between them, still advises on EACH one — precision-tuning narrows false positives, it does not neuter the arm', () => {
+// decision h21-downgraded-to-once-per-session: the old advise-on-EACH-write pin
+// is superseded — the FIRST fire keeps its full framing, the rest stay silent.
+test('AC3: a burst of several large hand-run store writes — the FIRST advises with full framing, the rest stay silent (decision h21-downgraded-to-once-per-session)', () => {
   const { dir, cleanup } = makeProject();
   try {
     for (let i = 0; i < 3; i++) {
       const r = runHook(sizedEdit(2500), dir);
       assert.equal(r.code, 0);
       const ctx = additionalContextOf(r);
-      assert.ok(ctx, `burst write #${i + 1} (2500B, over write_bytes_advise) must still advise — the fix must not silence genuine bulk hand-writes`);
-      assert.match(ctx, /byte/i, `burst write #${i + 1}'s advisory is still framed by size`);
-      assert.match(ctx, /dac3d2c6/, `burst write #${i + 1} must still cite decision dac3d2c6 — the fix narrows false positives, it does not drop the underlying ruling`);
+      if (i === 0) {
+        assert.ok(ctx, 'burst write #1 (2500B, over write_bytes_advise) must advise — the downgrade keeps the first fire');
+        assert.match(ctx, /byte/i, "burst write #1's advisory is still framed by size");
+        assert.match(ctx, /dac3d2c6/, 'burst write #1 must still cite decision dac3d2c6 — the underlying ruling is unchanged');
+      } else {
+        assert.equal(ctx, null, `burst write #${i + 1} stays silent — once per session`);
+      }
     }
   } finally {
     cleanup();
@@ -312,7 +318,7 @@ test('AC4: a corrupt/non-numeric delegation_watch size config fails open — fal
 
 // --------------------------- AC-X: session-crossing advisory fires exactly once (nagged flag) ---------------------------
 
-test('AC-X: once the session has crossed session_bytes_advise, a subsequent SMALL write stays silent, while a large write still advises on its own per-write trigger', () => {
+test('AC-X: once the session has crossed session_bytes_advise, a subsequent SMALL write stays silent, and a LARGE write is also silent — one advisory per kind per session (decision h21-downgraded-to-once-per-session)', () => {
   const { dir, cleanup } = makeProject();
   try {
     // 4 writes @ 1700B stay under both the per-write (2000) and session (8000)
@@ -345,17 +351,18 @@ test('AC-X: once the session has crossed session_bytes_advise, a subsequent SMAL
       'write #6 (300B, under write_bytes_advise, AFTER the session threshold already crossed and advised once) must stay silent — a naive "cumulative > threshold every call" implementation would re-fire here since the running total (8800B) still exceeds session_bytes_advise; the session-crossing advisory is a one-time (nagged) event, not a sticky condition'
     );
 
-    // write #7: LARGE (2500B, over write_bytes_advise 2000). This must still
-    // advise — on its OWN independent per-write trigger — proving the fix
-    // narrows the one-time session-crossing nag without neutering the
-    // per-write arm (AC3's regression guarantee holds even post-crossing).
+    // write #7: LARGE (2500B, over write_bytes_advise 2000). Under decision
+    // h21-downgraded-to-once-per-session the per-write trigger is gated by the
+    // SAME once-per-session marker as the crossing nag (one marker per KIND),
+    // so this write stays SILENT — the old per-write regression guarantee was
+    // explicitly traded away by that decision (its rejected-alternatives list
+    // includes accepting the per-write firing as a priced trade).
     const largeAfterCross = runHook(sizedUpdate(2500), dir);
-    const largeCtx = additionalContextOf(largeAfterCross);
-    assert.ok(
-      largeCtx,
-      'write #7 (2500B, over write_bytes_advise) must still advise on its own per-write trigger even though the session-crossing nag already fired and write #6 was correctly silent'
+    assert.equal(
+      additionalContextOf(largeAfterCross),
+      null,
+      'write #7 (2500B) stays silent — the article-write advisory already fired once this session (decision h21-downgraded-to-once-per-session)'
     );
-    assert.match(largeCtx, /byte/i, 'the per-write advisory is still framed by size');
   } finally {
     cleanup();
   }

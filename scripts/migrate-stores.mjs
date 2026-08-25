@@ -138,6 +138,63 @@ function hasFlag(name) {
   return process.argv.includes(`--${name}`);
 }
 
+/** Every value passed to a REPEATABLE flag, e.g. multiple --elect-successor. */
+function argAll(name) {
+  const flag = `--${name}`;
+  const values = [];
+  for (let i = 0; i < process.argv.length; i++) {
+    if (process.argv[i] === flag) values.push(process.argv[i + 1]);
+  }
+  return values;
+}
+
+// Every id Sterling mints is a UUID (v4-shaped, but this only checks the
+// canonical 8-4-4-4-12 hex layout — it need not pin the version/variant
+// nibbles, since the point is catching a typo/truncation, not validating
+// UUID conformance).
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Parses every --elect-successor <oldId>=<winnerId> flag into a Map, syntax-
+ * checked here (before any db work) so a malformed election fails loudly
+ * before a backup is even taken. Semantic validation (does the conflict
+ * exist, does the winner match the claimants) happens in classify(), which
+ * has the actual legacy data.
+ *
+ * review fix F2 (roster review, board d055b150): a typo'd or space-padded id
+ * used to sail through this parse and only surface later as a stale_election
+ * or election_mismatch AFTER classify() ran — contradicting this function's
+ * own "before a backup is even taken" promise (classify() runs, and its
+ * failures are journalled, only after the backup). Both sides are trimmed and
+ * must be UUID-shaped, or the flag itself is refused right here.
+ */
+function parseElections() {
+  const elections = new Map();
+  for (const raw of argAll('elect-successor')) {
+    const eq = raw ? raw.indexOf('=') : -1;
+    if (!raw || eq <= 0 || eq === raw.length - 1) {
+      return fail(`--elect-successor requires '<oldId>=<winnerId>' (got '${raw}')`);
+    }
+    const oldId = raw.slice(0, eq).trim();
+    const winnerId = raw.slice(eq + 1).trim();
+    if (!UUID_SHAPE.test(oldId) || !UUID_SHAPE.test(winnerId)) {
+      return fail(
+        `--elect-successor '${raw}' must be '<oldId>=<winnerId>' with both sides a UUID-shaped record id — got ` +
+          `oldId='${oldId}'${UUID_SHAPE.test(oldId) ? '' : ' (not UUID-shaped)'}, winnerId='${winnerId}'` +
+          `${UUID_SHAPE.test(winnerId) ? '' : ' (not UUID-shaped)'}`
+      );
+    }
+    if (elections.has(oldId) && elections.get(oldId) !== winnerId) {
+      return fail(
+        `--elect-successor given twice for '${oldId}' with different winners ('${elections.get(oldId)}' vs ` +
+          `'${winnerId}') — ambiguous, refusing rather than picking one`
+      );
+    }
+    elections.set(oldId, winnerId);
+  }
+  return elections;
+}
+
 /** The DERIVED served status — the one definition mirrored from
  *  packages/store's SterlingStore.derivedStatus (it is private there). */
 function derivedStatus(lifecycle, freshness) {
@@ -218,11 +275,31 @@ function ensureRecordColumns(db) {
  * MECHANICAL classification (design section 6): who supersedes whom, from
  * record_links + the superseded_by column ONLY. Returns the collapse chains,
  * the retirements, and every conflict that must refuse.
+ *
+ * `elections` is a Map<oldId, winnerId> built from repeatable
+ * --elect-successor <oldId>=<winnerId> flags (board d055b150): a human-ruled
+ * resolution of a genuine multi_successor conflict, run through this
+ * journalled classifier rather than a hand-edit. An election is consumed
+ * ONLY against a real multi-successor conflict on oldId whose claimant set
+ * contains winnerId — a mismatch, or a stale election naming a conflict that
+ * does not exist, both refuse loudly rather than being silently ignored
+ * (electionsUsed tracks which elections actually fired; anything left over
+ * at the end refuses too).
  */
-function classify(records, links) {
+function classify(records, links, elections = new Map()) {
   const byId = new Map(records.map((r) => [r.id, r]));
   const disclosures = [];
   const failures = [];
+  const electionsUsed = new Set();
+  // Every supersedes edge an election DROPPED, as `${sourceId}|${targetId}`
+  // (the raw record_links direction: source = claimant, target = oldId).
+  // The relation-building pass in main() iterates the ORIGINAL link rows
+  // independently of this function's internal `successors` maps, so a
+  // dropped claim must be surfaced here too — otherwise the raw edge
+  // survives, gets remapped to canonical ids, and re-appears as a relation
+  // the election never elected (measured while pinning S4-E1: Q2's dropped
+  // edge to P re-emerged as Q2-supersedes-Q1 once P canonicalized to Q1).
+  const electionDroppedEdges = new Set();
 
   // oldId -> Map(newId -> Set(which legacy surface claimed it)). Both surfaces
   // describing the SAME edge is the reciprocal shape the design expects; two
@@ -303,6 +380,40 @@ function classify(records, links) {
         }
       }
     }
+    // ELECTION (board d055b150): a human-ruled resolution of a genuine
+    // multi-successor conflict — the automatic transitive-edge collapse above
+    // only fires when oldId's OWN superseded_by column names one authoritative
+    // chain, which is exactly what is missing when oldId has no local record
+    // row at all (an absent target, see below) or when the claimants are
+    // independent forks rather than copies of one column. Applied AFTER the
+    // auto-collapse pass, so an election is never needed for a conflict the
+    // mechanical pass already resolved on its own.
+    if (successors.size > 1 && elections.has(oldId)) {
+      const winnerId = elections.get(oldId);
+      if (!successors.has(winnerId)) {
+        failures.push({
+          kind: 'election_mismatch',
+          detail:
+            `--elect-successor '${oldId}=${winnerId}' names a winner that is NOT among '${oldId}''s claimants ` +
+            `(${[...successors.keys()].join(', ')}) — the election does not match the data and is refused rather ` +
+            `than silently ignored. REMEDY: re-run electing one of the listed claimants.`,
+        });
+        electionsUsed.add(oldId);
+        continue;
+      }
+      const dropped = [...successors.keys()].filter((s) => s !== winnerId);
+      for (const s of dropped) {
+        const claimSurfaces = successors.get(s);
+        successors.delete(s);
+        electionDroppedEdges.add(`${s}|${oldId}`);
+        disclosures.push(
+          `ELECTION --elect-successor '${oldId}=${winnerId}' resolved a MULTI-SUCCESSOR conflict: supersedes edge ` +
+            `'${s}' -> '${oldId}' (via ${[...claimSurfaces].sort().join(' + ')}) dropped as the losing claimant; ` +
+            `'${winnerId}' is the sole surviving successor by human ruling, not by mechanical guess.`
+        );
+      }
+      electionsUsed.add(oldId);
+    }
     if (successors.size > 1) {
       failures.push({
         kind: 'multi_successor',
@@ -314,6 +425,40 @@ function classify(records, links) {
       continue;
     }
     const [newId, surfaces] = [...successors.entries()][0];
+    if (!byId.has(oldId)) {
+      // ABSENT TARGET (board d055b150, the deepdots c1bae7e0 case): oldId
+      // itself has no local record row — a project-local handoff, or a
+      // supersession this store's authors recorded for an id it never held.
+      // Its claims live entirely in a CLAIMANT's record_links edge, never in
+      // a row of its own (a superseded_by-column claim always names a REAL
+      // record as oldId — see the claim-building loop above — so this shape
+      // is link-only by construction), so there is no body to archive and no
+      // chain to collapse. record_relations requires BOTH endpoints to
+      // resolve to a live local record (verified below in main()), so even a
+      // SINGLY-claimed absent target cannot be materialized here — election
+      // or not. review fix F1 (roster review, board d055b150): this check
+      // used to be gated on `electionsUsed.has(oldId)`, so a singly-claimed
+      // absent target (no conflict, no election — deepdots' own c1bae7e0
+      // shape before any human ruling) fell through to collapseSuccessor,
+      // became a chain root, and crashed `JSON.parse(alias.row.body)` inside
+      // the transaction (safe rollback, but unactionable) because there was
+      // no row to archive. The absence is disclosed regardless of whether an
+      // election named it.
+      disclosures.push(
+        electionsUsed.has(oldId)
+          ? `ELECTION --elect-successor '${oldId}=${newId}' resolved a MULTI-SUCCESSOR conflict on an ABSENT target: ` +
+              `'${oldId}' has no local record row in this store (its only trace is the claimants' supersedes edges). ` +
+              `The elected supersedes edge from '${newId}' cannot be materialized as a record_relations row (both ` +
+              `endpoints must resolve to a live local record), so it is dropped from the live graph; nothing was ` +
+              `collapsed or aliased for '${oldId}', and this line is its provenance.`
+          : `record '${oldId}' has no local record row in this store — an ABSENT target: its only trace is a ` +
+              `supersedes claim from '${newId}' (via ${[...surfaces].sort().join(' + ')}). There is no body to ` +
+              `archive and no chain to collapse, and the elected/sole successor's edge cannot be materialized as a ` +
+              `record_relations row (both endpoints must resolve to a live local record), so it is dropped from the ` +
+              `live graph; nothing was collapsed or aliased for '${oldId}', and this line is its provenance.`
+      );
+      continue;
+    }
     if (!byId.has(newId)) {
       if (surfaces.size === 1 && surfaces.has('superseded_by')) {
         // The promote-tombstone signature: column-only claim at an id that was
@@ -338,6 +483,25 @@ function classify(records, links) {
     }
     if (surfaces.has('record_links')) collapseSuccessor.set(oldId, newId);
     else retirements.set(oldId, newId);
+  }
+
+  // A STALE ELECTION — naming an oldId that carries no genuine
+  // multi-successor conflict (never claimed at all, claimed by only one
+  // record, or already resolved by the mechanical transitive-edge collapse
+  // before the election was even consulted) — is an ERROR, not a no-op
+  // (board d055b150): silently ignoring it would hide the fact that the
+  // human's instruction no longer matches the data.
+  for (const [oldId, winnerId] of elections) {
+    if (electionsUsed.has(oldId)) continue;
+    failures.push({
+      kind: 'stale_election',
+      detail:
+        `--elect-successor '${oldId}=${winnerId}' names a conflict that does not exist in this store's legacy data ` +
+        `— '${oldId}' is not claimed by more than one record (it may be unclaimed, singly-claimed, or already ` +
+        `resolved without needing an election). A stale election is refused rather than silently ignored. REMEDY: ` +
+        `drop this --elect-successor and re-run (the conflict does not exist, or the mechanical pass already ` +
+        `resolved it).`,
+    });
   }
 
   // BRANCHED (converging) chains: two records collapsing onto one successor
@@ -392,7 +556,7 @@ function classify(records, links) {
     });
   }
 
-  return { byId, chains, collapseSuccessor, retirements, foreignRetirements, disclosures, failures };
+  return { byId, chains, collapseSuccessor, retirements, foreignRetirements, electionDroppedEdges, disclosures, failures };
 }
 
 function writeManifest(manifestPath, manifest) {
@@ -432,6 +596,11 @@ function main() {
   const dbPath = arg('db');
   if (!dbPath) return fail('--db <path-to-sterling.db> is required (or --all-stores, which is not implemented)');
   if (!existsSync(dbPath)) return fail(`no db file at '${dbPath}' — nothing was read, nothing was created`);
+
+  // Syntax-checked before any db work; semantic validation (against the real
+  // legacy claims) happens inside classify().
+  const elections = parseElections();
+  const invokedBy = arg('invoked-by') ?? 'direct';
 
   const probe = probeSchemaVersion(dbPath);
   if (probe.error) return fail(probe.error);
@@ -508,6 +677,7 @@ function main() {
         retirements_preserved: 0,
         relations_migrated: 0,
         relations_dropped_intra_chain: 0,
+        relations_dropped_by_election: 0,
         relations_dropped_unresolvable: 0,
         relations_remapped_to_canonical: 0,
         records_after: records.length,
@@ -515,10 +685,23 @@ function main() {
       },
       disclosures: [],
       verification: { ok: false, reason: 'not run' },
+      // PROVENANCE (board d055b150): an unattributed store-mutating run cost
+      // a real investigation and one retracted attribution — argv is the
+      // post-node args verbatim (so any --elect-successor lands here exactly
+      // as given), plus cwd/pid/ppid/invoked_by. Old journals predate this
+      // field entirely; readers must tolerate its absence.
+      invocation: {
+        argv: process.argv.slice(2),
+        cwd: process.cwd(),
+        pid: process.pid,
+        ppid: process.ppid,
+        invoked_by: invokedBy,
+      },
     };
 
     // ---- 3. CLASSIFY -------------------------------------------------------
-    const { byId, chains, collapseSuccessor, retirements, foreignRetirements, disclosures, failures } = classify(records, links);
+    const { byId, chains, collapseSuccessor, retirements, foreignRetirements, electionDroppedEdges, disclosures, failures } =
+      classify(records, links, elections);
     manifest.disclosures.push(...disclosures);
     if (failures.length) {
       manifest.failures = failures;
@@ -579,6 +762,16 @@ function main() {
       // the per-chain disclosure above).
       if (l.rel === 'supersedes' && collapseSuccessor.get(l.target_id) === l.source_id) {
         manifest.counts.relations_dropped_intra_chain++;
+        continue;
+      }
+      // ELECTION-DROPPED edges (board d055b150): a losing claimant's raw
+      // record_links row still exists here, independent of classify()'s
+      // internal `successors` maps — without this check it would canonicalize
+      // to the elected winner's terminus and re-appear as a relation the
+      // election never elected (its own provenance line was already written
+      // above, in classify()'s disclosures).
+      if (l.rel === 'supersedes' && electionDroppedEdges.has(`${l.source_id}|${l.target_id}`)) {
+        manifest.counts.relations_dropped_by_election++;
         continue;
       }
       const source = canonical(l.source_id);

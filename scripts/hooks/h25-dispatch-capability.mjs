@@ -46,9 +46,25 @@
 // edit mid-work if the dispatch proceeds anyway — this catches the
 // misdispatch before the spawn, exactly like the capability advisory above.
 import { readStdin, allow, warnNonBlocking, loadConfig } from './lib/common.mjs';
+import { hasUnsuppressedMatch, isReviewerClass, escapeRe as escapeReShared } from './lib/dispatch-advisory.mjs';
 import { PIPELINE_AGENT_TYPES, matchesGlob } from '@sterling/schemas';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Harness BUILT-IN subagent types (board a6b76e8c item 2, 2026-08-24 feedback batch: 11
+// of 12 firings in one session): the platform ships these with NO
+// per-project .claude/agents/<type>.md definition file at all — that absence
+// is by design, not a capability gap, so they must never trigger the
+// "capability cannot be checked" advisory below.
+const BUILTIN_AGENT_TYPES = new Set([
+  'general-purpose',
+  'claude',
+  'Explore',
+  'Plan',
+  'fork',
+  'claude-code-guide',
+  'statusline-setup',
+]);
 
 // Platform tools + Sterling MCP short names (decision dc6c1abf6...: derive
 // from the repo's own tool surface, hardcoded here as the current set).
@@ -92,10 +108,15 @@ function wholeTokenRe(tok) {
   return new RegExp(`(?:^|[^\\w])(?:mcp__\\w+__)?${escapeRe(tok)}\\b`, 'i');
 }
 
+// SHARED NEGATION/PROHIBITION CHECK (board a6b76e8c item 1): a tool mention
+// inside a prohibition ("do NOT run Bash"), a subject-of-change verb ("You
+// hold no Bash by design", "implement board_remove in TypeScript"), or a
+// quoted denial ("H14 denies...") must not count as a requirement — see
+// scripts/hooks/lib/dispatch-advisory.mjs for the exact clause-scoped shape.
 function findMentionedTools(text) {
   const t = String(text ?? '');
   if (!t) return [];
-  return KNOWN_TOOLS.filter((tok) => wholeTokenRe(tok).test(t));
+  return KNOWN_TOOLS.filter((tok) => hasUnsuppressedMatch(t, wholeTokenRe(tok)));
 }
 
 // A short MCP name is granted by the bare name OR any mcp-prefixed form
@@ -198,8 +219,12 @@ function hasPathTrigger(text, cwd) {
   }
   const globs = (config?.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   if (!globs.length) return false;
-  const candidates = extractPathCandidates(text);
-  return candidates.some((path) => globs.some((glob) => matchesGlob(path, glob)));
+  const candidates = extractPathCandidates(text).filter((path) => globs.some((glob) => matchesGlob(path, glob)));
+  // SHARED NEGATION CHECK (board a6b76e8c item 1): a test path named only to
+  // FORBID touching it ("DO NOT EDIT tests/export.test.mjs — it is frozen")
+  // must not count as a path trigger. checkSubjectVerb:false — this is a
+  // FILE candidate, not a tool/capability mention (same split as H26).
+  return candidates.some((path) => hasUnsuppressedMatch(text, new RegExp(escapeReShared(path)), { checkSubjectVerb: false }));
 }
 
 // Null when this lint does not apply or does not trigger: non-pipeline types,
@@ -207,7 +232,15 @@ function hasPathTrigger(text, cwd) {
 // trigger all fall through silently, matching the capability advisory's own
 // posture (never a claim it cannot support).
 function testAuthoringAdvisory(subagentType, prompt, cwd) {
-  if (!subagentType || !PIPELINE_AGENT_TYPES.has(subagentType) || subagentType === 'test-writer') return null;
+  if (
+    !subagentType ||
+    !PIPELINE_AGENT_TYPES.has(subagentType) ||
+    subagentType === 'test-writer' ||
+    // board a6b76e8c item 4: a reviewer-class dispatch REVIEWS tests, it
+    // does not author them — never fires the test-authoring advisory.
+    isReviewerClass(subagentType)
+  )
+    return null;
   const text = String(prompt ?? '');
   if (!text) return null;
   if (!hasVerbOrTddTrigger(text) && !hasPathTrigger(text, cwd)) return null;
@@ -253,6 +286,9 @@ try {
 
   const agentPath = join(input.cwd ?? '.', '.claude', 'agents', `${subagentType}.md`);
   if (!existsSync(agentPath)) {
+    // Harness built-in (board a6b76e8c item 2): no definition file by
+    // design, not a capability gap — never fires the no-definition advisory.
+    if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
     // DISTINCT shape from the missing-tool warning: capability cannot be
     // checked at all, and this must not read like a claim about a specific
     // grant it has no way to know.

@@ -1271,6 +1271,85 @@ test('enqueueSystemTodo: file_keys ORDER does not create a false distinction', (
 });
 
 // ---------------------------------------------------------------------------
+// STABLE state_review IDENTITY (board e939fd21). Its file_keys are chosen by
+// the CALLER (tools.ts) as unverifiedPaths-else-first-3-owned, so re-detecting
+// the SAME article's state-honesty debt can present a DIFFERENT file_keys set
+// on successive reads even though the semantic cause never changed — under
+// the universal (system_reason, feature_link, file_keys-SET) key (decision
+// 194f43e4) that mints a fresh duplicate every time the shape shifts. The fix
+// gives state_review ONLY a lane-specific key of {system_reason, feature_link}
+// at the enqueueSystemTodo choke point. Every OTHER lane's per-file dedup
+// (decision 194f43e4) is explicitly UNCHANGED — pinned below as a control.
+// ---------------------------------------------------------------------------
+
+test('enqueueSystemTodo: state_review dedups on {system_reason, feature_link} ALONE — a DIFFERENT file_keys set for the SAME article is the SAME item', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const first = store.enqueueSystemTodo(
+      sysTodo({
+        system_reason: 'state_review',
+        text: "article 'x' declares state 'planned' while its files hold real code",
+        file_keys: ['src/a.ts'],
+      })
+    );
+    assert.equal(first.deduped, false, 'baseline: first detection mints');
+
+    const second = store.enqueueSystemTodo(
+      sysTodo({
+        system_reason: 'state_review',
+        text: "article 'x' roles for src/b.ts are still flagged unverified",
+        file_keys: ['src/b.ts', 'src/c.ts'],
+      })
+    );
+    assert.equal(
+      second.deduped,
+      true,
+      "re-detecting the SAME article's state-honesty debt through a DIFFERENT file_keys set must dedupe, not duplicate — " +
+        'SABOTAGE: reverting the lane exception (keying state_review on the universal per-file key again) makes this go RED (mints a second item)'
+    );
+    assert.equal(second.record.id, first.record.id, 'the surviving item is the ORIGINAL, not a fresh duplicate');
+    assert.equal(
+      store.query({ types: ['todo'], cap: 100 }).filter((t) => (t as Record<string, unknown>).system_reason === 'state_review').length,
+      1
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: state_review CONTROL — a genuinely DIFFERENT article still mints its own separate item', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo({ system_reason: 'state_review', file_keys: ['src/a.ts'], feature_link: ART_1 }));
+    store.enqueueSystemTodo(sysTodo({ system_reason: 'state_review', file_keys: ['src/a.ts'], feature_link: ART_2 }));
+    assert.equal(
+      store.query({ types: ['todo'], cap: 100 }).filter((t) => (t as Record<string, unknown>).system_reason === 'state_review').length,
+      2,
+      'CONTROL: the stable-identity fix is scoped to {system_reason, feature_link} TOGETHER — ' +
+        'SABOTAGE: dropping feature_link from the state_review key too (keying on system_reason alone) makes this go RED (both articles collapse to one item)'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: reconcile_needed CONTROL — per-file dedup semantics (decision 194f43e4) are UNCHANGED by the state_review fix', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo({ system_reason: 'reconcile_needed', file_keys: ['src/a.ts'] }));
+    store.enqueueSystemTodo(sysTodo({ system_reason: 'reconcile_needed', file_keys: ['src/b.ts'] }));
+    assert.equal(
+      store.query({ types: ['todo'], cap: 100 }).filter((t) => (t as Record<string, unknown>).system_reason === 'reconcile_needed').length,
+      2,
+      'CONTROL: the exception must be LANE-SPECIFIC to state_review — ' +
+        'SABOTAGE: widening it to drop file_keys from the key for every lane makes this go RED (silently re-introduces the exact silent-loss bug decision 194f43e4 fixed)'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // relied_by DERIVED AT READ TIME (board 9641e01b, option (b)): relies_on stays
 // author-written; relied_by is computed from the union of every other active
 // feature_article's relies_on naming this article's slug — on get() AND

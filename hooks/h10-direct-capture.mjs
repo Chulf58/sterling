@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { spawnSync as spawnSync3 } from "node:child_process";
-import { readFileSync as readFileSync2, writeFileSync, rmSync, existsSync as existsSync4, mkdirSync as mkdirSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { readFileSync as readFileSync3, writeFileSync, rmSync as rmSync2, existsSync as existsSync4, mkdirSync as mkdirSync3, renameSync } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4140,6 +4140,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4418,7 +4426,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5568,8 +5582,8 @@ var SterlingStore = class _SterlingStore {
    * which fields may change.
    *
    * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of the wave.
-   * lifecycle is likewise preserved: retirement happens ONLY through
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
    * supersede/retireInFavorOf.
    */
   updateRecord(id, patch, opts = {}) {
@@ -5772,12 +5786,21 @@ var SterlingStore = class _SterlingStore {
     if (candidate.type !== "todo" || candidate.source !== "system") {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
     }
+    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
+      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
+    }
     const keyOf = (t) => {
-      const files = [...t.file_keys ?? []].sort();
+      const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
     };
     const wantKey = keyOf(candidate);
+    const textsEquivalent = (a, b) => {
+      if (candidate.system_reason !== "state_review")
+        return a === b;
+      const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+      return strip(a) === strip(b);
+    };
     let existing;
     let textUpdated = false;
     this.tx(() => {
@@ -5795,9 +5818,18 @@ var SterlingStore = class _SterlingStore {
         this.insertRecord(candidate);
         return;
       }
-      if ((existing.text ?? "") !== (candidate.text ?? "")) {
-        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({ ...cur, text: candidate.text, updated_at: candidate.updated_at }), {});
-        textUpdated = true;
+      const priorFiles = [...existing.file_keys ?? []].sort();
+      const nextFiles = [...candidate.file_keys ?? []].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
+      if (textChanged || filesChanged) {
+        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
+          ...cur,
+          updated_at: candidate.updated_at,
+          ...textChanged ? { text: candidate.text } : {},
+          ...filesChanged ? { file_keys: candidate.file_keys } : {}
+        }), {});
+        textUpdated = textChanged;
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
@@ -6015,6 +6047,50 @@ var SterlingStore = class _SterlingStore {
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
     return row.n;
   }
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts, minScore) {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore);
+    return row.n;
+  }
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  ftsMatchExpr(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
@@ -6022,8 +6098,7 @@ var SterlingStore = class _SterlingStore {
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        const joiner = opts.match_all ? " AND " : " OR ";
-        const match = terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+        const match = this.ftsMatchExpr(terms, opts.match_all);
         const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
@@ -6800,8 +6875,165 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/hooks/lib/settlement.mjs
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync2, mkdirSync as mkdirSync2, rmSync, statSync } from "node:fs";
+import { join as join2 } from "node:path";
+var LOCK_DEADLINE_MS = 150;
+var LOCK_STALE_MS = 3e3;
+var LOCK_POLL_MS = 20;
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withFileLock(targetPath, fn, { onTimeout } = {}) {
+  const lockPath = `${targetPath}.lock`;
+  const deadline = Date.now() + LOCK_DEADLINE_MS;
+  let acquired = false;
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync2(lockPath);
+      acquired = true;
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      sleepMs(LOCK_POLL_MS);
+    }
+  }
+  if (!acquired && onTimeout) {
+    try {
+      onTimeout();
+    } catch {
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (acquired) {
+      try {
+        rmSync(lockPath, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  }
+}
+function parseTouchesContent(raw) {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[")) {
+    try {
+      const arr = JSON.parse(trimmed);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
+  const out = [];
+  for (const line of trimmed.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj && typeof obj === "object") out.push(obj);
+    } catch {
+    }
+  }
+  return out;
+}
+function hashFile(root, rel) {
+  try {
+    return createHash("sha256").update(readFileSync2(join2(root, rel))).digest("hex");
+  } catch {
+    return void 0;
+  }
+}
+function contentChangedAgainstBaseline(root, rel, baselines) {
+  const baseline = baselines?.[rel];
+  if (baseline === void 0) return false;
+  const current = hashFile(root, rel);
+  if (current === void 0) return true;
+  return current !== baseline;
+}
+function loadGeneratedProjections(root) {
+  try {
+    const raw = readFileSync2(join2(root, ".sterling", "config.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    const list = parsed?.generated_projections;
+    return new Set(Array.isArray(list) ? list : []);
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function buildReconcileItem(article, fileKeys, now) {
+  return {
+    id: randomUUID2(),
+    type: "todo",
+    created_at: now,
+    updated_at: now,
+    author: "system",
+    status: "active",
+    superseded_by: null,
+    links: [],
+    scope: "project",
+    stack_tags: [],
+    text: article.type === "reference_material" ? `reconcile reference '${article.title}' \u2014 its document changed content in direct mode (settled): ${fileKeys.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${article.slug}' \u2014 owned file(s) changed content in direct mode (settled): ${fileKeys.join(", ")}`,
+    source: "system",
+    system_reason: "reconcile_needed",
+    file_keys: fileKeys,
+    feature_link: article.id
+  };
+}
+function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE__ */ new Date()).toISOString()) {
+  const exempt = loadGeneratedProjections(root);
+  const paths = [...new Set((candidatePaths ?? []).filter(Boolean))].filter((rel) => !exempt.has(rel));
+  if (!paths.length) return [];
+  const openByArticle = /* @__PURE__ */ new Map();
+  for (const t of store2.query({ types: ["todo"], cap: 1e3 })) {
+    if (t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link && !openByArticle.has(t.feature_link)) {
+      openByArticle.set(t.feature_link, t);
+    }
+  }
+  const byArticle = /* @__PURE__ */ new Map();
+  for (const rel of paths) {
+    const owners = store2.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+    for (const article of owners) {
+      if (!byArticle.has(article.id)) byArticle.set(article.id, { article, freshPaths: /* @__PURE__ */ new Set() });
+      byArticle.get(article.id).freshPaths.add(rel);
+    }
+  }
+  const minted = [];
+  for (const { article, freshPaths } of byArticle.values()) {
+    const existing = openByArticle.get(article.id);
+    const existingSet = new Set((existing?.file_keys ?? []).filter((k) => !exempt.has(k)));
+    const newlyDrifted = [...freshPaths].filter((rel) => !existingSet.has(rel)).filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
+    if (!newlyDrifted.length) continue;
+    if (!existing) {
+      const fileKeys = newlyDrifted.sort();
+      store2.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now));
+      minted.push({ article_id: article.id, paths: fileKeys });
+      continue;
+    }
+    const widened = [.../* @__PURE__ */ new Set([...existingSet, ...newlyDrifted])].sort();
+    const { record: widenedRecord } = store2.enqueueSystemTodo(buildReconcileItem(article, widened, now));
+    for (const t of store2.query({ types: ["todo"], cap: 1e3 })) {
+      if (t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link === article.id && t.id !== widenedRecord.id) {
+        store2.remove(t.id, now);
+      }
+    }
+    minted.push({ article_id: article.id, paths: widened });
+  }
+  return minted;
+}
+
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync as statSync2, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync3(path)) return null;
@@ -6838,7 +7070,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync(path).size > TAIL_BYTES;
+  const exhausted = statSync2(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
@@ -6846,10 +7078,66 @@ function fillPct(usage, windowSize) {
   return 100 * used / windowSize;
 }
 
-// scripts/lib/test-integrity.mjs
+// scripts/hooks/lib/dispatch-residue.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
+
+// scripts/hooks/lib/dispatch-advisory.mjs
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+
+// scripts/hooks/lib/dispatch-residue.mjs
+function isOrphan(entry, staleMinutes, nowMs = Date.now()) {
+  const t = Date.parse(entry?.at ?? "");
+  if (Number.isNaN(t)) return true;
+  return nowMs - t > staleMinutes * 6e4;
+}
+function probeDirtyPaths(projectDir, files) {
+  const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
+  if (declared.length === 0) return { verified: true, dirty: [] };
+  let r;
+  try {
+    r = spawnSync2("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
+      cwd: projectDir,
+      encoding: "utf8",
+      timeout: 1e4
+    });
+  } catch (err) {
+    return { verified: false, dirty: declared, reason: String(err?.message ?? err).slice(0, 200) };
+  }
+  if (r.error || r.status !== 0) {
+    const reason = String(r.error?.message || r.stderr || "git status failed").trim().slice(0, 200);
+    return { verified: false, dirty: declared, reason };
+  }
+  const flagged = /* @__PURE__ */ new Set();
+  const tokens = String(r.stdout ?? "").split("\0").filter((t) => t.length > 0);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length < 3) continue;
+    const status = token.slice(0, 2);
+    const path = token.slice(3);
+    flagged.add(path);
+    if ((status[0] === "R" || status[1] === "R" || status[0] === "C" || status[1] === "C") && i + 1 < tokens.length) {
+      flagged.add(tokens[i + 1]);
+      i++;
+    }
+  }
+  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+}
+function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
+  const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
+  const list = (Array.isArray(paths) && paths.length ? paths : ["<no declared files>"]).join(", ");
+  const marker = verified ? "" : ` [tree-state-unverified${reason ? `: ${reason}` : ""}]`;
+  return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
+}
+
+// scripts/lib/test-integrity.mjs
+import { spawnSync as spawnSync3 } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
-  const r = spawnSync2("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync3("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
@@ -6873,17 +7161,84 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 }
 
 // scripts/hooks/h10-direct-capture.mjs
+function computeDeadDispatchResidue(cwd, sessionId) {
+  const registerPath = join3(cwd, ".sterling", "transient", "dispatch-register.json");
+  let raw = [];
+  try {
+    if (existsSync4(registerPath)) {
+      const parsed = JSON.parse(readFileSync3(registerPath, "utf8"));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  let staleMinutes = 60;
+  try {
+    staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
+  } catch {
+  }
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const nowMs = Date.parse(nowIso);
+  const lines = [];
+  const stampIds = /* @__PURE__ */ new Set();
+  for (const entry of raw) {
+    if (!entry || entry.session_id !== sessionId) continue;
+    if (!isOrphan(entry, staleMinutes, nowMs)) continue;
+    if (entry.residue_reported_at) continue;
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue;
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    stampIds.add(entry.agent_id);
+  }
+  if (stampIds.size) {
+    try {
+      let fresh = [];
+      try {
+        if (existsSync4(registerPath)) {
+          const parsed = JSON.parse(readFileSync3(registerPath, "utf8"));
+          if (Array.isArray(parsed)) fresh = parsed;
+        }
+      } catch {
+        fresh = [];
+      }
+      for (const entry of fresh) {
+        if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
+          entry.residue_reported_at = nowIso;
+        }
+      }
+      const transient = join3(cwd, ".sterling", "transient");
+      mkdirSync3(transient, { recursive: true });
+      const tmpPath = join3(transient, `dispatch-register.json.tmp-${process.pid}`);
+      writeFileSync(tmpPath, JSON.stringify(fresh));
+      renameSync(tmpPath, registerPath);
+    } catch {
+    }
+  }
+  return lines;
+}
 var input = readStdin();
+var residueLines = (() => {
+  try {
+    return computeDeadDispatchResidue(input.cwd, input.session_id);
+  } catch {
+    return [];
+  }
+})();
 var store = openStore(input.cwd);
-if (!store) allow();
-var touchesPath = join2(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join2(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join2(input.cwd, ".sterling", "transient", "capture-nagged.json");
+if (!store) {
+  if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
+  allow();
+}
+var touchesPath = join3(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join3(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join3(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   if (store.getRun()) allow();
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const pressureMarker = join2(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join3(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const pressure = (() => {
     try {
       const cw = config.context_watch;
@@ -6905,8 +7260,8 @@ try {
           sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
         }
       }
-      mkdirSync2(join2(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync(join2(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync3(join3(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync(join3(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -6919,7 +7274,7 @@ try {
   const dirtyPaths = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      const st = spawnSync3("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      const st = spawnSync4("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
       if (st.status !== 0) {
         store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
         return 0;
@@ -6934,48 +7289,48 @@ try {
     }
   })();
   const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
-  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
+  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join3(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
   const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% (${pressure.window}-tok window) \u2192 finish/commit open work, delegate reads & mechanical work to subagents (P1).${boundaryLine()} Once committed: ${rotationCmd} --next-slice "<next slice>" (--objective/--risks/--pointers optional), then say READY TO CLEAR.` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync2(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync3(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join2(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const gaugeMarker = join3(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync2(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync3(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
   const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 measured against the ${pressure.window}-tok default (may mislead). Add context_watch.windows["${pressure.unmapped_model}"] to .sterling/config.json. (once per session)`;
-  const delegationMarker = join2(input.cwd, ".sterling", "transient", "delegation-nagged.json");
+  const delegationMarker = join3(input.cwd, ".sterling", "transient", "delegation-nagged.json");
   const delegationSpent = () => {
     try {
-      return !!input.session_id && JSON.parse(readFileSync2(delegationMarker, "utf8")).session_id === input.session_id;
+      return !!input.session_id && JSON.parse(readFileSync3(delegationMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const articleWritesPath = join2(input.cwd, ".sterling", "transient", "article-writes.json");
+  const articleWritesPath = join3(input.cwd, ".sterling", "transient", "article-writes.json");
   const readArticleWrites = () => {
     try {
-      const raw = JSON.parse(readFileSync2(articleWritesPath, "utf8"));
+      const raw = JSON.parse(readFileSync3(articleWritesPath, "utf8"));
       return raw.session_id === input.session_id && Number.isFinite(raw.count) ? raw.count : 0;
     } catch {
       return 0;
     }
   };
-  const statsPath = join2(input.cwd, ".sterling", "transient", "delegation-stats.json");
+  const statsPath = join3(input.cwd, ".sterling", "transient", "delegation-stats.json");
   const writeDelegationStats = (stats) => {
     try {
-      mkdirSync2(join2(input.cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync3(join3(input.cwd, ".sterling", "transient"), { recursive: true });
       writeFileSync(statsPath, JSON.stringify(stats));
     } catch {
     }
@@ -6996,7 +7351,7 @@ try {
       let soloDispatches = 0;
       let assistantEntries = 0;
       let contentArrays = 0;
-      for (const line of readFileSync2(tPath, "utf8").split("\n")) {
+      for (const line of readFileSync3(tPath, "utf8").split("\n")) {
         if (!line.trim()) continue;
         let entry;
         try {
@@ -7078,27 +7433,65 @@ try {
     if (disclosureParts.length) process.stdout.write(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }));
     allow();
   };
+  const touchesClaimPath = `${touchesPath}.claim`;
   let touches = [];
-  if (existsSync4(touchesPath)) {
-    touches = JSON.parse(readFileSync2(touchesPath, "utf8"));
-  }
+  withFileLock(
+    touchesPath,
+    () => {
+      let orphanedTouches = [];
+      if (existsSync4(touchesClaimPath)) {
+        try {
+          orphanedTouches = parseTouchesContent(readFileSync3(touchesClaimPath, "utf8"));
+        } catch {
+          orphanedTouches = [];
+        }
+      }
+      let freshTouches = [];
+      try {
+        renameSync(touchesPath, touchesClaimPath);
+        freshTouches = parseTouchesContent(readFileSync3(touchesClaimPath, "utf8"));
+      } catch (e) {
+        if (e && e.code !== "ENOENT") throw e;
+      }
+      touches = [...orphanedTouches, ...freshTouches];
+      if (orphanedTouches.length) writeFileSync(touchesClaimPath, JSON.stringify(touches));
+    },
+    { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
+  );
+  const discardTouchesClaim = () => {
+    withFileLock(
+      touchesPath,
+      () => rmSync2(touchesClaimPath, { force: true }),
+      { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
+    );
+  };
+  const releaseTouchesClaim = () => {
+    withFileLock(
+      touchesPath,
+      () => {
+        if (existsSync4(touchesClaimPath) && !existsSync4(touchesPath)) renameSync(touchesClaimPath, touchesPath);
+      },
+      { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
+    );
+  };
+  let settlementFailed = false;
   let sessionEvents = [];
   try {
     if (existsSync4(eventsPath)) {
-      const raw = JSON.parse(readFileSync2(eventsPath, "utf8"));
+      const raw = JSON.parse(readFileSync3(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync4(join2(input.cwd, p))
+    (p) => existsSync4(join3(input.cwd, p))
   );
   let dispatchEntries = [];
   try {
-    const registerPath = join2(input.cwd, ".sterling", "transient", "dispatch-register.json");
+    const registerPath = join3(input.cwd, ".sterling", "transient", "dispatch-register.json");
     if (existsSync4(registerPath)) {
-      const raw = JSON.parse(readFileSync2(registerPath, "utf8"));
+      const raw = JSON.parse(readFileSync3(registerPath, "utf8"));
       if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
     }
   } catch {
@@ -7127,9 +7520,12 @@ try {
     }
   }
   const isDeferred = (p) => deferredOwners.has(joinKey(p));
-  const deferredPaths = touchedExisting.filter(isDeferred);
+  const allTouchedPaths = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))];
+  const deferredPaths = allTouchedPaths.filter(isDeferred);
+  const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
   const disclosureParts = [];
+  if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     disclosureParts.push(
       `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}] \u2014 duty re-arms when they land`
@@ -7143,13 +7539,29 @@ try {
     );
   }
   const clearRegisters = () => {
-    if (!deferredPaths.length) {
-      rmSync(touchesPath, { force: true });
-      rmSync(eventsPath, { force: true });
+    if (deferredPaths.length || settlementFailed) {
+      releaseTouchesClaim();
+    } else {
+      discardTouchesClaim();
     }
-    rmSync(nagMarker, { force: true });
+    if (!deferredPaths.length) {
+      rmSync2(eventsPath, { force: true });
+    }
+    rmSync2(nagMarker, { force: true });
+  };
+  const runSettlement = () => {
+    try {
+      mintSettlementReconcile(store, input.cwd, settlementCandidates, now);
+    } catch (e) {
+      settlementFailed = true;
+      try {
+        store.recordCheckSkipped("h10-settlement-mint", String(e && e.message || e), void 0, now);
+      } catch {
+      }
+    }
   };
   if (!touches.length && !sessionEvents.length) {
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
@@ -7193,13 +7605,14 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join2(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join3(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
@@ -7245,7 +7658,7 @@ try {
   }
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync3("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+    const head = spawnSync4("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4
@@ -7260,18 +7673,20 @@ try {
   const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     if (!existsSync4(nagMarker)) {
       writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+      releaseTouchesClaim();
       releaseWithPressure();
     }
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
       store.enqueueSystemTodo({
-        id: randomUUID2(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -7287,6 +7702,7 @@ try {
         file_keys: activePaths.slice(0, 20)
       });
     }
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
@@ -7303,7 +7719,7 @@ try {
   if (!input.stop_hook_active && !existsSync4(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [...disclosureParts];
-    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join2(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
+    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join3(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
     if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;
       const declareLine = `no_capture (${noCaptureCmd} --reason "<why>") if nothing durable, or capture_pending if riding an in-flight commit/agent \u2014 a false declaration is drift`;
@@ -7342,6 +7758,7 @@ try {
       spendDelegationMarker();
       parts.push(delegationPart());
     }
+    releaseTouchesClaim();
     deny(`${H10_HEADER}
 ${parts.join("\n\n")}`);
   }
@@ -7349,7 +7766,7 @@ ${parts.join("\n\n")}`);
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
-        id: randomUUID2(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -7369,7 +7786,7 @@ ${parts.join("\n\n")}`);
   if (articleDemand) {
     const overlapping = store.query({ types: ["todo"], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
     store.enqueueSystemTodo({
-      id: randomUUID2(),
+      id: randomUUID3(),
       type: "todo",
       created_at: now,
       updated_at: now,
@@ -7388,7 +7805,7 @@ ${parts.join("\n\n")}`);
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
       store.enqueueSystemTodo({
-        id: randomUUID2(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -7409,7 +7826,7 @@ ${parts.join("\n\n")}`);
     if (!open) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
-        id: randomUUID2(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -7425,6 +7842,7 @@ ${parts.join("\n\n")}`);
       });
     }
   }
+  runSettlement();
   clearRegisters();
   releaseWithPressure();
 } catch (e) {

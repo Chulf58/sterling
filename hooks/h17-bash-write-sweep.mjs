@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, statSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { join as join2, dirname as dirname3, relative, resolve as resolve2, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
@@ -4136,6 +4136,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4414,7 +4422,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5565,8 +5579,8 @@ var SterlingStore = class _SterlingStore {
    * which fields may change.
    *
    * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of the wave.
-   * lifecycle is likewise preserved: retirement happens ONLY through
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
    * supersede/retireInFavorOf.
    */
   updateRecord(id, patch, opts = {}) {
@@ -5769,12 +5783,21 @@ var SterlingStore = class _SterlingStore {
     if (candidate.type !== "todo" || candidate.source !== "system") {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
     }
+    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
+      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
+    }
     const keyOf = (t) => {
-      const files = [...t.file_keys ?? []].sort();
+      const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
     };
     const wantKey = keyOf(candidate);
+    const textsEquivalent = (a, b) => {
+      if (candidate.system_reason !== "state_review")
+        return a === b;
+      const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+      return strip(a) === strip(b);
+    };
     let existing;
     let textUpdated = false;
     this.tx(() => {
@@ -5792,9 +5815,18 @@ var SterlingStore = class _SterlingStore {
         this.insertRecord(candidate);
         return;
       }
-      if ((existing.text ?? "") !== (candidate.text ?? "")) {
-        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({ ...cur, text: candidate.text, updated_at: candidate.updated_at }), {});
-        textUpdated = true;
+      const priorFiles = [...existing.file_keys ?? []].sort();
+      const nextFiles = [...candidate.file_keys ?? []].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
+      if (textChanged || filesChanged) {
+        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
+          ...cur,
+          updated_at: candidate.updated_at,
+          ...textChanged ? { text: candidate.text } : {},
+          ...filesChanged ? { file_keys: candidate.file_keys } : {}
+        }), {});
+        textUpdated = textChanged;
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
@@ -6012,6 +6044,50 @@ var SterlingStore = class _SterlingStore {
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
     return row.n;
   }
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts, minScore) {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore);
+    return row.n;
+  }
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  ftsMatchExpr(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
@@ -6019,8 +6095,7 @@ var SterlingStore = class _SterlingStore {
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        const joiner = opts.match_all ? " AND " : " OR ";
-        const match = terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+        const match = this.ftsMatchExpr(terms, opts.match_all);
         const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
@@ -7021,6 +7096,35 @@ function validateStateKey(cwd2, key) {
   if (abs !== root && !abs.startsWith(root + sep)) return null;
   return fwd;
 }
+function coveringPreDirtyPath(preDirty, rel) {
+  if (typeof rel !== "string" || !rel) return null;
+  if (preDirty.has(rel)) return rel;
+  if (rel === "." || rel.split("/").includes("")) return null;
+  for (let i = rel.lastIndexOf("/"); i > 0; i = rel.lastIndexOf("/", i - 1)) {
+    const candidate = rel.slice(0, i);
+    if (preDirty.has(candidate)) return candidate;
+  }
+  return null;
+}
+function recordedDescendantState(ancestorState, ancestor, rel) {
+  let node = ancestorState;
+  let at = ancestor;
+  let i = ancestor.length;
+  while (i < rel.length) {
+    if (!isStateObject(node) || node.type !== "dir" || !isStateObject(node.children)) {
+      throw new Error(
+        `per-call Pre-STATE record has '${at}' as a NON-DIRECTORY while resolving '${rel}' under the recorded pre-dirty path '${ancestor}' \u2014 the recorded topology and the swept path disagree, so this command's writes cannot be told from pre-existing ones`
+      );
+    }
+    const next = rel.indexOf("/", i + 1);
+    const childKey = next === -1 ? rel : rel.slice(0, next);
+    if (!Object.prototype.hasOwnProperty.call(node.children, childKey)) return null;
+    node = node.children[childKey];
+    at = childKey;
+    i = next === -1 ? rel.length : next;
+  }
+  return node;
+}
 function lstatKind(abs) {
   try {
     const st = lstatSync(abs);
@@ -7049,26 +7153,79 @@ function sha256OfRegularFile(abs) {
 function toRel(cwd2, abs) {
   return relative(cwd2, abs).replace(/\\/g, "/");
 }
-function collectBaseline(cwd2) {
-  const map = {};
-  const walk = (absDir) => {
-    if (!existsSync3(absDir)) return;
-    for (const name of readdirSync(absDir)) {
-      const abs = join2(absDir, name);
-      if (statSync(abs).isDirectory()) walk(abs);
-      else map[toRel(cwd2, abs)] = readFileSync2(abs, "utf8");
-    }
-  };
-  walk(join2(cwd2, ".claude", "agents"));
-  const claudeDir = join2(cwd2, ".claude");
-  if (existsSync3(claudeDir)) {
-    for (const name of readdirSync(claudeDir)) {
-      const rel = ".claude/" + name;
-      if (matchesGlob(rel, ".claude/settings*.json")) map[rel] = readFileSync2(join2(cwd2, rel), "utf8");
+function classifyPathComponents(cwd2, rel) {
+  const segments = rel.split("/");
+  let abs = cwd2;
+  let soFar = "";
+  for (let i = 0; i < segments.length; i++) {
+    abs = join2(abs, segments[i]);
+    soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
+    const kind = lstatKind(abs);
+    if (kind === "absent") return "absent";
+    if (i === segments.length - 1) return kind;
+    if (kind !== "dir") {
+      throw new Error(
+        `(B) baseline path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+      );
     }
   }
-  const cfg = join2(cwd2, ".sterling", "config.json");
-  if (existsSync3(cfg)) map[".sterling/config.json"] = readFileSync2(cfg, "utf8");
+  return "absent";
+}
+function collectBaseline(cwd2) {
+  const map = {};
+  const walkDir = (absDir, relDir) => {
+    const kind = lstatKind(absDir);
+    if (kind === "absent") return;
+    if (kind !== "dir") {
+      throw new Error(
+        `(B) baseline path '${relDir}' is not a directory (lstat kind: ${kind}) \u2014 refusing to read through it; a symlink or other non-regular entry standing in for a (B) directory is denied on sight, never followed`
+      );
+    }
+    for (const de of readdirSync(absDir, { withFileTypes: true })) {
+      const abs = join2(absDir, de.name);
+      const rel = relDir ? `${relDir}/${de.name}` : de.name;
+      if (de.isSymbolicLink()) {
+        throw new Error(
+          `(B) baseline path '${rel}' is a symlink \u2014 refusing to read through it (it may point outside the repository); denied on sight, never followed`
+        );
+      }
+      if (de.isDirectory()) {
+        walkDir(abs, rel);
+      } else if (de.isFile()) {
+        map[toRel(cwd2, abs)] = readFileSync2(abs).toString("base64");
+      } else {
+        throw new Error(`(B) baseline path '${rel}' is not a regular file or directory (unsupported type) \u2014 refusing to read it`);
+      }
+    }
+  };
+  const agentsKind = classifyPathComponents(cwd2, ".claude/agents");
+  if (agentsKind === "dir") {
+    walkDir(join2(cwd2, ".claude", "agents"), ".claude/agents");
+  } else if (agentsKind !== "absent") {
+    throw new Error(`'.claude/agents' is not a directory (lstat kind: ${agentsKind}) \u2014 refusing to read/walk through it; denied on sight, never followed`);
+  }
+  const claudeKind = classifyPathComponents(cwd2, ".claude");
+  if (claudeKind === "dir") {
+    for (const de of readdirSync(join2(cwd2, ".claude"), { withFileTypes: true })) {
+      const rel = ".claude/" + de.name;
+      if (!matchesGlob(rel, ".claude/settings*.json")) continue;
+      if (!de.isFile()) {
+        throw new Error(
+          `(B) baseline path '${rel}' is not a regular file (lstat kind: ${de.isSymbolicLink() ? "symlink" : "other"}) \u2014 refusing to read through it; denied on sight, never followed`
+        );
+      }
+      map[rel] = readFileSync2(join2(cwd2, rel)).toString("base64");
+    }
+  } else if (claudeKind !== "absent") {
+    throw new Error(`'.claude' is not a directory (lstat kind: ${claudeKind}) \u2014 refusing to read the (B) baseline surface through it`);
+  }
+  const cfgRel = ".sterling/config.json";
+  const cfgKind = classifyPathComponents(cwd2, cfgRel);
+  if (cfgKind === "file") {
+    map[cfgRel] = readFileSync2(join2(cwd2, cfgRel)).toString("base64");
+  } else if (cfgKind !== "absent") {
+    throw new Error(`(B) baseline path '${cfgRel}' is not a regular file (lstat kind: ${cfgKind}) \u2014 refusing to read through it; denied on sight, never followed`);
+  }
   return map;
 }
 function validateBaselineKey(key) {
@@ -7081,8 +7238,24 @@ function validateBaselineKey(key) {
 }
 function writeUnder(cwd2, rel, content) {
   const abs = join2(cwd2, rel);
+  const segments = rel.split("/");
+  const ancestorRel = segments.slice(0, -1).join("/");
+  if (ancestorRel) {
+    const ancestorKind = classifyPathComponents(cwd2, ancestorRel);
+    if (ancestorKind !== "dir" && ancestorKind !== "absent") {
+      throw new Error(
+        `refusing to restore (B) baseline path '${rel}': ancestor '${ancestorRel}' is not a directory (lstat kind: ${ancestorKind}) \u2014 a symlink or other non-regular ancestor is never created through or written through by a restore`
+      );
+    }
+  }
+  const kind = lstatKind(abs);
+  if (kind !== "file" && kind !== "absent") {
+    throw new Error(
+      `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink or other non-regular entry is never written through by a restore`
+    );
+  }
   mkdirSync2(dirname3(abs), { recursive: true });
-  writeFileSync(abs, content);
+  writeFileSync(abs, Buffer.from(content, "base64"));
 }
 function parsePorcelainZ(out) {
   const tokens = out.split("\0");
@@ -7299,14 +7472,33 @@ try {
         )
       );
     }
+    let recordedDirty;
     try {
-      preDirty = new Set(JSON.parse(readFileSync2(dPath, "utf8")));
+      recordedDirty = JSON.parse(readFileSync2(dPath, "utf8"));
     } catch {
       deny(
         environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`, {
           agentId: input.agent_id
         })
       );
+    }
+    if (!Array.isArray(recordedDirty)) {
+      deny(
+        environmentDefectDenial("H17", `attribution record '${dPath}' is not an array of paths \u2014 cannot attribute writes; failing closed (P5).`, {
+          agentId: input.agent_id
+        })
+      );
+    }
+    for (const entry of recordedDirty) {
+      const norm = typeof entry === "string" ? entry.replace(/\/+$/, "") : "";
+      const segments = norm ? norm.split("/") : [];
+      const malformed = !norm || segments.some((s2) => s2 === "" || s2 === "." || s2 === "..");
+      if (malformed) {
+        deny(
+          `H17: crafted attribution record entry rejected (${JSON.stringify(entry)} \u2014 not a well-formed repo-relative path: empty, '.', '..' or an empty segment). An entry that cannot be matched silently withdraws restore protection from everything under it, so it is refused BEFORE the sweep runs; no write performed, failing closed (P5). NOTE the limit of this check: it rejects malformed SHAPES, and cannot detect a tampered entry that names a different WELL-FORMED path \u2014 that residual is the forged-record class decision 2422e76a already accepts.`
+        );
+      }
+      preDirty.add(norm);
     }
     const key = callKey(input.tool_use_id);
     if (!key) {
@@ -7381,17 +7573,22 @@ try {
   for (const [rel, p] of sweep) {
     const isViolation = isEnforcementSurface(rel) || matchesGlob(rel, "hooks/**") || brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny;
     if (isViolation) {
-      if (preDirty.has(rel)) {
+      const coveringPre = coveringPreDirtyPath(preDirty, rel);
+      if (coveringPre) {
         if (!preState) {
           preExisting.push(rel);
           continue;
         }
-        if (!preState.has(rel)) {
+        if (!preState.has(coveringPre)) {
           throw new Error(
-            `per-call Pre-STATE record has no entry for the pre-dirty path '${rel}' \u2014 the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
+            `per-call Pre-STATE record has no entry for the pre-dirty path '${coveringPre}'` + (coveringPre === rel ? "" : ` (the recorded ancestor covering the swept path '${rel}')`) + ` \u2014 the attribution record and the state record disagree, so this command's writes cannot be told from pre-existing ones`
           );
         }
-        const wasState = preState.get(rel);
+        let wasState = preState.get(coveringPre);
+        if (coveringPre !== rel) {
+          const recordedChild = recordedDescendantState(wasState, coveringPre, rel);
+          wasState = recordedChild ?? { exists: false, index: null };
+        }
         const nowState = pathState(cwd, rel, postIndex);
         if (sameState(wasState, nowState)) continue;
         if (stampCouldAttest(wasState, nowState)) {
@@ -7492,7 +7689,15 @@ try {
       parts.push(
         environmentDefectDenial(
           "H17",
-          `PRE-EXISTING change(s), already dirty before this command and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
+          // "or inside one that was" is load-bearing since coverage became
+          // ancestor-aware (board 7dd39b85): a path here may be a DESCENDANT of
+          // a recorded dirty directory rather than recorded itself, and for a
+          // file the command genuinely created inside such a directory the bare
+          // claim "already dirty before this command" is false. The disposition
+          // is unchanged and still correct — not attributed, not reverted —
+          // but a denial that states a falsehood about the agent's own write is
+          // exactly the misdirection the discriminator rule forbids.
+          `PRE-EXISTING change(s), already dirty before this command (or inside a directory that was) and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
           // landed, this blanket denial fires ONLY when there is no record to
           // compare against — so it must say which input it lacked, or the
           // degrade is silent and indistinguishable from the old behaviour.

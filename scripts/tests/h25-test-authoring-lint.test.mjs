@@ -177,7 +177,11 @@ test('H25-TAL WARN verb (1): coder told to "write failing tests first, then impl
   }
 });
 
-test('H25-TAL WARN verb (2): reviewer-correctness told to "author tests for" the export function → advisory', () => {
+// board a6b76e8c (2026-08-24): reviewer-class dispatches never fire the
+// test-authoring advisory — the measured review-not-author false-positive
+// class. Even a genuine authoring instruction to a reviewer stays silent
+// here: H5 remains the hard wall that DENIES the actual test edit.
+test('H25-TAL verb (2): reviewer-correctness told to "author tests for" → SILENT (reviewer-class exempt, board a6b76e8c; H5 is the wall)', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeAgentDef(dir, 'reviewer-correctness');
@@ -188,7 +192,7 @@ test('H25-TAL WARN verb (2): reviewer-correctness told to "author tests for" the
       }),
       dir
     );
-    assertTestAuthoringWarn(r, { agentType: 'reviewer-correctness' });
+    assertNoTestAuthoringAdvisory(r);
   } finally {
     cleanup();
   }
@@ -250,7 +254,9 @@ test('H25-TAL WARN verb (5): implementation-architect told to "create tests befo
 // without an authoring verb accompanying it.
 // ---------------------------------------------------------------------------
 
-test('H25-TAL WARN path, no verb (6): reviewer-security brief names tests/export.test.mjs (tests/** glob) → advisory', () => {
+// board a6b76e8c: a reviewer named a test path to REVIEW it — the exact
+// measured false-positive shape. Reviewer-class exempt; silent.
+test('H25-TAL path, no verb (6): reviewer-security brief names tests/export.test.mjs → SILENT (reviewer-class exempt, board a6b76e8c)', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeAgentDef(dir, 'reviewer-security');
@@ -261,13 +267,15 @@ test('H25-TAL WARN path, no verb (6): reviewer-security brief names tests/export
       }),
       dir
     );
-    assertTestAuthoringWarn(r, { agentType: 'reviewer-security' });
+    assertNoTestAuthoringAdvisory(r);
   } finally {
     cleanup();
   }
 });
 
-test('H25-TAL WARN path, no verb (7): reviewer-performance brief names packages/store/src/foo.test.mjs (**/*.test.mjs glob) → advisory', () => {
+// board a6b76e8c: reviewer-class exempt — reading fixture data from a test
+// path is review-shaped work, the measured false-positive class. Silent.
+test('H25-TAL path, no verb (7): reviewer-performance brief names packages/store/src/foo.test.mjs → SILENT (reviewer-class exempt, board a6b76e8c)', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeAgentDef(dir, 'reviewer-performance');
@@ -278,7 +286,7 @@ test('H25-TAL WARN path, no verb (7): reviewer-performance brief names packages/
       }),
       dir
     );
-    assertTestAuthoringWarn(r, { agentType: 'reviewer-performance' });
+    assertNoTestAuthoringAdvisory(r);
   } finally {
     cleanup();
   }

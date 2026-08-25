@@ -350,6 +350,15 @@ export const todoSchema = base
     // a parent record — absent means standalone. The 'standalone' sentinel is
     // normalized to absent at the TOOL layer; the schema stores what it gets.
     objective: z.string().min(1).optional(),
+    // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+    // commit this item's evidence was read at. Server-stamped on board_add and
+    // re-stamped on a board_update that changes text/file_keys; a caller MAY
+    // supply it, and the tool layer refuses an unresolvable sha by name rather
+    // than silently replacing it with HEAD (P5).
+    measured_at_head: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/, '40-hex commit sha required')
+      .optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
@@ -688,6 +697,34 @@ export function digestRecord(record: Record<string, unknown>): Record<string, un
   return out;
 }
 
+/**
+ * projection:'headline' (board b786a84f) — board_query/maintenance_query
+ * ONLY, and smaller than 'digest': id, priority, objective (user items),
+ * system_reason (maintenance items), and the first HEADLINE_CLIP chars of
+ * text. Measured need: projection:'digest' on a 289-item board ran 108KB in
+ * one call — digest still carries source/status/type/updated_at/size_chars
+ * per item, which a scale audit pays for and rarely reads. Todo-only by
+ * construction (board/maintenance items are always type:'todo') rather than
+ * a per-type registry entry like `digest`, because no other record type is
+ * read through board_query.
+ *
+ * `priority` is emitted UNCONDITIONALLY (even when the item never set one) —
+ * unlike `objective`/`system_reason`, which are omitted when absent — because
+ * priority is a board-wide sort axis every item carries a slot for, while
+ * objective/system_reason are properties of ONE lane (user vs. system) a
+ * record from the other lane never has at all.
+ */
+export const HEADLINE_CLIP = 80;
+
+export function headlineRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { id: record.id, priority: record.priority };
+  if (record.objective !== undefined && record.objective !== null && record.objective !== '') out.objective = record.objective;
+  if (record.system_reason !== undefined && record.system_reason !== null && record.system_reason !== '') out.system_reason = record.system_reason;
+  const text = clipped(record.text, HEADLINE_CLIP);
+  if (text !== undefined) out.text = text;
+  return out;
+}
+
 export type RecordType = keyof typeof RECORD_TYPES;
 
 export type DurableRecord =
@@ -708,7 +745,7 @@ export type DurableRecord =
  * the shape has to be unwrapped rather than read off the top — and reference_
  * material chains two refinements, hence the loop rather than one step.
  */
-function objectShapeFor(type: string): Record<string, unknown> | undefined {
+export function objectShapeFor(type: string): Record<string, unknown> | undefined {
   const entry = RECORD_TYPES[type];
   if (!entry) return undefined;
   let schema: unknown = entry.schema;
@@ -745,6 +782,16 @@ export interface FieldShape {
    * sub-field rejected.
    */
   element_fields?: FieldShape[];
+  /**
+   * A concrete value satisfying this field's constraint, present only where
+   * describeZod can derive one with confidence (a closed enum's first value,
+   * a literal's own value, an ISO-instant string) — board be5e1d04. A format
+   * constraint stated in prose ('string (ISO datetime)') is still abstract;
+   * one worked value is what a writer actually copies. Never populated for a
+   * plain unconstrained string, and never guessed for an arbitrary regex —
+   * a wrong example is worse than none.
+   */
+  example?: string;
 }
 
 /**
@@ -752,14 +799,48 @@ export interface FieldShape {
  * a closed set. Bounded recursion: a malformed or exotically-nested schema
  * degrades to 'unknown' rather than throwing, because a SCHEMA READ must never
  * be why a call fails.
+ *
+ * Internal — carries the full descriptor (enum_values/element_fields/example)
+ * that schemaFor/describeElementFields need. The exported `describeZod`
+ * below is the thin public projection (just the type string) board be5e1d04
+ * pins directly.
  */
-function describeZod(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[] } {
+function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[]; example?: string } {
   if (!node || typeof node !== 'object' || depth > 6) return { type: 'unknown' };
   const def = (node as { _def?: Record<string, unknown> })._def;
   const name = def?.typeName as string | undefined;
   switch (name) {
-    case 'ZodString':
-      return { type: 'string' };
+    case 'ZodString': {
+      // board be5e1d04: a .regex()/.datetime() constraint was invisible here —
+      // describeZod reported bare 'string' for both a regex-pinned union
+      // member and history[].date's ISO-instant requirement, so a reader had
+      // no way to tell "accepts any string" from "must match this pattern"
+      // short of a rejected write. Surface the constraint IN the type string;
+      // a stated pattern beats a silent one.
+      // Codex review fix: a schema can carry MORE THAN ONE of these checks at
+      // once (z.string().datetime().regex(/Z$/) stores both in _def.checks),
+      // and the earlier version returned at the first match — silently
+      // dropping the others. Compose every present constraint into one
+      // description instead of picking one.
+      const checks = (def?.checks as Array<{ kind?: string; regex?: RegExp }> | undefined) ?? [];
+      const regexCheck = checks.find((c) => c.kind === 'regex' && c.regex);
+      const datetimeCheck = checks.find((c) => c.kind === 'datetime');
+      const uuidCheck = checks.find((c) => c.kind === 'uuid');
+      if (!regexCheck && !datetimeCheck && !uuidCheck) return { type: 'string' };
+      const annotations: string[] = [];
+      if (datetimeCheck) annotations.push('ISO datetime');
+      if (uuidCheck) annotations.push('uuid');
+      const base = annotations.length ? `string (${annotations.join(', ')})` : 'string';
+      // No generic example for a regex: a wrong guess at a value satisfying
+      // an arbitrary pattern is worse than no example at all. Precedence for
+      // the OTHER two stays as before: datetime's example wins over uuid's
+      // when both are present.
+      const example = !regexCheck && datetimeCheck ? '2026-08-24T00:00:00.000Z' : !regexCheck && uuidCheck ? '00000000-0000-0000-0000-000000000000' : undefined;
+      return {
+        type: regexCheck?.regex ? `${base} matching ${regexCheck.regex}` : base,
+        ...(example ? { example } : {}),
+      };
+    }
     case 'ZodNumber':
       return { type: 'number' };
     case 'ZodBoolean':
@@ -771,14 +852,14 @@ function describeZod(node: unknown, depth = 0): { type: string; enum_values?: st
       return { type: 'any' };
     case 'ZodEnum': {
       const values = (def?.values as string[] | undefined) ?? [];
-      return { type: 'enum', enum_values: values };
+      return { type: 'enum', enum_values: values, ...(values.length ? { example: values[0] } : {}) };
     }
     case 'ZodNativeEnum':
       return { type: 'enum' };
     case 'ZodLiteral':
-      return { type: `literal ${JSON.stringify(def?.value)}` };
+      return { type: `literal ${JSON.stringify(def?.value)}`, example: String(def?.value) };
     case 'ZodArray': {
-      const inner = describeZod(def?.type, depth + 1);
+      const inner = describeZodDetailed(def?.type, depth + 1);
       const elementFields = describeElementFields(def?.type, depth + 1);
       return {
         type: `${inner.type}[]`,
@@ -793,7 +874,7 @@ function describeZod(node: unknown, depth = 0): { type: string; enum_values?: st
     case 'ZodRecord':
       return { type: 'record<string, string>' };
     case 'ZodUnion': {
-      const opts = ((def?.options as unknown[]) ?? []).map((o) => describeZod(o, depth + 1));
+      const opts = ((def?.options as unknown[]) ?? []).map((o) => describeZodDetailed(o, depth + 1));
       // A union of literals IS a closed set, so report it as one — that is what
       // verifiable_at ('final' | 'phase:<n>') and similar fields actually are.
       const literals = opts.filter((o) => o.type.startsWith('literal '));
@@ -807,12 +888,25 @@ function describeZod(node: unknown, depth = 0): { type: string; enum_values?: st
     case 'ZodOptional':
     case 'ZodNullable':
     case 'ZodDefault':
-      return describeZod(def?.innerType, depth + 1);
+      return describeZodDetailed(def?.innerType, depth + 1);
     case 'ZodEffects':
-      return describeZod(def?.schema, depth + 1);
+      return describeZodDetailed(def?.schema, depth + 1);
     default:
       return { type: name ? name.replace(/^Zod/, '').toLowerCase() : 'unknown' };
   }
+}
+
+/**
+ * Public projection: JUST the readable type string, no enum/example/element
+ * metadata attached — the surface board be5e1d04's frozen pins exercise
+ * directly (describe-zod-projection.test.ts). schemaFor/knowledge_schema
+ * consume the richer describeZodDetailed internally; this wrapper exists so a
+ * caller who only wants "what does this render as" is not made to reach into
+ * an object for the one field it cares about, and so the fix is testable
+ * without pinning the internal descriptor shape.
+ */
+export function describeZod(node: unknown): string {
+  return describeZodDetailed(node).type;
 }
 
 /**
@@ -833,9 +927,15 @@ function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefin
     case 'ZodObject': {
       const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
       return Object.entries(shape).map(([fieldName, fieldNode]) => {
-        const described = describeZod(fieldNode, depth + 1);
+        const described = describeZodDetailed(fieldNode, depth + 1);
         const required = !(fieldNode as { isOptional?: () => boolean }).isOptional?.();
-        return { name: fieldName, required, type: described.type, ...(described.enum_values ? { enum_values: described.enum_values } : {}) };
+        return {
+          name: fieldName,
+          required,
+          type: described.type,
+          ...(described.enum_values ? { enum_values: described.enum_values } : {}),
+          ...(described.example ? { example: described.example } : {}),
+        };
       });
     }
     case 'ZodOptional':
@@ -873,7 +973,7 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
   const shape = objectShapeFor(type);
   if (!shape) return undefined;
   const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
-    const described = describeZod(node);
+    const described = describeZodDetailed(node);
     const required = !(node as { isOptional?: () => boolean }).isOptional?.();
     return {
       name,
@@ -881,6 +981,7 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
       type: described.type,
       ...(described.enum_values ? { enum_values: described.enum_values } : {}),
       ...(described.element_fields ? { element_fields: described.element_fields } : {}),
+      ...(described.example ? { example: described.example } : {}),
     };
   });
   return { type, fields };

@@ -3,7 +3,7 @@ name: test-writer
 description: Adversarial, spec-only test author for a pipeline phase. Writes tests from the brief and ACs — never from implementation.
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: Read, Write, Edit, MultiEdit, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__board_query, mcp__plugin_sterling_sterling__board_query, mcp__sterling__board_get, mcp__plugin_sterling_sterling__board_get, mcp__sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_read, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
+tools: Read, Write, Edit, MultiEdit, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__knowledge_schema, mcp__plugin_sterling_sterling__knowledge_schema, mcp__sterling__board_query, mcp__plugin_sterling_sterling__board_query, mcp__sterling__board_get, mcp__plugin_sterling_sterling__board_get, mcp__sterling__handoff_read, mcp__plugin_sterling_sterling__handoff_read, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
 required_inputs:
   - brief (problem, feature, full acceptance_criteria)
   - phase AC slice (the ac_ids this phase must satisfy)
@@ -11,6 +11,8 @@ required_inputs:
   - prior tests (paths)
   - prior handoffs (handoff_read)
   - knowledge slice (decisions + conventions, prep-staged)
+  - toolchain test command (config.toolchains[].run_commands.test — prep-staged in pipeline mode; a direct-mode dispatch has no prep step, so the conductor states it explicitly in the brief instead)
+  - the session scratchpad path (where any throwaway/exploration file goes — never `scripts/`, never the repo tree)
 hooks:
   PreToolUse:
     - matcher: "Read|Grep"
@@ -108,6 +110,7 @@ NO RUN ACTIVE (a conductor-direct dispatch): `handoff_write`/`agent_exit` are ru
 - Never write or edit non-test files — H18 (the write wall) denies any Write/Edit/MultiEdit outside the toolchain test globs, and the enforcement surface unconditionally; do not route around it. Prefer Edit for adding cases to an existing test file you own — a wholesale Write rewrite risks altering cases you were told to leave alone.
 - Never weaken or delete an existing test — if you believe one is wrong, that is evidence for the conductor, not an edit.
 - Never invent interfaces, fields, or behaviors not in the brief's interface slice.
+- Any throwaway or exploration file (a scratch note, a fixture you're only drafting) goes in the scratchpad, never the repo tree — H18 already denies Write/Edit/MultiEdit outside the toolchain's test globs, so the repo tree was never a legal destination for it anyway; the scratchpad is where it belongs instead of not existing at all.
 
 # Exit signals it may emit
 

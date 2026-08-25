@@ -37,6 +37,31 @@ if (interfaceCount > splitThreshold) {
 
 const role = arg('--role') ?? 'coder';
 
+// Toolchain test command (board 670b2b44 S1, review round 2): resolve
+// config.toolchains[].run_commands.test the same way run-gate.mjs does (first
+// DECLARING toolchain wins) — but ONLY when the dispatched role is the one
+// whose brief actually consumes it. test-writer is walled off package.json by
+// H4, so it alone needs this staged; coder/reviewer/etc. never do. Gating the
+// requirement to test-writer (rather than making it unconditional) means a
+// 'none'-toolchain project (decision 34e9a7d6 — a SANCTIONED "no automated
+// checks" declaration, run_commands {}) can still stage a coder/reviewer
+// phase. A test-writer prep on a 'none'-only project still fails loud here —
+// that IS the true answer: there is no command to give it (P5).
+let toolchainTestCommand;
+if (role === 'test-writer') {
+  for (const tc of config.toolchains ?? []) {
+    const runCommands = tc?.run_commands ?? {};
+    if (toolchainTestCommand === undefined && Object.prototype.hasOwnProperty.call(runCommands, 'test')) {
+      toolchainTestCommand = runCommands.test;
+    }
+  }
+  if (!toolchainTestCommand) {
+    fail(
+      `prep: no toolchain in .sterling/config.json declares run_commands.test — cannot stage the test-writer's required toolchain command. Declare a toolchain (with run_commands.test), or dispatch a different role if this project has no automated checks (decision 34e9a7d6).`
+    );
+  }
+}
+
 // Planning outputs are prep's inputs (§7.6); one-phase spine falls back to the blast radius.
 const files = phase.files ?? brief.blast_radius.files.map((f) => f.path);
 const rankTerms = phase.rank_terms ?? [];
@@ -113,6 +138,9 @@ const pack = {
   run_id: run.id,
   phase_id: phaseId,
   query_inputs: queryInputs,
+  // Only present when resolved (test-writer role — see above); omitted
+  // entirely for other roles rather than a misleading null/undefined field.
+  ...(toolchainTestCommand !== undefined ? { toolchain_test_command: toolchainTestCommand } : {}),
   returned_record_ids: returned.map((r) => r.id),
   mandatory,
   cap_omissions: capOmissions,
@@ -191,6 +219,7 @@ const builderLines = [
   '',
   '# Builder knowledge pack — full staged retrieval for this phase',
   '',
+  ...(toolchainTestCommand !== undefined ? [`Toolchain test command: ${toolchainTestCommand}`, ''] : []),
   ...(returned.length
     ? returned.map((r) => `- ${r.type} — ${r.title ?? r.slug ?? '(untitled)'} [${r.id}] — ${oneLiner(r)}`)
     : ['(no records staged for this phase)']),

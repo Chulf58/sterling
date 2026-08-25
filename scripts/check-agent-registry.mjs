@@ -12,11 +12,41 @@ import { checkAdapterRegistry } from './adapters/resolve.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
 
-const violations = checkRegistryConsistency({
+const registryChecks = checkRegistryConsistency({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
-  scanDirs: [join(pluginRoot, 'templates'), join(pluginRoot, 'commands'), join(pluginRoot, 'skills')],
+  // scripts/hooks/ is the convention-injection surface (H1 speaks into every
+  // session ahead of every conductor) — the dead-term scan is strictly worse
+  // at missing residue there than in templates/, which only gets stamped
+  // occasionally. Board f4221f8a: a term banned everywhere else shipped in H1
+  // undetected, and text copied VERBATIM out of H1 into a template then failed
+  // the merge for carrying the very term H1 itself carried.
+  //
+  // packages/store/src + packages/tui/src (board c05da1d1): a banned term
+  // living in store source propagated into 17 built bundles while this scan
+  // stayed structurally blind to packages/ entirely. Other packages
+  // (mcp-server, schemas) are not yet in scope here — their own residue is a
+  // separate lane's fix, not silently swept in by widening this list.
+  scanDirs: [
+    join(pluginRoot, 'templates'),
+    join(pluginRoot, 'commands'),
+    join(pluginRoot, 'skills'),
+    join(pluginRoot, 'scripts', 'hooks'),
+    join(pluginRoot, 'packages', 'store', 'src'),
+    join(pluginRoot, 'packages', 'tui', 'src'),
+  ],
+  // hooks/ is the BUILT bundle output (scripts/hooks/ above is its source) —
+  // verify-only: a hit here means "rebuild bundles", not "edit this file".
+  bundleScanDirs: [join(pluginRoot, 'hooks')],
 });
+
+// dead_term_bundle hits are advisory, not a failing violation: they name stale
+// BUILT bundles awaiting a rebuild, never a source defect (board c05da1d1
+// review follow-up) — reported below but excluded from the exit-1 set so
+// `npm run check` does not refuse merely because bundles haven't been rebuilt
+// yet. `violations` stays the sole exit-1 authority.
+const violations = registryChecks.filter((v) => v.kind !== 'dead_term_bundle');
+const bundleAdvisories = registryChecks.filter((v) => v.kind === 'dead_term_bundle');
 
 // §6 hook-emission backslash check over the shipped hooks.json
 const hooksJsonPath = join(pluginRoot, 'hooks', 'hooks.json');
@@ -69,6 +99,11 @@ for (const b of bundles) {
       detail: `hooks/${b} is bundled but registered nowhere (hooks.json or agent-template frontmatter) — a half-wired extension (P5); register it or add a documented exception`,
     });
   }
+}
+
+if (bundleAdvisories.length > 0) {
+  console.log(`agent registry consistency: ${bundleAdvisories.length} stale-bundle dead-term hit(s) (advisory, rebuild bundles):`);
+  for (const v of bundleAdvisories) console.log(`  [${v.kind}] ${v.detail}`);
 }
 
 if (violations.length === 0) {

@@ -42,9 +42,26 @@
 // surfaced as a caveated warning that would cry wolf on every batch.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, allow, warnNonBlocking, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
 import { liveDispatches } from '../lib/dispatch-register.mjs';
+import { hasUnsuppressedMatch, escapeRe, isReadOnlyDispatchType } from './lib/dispatch-advisory.mjs';
+import { claimedResources } from './lib/dispatch-residue.mjs';
+
+/**
+ * SPEC B advisory text for a claimed resource already held by a live
+ * dispatch — flat, uncaveated (no hedging tokens; SPEC B (5)), names every
+ * contested resource and every distinct holder identity `type:id`.
+ */
+function buildResourceAdvisory(contested) {
+  const resourceList = [...new Set(contested.map((c) => c.name))].map((n) => `'${n}'`).join(', ');
+  const holderList = [...new Set(contested.map((c) => `${c.agentType}:${c.agentId}`))].join(', ');
+  return (
+    `H26 RESOURCE OVERLAP ADVISORY — this dispatch's brief claims exclusive resource(s) ${resourceList}, ` +
+    `already held by live in-flight dispatch(es): ${holderList}. This is warn-only, never a block. Remedy: ` +
+    `coordinate with the holder before proceeding, or drop the resource claim.`
+  );
+}
 
 let input;
 try {
@@ -64,29 +81,111 @@ function emit(additionalContext) {
 }
 
 try {
-  // Not a Sterling project — no ceremony (P1), same DB-file marker every
-  // other hook in this layer keys on.
-  if (!existsSync(join(input.cwd ?? '.', '.sterling', 'sterling.db'))) allow();
+  const prompt = input.tool_input?.prompt;
 
-  const candidates = extractPathCandidates(input.tool_input?.prompt);
+  // Session-scoped live register, shared by the resource check below and the
+  // file-overlap check further down (same liveness/TTL semantics either way).
+  // liveDispatches reads only the register/config JSON files — no store
+  // dependency — so this is safe to compute even outside a Sterling project.
+  const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
+
+  // SPEC B — EXCLUSIVE NON-FILE RESOURCE CLAIM. This runs BEFORE both (a) the
+  // sterling.db project-marker gate just below and (b) the read-only-
+  // dispatch-class early return further down: a reviewer/explorer-class
+  // dispatch's FILE overlap stays suppressed (unchanged), but a resource it
+  // claims that a live entry already holds must still warn — resources are
+  // not write-territory, and the check needs only config.json + the register
+  // (never the store), so it never needed the sterling.db gate to begin with.
+  // A directory with no .sterling/config.json at all yields configuredNames
+  // === [] and stays silent regardless (the non-Sterling control case).
+  const cfg = loadConfig(input.cwd);
+  const configuredNames = Array.isArray(cfg?.exclusive_resources)
+    ? cfg.exclusive_resources.filter((n) => typeof n === 'string' && n.trim())
+    : [];
+  let resourceAdvisory = '';
+  if (configuredNames.length) {
+    const claimed = claimedResources(prompt, configuredNames);
+    if (claimed.length) {
+      const contested = [];
+      for (const e of live) {
+        // Same pruning semantics as the file-overlap comparison below: a
+        // malformed entry (no agent_id) or an imprecisely-attributed one
+        // (not a provable single-block claim) never contributes a warning.
+        if (!e || !e.agent_id || e.attribution !== 'block' || !Array.isArray(e.exclusive_resources)) continue;
+        for (const name of claimed) {
+          if (e.exclusive_resources.includes(name)) {
+            contested.push({ name, agentType: e.agent_type ?? 'agent', agentId: e.agent_id });
+          }
+        }
+      }
+      if (contested.length) resourceAdvisory = buildResourceAdvisory(contested);
+    }
+  }
+
+  // Combine whichever advisories fired (file overlap, resource overlap, both,
+  // or neither) into one emission and exit — every early return below routes
+  // through this so the resource advisory is never lost when the file-overlap
+  // check bails out earlier (non-Sterling cwd, no candidates, no live
+  // entries, no overlap).
+  function finish(fileAdvisory) {
+    const parts = [fileAdvisory, resourceAdvisory].filter(Boolean);
+    if (parts.length) emit(parts.join('\n\n'));
+    allow();
+  }
+
+  // Not a Sterling project — no ceremony for FILE overlap (P1), same DB-file
+  // marker every other hook in this layer keys on. The resource advisory
+  // computed above still surfaces (it never touched the store).
+  if (!existsSync(join(input.cwd ?? '.', '.sterling', 'sterling.db'))) finish();
+
+  // READ-ONLY incoming dispatch (board a6b76e8c item 3): a reviewer/explorer/
+  // Explore/Plan class cannot write, so it can never enter a live write lane
+  // — never warn FILE overlap for one, regardless of prompt content. The
+  // resource advisory computed above is unaffected by this exemption.
+  if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) finish();
+
+  const candidates = extractPathCandidates(prompt);
   // Repo-relative POSIX only, with H22's exact exclusion filter mirrored
   // verbatim: .git/.sterling are never governed territory, and the dot-
   // stripped 'sterling/…'/'git/…' forms the extractor can produce are
   // dropped too, so an excluded path never enters the candidate set at all.
-  const files = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
-    (r) =>
-      r !== '.git' &&
-      !r.startsWith('.git/') &&
-      !r.startsWith('.sterling/') &&
-      !r.startsWith('sterling/') &&
-      !r.startsWith('git/')
-  );
-  if (!files.length) allow();
+  // KEEP THE PRE-NORMALIZATION STRING for the suppression check (review
+  // finding, board a6b76e8c fixer pass): a Windows-style mention
+  // ('src\util.mjs') normalizes to 'src/util.mjs', which never literally
+  // appears in the RAW prompt — searching the normalized form there silently
+  // dropped every such candidate as "not found" rather than warning on it.
+  // The normalized form is still what feeds the register comparison below.
+  const normalized = candidates
+    .map((raw) => ({ raw, norm: repoRel(raw, input.cwd) }))
+    .filter((p) => p.norm)
+    .filter(
+      (p) =>
+        p.norm !== '.git' &&
+        !p.norm.startsWith('.git/') &&
+        !p.norm.startsWith('.sterling/') &&
+        !p.norm.startsWith('sterling/') &&
+        !p.norm.startsWith('git/')
+    );
+  // Then the SHARED PROHIBITION/NEGATION CHECK (board a6b76e8c item 1): a
+  // path named only inside a prohibition ("DO NOT TOUCH: <paths> (another
+  // lane owns those)") is a NEGATIVE territory declaration, not a positive
+  // claim on this dispatch's own lane — it must never count as a candidate.
+  // checkSubjectVerb:false — "implement the feature in <path>" is a
+  // legitimate territory declaration for a FILE candidate, not a
+  // subject-of-change mention to discount (that guard is for H25's tool
+  // mentions only); only an actual negation suppresses a path here.
+  const files = [
+    ...new Set(
+      normalized
+        .filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false }))
+        .map((p) => p.norm)
+    ),
+  ];
+  if (!files.length) finish();
 
   const candidateSet = new Set(files);
 
-  const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
-  if (!live.length) allow();
+  if (!live.length) finish();
 
   const overlaps = [];
   const overlapPaths = new Set();
@@ -113,11 +212,11 @@ try {
       matched.forEach((f) => overlapPaths.add(f));
     }
   }
-  if (!overlaps.length) allow();
+  if (!overlaps.length) finish();
 
   const pathList = [...overlapPaths].map((p) => `'${p}'`).join(', ');
   const entryList = overlaps.map((o) => `${o.agentType}:${o.agentId} (${o.files.join(', ')})`).join('; ');
-  emit(
+  finish(
     `H26 DISPATCH OVERLAP ADVISORY — this dispatch's brief names file(s) that overlap a LIVE in-flight ` +
       `dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is ` +
       `warn-only, never a block — the prompt extraction only approximates write territory, and this hook ` +
@@ -125,7 +224,6 @@ try {
       `keep lanes file-disjoint — await the in-flight agent, or re-scope this dispatch's territory so it does ` +
       `not overlap.`
   );
-  allow();
 } catch (e) {
   // Advisory only, never a gate: loud but non-blocking (P5 without AC7 harm).
   warnNonBlocking(`H26: dispatch-overlap advisory failed: ${(e && e.message) || e}`);

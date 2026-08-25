@@ -380,11 +380,43 @@ export function findBackslashCommandsInHooksJson(node) {
   return bad;
 }
 
+// Extensions the dead-term scan reads as text. `.ts` covers packages/*/src —
+// the scan previously covered only shipped markdown/mjs/json/bat surfaces and
+// was structurally blind to TypeScript source (board c05da1d1: a banned term
+// lived in packages/store/src/index.ts and propagated into 17 built bundles
+// undetected).
+const DEAD_TERM_SCAN_EXT_RE = /\.(md|json|mjs|bat|ts)$/;
+
+// Source scanning skips a `tests/` path segment: the dead-term ban targets
+// shipped/scaffolded content, not internal test-file prose citing a past
+// decision's own phase labels (e.g. frozen pins referencing "stable-identity
+// wave S1/S2") — those are a separate, out-of-scope residue for whichever
+// lane owns that file, not this scan's concern.
+const isTestPath = (p) => /[\\/]tests[\\/]/.test(p);
+
+function collectDeadTermScanFiles(dir, { excludeTests = false } = {}) {
+  const files = [];
+  if (!existsSync(dir)) return files;
+  for (const f of readdirSync(dir, { recursive: true })) {
+    const p = join(dir, String(f));
+    if (excludeTests && isTestPath(p)) continue;
+    if (DEAD_TERM_SCAN_EXT_RE.test(p) && statSync(p).isFile()) files.push(p);
+  }
+  return files;
+}
+
 // Registry consistency check (spec §15, invariant 3): templates dir and
 // registry must agree 1:1; template frontmatter names must match registry
 // names; shipped/scaffolded content carries no dead terms and no backslash
 // hook commands. Returns a violations list; empty = pass.
-export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs = [] }) {
+//
+// `bundleScanDirs` is a separate, VERIFY-ONLY surface (board c05da1d1): built
+// bundles (hooks/*.mjs, packages/*/dist, the tui bundle) inline whatever their
+// source carried, so a hit there is stale-bundle residue, not a source defect
+// — the fix is `npm run build` (rebuild), never an edit to the bundle itself.
+// Reported as its own `dead_term_bundle` kind so tooling and humans can tell
+// the two apart at a glance.
+export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs = [], bundleScanDirs = [] }) {
   const violations = [];
   let registry;
   try {
@@ -420,17 +452,22 @@ export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs 
   }
   const scanTargets = [...templateFiles.map((f) => join(templatesDir, f))];
   for (const dir of scanDirs) {
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir, { recursive: true })) {
-      const p = join(dir, String(f));
-      if (/\.(md|json|mjs|bat)$/.test(p) && statSync(p).isFile()) {
-        scanTargets.push(p);
-      }
-    }
+    scanTargets.push(...collectDeadTermScanFiles(dir, { excludeTests: true }));
   }
   for (const p of scanTargets) {
     const hits = findDeadTerms(readFileSync(p, 'utf8'));
     for (const h of hits) violations.push({ kind: 'dead_term', detail: `${p}: '${h.match}' (${h.term})` });
+  }
+  for (const dir of bundleScanDirs) {
+    for (const p of collectDeadTermScanFiles(dir)) {
+      const hits = findDeadTerms(readFileSync(p, 'utf8'));
+      for (const h of hits) {
+        violations.push({
+          kind: 'dead_term_bundle',
+          detail: `${p}: '${h.match}' (${h.term}) — stale bundle, rebuild via npm run build once the source is clean`,
+        });
+      }
+    }
   }
   return violations;
 }

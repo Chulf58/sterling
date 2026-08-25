@@ -2105,3 +2105,617 @@ test('PIN-STAMP-SYMLINK-CLEAN-AT-PRE: a CLEAN-at-Pre path replaced in-window by 
     cleanup([decoy]);
   }
 });
+
+// #########################################################################
+// ##  BOARD 7dd39b85 (HIGH) — CURRENTLY LIVE, TWO PINS BELOW             ##
+// #########################################################################
+//
+// `git status --porcelain` collapses an untracked DIRECTORY to a single entry
+// (`?? hooks/newdir/`), so the set Post checks a currently-dirty path against
+// for "already dirty at Pre" membership — an EXACT match — never contains the
+// directory's CHILDREN, only the directory path itself. When the audited
+// command makes a child individually visible to porcelain (`git add -A` is the
+// everyday trigger: the child then reports as its own `A  hooks/newdir/a.mjs`
+// entry), that child fails the exact-match membership test, is treated as a
+// write THIS COMMAND made, and is swept: since it is not in HEAD, the restore
+// path DELETES it. Net effect: a conductor's brand-new untracked enforcement-
+// surface file is destroyed and the denial blames the agent for it.
+//
+// Authored BLIND to scripts/hooks/h17-bash-write-sweep.mjs, exactly like every
+// pin above — from the board's behaviour statement only, never from hook
+// source. Both pins below assert BEHAVIOUR only (survival, byte identity, exit
+// code, and that the denial names the offending path) — never HOW the fix
+// distinguishes a covered child from a genuinely new one.
+// #########################################################################
+
+// =========================================================================
+// PIN-CHILD-SURVIVES-STAGE — the core pin plus its CONTROL. A file that
+// existed inside a pre-dirty untracked enforcement-surface DIRECTORY must
+// SURVIVE the Post sweep — bytes unchanged on disk — even when the audited
+// command staged it (`git add -A`) so porcelain now reports it individually
+// instead of as part of the collapsed directory entry. The command is still
+// DENIED: survival must not be bought by turning the violation into an allow.
+//
+// CONTROL ARM FIRST (decision cf863d84 — a verdict with more than one possible
+// cause needs a control that fails differently, placed first so a green pin
+// always carries its evidence): a file created by the SAME audited command
+// (create + `git add -A`) inside a directory that was NOT dirty at Pre is a
+// genuinely NEW write and must still be swept — restored/removed — and the
+// call still denies. Without this arm, "the child survives" in the pin arm
+// could be explained by an implementation that simply stopped deleting
+// anything under hooks/ at all, which would be a much bigger and unrelated
+// hole; the control rules that out, because deletion still happens here, for
+// the opposite (correct, unrelated) reason.
+//
+// EXPECTED FAILURE SHAPE (RED today, PIN ARM only): the child
+// `hooks/newdir/a.mjs` does not exact-match the Pre-recorded directory path
+// `hooks/newdir/`, so it is swept as a fresh write — `assert.equal(existsSync
+// (child), true)` fires with actual false, the file is gone. The CONTROL ARM
+// is expected GREEN today: an ordinary new write with no pre-dirty ancestor
+// already gets removed and denied correctly, so it does not exercise this
+// defect.
+//
+// SABOTAGE (one line at a time, each must flip the named assertion to RED):
+//   * CORE PIN (survival) — the ancestor-coverage check for a currently-dirty
+//     path deleted or short-circuited, i.e. reverting to a bare
+//     `recordedPreDirty.has(path)` exact-match test with no "is this path
+//     inside a recorded pre-dirty directory's recorded children" fallback: the
+//     child then fails membership again and is deleted — both
+//     `assert.equal(existsSync(child), true)` and the byte-identical assertion
+//     fire.
+//   * DENIAL — the fix implemented by exempting the child from the
+//     enforcement-surface check entirely instead of recognizing it as
+//     pre-dirty (allow instead of deny): `assert.equal(r.code, 2)` fires with
+//     actual 0.
+//   * CONTROL — the ancestor-coverage check widened to match ANY
+//     currently-dirty path regardless of a recorded ancestor (i.e. "assume
+//     pre-dirty unless proven otherwise"): the control's genuinely-new file
+//     then survives too, and `assert.equal(existsSync(freshFile), false)`
+//     fires with actual true.
+// =========================================================================
+
+test('PIN-CHILD-SURVIVES-STAGE: a file inside a pre-dirty untracked enforcement-surface directory survives `git add -A` staging it individually — denies, but does not destroy it (control: a same-shaped file under a directory NOT pre-dirty is genuinely new and is still removed)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    // ---- CONTROL ARM (expected: denied AND removed — the ordinary, correct
+    // behaviour for a genuinely new write with no pre-dirty ancestor).
+    assert.equal(porcelain(dir), '', 'PRECONDITION: the tree is CLEAN — the control directory does not exist yet at Pre');
+    const C = lane('childcontrol');
+    assert.equal(h17(dir, 'PreToolUse', C).code, 0);
+
+    const controlDir = join(dir, 'hooks', 'control-new');
+    mkdirSync(controlDir, { recursive: true });
+    const freshFile = join(controlDir, 'fresh.mjs');
+    writeFileSync(freshFile, "// genuinely new, created inside this command's own window\n");
+    git(dir, ['add', '-A'], { must: true });
+    assert.match(porcelain(dir), /A\s+hooks\/control-new\/fresh\.mjs/, 'PRECONDITION: staging makes the new file individually visible, same as the pin arm below');
+
+    const control = h17(dir, 'PostToolUse', C);
+    assert.notEqual(control.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      control.code,
+      2,
+      `CONTROL: a genuinely new enforcement-surface write must still deny — if THIS fails, the pin arm below proves nothing, because nothing would distinguish a working sweep from one that simply stopped deleting anything under hooks/ — actual ${control.code}, stderr: ${oneLine(control.stderr)}`
+    );
+    assert.equal(existsSync(freshFile), false, 'CONTROL: and it is genuinely new (no pre-dirty ancestor), so it is swept — removed, since it is not in HEAD');
+
+    // ---- PIN ARM: the child was ALREADY THERE, inside a directory that was
+    // already dirty (untracked) at Pre — only staging makes it individually
+    // visible to porcelain.
+    const newDir = join(dir, 'hooks', 'newdir');
+    mkdirSync(newDir, { recursive: true });
+    const child = join(newDir, 'a.mjs');
+    const childBytes = '// pre-dirty untracked enforcement-surface file, uncommitted\n';
+    writeFileSync(child, childBytes);
+    assert.match(porcelain(dir), /\?\?\s+hooks\/newdir\//, 'PRECONDITION: the untracked directory collapses to ONE entry at Pre, exactly as the defect describes');
+
+    const P = lane('childpin');
+    assert.equal(h17(dir, 'PreToolUse', P).code, 0);
+
+    git(dir, ['add', '-A'], { must: true });
+    assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: staging inside the window makes the child its OWN porcelain entry — the everyday trigger named in the defect');
+
+    const r = h17(dir, 'PostToolUse', P);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `staging a pre-dirty untracked enforcement-surface path is still a violation and must deny — survival must not be bought by turning this into an allow — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.match(r.stderr, /newdir/, 'the denial names the offending enforcement-surface path');
+    assert.equal(
+      existsSync(child),
+      true,
+      `THE PIN: a file that existed inside a pre-dirty untracked directory before this command ran must survive being staged — actual: file is gone, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(child, 'utf8'), childBytes, 'and its bytes are byte-identical — untouched by the sweep');
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-CHILD-SURVIVES-STAGE-NESTED — the same defect, TWO LEVELS below the
+// recorded directory (`hooks/newdir/sub/deep.mjs`). The board's account of the
+// defect names the recorded directory state as a RECURSIVE children map
+// (PIN-RECORD-DIR-NO-CHILDREN above establishes that Pre records one for a
+// dirty untracked directory); a fix that only recognizes a DIRECT child of the
+// recorded path — checking one level of nesting rather than walking the
+// recursive map — would pass PIN-CHILD-SURVIVES-STAGE above while still
+// destroying a grandchild.
+//
+// Relies on PIN-CHILD-SURVIVES-STAGE's control arm for the opposite-cause
+// evidence (a genuinely new write with no pre-dirty ancestor is still removed
+// and denied) — that property does not change with nesting depth, so it is not
+// re-proven here.
+//
+// EXPECTED FAILURE SHAPE (RED today): identical in shape to
+// PIN-CHILD-SURVIVES-STAGE — `hooks/newdir/sub/deep.mjs` does not exact-match
+// the Pre-recorded `hooks/newdir/` entry, so `assert.equal(existsSync(deep),
+// true)` fires with actual false.
+//
+// SABOTAGE: an ancestor-coverage fix that only checks ONE level of nesting
+// (e.g. comparing the path's immediate parent directory against the recorded
+// set instead of walking up through every ancestor to it) — `hooks/newdir/sub/
+// deep.mjs`'s immediate parent is `hooks/newdir/sub`, which is itself
+// unrecorded, so the shallow check still fails membership and the file is
+// still deleted, flipping both the existence and byte-identical assertions to
+// red.
+// =========================================================================
+
+test('PIN-CHILD-SURVIVES-STAGE-NESTED: a GRANDCHILD two levels below a pre-dirty untracked enforcement-surface directory survives `git add -A` staging it individually — denies, but does not destroy it', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const newDir = join(dir, 'hooks', 'newdir', 'sub');
+    mkdirSync(newDir, { recursive: true });
+    const deep = join(newDir, 'deep.mjs');
+    const deepBytes = '// pre-dirty untracked enforcement-surface file, two levels deep, uncommitted\n';
+    writeFileSync(deep, deepBytes);
+    assert.match(porcelain(dir), /\?\?\s+hooks\/newdir\//, 'PRECONDITION: the untracked directory collapses to ONE entry at Pre, exactly as the defect describes, regardless of how deep its contents nest');
+
+    const P = lane('grandchildpin');
+    assert.equal(h17(dir, 'PreToolUse', P).code, 0);
+
+    git(dir, ['add', '-A'], { must: true });
+    assert.match(porcelain(dir), /A\s+hooks\/newdir\/sub\/deep\.mjs/, 'PRECONDITION: staging inside the window makes the grandchild its OWN porcelain entry');
+
+    const r = h17(dir, 'PostToolUse', P);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `staging a pre-dirty untracked enforcement-surface path is still a violation and must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.match(r.stderr, /newdir/, 'the denial names the offending enforcement-surface path');
+    assert.equal(
+      existsSync(deep),
+      true,
+      `THE PIN: a file two levels below a pre-dirty untracked directory must survive being staged — a fix that only recognizes DIRECT children would still delete this one — actual: file is gone, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(deep, 'utf8'), deepBytes, 'and its bytes are byte-identical — untouched by the sweep');
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-SIBLING-PREFIX-NOT-COVERED — the over-broad-coverage hazard that
+// PIN-CHILD-SURVIVES-STAGE and PIN-CHILD-SURVIVES-STAGE-NESTED do not pin.
+// Those two pin that a covered CHILD survives; neither can distinguish a
+// correct ancestor-boundary walk from a raw string-prefix test, because for
+// them the recorded directory (`hooks/newdir`) and the covered path
+// (`hooks/newdir/a.mjs`) share a '/' boundary either way containment is
+// computed. This pin forces the two approaches apart: a SIBLING directory
+// whose name merely starts with the recorded directory's name as a STRING —
+// `hooks/newdir2/` — must NOT be treated as covered by `hooks/newdir`'s
+// pre-dirty record, even though `'hooks/newdir2/x.mjs'.startsWith
+// ('hooks/newdir')` is true. Coverage must be computed by walking ancestors
+// on '/' boundaries, never by a bare prefix test.
+//
+// Both arms run in the SAME command window against the SAME pre-dirty
+// record, so one verdict cannot be explained by "the coverage check broke"
+// (that would also fail the covered-child arm) or by "the coverage check now
+// covers everything" (that would also pass the sibling arm) — only a
+// boundary-correct walk satisfies both at once (decision cf863d84: a verdict
+// with more than one possible cause needs a control arm that fails the
+// opposite way, so a green pin always carries its evidence).
+//
+// EXPECTED (today): GREEN. The ancestor-aware fix for board 7dd39b85 already
+// walks on '/' boundaries, so the sibling is correctly seen as UNCOVERED and
+// swept, while the recorded directory's own child survives in the same run.
+// This pin guards against a REGRESSION back to string-prefix matching — it
+// is not chasing a live defect, and it should not be weakened if it passes.
+//
+// SABOTAGE: replace the ancestor-boundary walk with a bare
+// `rel.startsWith(candidate)` containment test. Under that sabotage,
+// `'hooks/newdir2/x.mjs'.startsWith('hooks/newdir')` is true, so the sibling
+// file is wrongly treated as already covered by the pre-dirty record and
+// SURVIVES the sweep — `assert.equal(existsSync(sibFile), false)` fires with
+// actual true. (The covered-child arm stays green either way under this
+// sabotage, which is exactly why neither existing sibling pin can catch it.)
+// =========================================================================
+
+test('PIN-SIBLING-PREFIX-NOT-COVERED: a NEW sibling directory whose name string-prefixes a pre-dirty untracked enforcement-surface directory is NOT covered by it — denies, and the sibling is swept while the recorded directory\'s own child survives in the same run', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const newDir = join(dir, 'hooks', 'newdir');
+    mkdirSync(newDir, { recursive: true });
+    const child = join(newDir, 'a.mjs');
+    const childBytes = '// pre-dirty untracked enforcement-surface file, uncommitted\n';
+    writeFileSync(child, childBytes);
+    assert.match(porcelain(dir), /\?\?\s+hooks\/newdir\//, 'PRECONDITION: the untracked directory collapses to ONE entry at Pre, exactly as the defect describes');
+
+    const L = lane('siblingprefix');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    const sibDir = join(dir, 'hooks', 'newdir2');
+    mkdirSync(sibDir, { recursive: true });
+    const sibFile = join(sibDir, 'x.mjs');
+    writeFileSync(sibFile, "// genuinely new sibling directory whose name merely starts with the recorded one\n");
+    git(dir, ['add', '-A'], { must: true });
+    assert.match(porcelain(dir), /A\s+hooks\/newdir2\/x\.mjs/, 'PRECONDITION: staging makes the sibling file individually visible to porcelain');
+    assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: the recorded directory\'s own child is ALSO staged, in the same window, against the same record');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a window containing a genuinely new enforcement-surface write must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(
+      existsSync(sibFile),
+      false,
+      `THE PIN: a sibling directory sharing only a STRING PREFIX with a recorded pre-dirty directory is NOT covered by it — it is genuinely new and must still be swept — actual: file survived, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(existsSync(child), true, "CONTROL: the recorded directory's own child still survives in the same run — the coverage check did not simply stop working, it correctly declined to extend across a sibling boundary");
+    assert.equal(readFileSync(child, 'utf8'), childBytes, 'and its bytes are byte-identical — untouched by the sweep');
+  } finally {
+    cleanup();
+  }
+});
+
+// #########################################################################
+// ##  TWO REVIEW FINDINGS ON THE ANCESTOR-AWARE COVERAGE FIX ABOVE       ##
+// #########################################################################
+//
+// Two independent reviews of the ancestor-aware coverage change (the fix
+// behind PIN-CHILD-SURVIVES-STAGE / -NESTED / PIN-SIBLING-PREFIX-NOT-COVERED)
+// each found one behaviour the three pins above never exercise, because all
+// three create the child BEFORE Pre — so the child is always PRESENT in the
+// recorded directory's `children` map. Both pins below are authored BLIND to
+// scripts/hooks/h17-bash-write-sweep.mjs, exactly like every pin above.
+// #########################################################################
+
+// =========================================================================
+// PIN-CHILD-ABSENT-FROM-RECORD — the RECORDED-ABSENT branch, the load-bearing
+// correction of the whole ancestor-aware change and, until this pin, never
+// executed by any test in this file. The settled rule: a path covered by a
+// recorded pre-dirty ANCESTOR but ABSENT from that ancestor's recorded
+// `children` map is DENIED and NOT restored. It must not be deleted, because
+// "absent from the map" does not prove "the audited command created it" — the
+// Pre snapshot is recursive but not atomic, and the record is agent-writable,
+// so an absent entry is inconclusive, not damning.
+//
+// FIXTURE: at Pre, `hooks/newdir/a.mjs` exists (untracked directory, porcelain
+// collapses it to one `?? hooks/newdir/` entry — same trigger as
+// PIN-CHILD-SURVIVES-STAGE, so `a.mjs` IS in the recorded children map).
+// INSIDE the audited command's window, a SECOND file `hooks/newdir/b.mjs` is
+// created — it did not exist at Pre and is therefore structurally absent from
+// whatever children map Pre recorded — then both are staged with `git add -A`
+// in the same window, against the same record.
+//
+// CONTROL ARM: `a.mjs` (recorded, present in the children map) must ALSO
+// survive, byte-identical, in the SAME run. Without it, "b.mjs survives" could
+// be explained by an implementation that stopped restoring/deleting anything
+// under a pre-dirty directory at all — a much bigger, unrelated hole distinct
+// from the recorded-absent rule this pin targets. `a.mjs` surviving because it
+// is a RECOGNIZED covered child, and `b.mjs` surviving because it is an
+// UNRECOGNIZED-but-not-provably-new child, are two different reasons landing
+// on the same observable outcome, and the control is what keeps them apart.
+//
+// EXPECTED TODAY: GREEN — the implemented code already takes the correct
+// branch here (this is a correction that has already shipped; the pin exists
+// to guard it against being undone, not to chase a live defect). Do not
+// expect or try to make this test red.
+//
+// CATCHES SABOTAGE: recordedChild absent falling through to the destructive
+// arm instead of the deny-only arm — concretely,
+//   if (!recordedChild) { restoreTracked(cwd, p); violations.push(rel); restoredPaths.push(rel); continue; }
+// in place of a deny-without-restore branch. That is the most destructive
+// edit reachable in this change (it deletes a file the record never proved
+// was new), and today the entire rest of the suite stays green under it —
+// only this pin's `existsSync(b) === true` assertion catches it, flipping to
+// actual `false`.
+// =========================================================================
+
+test('PIN-CHILD-ABSENT-FROM-RECORD: a file created IN-WINDOW under a pre-dirty untracked enforcement-surface directory, ABSENT from the recorded children map, DENIES and is NOT restored — while its sibling recorded at Pre survives untouched in the same run', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const newDir = join(dir, 'hooks', 'newdir');
+    mkdirSync(newDir, { recursive: true });
+    const a = join(newDir, 'a.mjs');
+    const aBytes = '// pre-dirty untracked enforcement-surface file, present at Pre, uncommitted\n';
+    writeFileSync(a, aBytes);
+    assert.match(porcelain(dir), /\?\?\s+hooks\/newdir\//, 'PRECONDITION: the untracked directory collapses to ONE entry at Pre, exactly as the defect describes');
+
+    const L = lane('recordabsent');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    // INSIDE the audited command's window: a second file that did NOT exist at
+    // Pre and is therefore absent from whatever children map Pre recorded for
+    // hooks/newdir.
+    const b = join(newDir, 'b.mjs');
+    const bBytes = "// created inside this command's own window, absent from the recorded children map\n";
+    writeFileSync(b, bBytes);
+    git(dir, ['add', '-A'], { must: true });
+    assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: a.mjs (recorded at Pre) is staged, individually visible to porcelain');
+    assert.match(porcelain(dir), /A\s+hooks\/newdir\/b\.mjs/, 'PRECONDITION: b.mjs (created after Pre) is staged, individually visible to porcelain, and cannot be in the recorded children map');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a window containing a path absent from the recorded children map is still a violation and must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+
+    assert.equal(existsSync(a), true, "CONTROL: the sibling that WAS recorded at Pre still survives in the same run — a recognized covered child is not the thing this pin is testing");
+    assert.equal(readFileSync(a, 'utf8'), aBytes, 'and its bytes are byte-identical — untouched by the sweep');
+
+    assert.equal(
+      existsSync(b),
+      true,
+      `THE PIN: a child absent from the recorded children map must NOT be deleted — absence does not prove the audited command created it (the Pre snapshot is recursive but not atomic, and the record is agent-writable) — actual: file is gone, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(b, 'utf8'), bBytes, 'and its bytes are byte-identical — untouched by the sweep');
+  } finally {
+    cleanup();
+  }
+});
+
+// Blind-safe tamper helper for PIN-RECORD-KEY-TRAILING-SLASH below. Mirrors
+// stripChildren's assume-nothing-about-shape idiom: it does not assume whether
+// a recorded pre-dirty path is stored as an object KEY (a path -> state/info
+// map) or as a plain STRING entry in an array (a flat list) — it rewrites
+// `target` to a trailing-slash variant wherever it finds it, in either shape,
+// anywhere in the tree, and reports how many occurrences it changed so the
+// caller can assert the tamper was unambiguous.
+//
+// Generalized (2026-08-23, additively, for PIN-RECORD-MALFORMED-ENTRY-
+// REFUSED-AT-LOAD below) with an optional third `replacement` argument so the
+// SAME walk can be reused for a different malformed shape instead of a second
+// near-duplicate helper. Backward-compatible: every existing 2-arg call site
+// (PIN-RECORD-KEY-TRAILING-SLASH) is untouched and computes the identical
+// trailing-slash `withSlash` value it always did, since `replacement` is
+// `undefined` there.
+function addTrailingSlash(node, target, replacement) {
+  const withSlash = replacement !== undefined ? replacement : target.endsWith('/') ? target : target + '/';
+  let hits = 0;
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      if (node[i] === target) {
+        node[i] = withSlash;
+        hits += 1;
+      } else {
+        hits += addTrailingSlash(node[i], target, replacement);
+      }
+    }
+    return hits;
+  }
+  if (node && typeof node === 'object') {
+    if (Object.prototype.hasOwnProperty.call(node, target)) {
+      node[withSlash] = node[target];
+      delete node[target];
+      hits += 1;
+    }
+    for (const v of Object.values(node)) hits += addTrailingSlash(v, target, replacement);
+    return hits;
+  }
+  return 0;
+}
+
+// =========================================================================
+// PIN-RECORD-KEY-TRAILING-SLASH — the second review finding: the per-run
+// attribution record (`sterling-enforce-<projectTag>-<runId>.dirty.json`,
+// `dirtyPath` in this harness — the same file PIN-NO-RECORD names "the per-run
+// attribution record") is JSON written to the OS temp dir and is
+// agent-writable; UNLIKE the per-call snapshot record, its entries are not
+// normalized. Normal Pre output strips trailing slashes, but an entry that
+// reads `hooks/newdir/` instead of `hooks/newdir` must still cover
+// `hooks/newdir/a.mjs` exactly as the bare form does — a recorded ancestor
+// naming the same directory with or without a trailing slash is the SAME
+// directory, and ancestor-walk coverage must not be defeated by a stray
+// slash written (by hand or by a future code path) into an agent-writable
+// file.
+//
+// The tamper is applied directly to the attribution record between Pre and
+// Post via the blind-safe `addTrailingSlash` helper above, mirroring
+// PIN-RECORD-DIR-NO-CHILDREN's `soleRecordPath` + JSON.parse/stringify idiom
+// for reaching a temp record from this harness — the established prior art in
+// this file for tampering a record without assuming its shape.
+//
+// EXPECTED TODAY: RED. The trailing-slash normalization on the attribution
+// record's ancestor key is not implemented yet — a bare-string ancestor
+// lookup does not match `hooks/newdir/` against the query path
+// `hooks/newdir/a.mjs`'s ancestor `hooks/newdir`, so the child is treated as
+// UNCOVERED and swept: `assert.equal(existsSync(child), true)` fires with
+// actual `false`. (The exit-code assertion is expected green even today,
+// since an uncovered child still denies — via the same "genuinely new write"
+// path PIN-CHILD-SURVIVES-STAGE's control arm exercises — for the wrong
+// reason.)
+//
+// CATCHES SABOTAGE (once the normalization lands): the trailing-slash strip
+// removed from the ancestor-key comparison — e.g. comparing a candidate
+// ancestor key against a currently-dirty path's ancestor directly instead of
+// via `key.replace(/\/+$/, '')` (or equivalent) on the recorded side. Under
+// that sabotage this test reverts to today's failure: `existsSync(child)`
+// fires with actual `false` again.
+// =========================================================================
+
+test('PIN-RECORD-KEY-TRAILING-SLASH: a recorded pre-dirty ancestor keyed WITH a trailing slash in the (agent-writable, unnormalized) attribution record still covers its child exactly as the bare form does', { skip: GIT_SKIP }, () => {
+  const fx = makeGitProject();
+  const { dir, cleanup, dirtyPath } = fx;
+  try {
+    const newDir = join(dir, 'hooks', 'newdir');
+    mkdirSync(newDir, { recursive: true });
+    const child = join(newDir, 'a.mjs');
+    const childBytes = '// pre-dirty untracked enforcement-surface file, uncommitted\n';
+    writeFileSync(child, childBytes);
+    assert.match(porcelain(dir), /\?\?\s+hooks\/newdir\//, 'PRECONDITION: the untracked directory collapses to ONE entry at Pre, exactly as the defect describes');
+
+    const L = lane('trailingslash');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    assert.equal(existsSync(dirtyPath), true, 'PRECONDITION: the per-run attribution record exists after Pre');
+    const parsed = JSON.parse(readFileSync(dirtyPath, 'utf8'));
+    const hits = addTrailingSlash(parsed, 'hooks/newdir');
+    assert.ok(
+      hits >= 1,
+      'PRECONDITION: the attribution record must record the recorded directory path in its normal (no trailing slash) form for this tamper to be unambiguous — if this fails, the fixture is not exercising the defect'
+    );
+    writeFileSync(dirtyPath, JSON.stringify(parsed));
+
+    git(dir, ['add', '-A'], { must: true });
+    assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: staging makes the child its own porcelain entry, the same trigger as PIN-CHILD-SURVIVES-STAGE');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `staging a pre-dirty untracked enforcement-surface path is still a violation and must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(
+      existsSync(child),
+      true,
+      `THE PIN: an attribution-record entry naming the recorded directory WITH a trailing slash ('hooks/newdir/') must cover its child exactly as the bare form ('hooks/newdir') does — actual: file is gone, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(child, 'utf8'), childBytes, 'and its bytes are byte-identical — untouched by the sweep');
+  } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// PIN-RECORD-MALFORMED-ENTRY-REFUSED-AT-LOAD — an outside-review gap in the
+// same loader PIN-RECORD-KEY-TRAILING-SLASH exercises. That loader was just
+// hardened to strip trailing slashes and to refuse a non-array record or a
+// non-string/empty entry — but a MALFORMED, non-empty, non-trailing-slash path
+// shape survives it uncaught. `hooks/newdir/.` is exactly such a shape: it
+// passes "non-array? no. non-string-or-empty entry? no." and comes out the
+// other side unchanged, because trailing-slash stripping never touches a
+// trailing `.` segment.
+//
+// WHY THIS IS DANGEROUS, NOT MERELY WRONG: the surviving-but-mangled entry no
+// longer string-equals (nor ancestor-matches) the `hooks/newdir` ancestor the
+// ancestor-walk coverage check builds from the CURRENTLY-dirty path
+// `hooks/newdir/a.mjs`. So the recorded pre-dirty directory silently loses its
+// child's protection: the coverage walk visits `a.mjs`, finds no matching
+// recorded ancestor, treats it as clean-at-Pre / genuinely new (the same
+// "otherwise" path PIN-CHILD-SURVIVES-STAGE's CONTROL arm exercises), and it
+// is swept — DELETED — because it is (wrongly) not believed to predate this
+// command. Only afterward, when the sweep also notices the record entry
+// itself doesn't correspond to anything it can use, does any denial fire —
+// by which point the file is already gone. A deny that arrives after the
+// delete is not the same claim as a deny that PREVENTS the delete, and this
+// pin is written to tell the two apart: EXIT CODE ALONE PROVES NOTHING HERE.
+//
+// THE RULE THIS PINS: a malformed attribution-record entry must be REFUSED AT
+// LOAD — before the sweep walks anything, and therefore before anything can be
+// restored/deleted — never silently treated as "no coverage here, carry on".
+//
+// FIXTURE: identical setup to PIN-RECORD-KEY-TRAILING-SLASH — `hooks/newdir/
+// a.mjs` is written BEFORE Pre so the untracked directory collapses to one `??
+// hooks/newdir/` porcelain entry and Pre records `hooks/newdir` (bare, no
+// trailing slash) as a pre-dirty ancestor with `a.mjs` in its children. Between
+// Pre and Post, the per-run attribution record (`dirtyPath`) is tampered
+// in-place via the SAME blind-safe `addTrailingSlash` walk PIN-RECORD-KEY-
+// TRAILING-SLASH already established — reused here with its new optional
+// third argument to rewrite the `hooks/newdir` entry to the malformed
+// `hooks/newdir/.` instead of a second near-duplicate walker. The `hits >= 1`
+// precondition is kept for the same reason it is kept there: an
+// unrecognized record shape would make this tamper silently a no-op, and the
+// pin must fail loudly on THAT rather than pass for the wrong reason. The
+// child is then staged with `git add -A` in the same window, exactly the
+// everyday trigger PIN-CHILD-SURVIVES-STAGE names.
+//
+// EXPECTED TODAY: RED. The validation this pins is not implemented yet (I am
+// told it is being implemented in parallel and may be green by the time this
+// runs — the prediction below is for the state at authoring time and is not
+// weakened either way). Concretely:
+//   * `hooks/newdir/.` does not match `hooks/newdir` as a recorded ancestor of
+//     `hooks/newdir/a.mjs` (no trailing-`.`-segment normalization exists), so
+//     the child is treated as an uncovered/genuinely-new write and deleted by
+//     the sweep BEFORE any refusal — `assert.equal(existsSync(child), true)`
+//     is the assertion that fires, with actual `false`.
+//   * the exit-code assertions (`r.code === 2`, `r.code !== 1`) are expected
+//     GREEN even today, since an uncovered child still denies via the same
+//     "genuinely new write" path — exactly the trap the background for this
+//     pin warns about: a deny alone proves nothing, because today's deny
+//     lands AFTER the delete, not instead of it.
+//   * the stderr content match (`/crafted|attribution record/i`) is expected
+//     RED today too: today's denial explains a new/unrecognized write, not a
+//     rejected record entry, so it is not expected to use either word.
+// Once the load-time validation lands, all four assertions are expected
+// GREEN: the malformed entry is refused before the sweep runs, so the sweep
+// never reaches (and never deletes) the child, and the refusal names the
+// crafted entry.
+//
+// CATCHES SABOTAGE: relaxing the per-entry validation back to "non-empty
+// string after stripping trailing slashes" (i.e. accepting anything that
+// survives a bare `.replace(/\/+$/, '')` and an empty-string check) — under
+// that relaxed rule `hooks/newdir/.` is still non-empty after stripping
+// trailing slashes (there are none to strip) and so passes the loader again,
+// exactly reproducing today's failure: the child is deleted and
+// `assert.equal(existsSync(child), true)` flips back to actual `false`.
+// =========================================================================
+
+test('PIN-RECORD-MALFORMED-ENTRY-REFUSED-AT-LOAD: a malformed non-empty attribution-record entry (`hooks/newdir/.`) is REFUSED AT LOAD, before the sweep runs — the child is never reached, let alone deleted', { skip: GIT_SKIP }, () => {
+  const fx = makeGitProject();
+  const { dir, cleanup, dirtyPath } = fx;
+  try {
+    const newDir = join(dir, 'hooks', 'newdir');
+    mkdirSync(newDir, { recursive: true });
+    const child = join(newDir, 'a.mjs');
+    const childBytes = '// pre-dirty untracked enforcement-surface file, uncommitted\n';
+    writeFileSync(child, childBytes);
+    assert.match(porcelain(dir), /\?\?\s+hooks\/newdir\//, 'PRECONDITION: the untracked directory collapses to ONE entry at Pre, exactly as the defect describes');
+
+    const L = lane('malformedentry');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+
+    assert.equal(existsSync(dirtyPath), true, 'PRECONDITION: the per-run attribution record exists after Pre');
+    const parsed = JSON.parse(readFileSync(dirtyPath, 'utf8'));
+    const hits = addTrailingSlash(parsed, 'hooks/newdir', 'hooks/newdir/.');
+    assert.ok(
+      hits >= 1,
+      'PRECONDITION: the attribution record must record the recorded directory path in its normal (no trailing slash) form for this tamper to be unambiguous — if this fails, the fixture is not exercising the defect, and the pin would otherwise pass for the wrong reason'
+    );
+    writeFileSync(dirtyPath, JSON.stringify(parsed));
+
+    git(dir, ['add', '-A'], { must: true });
+    assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: staging makes the child its own porcelain entry, the same trigger as PIN-CHILD-SURVIVES-STAGE and PIN-RECORD-KEY-TRAILING-SLASH');
+
+    const r = h17(dir, 'PostToolUse', L);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(
+      r.code,
+      2,
+      `a malformed attribution-record entry must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.match(
+      r.stderr,
+      /crafted|attribution record/i,
+      `the refusal must name the malformed attribution-record entry, not merely deny for an unrelated reason — stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(
+      existsSync(child),
+      true,
+      `THE PIN: a malformed record entry must be refused AT LOAD, before the sweep runs — it must never silently withdraw the recorded directory's coverage and let the sweep delete its child first — actual: file is gone, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(child, 'utf8'), childBytes, 'and its bytes are byte-identical — untouched, because the sweep must never have reached it');
+  } finally {
+    cleanup();
+  }
+});

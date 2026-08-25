@@ -25,6 +25,7 @@ import { dirname, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { openMounted, openProject } from './lib/project.mjs';
+import { buildResolver } from './lib/citations.mjs';
 import {
   lintRecordCitations,
   lintCitationCurrency,
@@ -82,56 +83,18 @@ if (projectRecordCount === 0) {
 }
 
 const { store, config } = openMounted(root);
-let index;
+// Resolver seam (scripts/lib/citations.mjs, board c3705a15): id-universe
+// build (recordIdIndex + the S5 record_aliases dead-id join) plus resolve()/
+// getById() live there now, reused by scripts/knowledge-export.mjs. Kept
+// open across the whole file loop below, closed once at every exit path.
+let resolver;
 try {
-  index = store.recordIdIndex();
+  resolver = buildResolver(store);
 } catch (e) {
   store.close();
   throw e;
 }
-
-// Stable identity (S5, decision stable-identity-design-v2): the migration
-// collapses legacy chain members into record_aliases — every pre-migration
-// historical id must KEEP resolving (the design's no-false-positives promise),
-// so the dead-id index joins the resolution set as synthetic rows whose
-// status reads 'superseded' (they forward to a canonical live record).
-let aliasRows = [];
-try {
-  aliasRows = store.recordAliases();
-} catch {
-  aliasRows = []; // pre-v2 store: no alias table, nothing to join
-}
-for (const a of aliasRows) {
-  index.push({ id: a.historical_id, type: 'alias', status: 'superseded' });
-}
-
-const fullIds = new Set(index.map((r) => r.id));
-const byId = new Map(index.map((r) => [r.id, r]));
-const byPrefix = new Map();
-for (const r of index) {
-  const p = r.id.slice(0, 8);
-  if (!byPrefix.has(p)) byPrefix.set(p, []);
-  byPrefix.get(p).push(r);
-}
-
-/** undefined = nothing anywhere (the only failure), 'ambiguous' = prefix hits
- *  several records, otherwise the resolved {id,type,status} row — a FULL id.
- *  A FULL id must match a full id: a prefix collision must never let a
- *  wrong-record citation pass. The returned row's `.id` and `.status` are what
- *  the currency check (lintCitationCurrency) needs on top of plain existence. */
-function resolve(id) {
-  if (id.length > 8) return fullIds.has(id) ? byId.get(id) : undefined;
-  const hits = byPrefix.get(id);
-  if (!hits || hits.length === 0) return undefined;
-  return hits.length > 1 ? 'ambiguous' : hits[0];
-}
-
-// Full-body lookup for the currency walk ONLY — recordIdIndex (above) omits
-// superseded_by by design (it is the cheap id/type/status projection every
-// existence check needs; a currency walk needs the chain, so it pays for a
-// get() per hop instead of widening that index for every caller). Kept open
-// across the whole file loop below, closed once at every exit path.
-const getById = (id) => store.get(id);
+const { resolve, getById, size: indexSize } = resolver;
 
 const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', timeout: 60_000 });
 if (tracked.status !== 0) {
@@ -215,7 +178,7 @@ if (violations.length > 0) {
 
 printCurrencyWarnings();
 console.log(
-  `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${index.length} records; ` +
+  `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${indexSize} records; ` +
     `${optOuts} line(s) opted out via '${CITATION_OPT_OUT}'; ` +
     `store_authority=${authority}; ` +
     `${currencyWarnings.length} currency warning(s) on pointer surfaces (superseded citation still resolving elsewhere); ` +

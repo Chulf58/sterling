@@ -6,7 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h14-bash-allowlist.mjs
-import { relative, resolve as resolve2, sep } from "node:path";
+import { relative, resolve as resolve2, sep, join as join2 } from "node:path";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync } from "node:fs";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -4109,6 +4110,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4387,7 +4396,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5026,6 +5041,45 @@ try {
     deny(environmentDefectDenial("H14", "No toolchains in .sterling/config.json \u2014 the Bash allowlist cannot resolve run commands; failing closed (P5)."));
   }
   const command = String(input.tool_input?.command ?? "").trim();
+  if (input.tool_input?.dangerouslyDisableSandbox) {
+    try {
+      const commandHead = command.slice(0, 80) + (command.length > 80 ? "\u2026" : "");
+      process.stderr.write(
+        `\u26A0 H14 ADVISORY: dangerouslyDisableSandbox=true on this Bash call \u2014 sandbox is bypassed for '${commandHead}'. This does NOT bypass the allowlist below; logged to .sterling/transient/sandbox-bypass-log.json.
+`
+      );
+      const transient = join2(input.cwd, ".sterling", "transient");
+      mkdirSync(transient, { recursive: true });
+      const logPath = join2(transient, "sandbox-bypass-log.json");
+      let entries = [];
+      try {
+        if (existsSync2(logPath)) {
+          const raw = JSON.parse(readFileSync2(logPath, "utf8"));
+          if (Array.isArray(raw)) entries = raw;
+        }
+      } catch (parseErr) {
+        entries = [];
+        try {
+          process.stderr.write(
+            `H14: sandbox-bypass-log.json is corrupt (${parseErr && parseErr.message || parseErr}) \u2014 prior entries are being TRUNCATED; preserving the corrupt file as '${logPath}.corrupt'.
+`
+          );
+          if (existsSync2(logPath)) renameSync(logPath, `${logPath}.corrupt`);
+        } catch {
+        }
+      }
+      entries.push({ at: (/* @__PURE__ */ new Date()).toISOString(), command_head: commandHead, cwd: input.cwd });
+      const tmpPath = join2(transient, `sandbox-bypass-log.json.tmp-${process.pid}`);
+      writeFileSync(tmpPath, JSON.stringify(entries));
+      renameSync(tmpPath, logPath);
+    } catch (e) {
+      try {
+        process.stderr.write(`H14: sandbox-bypass disclosure failed (${e && e.message || e}) \u2014 the command is still evaluated normally below.
+`);
+      } catch {
+      }
+    }
+  }
   if (/[;&|`\n<>]|\$\(/.test(command)) {
     deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
   }

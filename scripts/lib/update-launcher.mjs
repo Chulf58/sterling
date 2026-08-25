@@ -11,6 +11,7 @@
 // nothing is built (see the consumer-update-path article).
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stampBody, verifyStamp } from './generated-marker.mjs';
 
 export const UPDATE_LAUNCHER_NAME = 'sterling-update.bat';
 
@@ -32,15 +33,23 @@ export function renderUpdateLauncher(pluginRoot) {
   // would flash-and-close), so its POSIX path passes through unchanged.
   const posix = pluginRoot.replace(/\\/g, '/');
   const cdPath = /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith('/') ? toWindowsPath(posix) : posix;
-  return crlf(template.replaceAll('{{WIN_PLUGIN_DIR}}', cdPath));
+  return crlf(stampBody(template.replaceAll('{{WIN_PLUGIN_DIR}}', cdPath), 'rem'));
 }
 
 /**
- * Ensure semantics (§12): created / matches / differs / skipped — never
- * overwrites content it cannot prove it generated. Also ensures the target's
- * .gitignore carries the entry (per-entry append, non-destructive): the
- * fan-out reaches projects whose init predates this launcher, and a generated
- * machine artifact must never surface as untracked noise in a sibling repo.
+ * Ensure semantics (§12): created / matches / refreshed / differs / skipped —
+ * never overwrites content it cannot prove it generated. Also ensures the
+ * target's .gitignore carries the entry (per-entry append, non-destructive):
+ * the fan-out reaches projects whose init predates this launcher, and a
+ * generated machine artifact must never surface as untracked noise in a
+ * sibling repo.
+ *
+ * REFRESH (board bb3aa162): a mismatch against the freshly rendered expected
+ * no longer means "leave it, might be hand-edited" — the on-disk file's own
+ * embedded content-hash marker (generated-marker.mjs) proves whether it was
+ * touched since ITS generation. Unmodified-but-stale (a clone move, a
+ * template edit) refreshes freely; a marker mismatch (or no marker at all —
+ * a legacy or foreign file) still leaves it untouched as 'differs'.
  */
 export function ensureUpdateLauncher(target, pluginRoot) {
   if (!existsSync(target)) {
@@ -56,10 +65,19 @@ export function ensureUpdateLauncher(target, pluginRoot) {
   if (!existsSync(launcherPath)) {
     writeFileSync(launcherPath, expected);
     result = { status: 'created', detail: 'double-click -> update the Sterling clone (no session in the loop)' };
-  } else if (normalize(readFileSync(launcherPath, 'utf8')) === normalize(expected)) {
-    result = { status: 'matches', detail: 'unchanged' };
   } else {
-    result = { status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' };
+    const diskNorm = normalize(readFileSync(launcherPath, 'utf8'));
+    if (diskNorm === normalize(expected)) {
+      result = { status: 'matches', detail: 'unchanged' };
+    } else {
+      const stamp = verifyStamp(diskNorm, 'rem');
+      if (stamp && stamp.unmodified) {
+        writeFileSync(launcherPath, expected);
+        result = { status: 'refreshed', detail: 'regenerated: unmodified since last generation, but this machine now renders it differently (clone moved or template changed)' };
+      } else {
+        result = { status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' };
+      }
+    }
   }
 
   const gitignorePath = join(target, '.gitignore');

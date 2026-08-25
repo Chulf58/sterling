@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -616,6 +616,19 @@ test('H4: content-mode Grep hits the same wall — the r-ea9e bypass replay (den
 
 // --------------------------- H7 ---------------------------
 
+// board c198866d: direct-mode Arm 1 stops minting reconcile_needed at TOUCH
+// time — it only registers the candidate path in touches.json (Arm 2,
+// unchanged). Minting moves to SETTLEMENT (H10's Stop), hashing final touched
+// content against the owning record's file_baselines (sha256 of the owned
+// file's bytes, decision 57d9a52d). Pipeline-mode minting-on-touch is
+// UNCHANGED (untouched below).
+function sha256hex(content) {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+const reconcileQueue = (store) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'reconcile_needed');
+const settleStop = (dir) => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
 test('H7 [pipeline]: owning articles land on run.reconcile_needed, idempotently', () => {
   const { dir, store, cleanup } = makeProject({ withRun: true });
   try {
@@ -630,23 +643,42 @@ test('H7 [pipeline]: owning articles land on run.reconcile_needed, idempotently'
   }
 });
 
-test('H7 [direct]: maintenance queue item (deduped) + transient touch register for H10', () => {
+test('H7 [direct]: touch registers as a settlement candidate (NO immediate mint); settlement at Stop mints exactly once, deduped per article (board c198866d)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const a = article(store, 'feat-a', ['src/a.mjs']);
+    const original = 'export const a = 1;\n';
+    const changed = 'export const a = 2;\n';
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), changed);
+    const a = store.create({
+      ...envelope('feature_article'),
+      slug: 'feat-a',
+      title: 'feat-a',
+      what_it_does: 'x',
+      intended_behavior: 'x',
+      files: [{ path: 'src/a.mjs', role: 'impl' }],
+      file_baselines: { 'src/a.mjs': sha256hex(original) },
+      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'originating brief' }],
+      live_test_refs: [],
+    });
     const edit = () =>
       runHook('h7-file-touch.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'a.mjs') } }), dir);
     assert.equal(edit().code, 0);
     assert.equal(edit().code, 0);
-    const queue = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'reconcile_needed');
-    assert.equal(queue.length, 1, 'deduped per article');
-    assert.equal(queue[0].feature_link, a.id);
+
+    // NEW CONTRACT: no mint at touch time, however many times the file was touched.
+    assert.equal(reconcileQueue(store).length, 0, 'H7 Arm 1 no longer mints reconcile_needed at touch time — minting moves to settlement');
+
     const touches = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'touches.json'), 'utf8'));
-    assert.equal(touches.length, 2);
+    assert.equal(touches.length, 2, 'the candidate register (Arm 2) is unchanged — still one entry per touch');
     assert.equal(touches[0].path, 'src/a.mjs');
 
     // .git/** is machinery, never governed work (live incident 2026-06-12:
-    // a commit-message temp file fed H10 a junk article demand)
+    // a commit-message temp file fed H10 a junk article demand) — unchanged.
     const gitWrite = runHook(
       'h7-file-touch.mjs',
       hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: join(dir, '.git', 'COMMIT_MSG_TMP.txt') } }),
@@ -655,6 +687,19 @@ test('H7 [direct]: maintenance queue item (deduped) + transient touch register f
     assert.equal(gitWrite.code, 0);
     const after = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'touches.json'), 'utf8'));
     assert.equal(after.length, 2, '.git/** paths never enter the touch register');
+
+    // SETTLEMENT: satisfy the capture duty so Stop releases clean on the first
+    // call, then mint happens as a side effect of settlement, deduped per article.
+    // h7-file-touch.mjs ran as a real subprocess and stamped touches.json with a
+    // genuine new Date() (today), NOT the file's fixed NOW constant — the capture
+    // record must postdate that real touch or the capture duty stays unmet.
+    store.create({ ...envelope('decision', new Date(Date.now() + 1000).toISOString()), title: 'learned things', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    const stop = settleStop(dir);
+    assert.equal(stop.code, 0, `settlement Stop must release clean once capture is satisfied and the file is owned — stderr=${stop.stderr}`);
+
+    const queue = reconcileQueue(store);
+    assert.equal(queue.length, 1, 'settlement mints exactly once, deduped per article, despite two prior touches');
+    assert.equal(queue[0].feature_link, a.id);
   } finally {
     cleanup();
   }
@@ -716,17 +761,45 @@ function referenceDoc(store, title, kind, location) {
   });
 }
 
-test('H7 [§3.2.5 direct]: repo-located reference doc trips reconcile_needed (deduped); url-kind trips nothing', () => {
+test('H7 [§3.2.5 direct]: touch registers as a settlement candidate (NO immediate mint); settlement at Stop mints reconcile_needed for a repo-located reference doc (deduped); url-kind trips nothing (board c198866d)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const doc = referenceDoc(store, 'Build Spec', 'doc', 'docs/spec.md');
+    const original = 'section map v1\n';
+    const changed = 'section map v2\n';
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'spec.md'), changed);
+    const doc = store.create({
+      ...envelope('reference_material'),
+      title: 'Build Spec',
+      kind: 'doc',
+      location: 'docs/spec.md',
+      summary: 'section map',
+      source_date: NOW,
+      capture_date: NOW,
+      basis: 'codebase',
+      file_baselines: { 'docs/spec.md': sha256hex(original) },
+    });
     referenceDoc(store, 'External', 'url', 'https://example.com/spec');
     const edit = () =>
       runHook('h7-file-touch.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'docs', 'spec.md') } }), dir);
     assert.equal(edit().code, 0);
     assert.equal(edit().code, 0);
-    const queue = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'reconcile_needed');
-    assert.equal(queue.length, 1, 'doc reference marked once (deduped); the url reference never');
+
+    // NEW CONTRACT: no mint at touch time.
+    assert.equal(reconcileQueue(store).length, 0, 'H7 Arm 1 no longer mints at touch time for reference docs either — minting moves to settlement');
+    const touches = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'touches.json'), 'utf8'));
+    assert.ok(touches.some((t) => t.path === 'docs/spec.md'), 'the touch still registers as a settlement candidate (Arm 2 unchanged)');
+
+    // SETTLEMENT: satisfy the capture duty so Stop releases clean on the first call.
+    // h7-file-touch.mjs ran as a real subprocess and stamped touches.json with a
+    // genuine new Date() (today), NOT the file's fixed NOW constant — the capture
+    // record must postdate that real touch or the capture duty stays unmet.
+    store.create({ ...envelope('decision', new Date(Date.now() + 1000).toISOString()), title: 'learned things', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    const stop = settleStop(dir);
+    assert.equal(stop.code, 0, `settlement Stop must release clean — stderr=${stop.stderr}`);
+
+    const queue = reconcileQueue(store);
+    assert.equal(queue.length, 1, 'doc reference marked once at settlement (deduped); the url reference never');
     assert.equal(queue[0].feature_link, doc.id);
     assert.match(queue[0].text, /refresh summary \+ source_date/);
   } finally {
@@ -2664,7 +2737,17 @@ test('changedLineRanges: locates an Edit, merges adjacent MultiEdit hunks, and r
   assert.equal(formatLineRanges([]), '');
 });
 
-test('H7 names WHERE the file changed, so a co-owner can dismiss an irrelevant item in seconds', () => {
+// board c198866d: the WHERE-hint text ("near line N") was carried on the
+// TOUCH-TIME mint, computed from the PostToolUse tool_input's exact
+// old_string/new_string delta. That delta is not preserved anywhere between
+// the touch and settlement (the candidate register — touches.json — carries
+// only {path, at}, per the board item's own description of what H7 already
+// writes for H10), so the hint has no settlement-time equivalent to move to —
+// it is RETIRED BY DESIGN for direct mode. changedLineRanges/formatLineRanges
+// themselves stay covered by the pure-function unit tests above (unchanged);
+// these two tests now pin only that the touch still lands as a settlement
+// candidate, with no touch-time mint left to carry (or omit) a hint on.
+test('H7 [retired hint pin]: an Edit touch registers as a settlement candidate — no touch-time mint exists to carry a WHERE hint (board c198866d)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
@@ -2683,21 +2766,23 @@ test('H7 names WHERE the file changed, so a co-owner can dismiss an irrelevant i
       dir
     );
     assert.equal(r.code, 0);
-    const [item] = store.query({ types: ['todo'], cap: 10 });
-    assert.match(item.text, /owned file src\/big\.mjs was touched in direct mode, near line 25/);
+    assert.equal(reconcileQueue(store).length, 0, 'no touch-time mint exists any more to carry a "near line" hint on — Arm 1 minting moved to settlement');
+    const touches = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'touches.json'), 'utf8'));
+    assert.ok(touches.some((t) => t.path === 'src/big.mjs'), 'the touch still registers as a settlement candidate (Arm 2 unchanged)');
   } finally {
     cleanup();
   }
 });
 
-test('H7 omits the hint rather than inventing one when the tool gives it nothing', () => {
+test('H7 [retired hint pin]: a Write touch (no new_string) registers as a settlement candidate — no touch-time mint exists to omit a hint from (board c198866d)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src', 'w.mjs'), 'whole file replaced\n');
     article(store, 'owner', ['src/w.mjs']);
 
-    // Write carries no new_string: there is no honest range to report.
+    // Write carries no new_string: there was never an honest range to report,
+    // but that is now moot — there is no touch-time mint at all.
     const r = runHook(
       'h7-file-touch.mjs',
       hookInput(dir, {
@@ -2708,8 +2793,9 @@ test('H7 omits the hint rather than inventing one when the tool gives it nothing
       dir
     );
     assert.equal(r.code, 0);
-    const [item] = store.query({ types: ['todo'], cap: 10 });
-    assert.match(item.text, /owned file src\/w\.mjs was touched in direct mode$/, 'no trailing "near lines" clause');
+    assert.equal(reconcileQueue(store).length, 0, 'Arm 1 no longer mints at touch time regardless of hint availability');
+    const touches = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'touches.json'), 'utf8'));
+    assert.ok(touches.some((t) => t.path === 'src/w.mjs'), 'the touch still registers as a settlement candidate (Arm 2 unchanged)');
   } finally {
     cleanup();
   }
@@ -3111,6 +3197,179 @@ test('H1 rotation restore: a HEAD moved since the note is disclosed as a CAUTION
     assert.match(ctx, /HEAD has MOVED/i, 'delta disclosed');
   } finally {
     cleanup();
+  }
+});
+
+// --------------------------- commits_ahead (N15) ---------------------------
+// docs/feedback/sterling-plugin-*2026-08-24*: the rotation note's prose fields
+// carried counts nothing recomputed — a note said 'FOURTEEN commits', the
+// conductor told the user fifteen, the real figure was 39. rotation-note.mjs
+// now stamps a computed commits_ahead (vs the resolved base branch) at write
+// time; H1 recomputes it at injection and discloses drift exactly like the
+// existing head_sha check above.
+
+test('rotation-note.mjs (N15): stamps commits_ahead (vs the resolved base branch) at write time', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    const base = g(['branch', '--show-current']).stdout.trim(); // master (or main) — the only branch so far
+    g(['checkout', '-qb', 'feat/slice']);
+    for (const f of ['a.mjs', 'b.mjs', 'c.mjs']) {
+      writeFileSync(join(dir, f), `// ${f}\n`);
+      g(['add', '-A']);
+      g(['commit', '-qm', `add ${f}`]);
+    }
+    const r = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(r.status, 0, r.stderr);
+    const note = readRotationNote(dir);
+    // EXPECTED FAILURE SHAPE (red before the fix): the unhardened writer
+    // never computes or stamps this field at all, so `note.commits_ahead`
+    // is `undefined` — the two assertions below are the ones expected to
+    // fail red against it.
+    assert.equal(note.commits_ahead, 3, 'three commits landed on feat/slice since the base branch');
+    assert.equal(note.base_branch, base);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (N15): commits_ahead drift (more commits landed after the note was written) is disclosed, naming both counts', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    g(['checkout', '-qb', 'feat/slice']);
+    writeFileSync(join(dir, 'a.mjs'), '// a\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add a']);
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    assert.equal(readRotationNote(dir).commits_ahead, 1, 'fixture guard: the note was written at 1 commit ahead');
+
+    // More work lands on the branch AFTER the note was written but BEFORE
+    // the /clear actually happens — the note's stamped count is now stale.
+    writeFileSync(join(dir, 'b.mjs'), '// b\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add b']);
+
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    // EXPECTED FAILURE SHAPE (red before the fix): H1 recomputes head_sha
+    // drift only — it never re-runs `git rev-list --count` against the
+    // note's base_branch, so no commits_ahead disclosure is ever produced.
+    // This match is the one expected to fail red against that shape.
+    assert.match(ctx, /commits_ahead drift.*note says 1.*actual is 2/is, 'drift disclosed with both the stamped and the actual count');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (N15 roster review, control): a MATCHING commits_ahead count produces NO drift line', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    g(['checkout', '-qb', 'feat/slice']);
+    writeFileSync(join(dir, 'a.mjs'), '// a\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add a']);
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    assert.equal(readRotationNote(dir).commits_ahead, 1, 'fixture guard: the note was written at 1 commit ahead');
+
+    // NOTHING lands on the branch between the note and the /clear — the
+    // stamped count and the actual count agree.
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    // EXPECTED FAILURE SHAPE (red against an UNCONDITIONAL-emit
+    // implementation, e.g. one that always appends the drift caution
+    // whenever it runs the recount regardless of whether the numbers
+    // actually differ): this control would then ALSO show a spurious
+    // drift line even though nothing drifted. The doesNotMatch below is
+    // the one expected to fail red against that shape.
+    assert.doesNotMatch(ctx, /commits_ahead drift/i, 'a matching count must never produce a drift caution');
+    const rotationSection = ctx.slice(ctx.indexOf('ROTATION RESTORE'), ctx.indexOf('Resume from next_slice'));
+    assert.match(rotationSection, /commits_ahead: 1 \(vs /, 'the matching count is still printed plainly');
+    assert.doesNotMatch(rotationSection, /unverified/i, 'a successfully-verified matching count is not marked unverified');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (Codex P2-B): a note with NO base_branch (commits_ahead unavailable to stamp) produces NO drift line and no commits_ahead field at all', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    const note = readRotationNote(dir);
+    // Simulate the "commits_ahead unavailable at write time" shape directly
+    // (a repo with no origin/HEAD, no main, no master is hard to construct
+    // from gitProject()'s single-branch fixture) — this note otherwise
+    // matches exactly what rotation-note.mjs itself would have written.
+    delete note.base_branch;
+    delete note.commits_ahead;
+    writeFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), JSON.stringify(note, null, 2) + '\n');
+
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    assert.doesNotMatch(ctx, /commits_ahead/i, 'no commits_ahead field/caution is fabricated when the note never carried one');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore (Codex P2-B): a commits_ahead present but base_branch UNRESOLVABLE at restore time is marked unverified, never claimed as drift', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    const note = readRotationNote(dir);
+    // A base that resolved at write time (e.g. a --base ref, or a branch
+    // since deleted) but no longer resolves at restore time — the recount
+    // itself fails, which must read as UNVERIFIABLE, never as drift (a
+    // failed recount is not evidence the stamped number is wrong).
+    note.base_branch = 'this-ref-does-not-exist';
+    note.commits_ahead = 3;
+    writeFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), JSON.stringify(note, null, 2) + '\n');
+
+    const r = h1(dir, { source: 'clear' });
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    assert.doesNotMatch(ctx, /commits_ahead drift/i, 'an unresolvable base is never reported as drift');
+    assert.match(ctx, /commits_ahead: 3 \(vs this-ref-does-not-exist\) \(unverified — base unavailable\)/, 'the stamped count is shown with an explicit unverified marker');
+  } finally {
+    cleanup();
+  }
+});
+
+test('rotation-note.mjs (Codex P1-B): a clone with origin/main but NO local main branch still gets a numeric commits_ahead (never a false null)', () => {
+  const { dir, cleanup } = gitProject();
+  const bareOutside = mkdtempSync(join(tmpdir(), 'sterling-rotation-bare-'));
+  try {
+    const g = (args, cwd = dir) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+    // Simulate a plain clone: an origin whose default branch is 'main', but
+    // THIS working copy never checked out a local 'main' — only the
+    // feature branch it's already on. resolveBaseBranch's old
+    // unconditional `origin/main` -> `main` strip would then try to diff
+    // against a local branch that does not exist.
+    const originDir = join(bareOutside, 'origin.git');
+    assert.equal(g(['init', '--bare', '-b', 'main', originDir], bareOutside).status, 0);
+    assert.equal(g(['remote', 'add', 'origin', originDir]).status, 0);
+    assert.equal(g(['push', 'origin', 'HEAD:main']).status, 0);
+    assert.equal(g(['fetch', 'origin']).status, 0);
+    assert.equal(g(['remote', 'set-head', 'origin', 'main']).status, 0);
+    assert.equal(g(['branch', '--list', 'main']).stdout.trim(), '', 'fixture guard: no LOCAL main branch exists in this working copy');
+
+    g(['checkout', '-qb', 'feat/off-origin-main']);
+    writeFileSync(join(dir, 'a.mjs'), '// a\n');
+    g(['add', '-A']);
+    g(['commit', '-qm', 'add a']);
+
+    const r = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(r.status, 0, r.stderr);
+    const note = readRotationNote(dir);
+    assert.equal(note.commits_ahead, 1, 'a numeric count, not a false null, even with no local main');
+    assert.equal(note.base_branch, 'origin/main', 'the actual ref used (the remote-tracking ref) is disclosed, not a stripped name that never resolved');
+  } finally {
+    cleanup();
+    rmSync(bareOutside, { recursive: true, force: true });
   }
 });
 

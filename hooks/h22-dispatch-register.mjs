@@ -4122,6 +4122,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4400,7 +4408,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5009,6 +5023,10 @@ function warnNonBlocking(message) {
   process.stderr.write(message);
   process.exit(1);
 }
+function loadConfig(cwd) {
+  const p = join(cwd, ".sterling", "config.json");
+  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
 function repoRel(toolPath, cwd) {
   if (!toolPath) return null;
   const fwd = String(toolPath).replace(/\\/g, "/");
@@ -5075,7 +5093,145 @@ function lastDispatchBlocks(transcriptPath, skip = 0) {
   return [];
 }
 
+// scripts/hooks/lib/dispatch-residue.mjs
+import { spawnSync } from "node:child_process";
+
+// scripts/hooks/lib/dispatch-advisory.mjs
+var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+var SUBJECT_VERB_WINDOW = 40;
+var BARE_NEGATOR_WINDOW = 5;
+function splitClauses(text) {
+  const s = String(text ?? "");
+  const clauses = [];
+  let clauseStart = 0;
+  HARD_BOUNDARY_RE.lastIndex = 0;
+  let m;
+  while (m = HARD_BOUNDARY_RE.exec(s)) {
+    const boundaryStart = m.index;
+    const boundaryEnd = boundaryStart + m[0].length;
+    const isHard = m[1] !== void 0 || m[2] !== void 0 || m[3] !== void 0;
+    if (isHard) {
+      clauses.push(s.slice(clauseStart, boundaryStart));
+      clauseStart = boundaryEnd;
+      continue;
+    }
+    const soFar = s.slice(clauseStart, boundaryStart);
+    if (PROHIBITION_TEST.test(soFar)) continue;
+    clauses.push(soFar);
+    clauseStart = boundaryEnd;
+  }
+  clauses.push(s.slice(clauseStart));
+  return clauses;
+}
+function isNegatedContext(clause, index) {
+  const text = String(clause ?? "");
+  const before = text.slice(0, Math.max(0, index));
+  if (PROHIBITION_TEST.test(before)) return true;
+  BARE_NEGATOR_TEST.lastIndex = 0;
+  let m;
+  while (m = BARE_NEGATOR_TEST.exec(before)) {
+    const gap = before.slice(m.index + m[0].length);
+    if (gap.includes(",")) continue;
+    const tokenCount = (gap.match(/\S+/g) || []).length;
+    if (tokenCount <= BARE_NEGATOR_WINDOW) return true;
+  }
+  return false;
+}
+function isSubjectOfChangeContext(clause, index) {
+  const text = String(clause ?? "");
+  const before = text.slice(0, Math.max(0, index));
+  const near = before.slice(Math.max(0, before.length - SUBJECT_VERB_WINDOW));
+  return SUBJECT_VERB_TEST.test(near);
+}
+function isSuppressedContext(clause, index, checkSubjectVerb = true) {
+  if (isNegatedContext(clause, index)) return true;
+  return checkSubjectVerb && isSubjectOfChangeContext(clause, index);
+}
+function hasUnsuppressedMatch(text, pattern, { checkSubjectVerb = true } = {}) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const global = new RegExp(pattern.source, flags);
+  for (const clause of splitClauses(text)) {
+    global.lastIndex = 0;
+    let m;
+    while (m = global.exec(clause)) {
+      if (!isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
+      if (m.index === global.lastIndex) global.lastIndex++;
+    }
+  }
+  return false;
+}
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// scripts/hooks/lib/dispatch-residue.mjs
+function probeDirtyPaths(projectDir, files) {
+  const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
+  if (declared.length === 0) return { verified: true, dirty: [] };
+  let r;
+  try {
+    r = spawnSync("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
+      cwd: projectDir,
+      encoding: "utf8",
+      timeout: 1e4
+    });
+  } catch (err) {
+    return { verified: false, dirty: declared, reason: String(err?.message ?? err).slice(0, 200) };
+  }
+  if (r.error || r.status !== 0) {
+    const reason = String(r.error?.message || r.stderr || "git status failed").trim().slice(0, 200);
+    return { verified: false, dirty: declared, reason };
+  }
+  const flagged = /* @__PURE__ */ new Set();
+  const tokens = String(r.stdout ?? "").split("\0").filter((t) => t.length > 0);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length < 3) continue;
+    const status = token.slice(0, 2);
+    const path = token.slice(3);
+    flagged.add(path);
+    if ((status[0] === "R" || status[1] === "R" || status[0] === "C" || status[1] === "C") && i + 1 < tokens.length) {
+      flagged.add(tokens[i + 1]);
+      i++;
+    }
+  }
+  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+}
+function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
+  const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
+  const list = (Array.isArray(paths) && paths.length ? paths : ["<no declared files>"]).join(", ");
+  const marker = verified ? "" : ` [tree-state-unverified${reason ? `: ${reason}` : ""}]`;
+  return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
+}
+function claimedResources(promptText, configuredNames) {
+  const names = (Array.isArray(configuredNames) ? configuredNames : []).filter(
+    (n) => typeof n === "string" && n.trim().length > 0
+  );
+  if (names.length === 0) return [];
+  const prompt = String(promptText ?? "");
+  const claimed = [];
+  for (const name of names) {
+    const pattern = new RegExp(escapeRe(name), "i");
+    if (hasUnsuppressedMatch(prompt, pattern, { checkSubjectVerb: false })) claimed.push(name);
+  }
+  return claimed;
+}
+
 // scripts/hooks/h22-dispatch-register.mjs
+function loadExclusiveResourceNames(cwd) {
+  try {
+    const names = loadConfig(cwd)?.exclusive_resources;
+    return Array.isArray(names) ? names.filter((n) => typeof n === "string" && n.trim().length > 0) : [];
+  } catch {
+    return [];
+  }
+}
 var MAX_WALK_BACK = 20;
 function attributeBlocks(transcriptPath, agentType) {
   const lastBlocks = lastDispatchBlocks(transcriptPath, 0);
@@ -5129,7 +5285,7 @@ function withLedgerLock(sterlingDir, run) {
 }
 var input = readStdin();
 try {
-  if (!existsSync4(join2(input.cwd, ".sterling", "sterling.db"))) allow();
+  if (!existsSync4(join2(input.cwd, ".sterling", "config.json"))) allow();
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;
   if (event !== "SubagentStart" && event !== "SubagentStop") {
@@ -5155,16 +5311,42 @@ try {
     const files = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
       (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
     );
-    entries.push({
+    const configuredResources = loadExclusiveResourceNames(input.cwd);
+    const claimed = attribution === "block" && configuredResources.length ? claimedResources(matchedBlocks.map((b) => b.prompt).join("\n"), configuredResources) : [];
+    const notices = [];
+    for (const name of configuredResources) {
+      const holder = entries.find((e) => Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
+      if (holder) {
+        notices.push(`You do not hold '${name}' \u2014 it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
+      }
+    }
+    if (notices.length) {
+      process.stdout.write(
+        JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: notices.join("\n") } })
+      );
+    }
+    const newEntry = {
       agent_id: input.agent_id,
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
       files,
       at: (/* @__PURE__ */ new Date()).toISOString(),
       attribution
-    });
+    };
+    if (claimed.length) newEntry.exclusive_resources = claimed;
+    entries.push(newEntry);
   } else {
     const departing = entries.find((e) => e.agent_id === input.agent_id);
+    if (departing && !departing.residue_reported_at) {
+      const lastMsg = input.last_assistant_message;
+      const noFinalMessage = typeof lastMsg !== "string" || lastMsg === "";
+      if (noFinalMessage) {
+        const probe = probeDirtyPaths(input.cwd, departing.files);
+        if (probe.dirty.length > 0) {
+          process.stdout.write(formatResidueLine(departing, probe.dirty, { verified: probe.verified, reason: probe.reason }) + "\n");
+        }
+      }
+    }
     if (departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-")) {
       const sterlingDir = join2(input.cwd, ".sterling");
       withLedgerLock(sterlingDir, () => {

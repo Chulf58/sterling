@@ -131,7 +131,10 @@ function runCommitReviewed(dir, args = []) {
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
-// The EXACT read scripts/direct-merge.mjs:143 uses (per the base spec).
+// The EXACT read scripts/direct-merge.mjs's receipt-gate uses — the
+// '%(trailers:key=Reviewed-By-Agent,valueonly,unfold)' format string (per
+// the base spec) — cited by format, never by line number, so this comment
+// cannot rot the way a line-number citation did (N2 roster review).
 function readTrailerValues(dir, sha = 'HEAD') {
   const out = git(dir, ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', sha]);
   return out.split('\n').filter((l) => l.trim() !== '');
@@ -369,6 +372,148 @@ test('commit-reviewed.mjs (hardening) CWD GUARD: invoked where .sterling/ does n
 
     const afterHead = git(dir, ['rev-parse', 'HEAD']);
     assert.equal(afterHead, beforeHead, 'no commit was made outside a Sterling project');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (6) TRAILER SURVIVAL (N2, docs/feedback/sterling-plugin-*2026-08-24*):
+// scripts/commit-reviewed.mjs must never hand back success while the trailer
+// it just stamped is unreadable — or does not match what was stamped — via
+// the exact format direct-merge.mjs's receipt-gate read uses — that shape
+// merges as a normal commit, then silently refuses at the gate with no clue
+// why. The required shape is a blank line separating subject from trailers,
+// then a FINAL PARAGRAPH consisting entirely of trailer-shaped lines — the
+// destroyer is any non-trailer line inside that paragraph, or content
+// appended after it, NOT the required separating blank line itself.
+// ---------------------------------------------------------------------------
+
+// A prepare-commit-msg hook that mixes a plain, non-trailer-shaped line into
+// the trailer paragraph — simulating the 'git commit --amend -F <file>'
+// destroyer class from a single git-commit invocation: git's trailer parser
+// requires EVERY line of the final paragraph to look like a trailer, so one
+// ordinary line stitched into that paragraph makes the WHOLE paragraph
+// unparseable as trailers even though 'Reviewed-By-Agent: ...' text is still
+// sitting right there in the raw commit message.
+const HOOK_BREAK_TRAILER_PARAGRAPH = `#!/usr/bin/env node
+const fs = require('fs');
+const file = process.argv[2];
+let msg = fs.readFileSync(file, 'utf8');
+msg = msg.replace(/\\n\\n(Reviewed-By-Agent:[^]*)$/, '\\n\\nnot a trailer line\\n$1');
+fs.writeFileSync(file, msg);
+`;
+
+function installPrepareCommitMsgHook(dir, script) {
+  const hookPath = join(dir, '.git', 'hooks', 'prepare-commit-msg');
+  writeFileSync(hookPath, script, { mode: 0o755 });
+  chmodSync(hookPath, 0o755);
+}
+
+test('commit-reviewed.mjs (N2) TRAILER SURVIVES: a normal commit stamps a trailer readable via the exact direct-merge.mjs receipt-gate format', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir);
+    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
+
+    const r = runCommitReviewed(dir, ['-m', 'feature reviewed']);
+    assert.equal(r.code, 0, `commit must succeed — stdout=${r.stdout} stderr=${r.stderr}`);
+
+    const trailers = readTrailerValues(dir);
+    assert.deepEqual(trailers, ['reviewer-correctness'], 'the trailer stamped by commit-reviewed.mjs is readable via the exact direct-merge.mjs receipt-gate format string');
+
+    assert.deepEqual(readLedger(dir), [], 'the consumed entry is removed once the trailer verified');
+  } finally {
+    cleanup();
+  }
+});
+
+test('commit-reviewed.mjs (N2) TRAILER DESTROYED: when the trailer does not survive the commit, the CLI fails LOUDLY instead of reporting success', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    installPrepareCommitMsgHook(dir, HOOK_BREAK_TRAILER_PARAGRAPH);
+    stageChange(dir);
+    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
+    const ledgerBefore = readLedgerRaw(dir);
+
+    // EXPECTED FAILURE SHAPE (red before the fix): an implementation that
+    // never re-reads the trailer after `git commit` reports {committed:
+    // true, ...} with exit 0 and consumes the ledger, even though the
+    // commit that just landed is unmergeable — direct-merge.mjs would
+    // refuse it later with no link back to this step. The `assert.notEqual
+    // (r.code, 0, ...)` line below is the one expected to fail red.
+    const r = runCommitReviewed(dir, ['-m', 'feature reviewed but the trailer gets mangled']);
+    assert.notEqual(r.code, 0, `a destroyed trailer must fail loudly, not report success — stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.match(r.stderr, /COMMIT SUCCEEDED/i, 'the failure names that the commit already exists');
+    assert.match(r.stderr, /UNMERGEABLE/i, 'the failure names that the commit is unmergeable as-is');
+
+    // The commit itself really did land (git commit exited 0) — this is not
+    // a normal refusal, it is a distinct post-commit failure mode.
+    const headMsg = git(dir, ['log', '-1', '--format=%s']);
+    assert.equal(headMsg, 'feature reviewed but the trailer gets mangled');
+
+    // The trailer really is unreadable via the exact direct-merge format —
+    // this is a fixture-correctness guard, not the behavior under test.
+    assert.deepEqual(readTrailerValues(dir), [], 'fixture guard: the prepare-commit-msg hook actually broke the trailer paragraph');
+
+    // The ledger entry must survive un-consumed so a retry (e.g. a
+    // corrected amend) can still stamp it.
+    assert.equal(readLedgerRaw(dir), ledgerBefore, 'the review-ledger entry is NOT consumed when the trailer verification fails');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (7) VERIFICATION-TARGET-IS-THE-CREATED-SHA (Codex P1-A): the post-commit
+// trailer verification must be pinned to the SHA the invocation's own `git
+// commit` actually created, never a subsequent read of the moving `HEAD`
+// alias — a `post-commit` hook that itself lands another commit (moving
+// HEAD) before `git commit` returns is enough to point a bare-HEAD
+// verification at the WRONG commit entirely.
+// ---------------------------------------------------------------------------
+
+// A post-commit hook that immediately lands a second, untrailered commit —
+// simulating any concurrent process (a reviewer's own workflow, another
+// tool) that moves HEAD in this working tree between this invocation's
+// commit and a later bare-HEAD read.
+const HOOK_MOVE_HEAD_AFTER_COMMIT = `#!/usr/bin/env node
+const fs = require('fs');
+const { execFileSync } = require('child_process');
+fs.writeFileSync('post-commit-hook-file.mjs', '// landed by the post-commit hook\\n');
+execFileSync('git', ['add', '-A']);
+execFileSync('git', ['commit', '-m', 'unrelated commit landed by a concurrent process']);
+`;
+
+test('commit-reviewed.mjs (Codex P1-A) VERIFICATION-TARGET-IS-THE-CREATED-SHA: a post-commit hook moving HEAD does not fool the trailer verification', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    installPreCommitHook(dir, '#!/bin/sh\nexit 0\n'); // no-op — post-commit is what matters here
+    const hookPath = join(dir, '.git', 'hooks', 'post-commit');
+    writeFileSync(hookPath, HOOK_MOVE_HEAD_AFTER_COMMIT, { mode: 0o755 });
+    chmodSync(hookPath, 0o755);
+
+    stageChange(dir);
+    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
+
+    // EXPECTED FAILURE SHAPE (red against a bare `git rev-parse HEAD`
+    // capture, or against a verification that never pins a sha at all): by
+    // the time the CLI reads HEAD, the post-commit hook has already landed
+    // a SECOND, untrailered commit on top — a bare-HEAD verification reads
+    // THAT commit's (missing) trailer, reporting a false TRAILER-DESTROYED
+    // failure for a commit that actually carries the trailer correctly.
+    // The `assert.equal(r.code, 0, ...)` line is the one expected to fail
+    // red against that shape.
+    const r = runCommitReviewed(dir, ['-m', 'feature reviewed, hook lands a second commit after']);
+    assert.equal(r.code, 0, `verification must target the sha THIS invocation created, not whatever HEAD moved to afterward — stdout=${r.stdout} stderr=${r.stderr}`);
+
+    const headSha = git(dir, ['rev-parse', 'HEAD']);
+    const parentSha = git(dir, ['rev-parse', 'HEAD~1']);
+    assert.equal(git(dir, ['log', '-1', '--format=%s', headSha]), 'unrelated commit landed by a concurrent process', 'fixture guard: HEAD really did move past the reviewed commit');
+    assert.deepEqual(readTrailerValues(dir, parentSha), ['reviewer-correctness'], 'the reviewed commit (now HEAD~1) carries the trailer');
+    assert.deepEqual(readTrailerValues(dir, headSha), [], 'fixture guard: the hook-landed commit on top carries no trailer at all');
+
+    assert.deepEqual(readLedger(dir), [], 'the ledger entry was correctly consumed once the CORRECT (non-HEAD) commit verified');
   } finally {
     cleanup();
   }

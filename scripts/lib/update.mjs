@@ -24,6 +24,7 @@ import { join } from 'node:path';
 // builtins-only module — safe at load time on an unbuilt clone (see the
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
+import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -395,7 +396,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       return report;
     }
     if (version < 2) {
-      if (!step(`migrate store schema v${version} → v2 (${store})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', store], { show: true }).ok) return report;
+      if (!step(`migrate store schema v${version} → v2 (${store})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', store, '--invoked-by', 'update-sweep'], { show: true }).ok) return report;
       // Review fix H2: an already-open MCP server keeps the schema verdict it
       // read at open, so a session that was live during migration refuses
       // writes until restarted — say so instead of leaving a mystery refusal.
@@ -445,7 +446,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         return report;
       }
       if (projVersion < 2) {
-        if (!step(`migrate store schema v${projVersion} → v2 (${projStore})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', projStore], { show: true }).ok) return report;
+        if (!step(`migrate store schema v${projVersion} → v2 (${projStore})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', projStore, '--invoked-by', 'update-sweep'], { show: true }).ok) return report;
         log(`  ▸ migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough — MCP servers survive it) before it can write again`);
       }
     }
@@ -477,6 +478,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         if (launcher.status !== 'matches') log(`      ${UPDATE_LAUNCHER_NAME}: ${launcher.status} — ${launcher.detail}`);
       } catch (err) {
         log(`      ⚠ ${UPDATE_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
+      }
+      // Deliver the consumer-runnable checks entry the same way (board 4ccf0644):
+      // a project init'd before this launcher existed otherwise never gets one.
+      try {
+        const checkLauncher = ensureConsumerCheckLauncher(p.repo_path, cwd);
+        if (checkLauncher.status !== 'matches') log(`      ${CONSUMER_CHECK_LAUNCHER_NAME}: ${checkLauncher.status} — ${checkLauncher.detail}`);
+      } catch (err) {
+        log(`      ⚠ ${CONSUMER_CHECK_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
       }
     }
   } else if (opts.projects === false) {

@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { parseConfig } from '@sterling/schemas';
+import { parseConfig, RECORD_TYPES } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { createSterlingServer } from '../server.js';
 import { SterlingTools } from '../tools.js';
@@ -77,7 +77,7 @@ const SERVED_TOOLS = [
 
 async function harness() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-mcp-'));
-  const { server, store } = createSterlingServer(join(dir, 'sterling.db'));
+  const { server, store, tools } = createSterlingServer(join(dir, 'sterling.db'));
   const client = new Client({ name: 'test-client', version: '0.0.1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -87,7 +87,7 @@ async function harness() {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { client, store, cleanup };
+  return { client, store, tools, cleanup };
 }
 
 function payload(result: unknown): unknown {
@@ -126,6 +126,7 @@ test('MCP: research_finding gains file_keys — create normalizes it, query join
         arguments: {
           type: 'research_finding',
           fields: {
+            type: 'research_finding',
             question: 'does the platform rate-limit per org or per token?',
             answer: 'per-org',
             source_urls: [],
@@ -152,6 +153,7 @@ test('MCP: research_finding gains file_keys — create normalizes it, query join
         arguments: {
           type: 'research_finding',
           fields: {
+            type: 'research_finding',
             question: 'unrelated question with no file identity',
             answer: 'a',
             source_urls: [],
@@ -189,6 +191,7 @@ test('MCP: research_finding gains file_keys — create normalizes it, query join
       arguments: {
         type: 'reference_material',
         fields: {
+          type: 'reference_material',
           title: 'ROADMAP',
           kind: 'doc',
           location: 'ROADMAP.md',
@@ -220,7 +223,7 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
         name: 'knowledge_create',
         arguments: {
           type: 'decision',
-          fields: { title: 'T', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src\\x.ts'] },
+          fields: { type: 'decision', title: 'T', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src\\x.ts'] },
           projection: 'full',
         },
       })
@@ -481,6 +484,100 @@ test('§3.2.5 repo-located docs: only a real content change (not an mtime-only b
     const ext = refs.find((r) => (r as unknown as { kind?: string }).kind === 'url')!;
     assert.equal(ext.verify_before_use, undefined, 'url-kind reference is never doc-flagged');
     assert.equal(tools.maintenanceQuery({ system_reason: 'refresh_reference' }).length, 1, 'and enqueues nothing');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// refresh_reference DEDUP UNCHANGED BY PRE-CHECK REMOVAL (board e939fd21). A
+// redundant pre-check sat upstream of the atomic enqueueSystemTodo choke,
+// keyed weaker than the choke itself — by path alone, ignoring feature_link —
+// so it could suppress a mint for a genuinely DIFFERENT subject that happens
+// to cite the same path. The fix removes that pre-check and relies solely on
+// the atomic choke. CONTROL FIRST: a single subject re-detected repeatedly
+// must still dedupe to one item (proves the choke alone still does its job);
+// only once that holds does "two subjects, two items" mean the fix is
+// correct rather than "dedup broke entirely".
+// ---------------------------------------------------------------------------
+
+test('refresh_reference CONTROL: an identical re-detection of the SAME subject still dedupes to one item once the redundant pre-check is removed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-refsame-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, repoRoot: dir });
+  try {
+    const docPath = join(dir, 'docs', 'spec.md');
+    writeFileSync(docPath, 'v1');
+    utimesSync(docPath, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+    const { record: doc } = tools.knowledgeCreate('reference_material', {
+      title: 'Build Spec',
+      kind: 'doc',
+      location: 'docs/spec.md',
+      summary: 'section map',
+      source_date: '2026-06-01T00:00:00.000Z',
+      capture_date: '2026-06-01T00:00:00.000Z',
+    });
+    writeFileSync(docPath, 'v2');
+    utimesSync(docPath, new Date('2026-06-10T00:00:00Z'), new Date('2026-06-10T00:00:00Z'));
+    for (let i = 0; i < 3; i++) tools.knowledgeQuery({ types: ['reference_material'] });
+    const queue = tools.maintenanceQuery({ system_reason: 'refresh_reference' }) as unknown as { feature_link?: string }[];
+    assert.equal(
+      queue.length,
+      1,
+      'CONTROL: removing the redundant pre-check must not reopen the duplicate-mint bug the atomic choke already closes — ' +
+        'SABOTAGE: bypassing enqueueSystemTodo for this lane (or dropping feature_link from its key) makes this go RED (3 items instead of 1)'
+    );
+    assert.equal(queue[0].feature_link, doc.id);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('refresh_reference: a DIFFERENT subject sharing the same path is NOT suppressed — both items exist (board e939fd21)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-refshare-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, repoRoot: dir });
+  try {
+    const docPath = join(dir, 'docs', 'spec.md');
+    writeFileSync(docPath, 'v1');
+    utimesSync(docPath, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+
+    const { record: doc1 } = tools.knowledgeCreate('reference_material', {
+      title: 'Build Spec — overview',
+      kind: 'doc',
+      location: 'docs/spec.md',
+      summary: 'section map',
+      source_date: '2026-06-01T00:00:00.000Z',
+      capture_date: '2026-06-01T00:00:00.000Z',
+    });
+    const { record: doc2 } = tools.knowledgeCreate('reference_material', {
+      title: 'Build Spec — appendix',
+      kind: 'doc',
+      location: 'docs/spec.md',
+      summary: 'a genuinely different subject citing the SAME path',
+      source_date: '2026-06-01T00:00:00.000Z',
+      capture_date: '2026-06-01T00:00:00.000Z',
+    });
+
+    writeFileSync(docPath, 'v2');
+    utimesSync(docPath, new Date('2026-06-10T00:00:00Z'), new Date('2026-06-10T00:00:00Z'));
+    tools.knowledgeQuery({ types: ['reference_material'] });
+
+    const queue = tools.maintenanceQuery({ system_reason: 'refresh_reference' }) as unknown as { feature_link?: string }[];
+    const links = new Set(queue.map((q) => q.feature_link));
+    assert.equal(
+      queue.length,
+      2,
+      'two distinct subjects citing one path must mint TWO items — ' +
+        'SABOTAGE: reintroducing a path-only pre-check ahead of the atomic choke makes this go RED (collapses back to 1)'
+    );
+    assert.ok(links.has(doc1.id) && links.has(doc2.id), "each subject gets its OWN item, addressed by its own id — never merged under the shared path");
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -855,5 +952,131 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
     store.close();
     rmSync(dir, { recursive: true, force: true });
     rmSync(copy, { recursive: true, force: true });
+  }
+});
+
+test('knowledge_create is typed per-type (decision 7c7f6db1, probe research_finding 15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
+  const { client, tools, cleanup } = await harness();
+  try {
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_create');
+    assert.ok(tool, 'knowledge_create is served');
+
+    // (f) the SDK serves z.discriminatedUnion as a bare anyOf (discriminator
+    // keyword lost — research_finding 15c8e6b5), so the description carries the
+    // hint a model needs to pick the right branch and stay inside it.
+    assert.match(
+      tool!.description ?? '',
+      /Set fields\.type to select one schema branch/,
+      'knowledge_create names the discriminator convention in prose, since the served schema cannot'
+    );
+
+    const inputSchema = tool!.inputSchema as { properties?: Record<string, unknown> };
+    const fieldsSchema = inputSchema.properties?.fields as { anyOf?: { properties?: Record<string, unknown>; required?: string[] }[] };
+    const variants = fieldsSchema.anyOf;
+    assert.ok(Array.isArray(variants), 'fields is served as a union (anyOf) — the SDK cannot express a discriminated union any other way');
+
+    // (a) exactly one variant per registered record type, each carrying its own
+    // type as a const literal and an accurate required[].
+    const registeredTypes = Object.keys(RECORD_TYPES).sort();
+    assert.equal(variants!.length, registeredTypes.length, `exactly the ${registeredTypes.length} registered record types get a variant`);
+
+    const seenTypes: string[] = [];
+    for (const variant of variants!) {
+      const properties = variant.properties ?? {};
+      const typeConst = (properties.type as { const?: string } | undefined)?.const;
+      assert.ok(typeConst, 'every variant carries its type as a const literal');
+      seenTypes.push(typeConst!);
+
+      // (d) SERVER-OWNED fields are absent from every variant's properties —
+      // never merely optional, since the server assigns every one of them.
+      for (const owned of ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'lifecycle', 'freshness', 'file_baselines', 'version']) {
+        assert.ok(!(owned in properties), `${typeConst} variant must not expose server-owned '${owned}' as a property`);
+      }
+
+      // required[] matches knowledge_schema's own required set (the SAME
+      // derivation this layer reuses) plus 'type' itself — the one field
+      // knowledge_schema masks as server-owned that THIS layer re-admits as a
+      // caller-supplied discriminator literal.
+      const described = tools.knowledgeSchema(typeConst!);
+      const expectedRequired = [...described.required, 'type'].sort();
+      assert.deepEqual(
+        [...(variant.required ?? [])].sort(),
+        expectedRequired,
+        `${typeConst} variant's required[] matches knowledge_schema's required set plus the discriminator`
+      );
+
+      // dedup_override is admitted on every variant (the create-time directive
+      // tools.ts strips before the candidate is built) and stays optional.
+      assert.ok('dedup_override' in properties, `${typeConst} variant admits dedup_override`);
+      assert.ok(!(variant.required ?? []).includes('dedup_override'), 'dedup_override is never required');
+
+      // The whole properties KEY SET, not just required[] (review finding):
+      // variants are .strict(), so a silently-dropped OPTIONAL field would be
+      // unwritable while every other assertion here stayed green. Expected =
+      // every field knowledge_schema describes for the type, minus the ones it
+      // marks server_owned, plus the discriminator and dedup_override.
+      const describedFields = tools.knowledgeSchema(typeConst!).fields;
+      const expectedKeys = [
+        ...describedFields.filter((f) => !(f as { server_owned?: boolean }).server_owned).map((f) => f.name),
+        'type',
+        'dedup_override',
+      ].sort();
+      assert.deepEqual(
+        Object.keys(properties).sort(),
+        expectedKeys,
+        `${typeConst} variant exposes exactly the caller-suppliable field set`
+      );
+    }
+    assert.deepEqual(seenTypes.sort(), registeredTypes, 'every registered type gets exactly one variant, no more, no fewer');
+
+    // (e) size guard: the served tool definition (description + schema) stays
+    // well under the 25KB ceiling research_finding 15c8e6b5 measured for the
+    // WRITE_REFUSED_FIELDS-stripped union (~15.3KB / ~3,834 tokens).
+    const servedBytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
+    assert.ok(servedBytes < 25_000, `served knowledge_create tool definition is ${servedBytes} bytes, expected < 25000`);
+
+    // (b) a well-formed create through the SERVER handler path succeeds —
+    // fields.type now selects the branch (the decision's own words: "fields
+    // body BECOMES the union").
+    const created = payload(
+      await client.callTool({
+        name: 'knowledge_create',
+        arguments: {
+          type: 'decision',
+          fields: { type: 'decision', title: 'typed-create', statement: 'S', alternatives_rejected: [], rationale: 'R' },
+          projection: 'full',
+        },
+      })
+    ) as { record: { id: string; title: string } };
+    assert.ok(created.record.id, 'a well-formed decision create succeeds through the typed schema');
+    assert.equal(created.record.title, 'typed-create');
+
+    // (c) a wrong-variant body (type anti_pattern with decision fields) is
+    // refused at PARSE TIME, naming that variant's missing/extra fields —
+    // never a generic union failure.
+    const wrongVariant = await client.callTool({
+      name: 'knowledge_create',
+      arguments: {
+        type: 'anti_pattern',
+        fields: { type: 'anti_pattern', title: 'T', statement: 'S', alternatives_rejected: [], rationale: 'R' },
+      },
+    });
+    assert.equal(wrongVariant.isError, true, 'anti_pattern fields carrying decision-only shape is refused, not silently accepted');
+    const wrongVariantText = (wrongVariant.content as { text: string }[])[0].text;
+    // anti_pattern requires trigger/guidance/wrong_way/right_way/severity, none
+    // of which the decision-shaped body supplied — the refusal names them.
+    assert.match(wrongVariantText, /trigger/, 'the refusal names a field the anti_pattern variant actually requires');
+
+    // knowledge_update's schema is UNTOUCHED (still passthrough) — only its
+    // description gains a guard sentence against a model copying a
+    // knowledge_create-shaped body into `body` verbatim.
+    const updateTool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_update');
+    assert.match(
+      updateTool!.description ?? '',
+      /PARTIAL PATCH, not a knowledge_create body/,
+      'knowledge_update names the partial-patch contract explicitly, guarding against a create-shaped body'
+    );
+  } finally {
+    await cleanup();
   }
 });

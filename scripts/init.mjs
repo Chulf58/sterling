@@ -30,6 +30,7 @@ import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
+import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -369,6 +370,14 @@ if (winNode) {
 // this launcher to projects whose init predates it.
 items.push({ item: UPDATE_LAUNCHER_NAME, ...ensureUpdateLauncher(target, pluginRoot) });
 
+// (6) the consumer-runnable checks entry (board 4ccf0644): check-record-citations
+// + check-stale-claims were registered only in the CLONE's own `npm run check` —
+// nothing shipped a way to run them against a CONSUMING project's own tree/store,
+// which is exactly where the incidents they exist to catch happened. Ensure logic
+// shared with /sterling:update's project fan-out (scripts/lib/consumer-checks.mjs),
+// same delivery precedent as the updater launcher above.
+items.push({ item: CONSUMER_CHECK_LAUNCHER_NAME, ...ensureConsumerCheckLauncher(target, pluginRoot) });
+
 // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
 // up_to_date | locally-modified left | refuse-on-local-modification
 const vars = { NODE: `"${fwd(process.execPath)}"`, HOOKS_DIR: fwd(join(pluginRoot, 'hooks')) };
@@ -574,7 +583,7 @@ items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the
 // gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');
 const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
-const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, '.claude/agents/'];
+const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
 if (fwd(target) === fwd(pluginRootMatch)) entries.push('.claude-plugin/sterling-mcp.json', '.claude-plugin/sterling-mcp-win.json');

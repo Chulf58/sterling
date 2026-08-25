@@ -51,8 +51,20 @@
 // with no self-healing mechanism.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, allow, warnNonBlocking, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { lastDispatchBlocks, extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
+
+// SPEC B: .sterling/config.json's top-level `exclusive_resources: string[]`
+// (absent/malformed -> none, soft posture — this hook never gates on config).
+function loadExclusiveResourceNames(cwd) {
+  try {
+    const names = loadConfig(cwd)?.exclusive_resources;
+    return Array.isArray(names) ? names.filter((n) => typeof n === 'string' && n.trim().length > 0) : [];
+  } catch {
+    return [];
+  }
+}
 
 // PER-BLOCK ATTRIBUTION (decision 5d3747c1, slug h22-per-block-attribution) —
 // replaces the old union-of-every-block-regardless-of-type extraction. Match
@@ -140,8 +152,23 @@ const input = readStdin();
 
 try {
   // Not a Sterling project — no ceremony, and above all nothing created (P1).
-  // Same key as projectRoot/openStore: the DB FILE, never a bare .sterling dir.
-  if (!existsSync(join(input.cwd, '.sterling', 'sterling.db'))) allow();
+  // Keyed on `.sterling/config.json`'s EXISTENCE, not the sterling.db FILE
+  // (board 03ed9d461/31565253 fixer note) and not the bare `.sterling/`
+  // directory (fixer round, 2026-08-25 addendum): this hook never opens the
+  // store — it only ever reads/writes config.json, the transient register,
+  // the durable review ledger, and a git probe — so a project with
+  // .sterling/config.json but no sterling.db yet (a project mid-init, or
+  // SPEC A/B's dispatch-residue-and-resources fixtures) is still a Sterling
+  // project for every duty this hook performs. Gating on config.json rather
+  // than the bare directory is STRICTER: a mid-init bare `.sterling/` (no
+  // config.json written yet) no longer accumulates a register or, worse, a
+  // durable review-ledger.json. Sibling h26-dispatch-overlap.mjs reached the
+  // same conclusion for its resource check ("it never needed the sterling.db
+  // gate to begin with"). The pinned non-Sterling control (h22-dispatch-
+  // register.test.mjs) uses a bare dir with NO .sterling/ at all, so this
+  // stays exactly as strict for that case; every frozen fixture writes
+  // config.json, so this stays green everywhere else too.
+  if (!existsSync(join(input.cwd, '.sterling', 'config.json'))) allow();
 
   const event = input.hook_event_name;
   // What a skipped update actually COSTS, named per event so the warning can
@@ -201,14 +228,61 @@ try {
         !r.startsWith('sterling/') &&
         !r.startsWith('git/')
     );
-    entries.push({
+    // SPEC B (1)/(2): exclusive non-file resource claim, scanned from the SAME
+    // matched blocks' prompt text the file attribution above came from — the
+    // shared negation-aware scanner means a negated mention ("No
+    // windowed-godot run for this dispatch") never claims. No configured
+    // names (absent/malformed config) -> nothing to claim.
+    // ATTRIBUTION-GATED (fixer round, 2026-08-25 addendum C): minted ONLY
+    // from a 'block' attribution (the single string-matched block's own
+    // prompt) — under 'union' attribution several same-type siblings share
+    // ONE register entry per spawn, and a claim found in just one sibling's
+    // prompt would otherwise mint exclusive_resources onto EVERY same-type
+    // spawn this fires for, producing false holders and false "you do not
+    // hold" notices. Under 'union' no claim field is written at all, matching
+    // the advisory-precision posture elsewhere (noise is the measured failure
+    // mode, not under-claiming — a missed claim here costs only a missed
+    // "you hold X" disclosure, never a duty).
+    const configuredResources = loadExclusiveResourceNames(input.cwd);
+    const claimed =
+      attribution === 'block' && configuredResources.length
+        ? claimedResources(matchedBlocks.map((b) => b.prompt).join('\n'), configuredResources)
+        : [];
+
+    // SPEC B (6): "you do not hold <resource>" notice — computed against
+    // `entries` BEFORE this spawn's own entry is appended below, so a
+    // sole/first claimant structurally never sees itself (self-exclusion is
+    // not a filter to get wrong, it is simply not in the list yet).
+    const notices = [];
+    for (const name of configuredResources) {
+      const holder = entries.find((e) => Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
+      if (holder) {
+        notices.push(`You do not hold '${name}' — it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
+      }
+    }
+    // Emitted through the documented SubagentStart injection channel
+    // (hookSpecificOutput.additionalContext — same shape h19-dispatch-staging.mjs
+    // uses), not a raw stdout write: a raw write is not guaranteed to reach the
+    // spawned agent at all. Nothing else on this event path writes
+    // hookSpecificOutput today, so there is nothing to merge with yet — but the
+    // shape is built so a future addition here joins into ONE payload/one write,
+    // never a second competing hookSpecificOutput write.
+    if (notices.length) {
+      process.stdout.write(
+        JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: notices.join('\n') } })
+      );
+    }
+
+    const newEntry = {
       agent_id: input.agent_id,
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
       files,
       at: new Date().toISOString(),
       attribution,
-    });
+    };
+    if (claimed.length) newEntry.exclusive_resources = claimed;
+    entries.push(newEntry);
   } else {
     // Stop: promote a reviewer-class entry into the durable review ledger
     // (decision 12a26ca6-a301-466d-a45c-5e1eeff36694, slug
@@ -218,6 +292,31 @@ try {
     // scripts/commit-reviewed.mjs. Non-reviewer entries keep the exact
     // delete-only path from before: the ledger is never created or touched.
     const departing = entries.find((e) => e.agent_id === input.agent_id);
+
+    // SPEC A (6): kill-detection at H22's own SubagentStop — no TTL wait
+    // needed, since a kill is detectable immediately via the real stdin field
+    // `last_assistant_message` (research_finding 20b44518): an EMPTY string OR
+    // an ABSENT field (both forms) is the kill signature; a normal agent
+    // completion always produces a non-empty final message. A git-probe
+    // failure must never silently drop the residue (SPEC A item 7) — it still
+    // prints, marked tree-state-unverified, via probeDirtyPaths's disclosed
+    // { verified: false, dirty: <all declared>, reason } shape.
+    // Print-once (fixer round, 2026-08-25 addendum B): an entry already
+    // carrying a truthy residue_reported_at may have been reported by H10 at
+    // a Stop that fired before this SubagentStop finally landed — mirrors
+    // H10/H1's own read-side suppression so the same incident is never
+    // reported twice across surfaces.
+    if (departing && !departing.residue_reported_at) {
+      const lastMsg = input.last_assistant_message;
+      const noFinalMessage = typeof lastMsg !== 'string' || lastMsg === '';
+      if (noFinalMessage) {
+        const probe = probeDirtyPaths(input.cwd, departing.files);
+        if (probe.dirty.length > 0) {
+          process.stdout.write(formatResidueLine(departing, probe.dirty, { verified: probe.verified, reason: probe.reason }) + '\n');
+        }
+      }
+    }
+
     if (departing && typeof departing.agent_type === 'string' && departing.agent_type.startsWith('reviewer-')) {
       // Lock-guarded (see withLedgerLock above) — this durable ledger has no
       // TTL/H1-wipe safety net, unlike the register below, so a lost update

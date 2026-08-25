@@ -3,7 +3,7 @@ name: debugger
 description: Root-causes a reproducible defect by running probes and harnesses through the project's declared toolchain commands. Returns evidence and a diagnosis — fixes only when the work order explicitly includes them.
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: Read, Edit, Write, Grep, Glob, Bash, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get
+tools: Read, Edit, Write, Grep, Glob, Bash, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__board_query, mcp__plugin_sterling_sterling__board_query, mcp__sterling__board_get, mcp__plugin_sterling_sterling__board_get
 required_inputs:
   - the symptom (failing harness/test name, exact error output, or observed misbehavior)
   - the suspect surface (files/commits in play) and any prior evidence the conductor gathered

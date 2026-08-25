@@ -440,6 +440,85 @@ test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed f
   }
 });
 
+test('direct-merge.mjs: reconcile refusal GROUPS items by owning article (feature_link) with counts — N articles, not N items (N13)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    git(dir, ['checkout', '-b', 'feat/many-touches']);
+    for (const f of ['a.mjs', 'b.mjs', 'c.mjs']) {
+      writeFileSync(join(dir, 'src', f), `export const v_${f.replace('.mjs', '')} = 1;\n`);
+    }
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'touch three files owned by one article']);
+
+    const articleId = randomUUID();
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const items = ['a.mjs', 'b.mjs', 'c.mjs'].map((f) =>
+      store.create({
+        id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+        text: `reconcile article — ${f} touched in direct mode`, source: 'system', system_reason: 'reconcile_needed', file_keys: [`src/${f}`], feature_link: articleId,
+      })
+    );
+    store.close();
+
+    const refused = runDirectMerge(dir);
+    assert.notEqual(refused.status, 0, 'open debt still refuses the merge');
+    // EXPECTED FAILURE SHAPE (red before the fix): the unhardened refusal
+    // prints one line PER ITEM with no grouping header at all — the
+    // `/3 item\(s\) across 1 article\(s\)/` line and the single `article
+    // <id>` header line below are the ones expected to fail red against it.
+    assert.match(refused.stderr, /3 open reconcile_needed item\(s\) across 1 article\(s\)/, 'the refusal reads as 1 article, not 3 items');
+    assert.match(refused.stderr, new RegExp(`article ${articleId} `), 'the group is headed by its owning article id');
+    // Every item id stays available under the article's group — grouping
+    // must never be lossy, only denser.
+    for (const item of items) {
+      assert.match(refused.stderr, new RegExp(item.id), `item ${item.id} is still individually listed under its article group`);
+    }
+    for (const f of ['src/a.mjs', 'src/b.mjs', 'src/c.mjs']) {
+      assert.match(refused.stderr, new RegExp(f.replace('.', '\\.')));
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('direct-merge.mjs: legacy items with NO feature_link collapse into ONE bucket — never counted as N separate articles (N13 roster review)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    git(dir, ['checkout', '-b', 'feat/legacy-touches']);
+    const files = ['x.mjs', 'y.mjs', 'z.mjs'];
+    for (const f of files) {
+      writeFileSync(join(dir, 'src', f), `export const v_${f.replace('.mjs', '')} = 1;\n`);
+    }
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'touch three files with no feature_link (older/foreign items)']);
+
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    for (const f of files) {
+      store.create({
+        id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+        text: `reconcile — ${f} touched (no feature_link on this legacy item)`, source: 'system', system_reason: 'reconcile_needed', file_keys: [`src/${f}`],
+      });
+    }
+    store.close();
+
+    const refused = runDirectMerge(dir);
+    assert.notEqual(refused.status, 0, 'open debt still refuses the merge');
+    // EXPECTED FAILURE SHAPE (red before the fix): keying the no-article
+    // bucket per-item (e.g. by t.id) produces 3 separate buckets — the
+    // headline would read "across 3 article(s)", over-counting the legacy
+    // case exactly like the per-item shape N13 was meant to compress. The
+    // `across 0 article\(s\)` assertion is the one expected to fail red
+    // against that shape.
+    assert.match(refused.stderr, /3 open reconcile_needed item\(s\) across 0 article\(s\)/, 'zero REAL articles — all three items are legacy/unlinked');
+    assert.match(refused.stderr, /plus 3 item\(s\) with no owning article/, 'the legacy items are named as one group of 3, not 3 groups of 1');
+    // Only ONE "(no owning article)" header line exists, not three.
+    const headerMatches = refused.stderr.match(/\(no owning article\)/g) ?? [];
+    assert.equal(headerMatches.length, 1, 'exactly one shared bucket header for every unlinked item — never one per item');
+  } finally {
+    cleanup();
+  }
+});
+
 test('direct-merge.mjs: pushes the base to origin after the merge (--no-push opts out); a worktree-pinned merged branch is skipped, never a sweep failure', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   const outside = mkdtempSync(join(tmpdir(), 'sterling-dm-push-'));
@@ -839,7 +918,7 @@ test('completeness-check --final: an amended file in the whole-run diff is in-co
 
 // ------- generated hook bundles in the whole-run diff (decision 66c15d77 corollary retired) -------
 
-// The enforcement suite runs build-hooks.mjs in-repo, so any run touching a bundle input
+// A run that rebuilds the bundles (`npm run build:hooks`) after touching a bundle input
 // (scripts/hooks/**, packages/schemas/**, packages/store/**) sweeps regenerated hooks/h*.mjs
 // bundles into its whole-run diff. --final derives a diff'd bundle as in-contract from its
 // CAUSE — another diff file under the input roots that is itself in the allowed set — so

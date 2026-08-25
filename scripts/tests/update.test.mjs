@@ -10,7 +10,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent } from '../lib/update.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
@@ -724,6 +725,102 @@ test('ensureUpdateLauncher: created / matches / differs / skipped — never over
   }
 });
 
+// board bb3aa162 — generated-marker refresh: the pre-fix behavior above
+// ('differs' + left untouched, byte-identical) is EXACTLY case 3 (no marker /
+// legacy) and, when the template hasn't changed between calls, case 4 (already
+// current). What the old bare content-equality could NOT do is tell apart "the
+// file changed because a human touched it" from "the file changed because the
+// TEMPLATE changed and this on-disk copy is still exactly what generation
+// produced" — both used to read identically as 'differs'. These pins isolate
+// that distinction at the ensureUpdateLauncher seam. Spec-only: authored BLIND
+// to scripts/lib/generated-marker.mjs, update-launcher.mjs and consumer-checks.mjs.
+const BAT_TEMPLATE_V2 = '@echo off\r\nrem updater v2\r\n"wt.exe" wsl.exe --cd "{{WIN_PLUGIN_DIR}}" -- bash scripts/update-console.sh"\r\n';
+
+test('ensureUpdateLauncher (case 1): an unmodified-since-generation file is REWRITTEN (status refreshed) when the render changes, and the new body validates its own fresh marker', () => {
+  const clone = cloneWithTemplate();
+  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
+  try {
+    assert.equal(ensureUpdateLauncher(target, clone).status, 'created');
+    const original = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
+
+    // the template changes (a clone move / template edit) — NOT a hand edit of
+    // the target file — so the fresh render now differs from what's on disk
+    writeFileSync(join(clone, 'templates', 'update-win.bat'), BAT_TEMPLATE_V2);
+
+    const refreshed = ensureUpdateLauncher(target, clone);
+    assert.equal(refreshed.status, 'refreshed', 'an untouched generated file refreshes instead of reporting differs');
+    const afterRefresh = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
+    assert.notEqual(afterRefresh, original, 'the on-disk CONTENT actually changed to the fresh render, not merely the status string');
+    assert.match(afterRefresh, /rem updater v2/, 'the rewritten file reflects the NEW template body');
+
+    // case 4 control, folded in: a further call against the now-current render
+    // must report matches and rewrite nothing — proving the marker stamped by
+    // the refresh above is itself valid for the body it describes
+    const stable = ensureUpdateLauncher(target, clone);
+    assert.equal(stable.status, 'matches', 'the freshly-stamped marker validates the freshly-written body — no refresh loop');
+    assert.equal(readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8'), afterRefresh, 'content untouched on the matching re-run');
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: revert the marker-refresh mechanism to bare content-equality (in
+// the "on-disk differs from fresh render" branch, always report 'differs' and
+// skip the rewrite, regardless of marker match) — 'refreshed' assertion and the
+// notEqual(afterRefresh, original) assertion both go red; the file would still
+// read as 'hand edited' original bytes, exactly the board bb3aa162 defect.
+
+test('ensureUpdateLauncher (case 2): a body hand-edited after generation stays "differs" even when the template ALSO changed — left byte-identical, never auto-refreshed', () => {
+  const clone = cloneWithTemplate();
+  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
+  try {
+    assert.equal(ensureUpdateLauncher(target, clone).status, 'created');
+    const launcherPath = join(target, UPDATE_LAUNCHER_NAME);
+    // hand-edit the generated body — this is what must invalidate its marker
+    const handEdited = readFileSync(launcherPath, 'utf8') + 'rem a human added this line\r\n';
+    writeFileSync(launcherPath, handEdited);
+
+    // the template ALSO changes, so a bare content-equality check and a
+    // marker-aware check would disagree here — this is the discriminating case
+    writeFileSync(join(clone, 'templates', 'update-win.bat'), BAT_TEMPLATE_V2);
+
+    const result = ensureUpdateLauncher(target, clone);
+    assert.equal(result.status, 'differs', 'a marker/body mismatch (hand-edited) is never auto-refreshed, even when the render moved on');
+    assert.equal(readFileSync(launcherPath, 'utf8'), handEdited, 'the hand-edited file is left byte-identical — never overwritten');
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: drop the marker-mismatch check and treat every on-disk/fresh-render
+// mismatch as refreshable (always rewrite when they differ) — result.status
+// flips to 'refreshed' and the hand-edited content is overwritten by the fresh
+// render, both assertions go red. (Together with case 1 above this is a control
+// pair: an "always refresh" implementation passes case 1 but fails this one; an
+// "always differs" implementation — the pre-fix behavior — fails case 1 but
+// passes this one. Only a real marker check passes both.)
+
+test('ensureUpdateLauncher (case 3): a legacy file with no marker at all still differs and is left in place — the pre-marker fallback behavior is preserved', () => {
+  const clone = cloneWithTemplate();
+  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
+  try {
+    // never generated by ensureUpdateLauncher — no marker line present at all
+    writeFileSync(join(target, UPDATE_LAUNCHER_NAME), '@echo off\r\nrem hand-authored, predates the marker\r\n');
+    const before = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
+
+    const result = ensureUpdateLauncher(target, clone);
+    assert.equal(result.status, 'differs', 'no marker present → bare content-equality fallback → differs');
+    assert.equal(readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8'), before, 'legacy/hand-authored file left byte-identical');
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: treat an absent marker as though it were a valid match for an
+// "unmodified" body (default to refreshed instead of falling back to
+// content-equality) — result.status flips to 'refreshed' and the legacy file's
+// content changes, both assertions go red.
+
 test('the fan-out delivers sterling-update.bat to each registered project (a project init\'d before the launcher existed still receives one)', async () => {
   const cwd = cloneWithTemplate();
   const proj = mkdtempSync(join(tmpdir(), 'sterling-launcher-proj-'));
@@ -736,5 +833,48 @@ test('the fan-out delivers sterling-update.bat to each registered project (a pro
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+// board d055b150 — migrate-stores.mjs's journal previously recorded no caller
+// identity at all, so an unattributed store mutation on this machine (11
+// stores touched in one session) cost a real investigation plus one retracted
+// public attribution. migrate-stores.mjs itself now stamps invoked_by:'direct'
+// when the flag is absent; this pins the OTHER half — the update sweep must
+// name itself so the journal can tell the two apart.
+/** A minimal, genuinely pre-v2 SQLite file at <cwd>/.sterling/sterling.db —
+ *  enough for probeSchemaVersion's raw header read (user_version=1) and
+ *  machineStores' existsSync check, deterministic regardless of what this
+ *  machine's real ~/.sterling/domains happens to hold. exec is fully faked in
+ *  these tests, so the "migration" is never actually run — only the args
+ *  step() was called with are inspected. */
+function legacyStoreAt(dbPath) {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS t (id INTEGER); PRAGMA user_version = 1;');
+  } finally {
+    db.close();
+  }
+}
+
+test('the migration sweep attributes itself: migrate-stores.mjs is invoked with --invoked-by update-sweep', async () => {
+  const cwd = scratchCwd();
+  try {
+    const storePath = join(cwd, '.sterling', 'sterling.db');
+    legacyStoreAt(storePath);
+    const { exec, calls } = fakeExec({ behind: 1 });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [], opts: {} });
+
+    assert.equal(report.exit, 0, `the update must succeed through the migration step: ${JSON.stringify(report)}`);
+    const migrateCall = calls.find((c) => c.includes('migrate-stores.mjs') && c.includes(storePath));
+    assert.ok(migrateCall, `expected a migrate-stores.mjs call naming '${storePath}' among:\n${calls.join('\n')}`);
+    assert.match(
+      migrateCall,
+      /--invoked-by update-sweep\b/,
+      'the update sweep must attribute itself in the migration journal via --invoked-by'
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });

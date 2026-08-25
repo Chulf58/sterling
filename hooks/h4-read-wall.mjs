@@ -4141,6 +4141,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4419,7 +4427,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5103,7 +5117,7 @@ try {
     })
   );
   deny(
-    isTestDir ? `H4: '${rel}' is a TEST directory, not implementation (\xA76 H4) \u2014 content-mode Grep on a directory shows no content here regardless of its kind. Scope content to a specific test FILE inside it (matching a declared test glob), or locate first with output_mode files_with_matches.` : `H4: '${rel}' is implementation \u2014 the test-writer never reads code (\xA76 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating.`
+    isTestDir ? `H4: '${rel}' is a TEST directory, not implementation (\xA76 H4) \u2014 content-mode Grep on a directory shows no content here regardless of its kind. Scope content to a specific test FILE inside it (matching a declared test glob), or locate first with output_mode files_with_matches.` : `H4: '${rel}' is implementation \u2014 the test-writer never reads code (\xA76 H4). Tests are specified from the brief + ACs + prior tests + handoffs; reading the implementation would anchor the oracle to it. Content-mode Grep is the same wall; files_with_matches Grep is allowed for locating. Need a record shape (a field name, its required-ness, an enum) rather than the code itself? Use knowledge_schema \u2014 it is the sanctioned route, not a file read.`
   );
 } catch (e) {
   deny(environmentDefectDenial("H4", `Read-wall evaluation failed (${e && e.message || e}) \u2014 failing closed (P5).`));

@@ -8,7 +8,7 @@ var __export = (target, all) => {
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { dirname as dirname5, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -4113,6 +4113,14 @@ var envelopeFields = {
   // bumped by every in-place write; feature_article narrows it to REQUIRED in
   // its own extend, because its pre-v2 chains author the number explicitly.
   lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
   freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
@@ -4391,7 +4399,13 @@ var todoSchema = base.extend({
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional()
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -5616,8 +5630,8 @@ var SterlingStore = class _SterlingStore {
    * which fields may change.
    *
    * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of the wave.
-   * lifecycle is likewise preserved: retirement happens ONLY through
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
    * supersede/retireInFavorOf.
    */
   updateRecord(id, patch, opts = {}) {
@@ -5820,12 +5834,21 @@ var SterlingStore = class _SterlingStore {
     if (candidate.type !== "todo" || candidate.source !== "system") {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
     }
+    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
+      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
+    }
     const keyOf = (t) => {
-      const files = [...t.file_keys ?? []].sort();
+      const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
     };
     const wantKey = keyOf(candidate);
+    const textsEquivalent = (a, b) => {
+      if (candidate.system_reason !== "state_review")
+        return a === b;
+      const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+      return strip(a) === strip(b);
+    };
     let existing;
     let textUpdated = false;
     this.tx(() => {
@@ -5843,9 +5866,18 @@ var SterlingStore = class _SterlingStore {
         this.insertRecord(candidate);
         return;
       }
-      if ((existing.text ?? "") !== (candidate.text ?? "")) {
-        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({ ...cur, text: candidate.text, updated_at: candidate.updated_at }), {});
-        textUpdated = true;
+      const priorFiles = [...existing.file_keys ?? []].sort();
+      const nextFiles = [...candidate.file_keys ?? []].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
+      if (textChanged || filesChanged) {
+        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
+          ...cur,
+          updated_at: candidate.updated_at,
+          ...textChanged ? { text: candidate.text } : {},
+          ...filesChanged ? { file_keys: candidate.file_keys } : {}
+        }), {});
+        textUpdated = textChanged;
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
@@ -6063,6 +6095,50 @@ var SterlingStore = class _SterlingStore {
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
     return row.n;
   }
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts, minScore) {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore);
+    return row.n;
+  }
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  ftsMatchExpr(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
@@ -6070,8 +6146,7 @@ var SterlingStore = class _SterlingStore {
     if (opts.rank_terms !== void 0) {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
-        const joiner = opts.match_all ? " AND " : " OR ";
-        const match = terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+        const match = this.ftsMatchExpr(terms, opts.match_all);
         const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
@@ -6828,6 +6903,57 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/hooks/lib/dispatch-residue.mjs
+import { spawnSync } from "node:child_process";
+
+// scripts/hooks/lib/dispatch-advisory.mjs
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+
+// scripts/hooks/lib/dispatch-residue.mjs
+function probeDirtyPaths(projectDir, files) {
+  const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
+  if (declared.length === 0) return { verified: true, dirty: [] };
+  let r;
+  try {
+    r = spawnSync("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
+      cwd: projectDir,
+      encoding: "utf8",
+      timeout: 1e4
+    });
+  } catch (err) {
+    return { verified: false, dirty: declared, reason: String(err?.message ?? err).slice(0, 200) };
+  }
+  if (r.error || r.status !== 0) {
+    const reason = String(r.error?.message || r.stderr || "git status failed").trim().slice(0, 200);
+    return { verified: false, dirty: declared, reason };
+  }
+  const flagged = /* @__PURE__ */ new Set();
+  const tokens = String(r.stdout ?? "").split("\0").filter((t) => t.length > 0);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length < 3) continue;
+    const status = token.slice(0, 2);
+    const path = token.slice(3);
+    flagged.add(path);
+    if ((status[0] === "R" || status[1] === "R" || status[0] === "C" || status[1] === "C") && i + 1 < tokens.length) {
+      flagged.add(tokens[i + 1]);
+      i++;
+    }
+  }
+  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+}
+function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
+  const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
+  const list = (Array.isArray(paths) && paths.length ? paths : ["<no declared files>"]).join(", ");
+  const marker = verified ? "" : ` [tree-state-unverified${reason ? `: ${reason}` : ""}]`;
+  return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
+}
+
 // scripts/lib/agent-distribution.mjs
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
@@ -6887,13 +7013,13 @@ function conventions(maxConcurrent2) {
     // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
     `- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS \u2014 an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise \u2014 adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch \u2014 hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent's claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor's attention spent where it should not be (decision 677f1639).`,
     // Slice ordering (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22): the
-    // stable-identity wave ran its critical path single-file for hours with free seats while
+    // stable-identity campaign ran its critical path single-file for hours with free seats while
     // later slices' independent pieces were already dispatchable — the user had to interrupt
     // to demand the frontier be widened. This states WHAT TO PICK; 677f1639 above states WHEN
     // to check. Sharpened by an external-model (Codex) consult, adjudicated: pure unlock-count
     // starved risky-but-low-unlock proof slices and mandatory low-unlock slices, and re-picking
     // on every freed seat could interrupt coherent in-flight work for no reason.
-    "- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement \u2014 a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) \u2014 never disturb coherent in-flight work just because a seat freed. The frontier \u2014 ready work across the board, the maintenance queue, and future slices' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice's commit boundary) \u2014 must GROW during a wave's expansion phase; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies \u2014 a free seat alone never implies dispatch (the quota pathology stays forbidden).",
+    "- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement \u2014 a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) \u2014 never disturb coherent in-flight work just because a seat freed. The frontier \u2014 ready work across the board, the maintenance queue, and future slices' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice's commit boundary) \u2014 must GROW while an objective's slice list is still expanding; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies \u2014 a free seat alone never implies dispatch (the quota pathology stays forbidden).",
     // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
     // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
     // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
@@ -6964,9 +7090,58 @@ function pluginVersion() {
   }
   return null;
 }
+function computeH1DeadDispatchResidue(cwd, source) {
+  if (source !== "startup" && source !== "clear") return [];
+  const registerPath = join4(cwd, ".sterling", "transient", "dispatch-register.json");
+  let raw = [];
+  try {
+    if (existsSync3(registerPath)) {
+      const parsed = JSON.parse(readFileSync2(registerPath, "utf8"));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  const lines = [];
+  for (const entry of raw) {
+    if (!entry || entry.residue_reported_at) continue;
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue;
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+  }
+  return lines;
+}
 var input = readStdin();
+var dispatchResidueLines = (() => {
+  try {
+    return computeH1DeadDispatchResidue(input.cwd, input.source);
+  } catch {
+    return [];
+  }
+})();
 var store = openStore(input.cwd);
-if (!store) allow();
+if (!store) {
+  if (dispatchResidueLines.length) {
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: dispatchResidueLines.join("\n\n") }
+      })
+    );
+  }
+  if (input.source === "startup" || input.source === "clear") {
+    try {
+      const transientDir = join4(input.cwd, ".sterling", "transient");
+      rmSync(join4(transientDir, "dispatch-register.json"), { force: true });
+      for (const f of readdirSync(transientDir)) {
+        if (f.startsWith("dispatch-register.json.tmp-")) rmSync(join4(transientDir, f), { force: true });
+      }
+    } catch {
+    }
+  }
+  allow();
+}
 var config = null;
 try {
   config = loadConfig(input.cwd);
@@ -7003,7 +7178,7 @@ try {
     }
     if (role !== "authoring") {
       const git = (args, timeout = 5e3) => {
-        const r = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout });
+        const r = spawnSync2("git", args, { cwd: root, encoding: "utf8", timeout });
         return r.status === 0 ? (r.stdout ?? "").trim() : null;
       };
       const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -7018,7 +7193,7 @@ try {
         } catch {
         }
         if (!fresh) {
-          spawnSync("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+          spawnSync2("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
             writeFileSync(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
@@ -7045,7 +7220,7 @@ try {
       rmSync(notePath, { force: true });
       const head = (() => {
         try {
-          const r = spawnSync("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+          const r = spawnSync2("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
           return r.status === 0 ? (r.stdout ?? "").trim() : null;
         } catch {
           return null;
@@ -7055,11 +7230,33 @@ try {
       if (note.head_sha && head && head !== note.head_sha) {
         cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
       }
+      let commitsAheadUnverified = false;
+      if (typeof note.commits_ahead === "number") {
+        if (!note.base_branch) {
+          commitsAheadUnverified = true;
+        } else {
+          try {
+            const countR = spawnSync2("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+            const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
+            if (Number.isFinite(actual)) {
+              if (actual !== note.commits_ahead) {
+                cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${note.base_branch})`);
+              }
+            } else {
+              commitsAheadUnverified = true;
+            }
+          } catch {
+            commitsAheadUnverified = true;
+          }
+        }
+      }
       const ageMs = Date.now() - Date.parse(note.at ?? "");
       if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
         cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
       }
-      const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).join("\n");
+      const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).concat(
+        typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
+      ).join("\n");
       rotationContext = `
 
 ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
@@ -7076,6 +7273,10 @@ try {
   }
 } catch {
 }
+var dispatchResidueContext = dispatchResidueLines.length ? `
+
+DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).
+` + dispatchResidueLines.join("\n") : "";
 try {
   const transientDir = join4(input.cwd, ".sterling", "transient");
   rmSync(join4(transientDir, "dispatch-register.json"), { force: true });
@@ -7159,6 +7360,7 @@ SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient regis
 }
 var counts = { todos: 0, maintenance: 0, groupedTodos: 0, objectives: 0 };
 var queueReasons = [];
+var queueReasonEntries = [];
 var drainable = 0;
 var parked = 0;
 try {
@@ -7176,16 +7378,31 @@ try {
   parked = system.length - drainable;
   const byReason = /* @__PURE__ */ new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
+  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
+  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
 } finally {
   store.close();
 }
+var TOO_DEEP_MULTIPLIER = 10;
 var queueContext = "";
-if (drainable >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
-  queueContext = `
+var deepThreshold = Math.max(1, config?.maintenance_queue?.deep_threshold ?? 15);
+if (drainable >= deepThreshold) {
+  const parkedNote = parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
+  if (drainable >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries.length) {
+    const topLanes = queueReasons.slice(0, 3);
+    const [topReason, topCount] = queueReasonEntries[0];
+    const topPhrase = `${topCount} item${topCount === 1 ? "" : "s"} in lane ${topReason}`;
+    const laneLead = queueReasonEntries.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
+    queueContext = `
 
-MAINTENANCE QUEUE IS DEEP \u2014 ${drainable} drainable items (${queueReasons.join(", ")})` + (parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "") + `.
+MAINTENANCE QUEUE IS VERY DEEP \u2014 ${drainable} drainable items across ${queueReasonEntries.length} lane(s)${parkedNote}.
+` + laneLead + `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest \u2014 don't try to clear the whole queue in one pass. Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back (an already-paid item closes with board_remove and NO knowledge_update). A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
+  } else {
+    queueContext = `
+
+MAINTENANCE QUEUE IS DEEP \u2014 ${drainable} drainable items (${queueReasons.join(", ")})${parkedNote}.
 Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+  }
 }
 var registryContext = "";
 if (existsSync3(registryPath())) {
@@ -7269,9 +7486,10 @@ try {
 } catch {
   maxConcurrent = 5;
 }
+var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventions(maxConcurrent) + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

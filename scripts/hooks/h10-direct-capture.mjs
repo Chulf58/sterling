@@ -29,16 +29,115 @@
 // All terminal paths clear both registers + the nag marker together (P4).
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking, gitIgnored } from './lib/common.mjs';
+import { mintSettlementReconcile, withFileLock, parseTouchesContent } from './lib/settlement.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
+import { isOrphan, probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 
+/**
+ * DEAD-DISPATCH RESIDUE (SPEC A, boards 03ed9d35/31565253; shared lib
+ * scripts/hooks/lib/dispatch-residue.mjs). A pure filesystem+git fact about
+ * the H22 register — deliberately independent of the knowledge store (a
+ * register + config can exist before/without a store, and the residue must
+ * still surface, SPEC A item 7's fail-loud posture applied to the STORE gate
+ * itself, not only the git probe): computed once, up front, before the
+ * `if (!store) allow()` bail below, so a store-less cwd still reports and
+ * stamps. When a store IS present the caller folds the returned lines into
+ * the normal disclosure surface instead of printing them standalone.
+ * Print-once via a truthy residue_reported_at persisted directly onto the
+ * matching register entries — additive only (never removes/reorders), so the
+ * existing "H10 never mutates the register" deferral pin (a LIVE entry, never
+ * an orphan) stays true.
+ */
+function computeDeadDispatchResidue(cwd, sessionId) {
+  const registerPath = join(cwd, '.sterling', 'transient', 'dispatch-register.json');
+  let raw = [];
+  try {
+    if (existsSync(registerPath)) {
+      const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  let staleMinutes = 60; // schema default (decision ec9eacaa) when config cannot be read
+  try {
+    staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
+  } catch {
+    // fall back to the schema default rather than skipping the residue check
+  }
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.parse(nowIso);
+  const lines = [];
+  const stampIds = new Set();
+  for (const entry of raw) {
+    if (!entry || entry.session_id !== sessionId) continue;
+    if (!isOrphan(entry, staleMinutes, nowMs)) continue;
+    if (entry.residue_reported_at) continue; // print-once
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    stampIds.add(entry.agent_id);
+  }
+  if (stampIds.size) {
+    // FRESH-READ MERGE, matching H22's own register-write discipline exactly
+    // (tmp-${pid} + renameSync atomic publish) rather than inventing a new
+    // cross-hook lock: H22 itself does NOT lock the register's
+    // read-modify-write (only its durable review-ledger write is
+    // lock-guarded — see its header comment), accepting a bounded lost
+    // update there. What this fixes is narrower and load-bearing: re-reading
+    // immediately before persisting and stamping ONLY entries still present
+    // (by agent_id) means an entry a concurrent H22 SubagentStop removed
+    // between our first read and now is simply left unstamped, never
+    // resurrected by writing back a stale copy of it — and a torn concurrent
+    // read degrading to [] here costs only this stamp, never the live
+    // register (we write back the FRESH read, not our own stale `raw`).
+    try {
+      let fresh = [];
+      try {
+        if (existsSync(registerPath)) {
+          const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
+          if (Array.isArray(parsed)) fresh = parsed;
+        }
+      } catch {
+        fresh = []; // a torn/corrupt read degrades to empty — nothing to stamp, never a re-add
+      }
+      for (const entry of fresh) {
+        if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
+          entry.residue_reported_at = nowIso;
+        }
+      }
+      const transient = join(cwd, '.sterling', 'transient');
+      mkdirSync(transient, { recursive: true });
+      const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
+      writeFileSync(tmpPath, JSON.stringify(fresh));
+      renameSync(tmpPath, registerPath);
+    } catch {
+      // best-effort — a failed stamp costs only print-once across Stops, never this report
+    }
+  }
+  return lines;
+}
+
 const input = readStdin();
+const residueLines = (() => {
+  try {
+    return computeDeadDispatchResidue(input.cwd, input.session_id);
+  } catch {
+    return [];
+  }
+})();
 const store = openStore(input.cwd);
-if (!store) allow();
+if (!store) {
+  if (residueLines.length) process.stderr.write(residueLines.join('\n\n'));
+  allow();
+}
 
 const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');
 const eventsPath = join(input.cwd, '.sterling', 'transient', 'session-events.json');
@@ -329,11 +428,107 @@ try {
     allow();
   };
 
-  // Read touches
+  // parseTouchesContent (shared with H7, scripts/hooks/lib/settlement.mjs —
+  // micro-round fixer): touches.json is always the whole-array shape H7
+  // writes and test fixtures hand-build it as; a stray JSONL-shaped line is
+  // tolerated too, never fatal.
+
+  // CLAIM the touch register atomically (F4/R4, board c198866d fixer round):
+  // renaming touches.json to a claim path is one atomic filesystem op — an H7
+  // append after the rename lands in a FRESH touches.json (H7 never reads
+  // before it appends), never in the claim. R4(a): a claim already sitting at
+  // the claim path (a prior Stop that DIED between the rename and its own
+  // release, or one that deliberately left it in place — see
+  // releaseTouchesClaim below) must be ADOPTED, never silently discarded or
+  // overwritten — read it FIRST, before this rename risks REPLACING it
+  // (POSIX rename() atomically replaces an existing destination file; reading
+  // after would find only the fresh half, with the orphaned half gone
+  // without a trace).
+  // R3 ROUND 2 (board c198866d round-4 fixer): the claim rename and the
+  // release rename-back both take the SAME lock H7's append now takes
+  // (withFileLock, scripts/hooks/lib/settlement.mjs) — "H7's append AND
+  // H10's claim/union writes" share ONE lock around touches.json, so an H7
+  // appending mid-claim serializes instead of racing the rename. A lock that
+  // cannot be acquired within its short deadline degrades to the pre-lock
+  // unlocked behavior (never hangs the Stop, P1) and records check_skipped.
+  const touchesClaimPath = `${touchesPath}.claim`;
   let touches = [];
-  if (existsSync(touchesPath)) {
-    touches = JSON.parse(readFileSync(touchesPath, 'utf8'));
-  }
+  withFileLock(
+    touchesPath,
+    () => {
+      // R4(a): a claim already sitting at the claim path (a prior Stop that
+      // DIED between the rename and its own release, or one that
+      // deliberately left it in place — see releaseTouchesClaim below) must
+      // be ADOPTED, never silently discarded or overwritten — read it FIRST,
+      // before this rename risks REPLACING it (POSIX rename() atomically
+      // replaces an existing destination file; reading after would find only
+      // the fresh half, with the orphaned half gone without a trace).
+      let orphanedTouches = [];
+      if (existsSync(touchesClaimPath)) {
+        try {
+          orphanedTouches = parseTouchesContent(readFileSync(touchesClaimPath, 'utf8'));
+        } catch {
+          orphanedTouches = [];
+        }
+      }
+      let freshTouches = [];
+      try {
+        renameSync(touchesPath, touchesClaimPath);
+        freshTouches = parseTouchesContent(readFileSync(touchesClaimPath, 'utf8'));
+      } catch (e) {
+        if (e && e.code !== 'ENOENT') throw e; // a real fs failure escapes to the outer catch (fail loud)
+      }
+      touches = [...orphanedTouches, ...freshTouches];
+      // Persist the UNION back to the claim file immediately when there was
+      // anything to adopt: a crash right after this point must find the
+      // WHOLE set, not just whichever half the rename happened to leave on
+      // disk (the rename above just overwrote any on-disk orphaned bytes
+      // with the fresh half alone).
+      if (orphanedTouches.length) writeFileSync(touchesClaimPath, JSON.stringify(touches));
+    },
+    { onTimeout: () => store.recordCheckSkipped('h10-touches-lock', 'lock_timeout', undefined, now) }
+  );
+  // Disposes the claimed copy once its debt is settled/nagged. Locked (micro-
+  // round fixer): a concurrent Stop's claim/union write must not race a
+  // delete of the SAME claim file — without the lock, one Stop could rename
+  // a fresh touch onto touchesClaimPath (widening the union) while another
+  // Stop's discard deletes that exact file out from under it, losing the
+  // widened union with no trace.
+  const discardTouchesClaim = () => {
+    withFileLock(
+      touchesPath,
+      () => rmSync(touchesClaimPath, { force: true }),
+      { onTimeout: () => store.recordCheckSkipped('h10-touches-lock', 'lock_timeout', undefined, now) }
+    );
+  };
+  // R4(b): gives the claim back for the next Stop to retry WITHOUT a
+  // read-modify-write against the live touchesPath — the prior version read
+  // whatever a racing H7 had already written there, merged it with the
+  // claim, and wrote the merge back, which could itself clobber an H7 append
+  // landing in THAT window. When nothing currently sits at the live path
+  // (the common case), a bare RENAME back is a pure metadata op: no bytes
+  // are read or computed, so nothing can be clobbered, and the claimed
+  // content lands back under its original filename byte-for-byte. When a
+  // racing H7 HAS recreated the live path, renaming onto it would destroy
+  // that fresh append instead — so in that case this does nothing at all:
+  // the claim stays exactly where it is, and the NEXT Stop's claim step
+  // above (R4(a)) unions it with whatever is live then. Locked (same lock as
+  // the claim above) since this is also a live-path write.
+  const releaseTouchesClaim = () => {
+    withFileLock(
+      touchesPath,
+      () => {
+        // Nothing was ever claimed (no touches this Stop at all): a no-op,
+        // never a rename of a file that does not exist.
+        if (existsSync(touchesClaimPath) && !existsSync(touchesPath)) renameSync(touchesClaimPath, touchesPath);
+      },
+      { onTimeout: () => store.recordCheckSkipped('h10-touches-lock', 'lock_timeout', undefined, now) }
+    );
+  };
+  // F3 (board c198866d fixer round): a settlement failure must PRESERVE the
+  // claimed touches for a retry at the next Stop, not silently discard them —
+  // set by runSettlement() below, consumed by clearRegisters().
+  let settlementFailed = false;
 
   // Read session events; degrade to empty on parse failure (phase-1 advisory:
   // H16 appends without schema-validating, so malformed bytes are possible).
@@ -400,6 +595,7 @@ try {
   };
   const liveDispatches = dispatchEntries.filter(isLive);
   const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern b3972717) while
   // the dispatch prompt names the plain repo-relative path — an exact-string
@@ -418,12 +614,31 @@ try {
     }
   }
   const isDeferred = (p) => deferredOwners.has(joinKey(p));
-  const deferredPaths = touchedExisting.filter(isDeferred);
+  // R5(a) (board c198866d round-3 fixer): the FULL, UNFILTERED touch set —
+  // deliberately NOT touchedExisting (which is existsSync-filtered). Both
+  // deferredPaths and settlementCandidates below derive from this, because a
+  // DELETED path a live dispatch still owns must count as deferred: if
+  // deferredPaths were existence-filtered, that same deleted+deferred path
+  // would vanish from BOTH deferredPaths (so clearRegisters() sees "nothing
+  // deferred" and discards the claim) AND settlementCandidates (correctly
+  // excluded from minting because it IS still deferred) — losing its debt
+  // with no trace, settled nowhere and preserved nowhere.
+  const allTouchedPaths = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))];
+  const deferredPaths = allTouchedPaths.filter(isDeferred);
+  // SETTLEMENT CANDIDATE SET (F1, board c198866d fixer round): unlike `paths`
+  // below (used for the capture/article-demand duties, which correctly
+  // ignore a deleted throwaway per AC10), a DELETED governed file is itself
+  // DRIFT — its deletion is the reconcile debt — and must still reach the
+  // settlement predicate so it can mint. No existsSync filter here; only a
+  // path a live dispatch still owns (isDeferred) is excluded, matching the
+  // duty set's own exclusion.
+  const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
   // Disclosure, not a demand: rides whatever release/deny the duties below
   // produce. Deliberately avoids the article-demand and capture-nag wording —
   // a deferred duty is not owed to the conductor right now.
   const disclosureParts = [];
+  if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     disclosureParts.push(
       `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}] — duty re-arms when they land`
@@ -459,15 +674,58 @@ try {
   // while a deferral is live are bounded by enqueueSystemTodo's dedup — noise is
   // acceptable, silence is not.
   const clearRegisters = () => {
+    // F3/F4/R4 (board c198866d fixer round): the touches claim is RELEASED
+    // (see releaseTouchesClaim above) rather than discarded whenever a live
+    // dispatch still owns work OR this Stop's own settlement attempt failed —
+    // a settlement failure must never silently lose the candidates it could
+    // not settle (F3). The events register and nag marker are UNAFFECTED by
+    // settlementFailed — only touches.json gets the preservation exception
+    // (F3: "not the other registers").
+    if (deferredPaths.length || settlementFailed) {
+      releaseTouchesClaim();
+    } else {
+      discardTouchesClaim();
+    }
     if (!deferredPaths.length) {
-      rmSync(touchesPath, { force: true });
       rmSync(eventsPath, { force: true });
     }
     rmSync(nagMarker, { force: true });
   };
 
+  // SETTLEMENT BOUNDARY (a) (board c198866d, H7 CANDIDATE-ONLY + SETTLEMENT-TIME
+  // MINTING): H7's direct-mode Arm 1 only registers CANDIDATE paths now — this
+  // is where reconcile_needed actually mints, hashing each candidate's CURRENT
+  // content (or its ABSENCE — F1: a deleted governed file is drift too)
+  // against its owning article's CURRENT baseline, so anything this turn's
+  // capture/reconcile knowledge_update calls already rebaselined, or an
+  // edit-then-revert, never mints. F6: called ONLY from the three
+  // duties-satisfied release sites below — settlement is the design's "Stop
+  // AFTER capture/reconcile writes", so a Stop that is about to NAG or queue
+  // an owed/missing item (duties still outstanding) never mints here; its
+  // candidates simply ride the claim through to the next Stop (or, if the
+  // session ends, to direct-merge's pre-merge backstop / H7's Arm 2 read-time
+  // drift as the residual net — the design's NAMED HOLE). Advisory in its own
+  // try (F3): a settlement failure records check_skipped (itself guarded — a
+  // store failure recording the skip must never escape to the outer catch and
+  // cost every other session-end duty) and marks settlementFailed so
+  // clearRegisters() preserves the claim for a retry, instead of costing the
+  // duty checks below or losing the candidates.
+  const runSettlement = () => {
+    try {
+      mintSettlementReconcile(store, input.cwd, settlementCandidates, now);
+    } catch (e) {
+      settlementFailed = true;
+      try {
+        store.recordCheckSkipped('h10-settlement-mint', String((e && e.message) || e), undefined, now);
+      } catch {
+        // recording the skip is itself best-effort — see the comment above
+      }
+    }
+  };
+
   // Dual-register entry: proceed only if either register has content.
   if (!touches.length && !sessionEvents.length) {
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
@@ -611,7 +869,7 @@ try {
   // Capture-pending declaration (board 1af5d630, decision follows e23f38f8):
   // the capture EXISTS and its write is in flight on a named target (detail =
   // "<target> — <reason>"). Unlike no_capture it covers LATER work too — the
-  // whole point is that wave work keeps arriving while the capture rides a
+  // whole point is that new work keeps arriving while the capture rides a
   // pending commit, and per-batch re-declaration is the boilerplate loop that
   // trains false declarations (six in ~90 minutes, measured 2026-08-09).
   // Safe because the debt cannot evaporate: the deferral below either settles
@@ -677,7 +935,8 @@ try {
 
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     // No duties to enforce (e.g. only non-research dispatches recorded, or a
-    // no-capture declaration covered every touch/debug event) — clear and release.
+    // no-capture declaration covered every touch/debug event) — settle, clear, release.
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
@@ -814,9 +1073,11 @@ try {
   }
   const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
 
-  // All duties satisfied → clear registers and release.
+  // All duties satisfied → settle (F6: this IS the "Stop after capture/reconcile
+  // writes" boundary), clear registers, release.
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
@@ -840,7 +1101,13 @@ try {
     // hook's deny would lose its whole grace period and mint a false debt.
     if (!existsSync(nagMarker)) {
       writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
-      releaseWithPressure(); // registers deliberately NOT cleared — see above
+      // Registers deliberately NOT cleared — see above. F4/R4: the claim
+      // must still be released (see releaseTouchesClaim above), or it would
+      // dangle in the claim file forever with no next-Stop adoption ever
+      // triggered. F6: duties are outstanding here (capture still pending),
+      // so settlement itself does not run.
+      releaseTouchesClaim();
+      releaseWithPressure();
     }
     // "any capture_owed open" gates more than the choke's exact-key match (its
     // file_keys vary with activePaths) — kept deliberately; only the write
@@ -866,6 +1133,12 @@ try {
         file_keys: activePaths.slice(0, 20),
       });
     }
+    // R2 (board c198866d round-3 fixer, BLOCKING): this IS a terminal
+    // release — the session ends here, so there is no "next Stop" for
+    // settlement to defer to the way F6's nag/deny paths can. Settling here,
+    // even though the capture duty itself is still outstanding, is the last
+    // chance before clearRegisters() below discards the claim for good.
+    runSettlement();
     clearRegisters();
     releaseWithPressure();
   }
@@ -970,6 +1243,11 @@ try {
       parts.push(delegationPart());
     }
 
+    // F4/F6/R4: this is a non-terminal, retry-next-Stop release — duties are
+    // outstanding (that is why it is nagging), so settlement does not run,
+    // but the claim must still be released (see releaseTouchesClaim above)
+    // or it would dangle forever with no next-Stop adoption ever triggered.
+    releaseTouchesClaim();
     deny(`${H10_HEADER}\n${parts.join('\n\n')}`);
   }
 
@@ -1078,6 +1356,11 @@ try {
       });
     }
   }
+  // R2 (board c198866d round-3 fixer, BLOCKING): the final terminal release —
+  // whatever duties are still outstanding are already queued as owed/missing
+  // items above; this is the last chance to settle before clearRegisters()
+  // discards the claim, since no next Stop exists once the session ends here.
+  runSettlement();
   clearRegisters();
   releaseWithPressure();
 } catch (e) {

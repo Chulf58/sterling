@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
+import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths } from '../lib/agent-distribution.mjs';
@@ -46,13 +47,13 @@ function conventions(maxConcurrent) {
     // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
     '- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS — an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise — adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch — hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent\'s claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor\'s attention spent where it should not be (decision 677f1639).',
     // Slice ordering (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22): the
-    // stable-identity wave ran its critical path single-file for hours with free seats while
+    // stable-identity campaign ran its critical path single-file for hours with free seats while
     // later slices' independent pieces were already dispatchable — the user had to interrupt
     // to demand the frontier be widened. This states WHAT TO PICK; 677f1639 above states WHEN
     // to check. Sharpened by an external-model (Codex) consult, adjudicated: pure unlock-count
     // starved risky-but-low-unlock proof slices and mandatory low-unlock slices, and re-picking
     // on every freed seat could interrupt coherent in-flight work for no reason.
-    '- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement — a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) — never disturb coherent in-flight work just because a seat freed. The frontier — ready work across the board, the maintenance queue, and future slices\' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice\'s commit boundary) — must GROW during a wave\'s expansion phase; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies — a free seat alone never implies dispatch (the quota pathology stays forbidden).',
+    '- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement — a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) — never disturb coherent in-flight work just because a seat freed. The frontier — ready work across the board, the maintenance queue, and future slices\' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice\'s commit boundary) — must GROW while an objective\'s slice list is still expanding; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies — a free seat alone never implies dispatch (the quota pathology stays forbidden).',
     // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
     // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
     // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
@@ -149,9 +150,84 @@ function pluginVersion() {
   return null;
 }
 
+/**
+ * DEAD-DISPATCH RESIDUE AT THE SESSION BOUNDARY (SPEC A items 2/3b, boards
+ * 03ed9d35/31565253; shared lib scripts/hooks/lib/dispatch-residue.mjs). A
+ * pure filesystem+git fact about the H22 register — computed BEFORE the
+ * `if (!store) allow()` bail below so it still fires for a cwd carrying a
+ * register + config but no initialized knowledge store yet (mirrors H10's
+ * same store-independent placement). Age-independent by design: at H1 the
+ * register belongs to a DEAD session by construction (its SubagentStop never
+ * fired), so no TTL wait is needed, unlike H10's Stop-time check. Only on
+ * source startup|clear — resume/compact continue the same logical session and
+ * keep their registers, same gating as the residue-conversion block further
+ * down. Read-side print-once only (a truthy residue_reported_at, however it
+ * got there — H10's Stop-side stamp included — suppresses); H1 never needs to
+ * write the stamp itself since the register is deleted unconditionally right
+ * after this runs.
+ */
+function computeH1DeadDispatchResidue(cwd, source) {
+  if (source !== 'startup' && source !== 'clear') return [];
+  const registerPath = join(cwd, '.sterling', 'transient', 'dispatch-register.json');
+  let raw = [];
+  try {
+    if (existsSync(registerPath)) {
+      const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  const lines = [];
+  for (const entry of raw) {
+    if (!entry || entry.residue_reported_at) continue; // print-once, cross-surface with H10
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+  }
+  return lines;
+}
+
 const input = readStdin();
+const dispatchResidueLines = (() => {
+  try {
+    return computeH1DeadDispatchResidue(input.cwd, input.source);
+  } catch {
+    return [];
+  }
+})();
 const store = openStore(input.cwd);
-if (!store) allow(); // not a Sterling project — no ceremony (P1)
+if (!store) {
+  if (dispatchResidueLines.length) {
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: dispatchResidueLines.join('\n\n') },
+      })
+    );
+  }
+  // FIXER ADDENDUM A (2026-08-25): the register wipe below is pure
+  // filesystem — it needs no open store — so a project with .sterling/
+  // (config.json present, per H22's widened gate) but no sterling.db yet
+  // must still get it HERE, on this early exit, or its register accumulates
+  // forever and every startup re-reports the same residue without ever
+  // wiping. Gated to startup|clear only, mirroring
+  // computeH1DeadDispatchResidue's own gate above — resume/compact stay
+  // untouched on this branch too, same as the store-present path below.
+  if (input.source === 'startup' || input.source === 'clear') {
+    try {
+      const transientDir = join(input.cwd, '.sterling', 'transient');
+      rmSync(join(transientDir, 'dispatch-register.json'), { force: true });
+      for (const f of readdirSync(transientDir)) {
+        if (f.startsWith('dispatch-register.json.tmp-')) rmSync(join(transientDir, f), { force: true });
+      }
+    } catch {
+      // fail-open — a failed delete costs deferral precision, never this early exit
+    }
+  }
+  allow(); // not a Sterling project — no further ceremony (P1)
+}
 
 // H1 is SOFT (banner + conventions + counts): a malformed config must cost the
 // deep-queue threshold, never the conventions injection, so this read is guarded
@@ -293,6 +369,39 @@ try {
       if (note.head_sha && head && head !== note.head_sha) {
         cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} → ${head.slice(0, 8)}) — re-verify repository state before acting on it`);
       }
+      // COMMITS-AHEAD DRIFT (N15, docs/feedback/sterling-plugin-*2026-08-24*):
+      // the note's commits_ahead is a number the writer computed, not prose —
+      // recompute it the same way at restore time and disclose any mismatch
+      // exactly like the head_sha check above, rather than trusting a stamp
+      // that may already be stale (a note written, then more commits landed
+      // before the /clear actually happened). UNVERIFIABLE IS ITS OWN STATE
+      // (Codex P2-B), distinct from both "matches" and "drifted": when the
+      // base is missing or the recount itself fails (e.g. a --base ref that
+      // no longer resolves), the stamped count is printed with an explicit
+      // "(unverified — base unavailable)" marker rather than silently
+      // presented as though it had been confirmed — and, just as important,
+      // never asserted as DRIFT either, since a failed recount is not
+      // evidence the number is wrong.
+      let commitsAheadUnverified = false;
+      if (typeof note.commits_ahead === 'number') {
+        if (!note.base_branch) {
+          commitsAheadUnverified = true;
+        } else {
+          try {
+            const countR = spawnSync('git', ['rev-list', '--count', `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: 'utf8', timeout: 5_000 });
+            const actual = countR.status === 0 ? Number((countR.stdout ?? '').trim()) : null;
+            if (Number.isFinite(actual)) {
+              if (actual !== note.commits_ahead) {
+                cautions.push(`commits_ahead drift — note says ${note.commits_ahead}, actual is ${actual} (vs ${note.base_branch})`);
+              }
+            } else {
+              commitsAheadUnverified = true;
+            }
+          } catch {
+            commitsAheadUnverified = true; // fail-open — a failed recount costs only the verification, never the restore
+          }
+        }
+      }
       const ageMs = Date.now() - Date.parse(note.at ?? '');
       if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1000) {
         cautions.push(`the note is ~${Math.round(ageMs / 3_600_000)}h old`);
@@ -300,6 +409,11 @@ try {
       const fields = ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'at']
         .filter((k) => note[k])
         .map((k) => `- ${k}: ${note[k]}`)
+        .concat(
+          typeof note.commits_ahead === 'number'
+            ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? 'unknown base'})${commitsAheadUnverified ? ' (unverified — base unavailable)' : ''}`]
+            : []
+        )
         .join('\n');
       rotationContext =
         `\n\nROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` +
@@ -330,6 +444,15 @@ try {
 } catch {
   // fail-open — a failed clear costs freshness, never the conventions injection
 }
+
+// DEAD-DISPATCH RESIDUE AT THE SESSION BOUNDARY (SPEC A items 2/3b): the lines
+// were already computed store-independently, above the `if (!store) allow()`
+// bail (computeH1DeadDispatchResidue) — folded into additionalContext here for
+// the normal (store-present) path.
+const dispatchResidueContext = dispatchResidueLines.length
+  ? `\n\nDEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary — its SubagentStop(s) never fired, so the register is about to be wiped (P4).\n` +
+    dispatchResidueLines.join('\n')
+  : '';
 
 // IN-FLIGHT DISPATCH REGISTER (decision ec9eacaa): deleted UNCONDITIONALLY —
 // every source, resume included. Unlike H10's other three registers there is no
@@ -479,6 +602,7 @@ try {
 
 let counts = { todos: 0, maintenance: 0, groupedTodos: 0, objectives: 0 };
 let queueReasons = [];
+let queueReasonEntries = [];
 let drainable = 0;
 let parked = 0;
 try {
@@ -521,7 +645,8 @@ try {
   // common cap literal.
   const byReason = new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasons = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`);
+  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
+  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`);
 } finally {
   store.close();
 }
@@ -533,16 +658,59 @@ try {
 // reached 63 items, most of them work finished days earlier and never closed,
 // with nothing anywhere prompting a drain (reported 2026-07-29). Silent below the
 // threshold (P1); above it, states the depth, the lanes, and the remedy.
+//
+// TWO TIERS (board 91fc3d6f): "drain it before taking new work" is an honest ask
+// at a few dozen items, but not at hundreds — a consuming project measured 247
+// drainable items against 5 closed in one drain pass, i.e. an instruction whose
+// only honest response was to ignore it ("is not a drain, it is evaporation").
+// TOO_DEEP_MULTIPLIER anchors the second tier off the SAME deep_threshold that
+// gates the first: at 10x threshold (default 150), naming every lane is no
+// longer readable and a blanket "drain it" is no longer actionable, so the
+// message switches to naming the top few lanes by count with a BOUNDED ask
+// (drain the biggest lane, or board a dedicated drain slice for the rest)
+// instead of repeating the same unattainable instruction at a larger number.
+const TOO_DEEP_MULTIPLIER = 10;
 let queueContext = '';
-if (drainable >= (config?.maintenance_queue?.deep_threshold ?? 15)) {
-  queueContext =
-    `\n\nMAINTENANCE QUEUE IS DEEP — ${drainable} drainable items (${queueReasons.join(', ')})` +
-    (parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain — excluded from this count)` : '') +
-    `.\n` +
-    `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
-    `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
-    `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
-    `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+// Clamped to >= 1 (reviewer F1): a corrupt/hostile deep_threshold <= 0 would
+// otherwise make BOTH tier conditions true even on an EMPTY drainable queue —
+// queueReasonEntries[0] would then be undefined and the destructure below
+// would throw OUTSIDE this try/finally, crashing H1 non-zero and losing the
+// whole injection (including an already-consumed rotation note — unrecoverable).
+const deepThreshold = Math.max(1, config?.maintenance_queue?.deep_threshold ?? 15);
+if (drainable >= deepThreshold) {
+  const parkedNote =
+    parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain — excluded from this count)` : '';
+  // Second guard (reviewer F1, belt-and-suspenders alongside the clamp above):
+  // never take the very-deep branch with an empty lane breakdown — fall back
+  // to the modest-tier wording instead of destructuring an undefined entry.
+  if (drainable >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries.length) {
+    // Every count named below stays in the "N item(s) in lane X" shape (never a
+    // bare number) — the same phrasing the moderate tier already uses — so a
+    // lane count can never be misread as a truncated/capped total.
+    const topLanes = queueReasons.slice(0, 3);
+    const [topReason, topCount] = queueReasonEntries[0];
+    const topPhrase = `${topCount} item${topCount === 1 ? '' : 's'} in lane ${topReason}`;
+    // "too many to name in full" is only true past the top-3 we actually show
+    // (reviewer cosmetic note: it read as false with exactly 2 lanes).
+    const laneLead =
+      queueReasonEntries.length > topLanes.length
+        ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(', ')}. `
+        : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(', ')}. `;
+    queueContext =
+      `\n\nMAINTENANCE QUEUE IS VERY DEEP — ${drainable} drainable items across ${queueReasonEntries.length} lane(s)${parkedNote}.\n` +
+      laneLead +
+      `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest — don't try to clear the whole queue in one pass. ` +
+      `Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back ` +
+      `(an already-paid item closes with board_remove and NO knowledge_update). ` +
+      `A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
+  } else {
+    queueContext =
+      `\n\nMAINTENANCE QUEUE IS DEEP — ${drainable} drainable items (${queueReasons.join(', ')})${parkedNote}.\n` +
+      `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
+      `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
+      `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
+      `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+  }
 }
 
 // shared project registry (decision 8f9e6db2): touch THIS project's last_seen
@@ -689,9 +857,24 @@ try {
   maxConcurrent = 5;
 }
 
+// PAYLOAD TRIM ON /clear (board eeb8ee53): a rotation restore already sits in a
+// context that just read the whole committed CLAUDE.md to get at the note —
+// re-injecting the conventions block (which mirrors CLAUDE.md almost verbatim)
+// on EVERY /clear was ~70% duplicate payload in the one injection a fresh
+// session must read most carefully. A genuinely fresh start (source=startup)
+// has no committed-CLAUDE.md context to fall back on yet, so it keeps the full
+// conventions injection; only source=clear trims it. Everything else here
+// (machine role, sibling projects, the deep-queue banner, the rotation note
+// itself) are per-machine/per-session facts CLAUDE.md does not carry, so they
+// are unaffected. INTENTIONAL (reviewer F2 confirm): the trim keys on
+// source==='clear' alone, not on whether a rotation note is staged — a /clear
+// with NO note reloads the committed CLAUDE.md exactly the same way, so the
+// duplication this closes is present either way.
+const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurrent);
+
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventions(maxConcurrent) + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

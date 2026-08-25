@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { ZodError } from 'zod';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -88,7 +88,18 @@ export interface BoardFilter {
    */
   feature_slug?: string;
   cap?: number;
-  projection?: Projection;
+  projection?: BoardProjection;
+  /**
+   * PAGING (board b786a84f) — a 186-item lane audit died at item 1 because
+   * board_query/maintenance_query had no way to see past one capped window.
+   * Applied AFTER the same filter+sort boardFiltered already uses and BEFORE
+   * the cap slice, over the same DETERMINISTIC ordering (updated_at DESC —
+   * query()'s own §3.4 mechanical fallback rank, made explicit and stable in
+   * boardFiltered) so paging through offset 0, cap, 2*cap, … visits every
+   * matching item exactly once, in the same order, even as the board changes
+   * between calls elsewhere. Defaults to 0.
+   */
+  offset?: number;
 }
 
 /**
@@ -121,16 +132,37 @@ export interface BoardFilter {
  */
 export type Projection = 'full' | 'digest' | 'count';
 
+/**
+ * board_query/maintenance_query's own projection axis (board b786a84f):
+ * every `Projection` value PLUS 'headline', which is board/maintenance-only
+ * (there is no headlineRecord for the other record types knowledge_query
+ * reads) — kept as its own type rather than widening `Projection` itself so
+ * knowledge_query's tool schema (full/digest/count) cannot silently start
+ * accepting a value it has no handling for.
+ */
+export type BoardProjection = Projection | 'headline';
+
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
   /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
   matched_filter: number;
   returned: number;
   cap: number;
-  /** exact: more matched than were returned */
+  /** exact: more matched than were returned (i.e. offset + returned < matched_filter) */
   capped: boolean;
+  /** PAGING (board b786a84f): the offset this page was read at (0 when omitted) — the next page starts at offset + returned. */
+  offset: number;
   note?: string;
-  /** full records, or their headline digests when projection:'digest' */
+  /**
+   * board-provenance-measured-at-head: whether the one-shot git walk backing
+   * the per-item '⚠ file_keys changed…' annotation ran. 'checked' means it ran
+   * (items with nothing to warn about are silently fine); 'unavailable:<reason>'
+   * — no_repo_root | no_git | detached_head | no_file_keys | walk_cap — states
+   * WHY, because an absent warning must never be mistaken for a checked-fresh
+   * one (P5).
+   */
+  provenance: string;
+  /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
 
@@ -157,6 +189,17 @@ export interface KnowledgeQueryResult {
    *  same uncapped, rank-blind count() split per queried type, alongside the
    *  combined `matched_filter` total (board fa19524d, AC2). */
   by_type?: Record<string, number>;
+  /**
+   * ABSENCE QUERY (board a577a69d): present only when `min_score` was passed.
+   * The count of records scoring >= min_score on the `-bm25(records_fts)`
+   * scale (higher is more relevant — see countAboveScore), computed over the
+   * FULL rank_terms match set, never the capped `records` window — so
+   * above_threshold:0 is a usable "nothing scored that high", the thing a
+   * capped/ranked window alone can never establish. matched_filter/returned/
+   * cap/capped are untouched by this — it is a THRESHOLDED SURFACE beside the
+   * capped-window disclosure, never a replacement for it.
+   */
+  above_threshold?: number;
 }
 
 /** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
@@ -192,6 +235,16 @@ export interface SameSubjectEntry {
   type: string;
   title: string;
   matched_on: string[];
+  /** N25: the served/derived status of the matched record. A same_subject
+   *  candidate is drawn from axisCandidateMatches -> store.query over the
+   *  five governing types, which never serves a 'superseded' row (AC5,
+   *  same-subject-surfacing.test.ts: a just-superseded record must NEVER be
+   *  named) — a retired record simply never reaches this entry at all, so
+   *  `status` cannot disclose retirement. What it DOES disclose: among the
+   *  live candidates that DO surface, 'active' vs 'flagged_stale' (a
+   *  research_finding whose currency has lapsed) — a caller can see that a
+   *  same-subject match is stale before deciding whether to link to it. */
+  status: string;
 }
 
 export interface ToolDeps {
@@ -219,6 +272,26 @@ const BOARD_SCAN_CAP = 1000;
 // deletion item — which is the safe direction, since that lane demands work and
 // the parked lane does not.
 const PARKED_REF_PROBE_CAP = 40;
+// The three-way verdict parkedOnRef reaches for a file absent from the working
+// tree (board e939fd21): 'parked' names the ref still holding it; 'never_tracked'
+// means every reachable ref was checked and NONE ever held the blob — the
+// deletion_candidate lane; 'confirmed_absent' means some ref held it once but
+// only as a fully-merged ancestor of base — real git history, so the classic
+// reconcile_needed reading stands; 'probe_failed' means git itself could not be
+// consulted (no repo, no git, a corrupt ref) and MUST NOT be read as a
+// confirmation of anything — it degrades to the same reconcile_needed reading
+// as 'confirmed_absent', never to the new, more assertive deletion_candidate
+// lane, because a failed probe proves nothing.
+type MissingFileProbe = { status: 'parked'; ref: string } | { status: 'never_tracked' | 'confirmed_absent' | 'probe_failed' };
+// board-provenance-measured-at-head: the ONE git log --name-only walk
+// board_query runs per call (never per item) is bounded by this many commits
+// back from HEAD, so a repo with a long history cannot turn one query into an
+// unbounded subprocess. An eligible item whose measured_at_head sha does not
+// appear inside this window is left unannotated and the envelope discloses
+// 'unavailable:walk_cap' rather than reporting a possibly-wrong count.
+// Measured against this repo's own board (~50 items, deep history): see the
+// coder report for the ms figure.
+const PROVENANCE_WALK_COMMIT_CAP = 2000;
 // Per-file drift items one read may mint for ONE article (board 2ded3b4b). One
 // item per FILE is the point — an item that names the changed file is actionable
 // where an article-level one is not, and the old article-level dedup is what
@@ -288,6 +361,33 @@ export interface KnowledgeSplitInput {
   reason?: string;
   resolves?: string[];
 }
+
+/**
+ * The unforgeable envelope: every write REFUSES these by name (board 617e97d4
+ * hoisted this out of refuseServerOwnedFields so knowledge_schema's
+ * server_owned mask derives from the SAME list this refusal guard consumes).
+ * Exported at MODULE scope (invariant 1 — one definition) so server.ts's typed
+ * knowledge_create input schema (decision 7c7f6db1) strips exactly this set
+ * from every per-type variant instead of re-deriving or copying it.
+ */
+export const WRITE_REFUSED_FIELDS: readonly string[] = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type', 'lifecycle', 'freshness', 'file_baselines'];
+
+/**
+ * knowledge_schema's server-owned mask, widened from WRITE_REFUSED_FIELDS by
+ * `version` — the counter this surface owns and always overwrites at create.
+ * Exported alongside WRITE_REFUSED_FIELDS for the same reason: server.ts's
+ * typed create variants must drop `version` too, not just the refused set.
+ */
+export const SERVER_OWNED_FIELDS: readonly string[] = [...WRITE_REFUSED_FIELDS, 'version'];
+
+/**
+ * Envelope fields knowledge_create DEFAULTS when absent (author 'conductor',
+ * links [], scope 'project', stack_tags []) — caller-SUPPLIABLE but never
+ * caller-REQUIRED. Exported so the typed create variants mark these
+ * `.optional()` exactly like knowledge_schema already reports them, keeping
+ * the two surfaces in lockstep (decision 7c7f6db1).
+ */
+export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 'scope', 'stack_tags'];
 
 export class SterlingTools {
   private store: ToolStore;
@@ -405,13 +505,20 @@ export class SterlingTools {
    * merged — case not satisfied), and checked by blob presence otherwise
    * (case (b), unmerged work).
    *
-   * Every git failure is swallowed to undefined, which degrades to today's
-   * behaviour — a deletion item. That direction is deliberate: a missing git, a
-   * non-repo tree root, or a corrupt ref must not SUPPRESS a real deletion
-   * finding, because the informational lane demands nothing and the reconcile
-   * lane is the one that gets acted on.
+   * Every git failure degrades to PROBE_FAILED, which reads as today's
+   * pre-ancestry behaviour — a reconcile_needed deletion item. That direction is
+   * deliberate: a missing git, a non-repo tree root, or a corrupt ref must not
+   * SUPPRESS a real deletion finding, and it must not be mistaken for a
+   * CONFIRMED verdict either — the deletion_candidate lane (board e939fd21) is
+   * for a file whose HISTORY (not just its live ref tips) proves it was NEVER
+   * tracked anywhere this repo can reach — `git rev-list --all -- <path>`,
+   * exhaustive over every ref and not subject to PARKED_REF_PROBE_CAP; a file
+   * deleted from a merged-into-base ancestor DOES have history (confirmed_absent,
+   * the classic reconcile_needed reading) even though no live tip holds it. A
+   * probe that could not run proved nothing, so it gets the old, safer reading
+   * rather than the new, more assertive one.
    */
-  private parkedOnRef(rel: string, treeRoot: string): string | undefined {
+  private parkedOnRef(rel: string, treeRoot: string): MissingFileProbe {
     const run = (args: string[]) => {
       try {
         return spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
@@ -419,6 +526,14 @@ export class SterlingTools {
         return undefined;
       }
     };
+    // CONFIRM THIS IS A USABLE GIT REPO before trusting an empty scan as a real
+    // verdict (board e939fd21, AC2/AC4 of file-parked-ancestry.test.ts): without
+    // this, "no repo at all" and "a repo that genuinely never tracked the file"
+    // both scan to nothing and were indistinguishable — the first must stay on
+    // the old reconcile_needed reading, the second is what earns the new
+    // deletion_candidate lane.
+    const repoCheck = run(['rev-parse', '--is-inside-work-tree']);
+    if (repoCheck?.status !== 0) return { status: 'probe_failed' };
     const has = (ref: string): boolean => run(['cat-file', '-e', `${ref}:${rel}`])?.status === 0;
     const resolveBase = (): string | undefined => {
       const symbolic = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
@@ -437,9 +552,9 @@ export class SterlingTools {
       return r?.status === 0;
     };
     try {
-      if (has('HEAD')) return 'HEAD';
+      if (has('HEAD')) return { status: 'parked', ref: 'HEAD' };
       const refs = run(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
-      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return undefined;
+      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return { status: 'probe_failed' };
       const branches = refs.stdout
         .split('\n')
         .map((s) => s.trim())
@@ -447,19 +562,231 @@ export class SterlingTools {
         .slice(0, PARKED_REF_PROBE_CAP);
       const base = resolveBase();
       if (base === undefined) {
-        for (const b of branches) if (has(b)) return b;
-        return undefined;
+        for (const b of branches) {
+          if (has(b)) return { status: 'parked', ref: b };
+        }
+      } else {
+        for (const b of branches) {
+          if (!has(b)) continue;
+          if (b === base) return { status: 'parked', ref: b }; // case (a): base itself still has it
+          if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
+          return { status: 'parked', ref: b }; // case (b): unmerged branch still holds it
+        }
       }
-      for (const b of branches) {
-        if (!has(b)) continue;
-        if (b === base) return b; // case (a): base itself still has it
-        if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
-        return b; // case (b): unmerged branch still holds it
-      }
-      return undefined;
+      // NOT parked on any ref TIP scanned. A tip-only scan cannot tell "deleted,
+      // but real git history exists" (confirmed_absent — the classic, closeable
+      // reconcile_needed case: file-parked-ancestry.test.ts AC2, a blob
+      // surviving only as a merged-into-base ancestor) from "never existed at
+      // all" (never_tracked — the new deletion_candidate lane, board e939fd21).
+      // HISTORY, not tips, answers that: one exhaustive `git rev-list --all --
+      // <path>` walks every commit reachable from EVERY ref (branches, tags,
+      // remote-tracking — not just refs/heads) and is NOT bounded by
+      // PARKED_REF_PROBE_CAP the way the tip scan above is (fixer round 2,
+      // findings 1+2 — the two collapse into one fix: never_tracked no longer
+      // depends on the capped per-ref tip loop at all, so a truncated tip scan
+      // can only ever under-detect a live PARK — an already-accepted, documented
+      // degrade (decision 30d18443: a failed or bounded probe must never SUPPRESS
+      // a real deletion finding) — never inflate into a false never_tracked).
+      // One subprocess per already-rare missing file is the accepted cost here.
+      const history = run(['rev-list', '--all', '--', rel]);
+      if (history?.status !== 0 || typeof history.stdout !== 'string') return { status: 'probe_failed' };
+      return { status: history.stdout.trim().length > 0 ? 'confirmed_absent' : 'never_tracked' };
+    } catch {
+      return { status: 'probe_failed' };
+    }
+  }
+
+  /**
+   * board-provenance-measured-at-head: one shared, swallowing git runner —
+   * the same spawn pattern parkedOnRef already uses (never throws; a failure
+   * or absent git surfaces as `undefined`, and every caller here decides for
+   * itself what an absent result means for ITS disclosure).
+   */
+  private runGit(treeRoot: string, args: string[]): { status: number | null; stdout: string } | undefined {
+    try {
+      const r = spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
+      return { status: r.status, stdout: typeof r.stdout === 'string' ? r.stdout : '' };
     } catch {
       return undefined;
     }
+  }
+
+  /** Current HEAD's full 40-hex sha in `treeRoot`, or undefined if git/the tree is unavailable (board-provenance-measured-at-head: what board_add/board_update stamp measured_at_head with). */
+  private currentHeadSha(treeRoot: string | undefined): string | undefined {
+    if (!treeRoot) return undefined;
+    const r = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
+    if (!r || r.status !== 0) return undefined;
+    const sha = r.stdout.trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  }
+
+  /**
+   * Does `sha` resolve to a real commit in `treeRoot`? Used to refuse a
+   * caller-supplied measured_at_head BY NAME rather than silently replacing
+   * it with HEAD (P5, decision board-provenance-measured-at-head) — the exact
+   * inverse of parkedOnRef's swallow-to-undefined direction, because here an
+   * unresolvable value is a caller error that must be reported, not degraded
+   * past.
+   */
+  private shaResolves(sha: string, treeRoot: string | undefined): boolean {
+    if (!treeRoot) return false;
+    const r = this.runGit(treeRoot, ['cat-file', '-e', `${sha}^{commit}`]);
+    return r?.status === 0;
+  }
+
+  /**
+   * board-provenance-measured-at-head: ONE bounded `git log --name-only` walk
+   * per board_query call (never per item — the decision's whole point).
+   *
+   * FIX F1 (review 2026-08-24): the walk is RANGE-BOUNDED by the OLDEST
+   * eligible item's measured_at_head, not an unconditional HEAD-relative cap
+   * — `<oldestBase>^..HEAD` (backstopped by `-n PROVENANCE_WALK_COMMIT_CAP+1`
+   * so a query never pays for history no returned item's evidence predates).
+   * Finding the oldest base costs exactly ONE extra subprocess regardless of
+   * how many eligible items there are: `git rev-list --no-walk --timestamp
+   * <every unique sha>` resolves each sha's commit time directly (no
+   * traversal), and the minimum timestamp names the oldest — cheaper than N
+   * `merge-base --is-ancestor` calls and cheaper than walking full history to
+   * derive it. If that resolution fails for any reason (unexpected — every
+   * stored sha was validated resolvable at write time) or `<oldestBase>^`
+   * itself doesn't exist (oldestBase is the repo's root commit), the walk
+   * falls back to the unbounded-range `-n cap HEAD` form — the cap stays the
+   * backstop either way (never a silent unbounded walk).
+   *
+   * For every record carrying both file_keys and a (40-hex) measured_at_head,
+   * counts — in JS, over this single walk — how many of the commits STRICTLY
+   * NEWER than its measured_at_head touched one of its file_keys.
+   *
+   * FIX F3: a sha genuinely absent from the walked range (rebased away, or a
+   * non-ancestor of HEAD) previously skipped SILENTLY while the envelope
+   * still reported 'checked' — a missing warning read as fresh, the exact P5
+   * inversion the whole feature exists to avoid. It now ALWAYS gets a visible
+   * per-item note rather than being dropped.
+   *
+   * Never throws: an absent/failing git, a non-repo tree, or nothing eligible
+   * all degrade to a disclosed 'unavailable:<reason>'.
+   */
+  private computeProvenance(
+    records: DurableRecord[],
+    treeRoot: string | undefined
+  ): { status: string; warnings: Map<string, { full: string; short: string }> } {
+    const warnings = new Map<string, { full: string; short: string }>();
+    const withFileKeys = (records as unknown as Record<string, unknown>[]).filter((r) => {
+      const fk = r.file_keys as string[] | undefined;
+      return Array.isArray(fk) && fk.length > 0;
+    });
+    const eligible = withFileKeys.filter((r) => {
+      const head = r.measured_at_head as string | undefined;
+      return typeof head === 'string' && /^[0-9a-f]{40}$/.test(head);
+    });
+    if (!treeRoot) return { status: 'unavailable:no_repo_root', warnings };
+    const headCheck = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
+    if (!headCheck || headCheck.status !== 0) return { status: 'unavailable:no_git', warnings };
+    const branchCheck = this.runGit(treeRoot, ['symbolic-ref', '-q', 'HEAD']);
+    if (!branchCheck || branchCheck.status !== 0) return { status: 'unavailable:detached_head', warnings };
+    // FIX F2: distinguish "nothing here even carries file_keys" from "file_keys
+    // exist but none of them have been stamped yet" — different remedies.
+    if (withFileKeys.length === 0) return { status: 'unavailable:no_file_keys', warnings };
+    if (eligible.length === 0) return { status: 'unavailable:no_measured_items', warnings };
+
+    // F1 / OUTSIDE-MODEL FINDING 1 (2026-08-24, repro d5b84e6→3ef9fbc): resolve
+    // the oldest eligible base topologically, never by commit TIMESTAMP — a
+    // child and its parent can share a timestamp, which made the CHILD
+    // "oldest" and excluded the PARENT's range entirely, falsely reporting the
+    // parent's sha as "not in current history". `git merge-base --octopus
+    // <shas>` returns a commit reachable from EVERY given base — an ancestor
+    // of all of them by construction — so `<that>^..HEAD` is guaranteed to
+    // cover every base's range regardless of commit-time skew. Pre-filter to
+    // shas that actually resolve (rev-list --ignore-missing) first: merge-base
+    // refuses outright if handed one that doesn't, and one rebased-away sha
+    // must not poison the whole batch back to the unbounded walk.
+    const uniqueShas = [...new Set(eligible.map((r) => r.measured_at_head as string))];
+    let oldestBase: string | undefined = uniqueShas.length === 1 ? uniqueShas[0] : undefined;
+    if (uniqueShas.length > 1) {
+      const resolveCheck = this.runGit(treeRoot, ['rev-list', '--no-walk', '--ignore-missing', ...uniqueShas]);
+      const resolvableShas =
+        resolveCheck && resolveCheck.status === 0
+          ? resolveCheck.stdout
+              .split('\n')
+              .map((l) => l.trim())
+              .filter((l) => /^[0-9a-f]{40}$/.test(l))
+          : [];
+      if (resolvableShas.length === 1) {
+        oldestBase = resolvableShas[0];
+      } else if (resolvableShas.length > 1) {
+        const mb = this.runGit(treeRoot, ['merge-base', '--octopus', ...resolvableShas]);
+        const candidate = mb && mb.status === 0 ? mb.stdout.trim() : '';
+        if (/^[0-9a-f]{40}$/.test(candidate)) oldestBase = candidate;
+      }
+      // Any failure above (missing/unrelated histories/no common ancestor)
+      // leaves oldestBase undefined — the walk below falls back to the
+      // unbounded-range/-n-cap-backstop form (never a throw).
+    }
+
+    // The `-n` request asks for one MORE than the disclosed cap so a
+    // cap-truncated walk is detectable by comparing the RETURNED count
+    // against the cap (F4 — `commits.length < CAP` misreads a repo with
+    // EXACTLY `CAP` commits as truncated; requesting CAP+1 and trimming the
+    // lookahead entry fixes the off-by-one instead of guessing at it).
+    // --no-renames (OUTSIDE-MODEL FINDING 2, repro 644b46e): --name-only's
+    // default rename detection reports only the NEW path for a renamed file,
+    // so an item keyed to the path it was renamed FROM never saw its own
+    // change. --no-renames reports both the old and new paths as plain
+    // add/delete entries.
+    const requestCap = PROVENANCE_WALK_COMMIT_CAP + 1;
+    const rangedWalk = oldestBase
+      ? this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), `${oldestBase}^..HEAD`])
+      : undefined;
+    const walk =
+      rangedWalk && rangedWalk.status === 0
+        ? rangedWalk
+        : this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), 'HEAD']);
+    if (!walk || walk.status !== 0) return { status: 'unavailable:no_git', warnings };
+    const commits: { sha: string; files: string[] }[] = [];
+    for (const raw of walk.stdout.split('\n')) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (/^[0-9a-f]{40}$/.test(line)) {
+        commits.push({ sha: line, files: [] });
+      } else if (commits.length) {
+        commits[commits.length - 1].files.push(line);
+      }
+    }
+    const walkTruncated = commits.length > PROVENANCE_WALK_COMMIT_CAP;
+    if (walkTruncated) commits.length = PROVENANCE_WALK_COMMIT_CAP; // drop the CAP+1'th lookahead entry
+    let capHit = false;
+    for (const rec of eligible) {
+      const fileKeys = rec.file_keys as string[];
+      const head = rec.measured_at_head as string;
+      const id = rec.id as string;
+      const idx = commits.findIndex((c) => c.sha === head);
+      if (idx === -1) {
+        // F3: never silently skip — the sha is either older than a truncated
+        // window (cap genuinely hit) or not on HEAD's ancestry at all
+        // (rebased/orphaned); either way the count cannot be trusted, so say
+        // so on the item rather than reporting nothing.
+        if (walkTruncated) capHit = true;
+        const reason = walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+        warnings.set(id, {
+          full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+          // OUTSIDE-MODEL FINDING 3 (headline stays compact): no sha/reason detail.
+          short: ` ⚠not verifiable — re-verify`,
+        });
+        continue;
+      }
+      const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
+      if (count > 0) {
+        warnings.set(id, {
+          full: `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`,
+          // OUTSIDE-MODEL FINDING 3 (2026-08-24): appending the full sentence
+          // after headlineRecord's clip broke headline's compact-line contract
+          // (an 80-char line became 170+ chars, multiline). Headline gets a
+          // short marker instead; digest/full keep the full sentence.
+          short: ` ⚠${count} commits since measured`,
+        });
+      }
+    }
+    return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
   }
 
   /**
@@ -550,12 +877,41 @@ export class SterlingTools {
    * want either and pointing at retirement alone would trade a stale denial for an
    * invitation to retire away every error instead of correcting it.
    */
+  /**
+   * The unforgeable envelope: every write REFUSES these by name (board
+   * 617e97d4 hoisted this out of refuseServerOwnedFields so knowledge_schema's
+   * server_owned mask derives from the SAME list this refusal guard consumes —
+   * the two surfaces used to be two hand-maintained copies of one truth, and
+   * the projection's copy was missing four of these names).
+   *
+   * lifecycle/freshness/file_baselines joined on this slice's review (both
+   * reviewers, independently). The genuinely reachable forgeries were
+   * freshness:'flagged_stale' (resolveIdentity honors a directly-given value,
+   * deriving status 'flagged_stale' — a forged-stale record) and the silent
+   * file_baselines overwrite — the misleading-success shape this guard exists
+   * to eliminate. lifecycle:'retired' alone was already blocked one layer down
+   * (the store's born-dead refusal demands a superseded_by, itself refused
+   * here), so its entry is defense-in-depth at the right layer: the tool
+   * surface names the caller's mistake instead of leaking a store-internal
+   * message. The store's own readEnum refusal for lifecycle/freshness is now
+   * tool-unreachable — it survives for internal/MountedStores callers only.
+   * Internal writers are unaffected:
+   * knowledgeSplit's create passes an explicit field list, knowledgePromote
+   * copies through store.create below this guard, and update/supersede spread
+   * the OLD record after this refusal has run on the caller's input.
+   *
+   * The destructure-strips in knowledgeCreate/knowledgeUpdate/knowledgeSupersede
+   * still enumerate names literally — dead code for refused names (the refusal
+   * throws first), kept as defense-in-depth; the shared list binds the two
+   * surfaces that must agree, the guard and the projection.
+   */
+  private static readonly WRITE_REFUSED_FIELDS = WRITE_REFUSED_FIELDS;
+
   private refuseServerOwnedFields(
     fields: Record<string, unknown>,
     op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede'
   ): void {
-    const SERVER_OWNED = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type'];
-    const attempted = SERVER_OWNED.filter((k) => k in fields);
+    const attempted = SterlingTools.WRITE_REFUSED_FIELDS.filter((k) => k in fields);
     if (attempted.length === 0) return;
     const retiring = attempted.includes('status') || attempted.includes('superseded_by');
     throw new Error(
@@ -566,7 +922,7 @@ export class SterlingTools {
             `To correct a WRONG record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug. ` +
             `The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, ` +
             `never for a record that is merely wrong — /sterling:cleanup never hard-deletes knowledge either.`
-          : `id and the clocks are assigned at write; type is fixed at create.`)
+          : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile.`)
     );
   }
 
@@ -649,6 +1005,40 @@ export class SterlingTools {
   }
 
   /**
+   * FIELD-EFFECT VISIBILITY (board 8659a573): a small, DATA-DRIVEN map of
+   * fields whose consumer is server-side and invisible in-session — a caller
+   * has no way to observe these fields' effect within a single tool response.
+   * Measured cost of the gap: volatility_hint was judged "unconsumed" (it
+   * drives stale_research's staleness clocks) and working_tree judged
+   * "unused" (it resolves a record's file paths server-side), both false
+   * claims that invited removal of load-bearing fields (research_finding
+   * 179d8161). Every entry here MUST be a VERIFIED consumer (grepped, not
+   * inferred) — an invented consumed_by is worse than none.
+   *
+   * Keyed by `${type}:${field}`, NOT by bare field name (review finding):
+   * a note is a claim about ONE type's verified consumer, and two types can
+   * share a field name with only one of them actually consumed server-side
+   * (or consumed differently) — a bare-name key would let any future type
+   * reusing the name silently inherit an unverified note.
+   */
+  private static readonly FIELD_CONSUMERS: Readonly<Record<string, string>> = {
+    // Consumed at the staleness threshold lookup (config.staleness.research_days
+    // keyed by volatility_hint) that decides when a research_finding reads as
+    // flagged_stale — a read-time computation with no caller-visible trace.
+    // volatility_hint is declared only on research_finding today.
+    'research_finding:volatility_hint': 'drives stale_research staleness clocks (research_days threshold lookup)',
+    // Consumed by treeRootFor()'s working-tree resolution (config.working_trees):
+    // unset means the project root; a mapped name resolves file paths
+    // server-side for the read-time drift/baseline checks and H7/H10
+    // ownership — none of which surfaces the lookup itself to the caller.
+    // Verified for BOTH types that declare working_tree: computeBaselines
+    // (tools.ts) gates on type === 'feature_article' || 'reference_material'
+    // before calling treeRootFor, so both consumers are confirmed, not assumed.
+    'feature_article:working_tree': 'resolves copy-file paths server-side (config.working_trees lookup for drift/baseline checks)',
+    'reference_material:working_tree': 'resolves copy-file paths server-side (config.working_trees lookup for drift/baseline checks)',
+  };
+
+  /**
    * knowledge_schema — ask what a type requires instead of guessing (board
    * 7acfbe48). Read-only, derived from the registered zod schema, so it cannot
    * drift from what a write will actually accept. Listing the registered type
@@ -657,17 +1047,16 @@ export class SterlingTools {
    */
   knowledgeSchema(
     type: string
-  ): { type: string; fields: (FieldShape & { server_owned?: boolean })[]; required: string[]; optional: string[] } {
+  ): { type: string; fields: (FieldShape & { server_owned?: boolean; consumed_by?: string })[]; required: string[]; optional: string[] } {
     const described = schemaFor(type);
     if (!described) {
       throw new Error(`knowledge_schema: '${type}' is not a registered record type. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
     }
     // SERVER-OWNED FIELDS ARE REPORTED AS SUCH ([stable-identity-design-v2]
-    // contract 1/4): `version` is the counter this surface OWNS — it starts at
-    // 1 and only a write moves it — and `status`/`superseded_by` are DERIVED
-    // from lifecycle + the supersedes relation since v2. All three are refused
-    // or stripped by the write path, so reporting them as caller-required (as
-    // the raw zod shape does, because the envelope still declares them for API
+    // contract 1/4; widened to the whole write-refused envelope by board
+    // 617e97d4): everything in SERVER_OWNED_FIELDS is refused or stripped by
+    // the write path, so reporting any of it as caller-required (as the raw
+    // zod shape does, because the envelope still declares them for API
     // compatibility) told callers to supply exactly what they must not: the
     // measured cost of a wrong schema answer is one write attempt each.
     //
@@ -677,10 +1066,22 @@ export class SterlingTools {
     // supply". There is deliberately NO top-level server_owned[] array: the
     // per-field flag already answers the question at the place a reader is
     // looking, and a second copy of the same list is one more thing to drift.
+    //
+    // CREATE-DEFAULTED fields (author/links/scope/stack_tags) are the second
+    // mask: zod declares them required, but knowledge_create defaults every
+    // one when absent, so to a caller they are optional — required[] is
+    // exactly the set a create must supply.
     const serverOwned = new Set(SterlingTools.SERVER_OWNED_FIELDS);
-    const fields = described.fields.map((f) =>
-      serverOwned.has(f.name) ? { ...f, required: false, server_owned: true } : f
-    );
+    const defaulted = new Set(SterlingTools.CREATE_DEFAULTED_FIELDS);
+    const fields = described.fields.map((f) => {
+      const consumedBy = SterlingTools.FIELD_CONSUMERS[`${described.type}:${f.name}`];
+      const withConsumer = consumedBy !== undefined ? { consumed_by: consumedBy } : {};
+      return serverOwned.has(f.name)
+        ? { ...f, ...withConsumer, required: false, server_owned: true }
+        : defaulted.has(f.name)
+          ? { ...f, ...withConsumer, required: false }
+          : { ...f, ...withConsumer };
+    });
     // The split lists are redundant with `fields` on purpose — "what must I
     // supply" is the actual question, and making the reader filter the array to
     // answer it is how the guessing starts.
@@ -791,6 +1192,11 @@ export class SterlingTools {
       // store. The strip is disclosed on the result's warnings, never silent.
       version: 1,
     };
+    // links[].target_id THROUGH THE LADDER (board 2e71d464) — set AFTER the
+    // `...body` spread above so a caller-supplied `links` array (which lands
+    // inside `body`) does not silently reintroduce its own unresolved
+    // target_id past this resolution.
+    candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_create') ?? [];
     // dedup_override is a create-time directive, never a stored field
     const dedupOverride = candidate.dedup_override === true;
     delete candidate.dedup_override;
@@ -1080,15 +1486,23 @@ export class SterlingTools {
           // by design; this wire has no deletion arm — that is the feature-
           // article check's job for files an article owns).
           if (stat && stat.mtimeMs > Date.parse(r.source_date) && !this.isGeneratedProjection(rel) && this.contentChanged(rel, r.file_baselines, tree.root)) {
-            const open = this.maintenanceQuery({ system_reason: 'refresh_reference', file_keys: [rel], cap: 1000 });
-            if (open.length === 0) {
-              this.maintenanceEnqueue({
-                reason: 'refresh_reference',
-                text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
-                file_keys: [rel],
-                feature_link: r.id,
-              });
-            }
+            // NO PRE-CHECK (board e939fd21): maintenanceEnqueue's atomic choke
+            // point (SterlingStore.enqueueSystemTodo) already keys on
+            // (system_reason, feature_link, file_keys) inside its own
+            // transaction, so a re-enqueued open item returns rather than
+            // duplicates. This pre-check queried on (system_reason, file_keys)
+            // alone — WITHOUT feature_link — which is a weaker key than the
+            // choke point's: two different reference_material records sharing
+            // a path would have the first one's open item silently suppress
+            // the second SUBJECT's finding, and duplicating the dedup rule
+            // here is exactly how the four hand-rolled copies drifted apart
+            // (decision 194f43e4).
+            this.maintenanceEnqueue({
+              reason: 'refresh_reference',
+              text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
+              file_keys: [rel],
+              feature_link: r.id,
+            });
             return { ...record, verify_before_use: true };
           }
         }
@@ -1115,7 +1529,7 @@ export class SterlingTools {
         // absorbed the second's drift into a fresh baseline. The finding neither
         // queued nor survived. One item per FILE is also what makes an item
         // actionable: it names the thing that changed.
-        const drifts: { path: string; missing: boolean }[] = [];
+        const drifts: { path: string; missing: boolean; neverTracked?: boolean }[] = [];
         const parkedFiles: { path: string; ref: string }[] = [];
         // Owned bytes that actually exist — the evidence for the state check below.
         // Free here: the stat is already being taken for the drift comparison.
@@ -1132,12 +1546,19 @@ export class SterlingTools {
             // pushed a drain toward exactly the no-op version bumps the closing
             // rule calls drift. Ask git before concluding anything: `ls` proves
             // working-tree absence and nothing else.
-            const ref = this.parkedOnRef(f.path, treeRoot);
-            if (ref) {
-              parkedFiles.push({ path: f.path, ref });
+            const probe = this.parkedOnRef(f.path, treeRoot);
+            if (probe.status === 'parked') {
+              parkedFiles.push({ path: f.path, ref: probe.ref });
               continue; // the article is CORRECT — the path returns on merge
             }
-            drifts.push({ path: f.path, missing: true });
+            // 'never_tracked' (every reachable ref checked, none EVER held the
+            // blob) is the only verdict that earns deletion_candidate (board
+            // e939fd21). 'confirmed_absent' (real git history, but only as a
+            // merged-into-base ancestor) and 'probe_failed' (git could not be
+            // consulted at all) both keep the classic reconcile_needed reading
+            // — a failed probe proves nothing and must not be read as strong a
+            // signal as a genuine, exhaustive "never existed here" verdict.
+            drifts.push({ path: f.path, missing: true, neverTracked: probe.status === 'never_tracked' });
             continue;
           }
           liveBytes += stat.size;
@@ -1168,30 +1589,66 @@ export class SterlingTools {
             const disclaimed = this.disclaimsOwnership(roleFor(d.path))
               ? ` NOTE: this article's own files[] role for ${d.path} disclaims ownership of it, so this item will recur on every future edit to that file and each one will be a no-op. Consider REMOVING ${d.path} from files[] instead of reconciling — check the co-owners first (knowledge_query file_keys:["${d.path}"]) so the path is not left orphaned.`
               : '';
+            // A file NEVER TRACKED on any git ref this repo can reach (board
+            // e939fd21) is not a RECONCILE — no write can ever close "the file
+            // no longer exists", so reconcile_needed for this shape re-mints
+            // forever (the config.ts incident). It gets its own gated lane
+            // instead — deletion_candidate, whose deed is confirming/undoing
+            // the deletion, never editing the article's prose. A file that WAS
+            // once tracked (real git history, now a merged-into-base ancestor)
+            // or a file the probe could not check at all (no repo, no git) both
+            // keep the classic reconcile_needed reading — the former IS a
+            // normal, closeable editorial fact, and the latter's probe proved
+            // nothing, so it must not be read as the stronger verdict.
+            const deletionCandidate = d.missing && d.neverTracked;
             this.maintenanceEnqueue({
-              reason: 'reconcile_needed',
+              reason: deletionCandidate ? 'deletion_candidate' : 'reconcile_needed',
               text:
                 (d.missing
-                  ? `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
+                  ? deletionCandidate
+                    ? `owned file ${d.path} of article '${a.slug}' no longer exists (out-of-band deletion) and was never tracked on any git ref this repo can reach — DELETION CANDIDATE, not a reconcile: confirm the deletion (drop ${d.path} from files[]) or restore the file, then close this via the deletion_candidate drain`
+                    : `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
                   : `reconcile article '${a.slug}' — owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`) + disclaimed,
               file_keys: [d.path],
               feature_link: a.id,
             });
           }
           if (drifts.length > DRIFT_ITEMS_PER_READ) {
-            // Never truncate SILENTLY (P5): the remainder is named on the item
-            // that did land, so a reader knows the queue is a floor here.
-            this.maintenanceEnqueue({
-              reason: 'reconcile_needed',
-              text:
-                `reconcile article '${a.slug}' — ${drifts.length} owned files drifted in one read; ` +
-                `the first ${DRIFT_ITEMS_PER_READ} have their own items and the remainder (${drifts
-                  .slice(DRIFT_ITEMS_PER_READ)
-                  .map((d) => d.path)
-                  .join(', ')}) are covered by this one. A drift this wide usually means a whole-area change — reconcile the article as a whole.`,
-              file_keys: drifts.slice(DRIFT_ITEMS_PER_READ).map((d) => d.path),
-              feature_link: a.id,
-            });
+            // Never truncate SILENTLY (P5): the remainder is named on the item(s)
+            // that land, so a reader knows the queue is a floor here. LANE-HONEST
+            // (board e939fd21, fixer round 2, finding 4): a deletion_candidate is
+            // a DIFFERENT, gated deed from a reconcile — collapsing the overflow
+            // into one hard-coded reconcile_needed summary either misclassifies a
+            // genuinely never-tracked file as an editable reconcile (re-minting
+            // it forever, the exact defect this change exists to close) or buries
+            // a real editorial fact inside a deletion-candidate summary. Split the
+            // overflow BY LANE and emit one truthful summary per lane actually
+            // represented, rather than one summary naming the wrong deed.
+            const overflow = drifts.slice(DRIFT_ITEMS_PER_READ);
+            const overflowDeletions = overflow.filter((d) => d.missing && d.neverTracked);
+            const overflowReconciles = overflow.filter((d) => !(d.missing && d.neverTracked));
+            if (overflowReconciles.length) {
+              this.maintenanceEnqueue({
+                reason: 'reconcile_needed',
+                text:
+                  `reconcile article '${a.slug}' — ${overflowReconciles.length} owned files drifted in one read beyond the first ${DRIFT_ITEMS_PER_READ} (which have their own items); the remainder (${overflowReconciles
+                    .map((d) => d.path)
+                    .join(', ')}) is covered by this one. A drift this wide usually means a whole-area change — reconcile the article as a whole.`,
+                file_keys: overflowReconciles.map((d) => d.path),
+                feature_link: a.id,
+              });
+            }
+            if (overflowDeletions.length) {
+              this.maintenanceEnqueue({
+                reason: 'deletion_candidate',
+                text:
+                  `article '${a.slug}' — ${overflowDeletions.length} owned files beyond the first ${DRIFT_ITEMS_PER_READ} are DELETION CANDIDATES: never tracked on any git ref this repo can reach (${overflowDeletions
+                    .map((d) => d.path)
+                    .join(', ')}). Confirm the deletions (drop them from files[]) or restore the files, then close via the deletion_candidate drain.`,
+                file_keys: overflowDeletions.map((d) => d.path),
+                feature_link: a.id,
+              });
+            }
           }
           return { ...record, verify_before_use: true };
         }
@@ -1719,6 +2176,14 @@ export class SterlingTools {
     if (result && typeof result === 'object' && 'record' in result) {
       return { ...(result as Record<string, unknown>), record: this.digestWriteEcho((result as { record: unknown }).record as Record<string, unknown>) };
     }
+    // knowledge_promote's envelope carries the written record under `promoted`
+    // (not `record` — the field name says what happened to it), so it needs
+    // its own branch rather than falling through to the bare-record case below,
+    // which would run digestRecord over the WHOLE envelope (promoted/retired/
+    // drained_review/warnings) instead of just the record it names.
+    if (result && typeof result === 'object' && 'promoted' in result) {
+      return { ...(result as Record<string, unknown>), promoted: this.digestWriteEcho((result as { promoted: unknown }).promoted as Record<string, unknown>) };
+    }
     return this.digestWriteEcho(result as unknown as Record<string, unknown>);
   }
 
@@ -1784,6 +2249,12 @@ export class SterlingTools {
     // (verify_targets), a zero-return window carries no basis to answer from
     // (insufficient), otherwise the window is complete and non-empty (ready).
     const answerability: KnowledgeQueryResult['answerability'] = capped ? 'verify_targets' : records.length === 0 ? 'insufficient' : 'ready';
+    // ABSENCE QUERY (board a577a69d): computed over the FULL match set, never
+    // the capped `records` window above — min_score requires rank_terms
+    // (countAboveScore refuses loudly otherwise), so a caller asking "is
+    // anything ruled about X" combines the two rather than reading a bare
+    // filter count as if it were a relevance judgement.
+    const aboveThreshold = filter.min_score !== undefined ? this.store.countAboveScore(filter, filter.min_score) : undefined;
     return {
       matched_filter: matchedFilter,
       returned: records.length,
@@ -1798,6 +2269,7 @@ export class SterlingTools {
           : {}),
       answerability,
       records: records.map((r) => (projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r))),
+      ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
     };
   }
 
@@ -1914,6 +2386,7 @@ export class SterlingTools {
         type: record.type,
         title: SterlingTools.axisRecordTitle(record),
         matched_on: hits,
+        status: record.status,
       }));
   }
 
@@ -1990,16 +2463,28 @@ export class SterlingTools {
   private static readonly FULL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
   /**
-   * Fields knowledge_schema reports as SERVER-OWNED rather than caller-supplied
-   * ([stable-identity-design-v2]): `version` is the counter this surface owns,
-   * `status`/`superseded_by` are derived from lifecycle + the supersedes
-   * relation. Deliberately NOT the whole unforgeable envelope (id, the clocks,
-   * type — refuseServerOwnedFields already teaches those at the write): this
-   * list is the set the v2 identity model MOVED out of caller control, and
-   * widening it would change what knowledge_schema reports for fields nothing
-   * in this wave touched.
+   * Fields knowledge_schema reports as SERVER-OWNED rather than caller-supplied:
+   * the whole write-refused envelope (WRITE_REFUSED_FIELDS — one shared list
+   * with refuseServerOwnedFields, so the projection and the refusal guard
+   * cannot re-diverge) plus `version`, the counter this surface owns (stripped
+   * with a disclosed warning at create, never honored).
+   *
+   * REVERSED from the earlier stance ("refuseServerOwnedFields already teaches
+   * those at the write") by board 617e97d4: teaching-at-the-write IS
+   * learn-by-rejection, the exact habit knowledge_schema exists to eliminate —
+   * measured, a caller followed the projection's required[] verbatim and
+   * composed a write the guard refused.
    */
-  private static readonly SERVER_OWNED_FIELDS = ['version', 'status', 'superseded_by'];
+  private static readonly SERVER_OWNED_FIELDS = SERVER_OWNED_FIELDS;
+
+  /**
+   * Envelope fields knowledge_create DEFAULTS when absent (author 'conductor',
+   * links [], scope 'project', stack_tags []) — caller-SUPPLIABLE but never
+   * caller-REQUIRED, so knowledge_schema reports them optional (board
+   * 617e97d4: with these masked, required[] is exactly what a create must
+   * supply). Keep in lockstep with the `??` defaults in knowledgeCreate.
+   */
+  private static readonly CREATE_DEFAULTED_FIELDS = CREATE_DEFAULTED_FIELDS;
 
   /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
   private static slugify(text: string): string {
@@ -2178,13 +2663,7 @@ export class SterlingTools {
       );
     }
     const type = String(full.type);
-    const known = knownFieldsFor(type);
-    if (!known || !known.has(field)) {
-      const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
-      throw new Error(`knowledge_get: '${type}' does not define field '${field}' — valid fields: ${valid}.`);
-    }
     const rec = full;
-    const value = rec[field];
     const base: Record<string, unknown> = {
       id: full.id,
       type: full.type,
@@ -2197,6 +2676,41 @@ export class SterlingTools {
       // concept lives now, which a window has no other way to say.
       ...(rec.legacy_resolution !== undefined ? { legacy_resolution: rec.legacy_resolution } : {}),
     };
+    // REAL FIELDS WIN OVER THE VIRTUAL ONE (roster review follow-up): check
+    // knownFieldsFor FIRST — if some type ever registers an actual field
+    // literally named 'headline', it must be reachable by field:'headline'
+    // exactly like any other real field, never shadowed by the fallback
+    // below. Only when no type declares 'headline' as a real field does the
+    // virtual resolver get a turn.
+    const known = knownFieldsFor(type);
+    if (!known?.has(field)) {
+      // N26: a type-agnostic headline read. 'headline' is a VIRTUAL field
+      // name — not registered per-type in knownFieldsFor, because the whole
+      // point is that it resolves the same way (title, falling back to
+      // question, falling back to slug) on every record type, so a caller
+      // does not need to know whether this record's headline lives in
+      // `title` (decision/feature_article) or `question` (research_finding,
+      // which carries no title at all). Reuses axisRecordTitle unchanged —
+      // the same fallback chain knowledgePreflight and sameSubjectDigest
+      // already rely on — so there is exactly one definition of "this
+      // record's headline" in the codebase. Not windowable: it is always a
+      // short derived scalar, never a long field offset/length would matter
+      // for.
+      if (field === 'headline') {
+        if (offset !== undefined || length !== undefined) {
+          throw new Error(
+            `knowledge_get: field 'headline' is a derived scalar (title ?? question ?? slug) — offset/length are not windowable on it.`
+          );
+        }
+        const value = SterlingTools.axisRecordTitle(rec as unknown as DurableRecord);
+        return { ...base, kind: 'value', value };
+      }
+      const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
+      throw new Error(
+        `knowledge_get: '${type}' does not define field '${field}' — valid fields: ${valid}, plus 'headline' (a virtual field on every type: title ?? question ?? slug).`
+      );
+    }
+    const value = rec[field];
     if (typeof value === 'string') {
       const off = offset ?? 0;
       const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
@@ -2300,6 +2814,34 @@ export class SterlingTools {
     // inconsistency is in the store, not the citation.
     if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
     return record;
+  }
+
+  /**
+   * links[].target_id through the SAME id-resolution ladder as knowledge_get
+   * (board 2e71d464) — a caller-supplied links[] array (knowledge_create /
+   * knowledge_update / knowledge_supersede) previously reached the envelope's
+   * `target_id: z.string().uuid()` schema check BEFORE anything resolved it,
+   * so an 8-char prefix or a slug failed validation outright and never got
+   * near resolveRecordId; the measured workaround was dropping the edge
+   * entirely and keeping only a prose citation. Only a NON-full-uuid string is
+   * routed through the ladder — an already-full-uuid target_id is left
+   * untouched (existence is not re-checked here, preserving today's tolerance
+   * for a dangling-but-well-formed target, the same shape the migration
+   * classifier already expects to see) — so this only widens what resolves,
+   * never what refuses. An ambiguous prefix/slug refuses naming the
+   * candidates, exactly as knowledge_get does; worst case here is a
+   * recoverable wrong edge, unlike the destroying paths (board_remove,
+   * maintenance_remove) whose exact-id rule is untouched by this change.
+   */
+  private resolveLinksTargets(links: unknown, toolName: string): unknown {
+    if (!Array.isArray(links)) return links;
+    return links.map((link) => {
+      if (!link || typeof link !== 'object') return link;
+      const targetId = (link as { target_id?: unknown }).target_id;
+      if (typeof targetId !== 'string' || SterlingTools.FULL_UUID_RE.test(targetId)) return link;
+      const resolved = this.resolveRecordId(targetId, toolName, 'target record');
+      return { ...(link as Record<string, unknown>), target_id: resolved.id };
+    });
   }
 
   /**
@@ -2717,6 +3259,15 @@ export class SterlingTools {
     // call. Without it the merge silently discarded the field and reported a new
     // version — the failure that makes a "fix" look applied when it never landed.
     this.refuseUnknownFields(old.type, overrides);
+    // links[].target_id THROUGH THE LADDER (board 2e71d464): a caller-supplied
+    // `links` array in this update's own body may cite a slug or 8-char prefix
+    // the same way knowledge_get already resolves; `old.links` (spread into
+    // `next` below when this call touches no links) is already stored as full
+    // ids from a prior resolved write, so only an EXPLICIT overrides.links
+    // needs this pass.
+    if (overrides.links !== undefined) {
+      overrides.links = this.resolveLinksTargets(overrides.links, toolName);
+    }
     // The item's feature_link points to whatever version was current when it
     // was raised, which may now be an ancestor, so match the whole supersede
     // chain — computed for every type, since promotion_review (below) can
@@ -3193,8 +3744,33 @@ export class SterlingTools {
    * drained (done = removed). feature_article is always project (§3.3); todo is
    * a project surface — neither promotes. An unmounted target domain is
    * rejected loudly by the store routing before anything is written.
+   *
+   * METADATA SANITISATION (board ff07e314, measured 2026-08-22): a whole-record
+   * copy was carrying LOCAL SCAFFOLDING verbatim into the shared per-user
+   * domain store — file_keys (a repo-relative path means nothing outside the
+   * originating project) and stack_tags (copied wholesale, so a record
+   * promoted to one domain kept advertising every OTHER stack tag its origin
+   * project happened to carry). Both are sanitised at this one crossing point:
+   * file_keys is dropped entirely (optional at the schema layer — nothing to
+   * backfill), stack_tags is INTERSECTED with the target domain, and the drop
+   * is disclosed on the receipt (dropped_file_keys/dropped_stack_tags/
+   * kept_stack_tags) alongside a warn-only scan for suspicious project-local
+   * labels (slice labels, repo-relative path mentions) still sitting in the
+   * promoted prose — never a refusal (P1): the reviewer sanitises the source
+   * record and re-promotes if it actually matters.
    */
-  knowledgePromote(id: string, domain: string): { promoted: DurableRecord; retired: string; drained_review: string | null } {
+  knowledgePromote(
+    id: string,
+    domain: string
+  ): {
+    promoted: DurableRecord;
+    retired: string;
+    drained_review: string | null;
+    dropped_file_keys: number;
+    dropped_stack_tags: string[];
+    kept_stack_tags: string[];
+    warnings: string[];
+  } {
     // Through the SHARED LADDER (decision 2debab53), not a raw store.get: a
     // slug or an 8-char citation prefix resolves here exactly as it does
     // everywhere else, and — the reason this changed — a HISTORICAL id now
@@ -3218,8 +3794,32 @@ export class SterlingTools {
     const ts = this.now();
     // copy content; the envelope (id/clocks/status/scope/links) is rebuilt for the domain
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, scope: _sc, links: _l, ...content } = original as unknown as Record<string, unknown>;
+
+    // (1) DROP file_keys — a repo-relative path is by definition project-scoped;
+    // the schema leaves the field optional everywhere, so omitting it entirely
+    // satisfies the write with nothing to backfill.
+    const originalFileKeys = Array.isArray((content as Record<string, unknown>).file_keys)
+      ? ((content as Record<string, unknown>).file_keys as unknown[])
+      : [];
+    delete (content as Record<string, unknown>).file_keys;
+
+    // (2) INTERSECT stack_tags with the target domain rather than copying —
+    // promoting to domain:node keeps 'node', drops every other tag (e.g. the
+    // origin project's own 'sterling') the record happened to carry.
+    const originalStackTags = Array.isArray((content as Record<string, unknown>).stack_tags)
+      ? ((content as Record<string, unknown>).stack_tags as string[])
+      : [];
+    const keptStackTags = originalStackTags.filter((t) => t === domain);
+    const droppedStackTags = originalStackTags.filter((t) => t !== domain);
+    // Empty-intersection invisibility (review finding): a record tagged only
+    // for OTHER stacks (e.g. only 'sterling', promoted to domain:node) is a
+    // legitimate promote, but the result carries NO stack_tags at all — and a
+    // zero-tag record is unreachable by every stack_tags-filtered query while
+    // the project original sits tombstoned. Warned, never blocked (P1).
+
     const promoted = this.store.create({
       ...content,
+      stack_tags: keptStackTags,
       id: this.newId(),
       created_at: ts,
       updated_at: ts,
@@ -3236,7 +3836,68 @@ export class SterlingTools {
       (t) => (t as { feature_link?: string }).feature_link === originalId
     );
     if (review) this.store.remove(review.id, ts);
-    return { promoted, retired: originalId, drained_review: review?.id ?? null };
+
+    // (3) RECEIPT DISCLOSURE: what crossed the project→domain boundary and
+    // what did not, surfaced on the write result — warn-only, never a
+    // refusal (P1).
+    const warnings: string[] = [];
+    if (originalFileKeys.length) {
+      warnings.push(`dropped ${originalFileKeys.length} file_keys (repo-relative paths are project-scoped and meaningless in a shared domain store)`);
+    }
+    if (droppedStackTags.length) {
+      warnings.push(`dropped stack_tags not shared by domain:${domain}: ${droppedStackTags.join(', ')}`);
+    }
+    if (keptStackTags.length === 0) {
+      warnings.push(
+        `promoted record carries no stack_tags — unreachable by tag-filtered queries; consider tagging it in the domain store`
+      );
+    }
+    warnings.push(...this.suspiciousLocalLabelWarnings(content as Record<string, unknown>));
+
+    return {
+      promoted,
+      retired: originalId,
+      drained_review: review?.id ?? null,
+      dropped_file_keys: originalFileKeys.length,
+      dropped_stack_tags: droppedStackTags,
+      kept_stack_tags: keptStackTags,
+      warnings,
+    };
+  }
+
+  /**
+   * knowledge_promote's warn-only scan (board ff07e314 (c)) over a record's
+   * PROSE for project-local labels that read as fine inside the originating
+   * project but are noise or actively misleading once shared: a slice label
+   * ('S1'/'S2', word-bounded so it never matches inside a longer token) and a
+   * repo-relative path mention (word/word.ext). Covers TOP-LEVEL string
+   * fields (answer/statement/summary/etc) AND the nested string leaves of the
+   * known array fields where the measured pollution actually lived —
+   * history[].event, alternatives_rejected[].{option,reason},
+   * current_ac[].text — walked cheaply rather than a generic deep-walk. Never
+   * a refusal — the finding is surfaced so the reviewer can judge it, per
+   * (3)'s warn-only contract.
+   */
+  private suspiciousLocalLabelWarnings(content: Record<string, unknown>): string[] {
+    const proseParts = Object.values(content).filter((v): v is string => typeof v === 'string');
+    const history = Array.isArray(content.history) ? (content.history as Record<string, unknown>[]) : [];
+    for (const entry of history) if (typeof entry?.event === 'string') proseParts.push(entry.event);
+    const alternatives = Array.isArray(content.alternatives_rejected) ? (content.alternatives_rejected as Record<string, unknown>[]) : [];
+    for (const alt of alternatives) {
+      if (typeof alt?.option === 'string') proseParts.push(alt.option);
+      if (typeof alt?.reason === 'string') proseParts.push(alt.reason);
+    }
+    const currentAc = Array.isArray(content.current_ac) ? (content.current_ac as Record<string, unknown>[]) : [];
+    for (const ac of currentAc) if (typeof ac?.text === 'string') proseParts.push(ac.text);
+    const prose = proseParts.join('\n');
+    const found = new Set<string>();
+    for (const m of prose.matchAll(/\bS\d{1,3}\b/g)) found.add(m[0]);
+    for (const m of prose.matchAll(/\b(?:[\w-]+\/)+[\w.-]+\.[a-zA-Z0-9]{1,6}\b/g)) found.add(m[0]);
+    if (!found.size) return [];
+    const list = [...found];
+    return [
+      `WARNING: possible project-local label(s) in the promoted prose — review before relying on this in a shared domain: ${list.slice(0, 10).join(', ')}${list.length > 10 ? ', …' : ''}`,
+    ];
   }
 
   // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------
@@ -3349,7 +4010,7 @@ export class SterlingTools {
   // -- board (§3.2.7) ----------------------------------------------------------
 
   boardAdd(args: Record<string, unknown>): CreateResult & { notice?: string } {
-    const { text, source, objective, ...rest } = args;
+    const { text, source, objective, measured_at_head, ...rest } = args;
     // Objective grouping (decision a8d2ce6c): a grouping key for the human's
     // board only — maintenance items are lane-keyed by system_reason.
     if (objective !== undefined && source === 'system') {
@@ -3360,10 +4021,35 @@ export class SterlingTools {
     // 'standalone' (exact lowercase) is the declared answer for "not a slice";
     // it normalizes to field-absent so ungrouped items stay shapeless.
     const normalized = objective === 'standalone' ? undefined : objective;
+    // board-provenance-measured-at-head: server-stamps HEAD at add time unless
+    // the caller supplies its own sha (decision — the a2a17efa §13.2 incident:
+    // an author who knew the head had nowhere to put it). A caller-supplied
+    // sha that does not resolve in this repo is refused BY NAME rather than
+    // silently replaced with HEAD (P5); an absent/unavailable git degrades to
+    // no stamp at all, same swallow direction as every other write-time probe
+    // in this file — the annotation surface (board_query) is where absence
+    // gets disclosed, not the write.
+    let stampedHead: string | undefined;
+    if (measured_at_head !== undefined) {
+      const candidate = String(measured_at_head);
+      // FIX F5 (review 2026-08-24): the 40-hex SHAPE check runs BEFORE
+      // shaResolves — git resolves an abbreviated sha too, so a short-but-real
+      // value would pass shaResolves and only fail later at the schema layer
+      // with a bare zod message instead of this refusal naming the value.
+      if (!/^[0-9a-f]{40}$/.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+        throw new Error(
+          `board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+      stampedHead = candidate;
+    } else {
+      stampedHead = this.currentHeadSha(this.repoRoot);
+    }
     const res = this.knowledgeCreate('todo', {
       text,
       source,
       ...(normalized !== undefined ? { objective: normalized } : {}),
+      ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
       ...rest,
     });
     if (source === 'user' && objective === undefined) {
@@ -3401,6 +4087,25 @@ export class SterlingTools {
       const chain = this.articleChainIds(filter.feature_slug);
       filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
     }
+    // DETERMINISTIC ORDER, MADE EXPLICIT (board b786a84f, PAGING): the store's
+    // own order for a rank_terms-less query() is `updated_at DESC` (mechanical
+    // fallback rank, §3.4). Re-sorted here on that SAME key so the order is a
+    // property of this method rather than an incidental SQL detail — but only
+    // on `updated_at`: Array.prototype.sort is SPEC-GUARANTEED STABLE (ES2019),
+    // so returning 0 for a tie (two todos sharing one updated_at, e.g. minted
+    // in the same write or the same test tick) preserves whatever relative
+    // order the underlying scan already produced for them, rather than
+    // imposing a different tie-break (an id-based one was tried and reordered
+    // same-timestamp items relative to existing, already-passing callers that
+    // assume insertion order for ties). Paging is still exactly reproducible:
+    // offset 0, cap, 2·cap, … visits every matching item once, in one order,
+    // as long as the board is unchanged between calls.
+    filtered = [...filtered].sort((a, b) => {
+      const at = (a as { updated_at: string }).updated_at;
+      const bt = (b as { updated_at: string }).updated_at;
+      if (at === bt) return 0;
+      return at < bt ? 1 : -1;
+    });
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
     return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
@@ -3429,7 +4134,9 @@ export class SterlingTools {
   }
 
   boardQuery(filter: BoardFilter = {}): DurableRecord[] {
-    return this.boardFiltered(filter).matching.slice(0, filter.cap ?? DEFAULT_BOARD_CAP);
+    const offset = filter.offset ?? 0;
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    return this.boardFiltered(filter).matching.slice(offset, offset + cap);
   }
 
   /**
@@ -3452,26 +4159,57 @@ export class SterlingTools {
   boardQueryResult(filter: BoardFilter = {}): BoardQueryResult {
     const { matching, scanTruncated } = this.boardFiltered(filter);
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
-    const records = matching.slice(0, cap);
-    const capped = records.length < matching.length;
+    const offset = filter.offset ?? 0;
+    const records = matching.slice(offset, offset + cap);
+    // capped is EXACT here (same guarantee as before offset existed): more of
+    // the matching set sits past this page's end.
+    const capped = offset + records.length < matching.length;
     const projection = filter.projection ?? 'full';
     const notes: string[] = [];
     if (capped) {
       notes.push(
-        `cap reached — showing ${records.length} of ${matching.length} matching items; raise cap to see the rest (a drain that stops at the cap leaves the tail behind)` +
-          (projection === 'full' ? `, or re-run with projection:"digest" for one-line items (board items run to several KB of text each)` : '')
+        `cap reached — showing ${records.length} of ${matching.length} matching items (offset ${offset}); ` +
+          `page with offset:${offset + records.length} to continue, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
+          (projection === 'full' ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)` : '')
       );
     }
     if (scanTruncated) {
-      notes.push(`the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total`);
+      notes.push(
+        `the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total — ` +
+          `and PAGING IS BOUNDED BY THAT SAME CEILING: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue)`
+      );
     }
+    // board-provenance-measured-at-head: ONE bounded git walk for this whole
+    // page (never per item), then the warning — if any — is appended to the
+    // projected record's `text` (full/digest/headline all read `text`, and
+    // this keeps the annotation visible through whichever projection the
+    // caller asked for without adding a wire field no projection declares).
+    const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    const projectRecord = (r: DurableRecord): Record<string, unknown> => {
+      const base =
+        projection === 'headline'
+          ? headlineRecord(r as unknown as Record<string, unknown>)
+          : projection === 'digest'
+            ? digestRecord(r as unknown as Record<string, unknown>)
+            : { ...(r as unknown as Record<string, unknown>) };
+      const warning = warnings.get((r as unknown as { id: string }).id);
+      if (!warning) return base;
+      const text = typeof base.text === 'string' ? base.text : '';
+      // OUTSIDE-MODEL FINDING 3: headline's line stays compact (a short marker,
+      // appended directly, no separator) — the full sentence only lands on
+      // digest/full, which already tolerate multi-line text.
+      if (projection === 'headline') return { ...base, text: `${text}${warning.short}` };
+      return { ...base, text: text ? `${text}\n\n${warning.full}` : warning.full };
+    };
     return {
       matched_filter: matching.length,
       returned: records.length,
       cap,
       capped,
+      offset,
+      provenance,
       ...(notes.length ? { note: notes.join('; ') } : {}),
-      records: projection === 'digest' ? records.map((r) => digestRecord(r as unknown as Record<string, unknown>)) : records,
+      records: records.map(projectRecord),
     };
   }
 
@@ -3501,7 +4239,7 @@ export class SterlingTools {
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective'] as const;
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head'] as const;
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
@@ -3526,6 +4264,26 @@ export class SterlingTools {
     if (Object.keys(patch).length === 0) {
       throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
     }
+    // board-provenance-measured-at-head: a text/file_keys rewrite carries new
+    // evidence, so it re-stamps measured_at_head to the CURRENT HEAD — unless
+    // the caller explicitly named a measured_at_head in this same patch, which
+    // wins verbatim (validated below). priority/objective-only patches leave
+    // the field untouched entirely (no key added to `next`). A caller-supplied
+    // measured_at_head that does not resolve is refused by name, never
+    // silently replaced with HEAD (P5) — on EITHER path (bare re-verify or
+    // alongside a text/file_keys change).
+    if ('measured_at_head' in patch) {
+      const candidate = String(patch.measured_at_head);
+      // FIX F5: shape check before shaResolves (see boardAdd's identical fix).
+      if (!/^[0-9a-f]{40}$/.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+        throw new Error(
+          `board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+    } else if ('text' in patch || 'file_keys' in patch) {
+      const head = this.currentHeadSha(this.repoRoot);
+      if (head) patch = { ...patch, measured_at_head: head };
+    }
     const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
     // 'standalone' clears the grouping to absent (decision a8d2ce6c) — the same
     // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
@@ -3533,7 +4291,19 @@ export class SterlingTools {
     // old.id (the resolved canonical id), not the caller's possibly-short
     // citation — a mounted domain store's routing (storeHolding) keys off the
     // real id, and a bare prefix would not resolve there.
-    return this.store.updateTodo(old.id, next as typeof old);
+    //
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 2): store.updateTodo
+    // re-parses the merged candidate against the todo schema (e.g. an empty
+    // `text` fails its min(1)) and throws the raw ZodError across the store
+    // boundary — caught and re-rendered the same way as knowledgeUpdate's
+    // own store-validation catch, rather than leaking the raw issue array on
+    // a caller-triggerable, constantly-used surface.
+    try {
+      return this.store.updateTodo(old.id, next as typeof old);
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, 'todo', 'board_update');
+      throw err;
+    }
   }
 
   /**
@@ -3697,8 +4467,26 @@ export class SterlingTools {
             // window honestly — it is a bounded scan of the 200 most-recently-
             // updated records of the evidence types, not an exhaustive search of
             // everything ever written citing this id.
+            //
+            // ROSTER REVIEW FIX (N28, follow-up): the file-key clause must not
+            // claim a negative result for a scan that never ran. When fileKeys
+            // is empty the file-key arm is SKIPPED (see check_skipped above) —
+            // saying "no knowledge record touching this item's file_keys...
+            // since it was created" on exactly those items (concept_article_
+            // missing / research_owed / plain tasks, per the FIX M1 comment
+            // above) restates the false-reason defect this note exists to fix,
+            // just relocated to the keyless case. And when the file-key arm DID
+            // run, it is the SAME bounded, overlap-ordered 200-record window as
+            // the id-citation arm (see the comment above fileKeyMatches) — an
+            // unhedged claim there is exactly as overclaiming as the id arm's
+            // own "not an exhaustive search" note already guards against, so
+            // both clauses carry the same window disclosure.
             note:
-              `no fulfilling artifact-write found — nothing touching this item's file_keys, and nothing citing its id among the 200 most-recently-updated evidence records, since it was created — removed on the operator's word. ` +
+              (fileKeys.length > 0
+                ? `no knowledge record touching this item's file_keys among the 200 most-recently-updated evidence records`
+                : `this item carries no file_keys, so the file-key scan could not run (see check_skipped)`) +
+              `, and no knowledge record citing its id among the 200 most-recently-updated evidence records, since it was created — removed on the operator's word. ` +
+              `This checks the durable knowledge store only, never git — a commit that fulfilled this item leaves no trace here unless it was also captured as a record. ` +
               `If work fulfilled this item, its capture is missing (that is drift, not a formality).`,
           }
         : {}),
@@ -4119,9 +4907,24 @@ export class SterlingTools {
       ...body,
       ...(slug !== undefined ? { slug } : {}),
     };
+    // links[].target_id THROUGH THE LADDER (board 2e71d464), set AFTER the
+    // `...body` spread above for the same reason as knowledgeCreate.
+    candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_supersede') ?? [];
     this.refuseUnknownFields(type, candidate, 'knowledge_supersede');
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
-    const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 1): this parse is directly
+    // MCP-reachable and does not route through knowledgeUpdate, so it was
+    // untouched by the original knowledge_create/append/edit fix (board
+    // 03c92e2a). Caught and re-rendered the same way (renderValidationFailure)
+    // rather than letting a bad field (e.g. a malformed history element) leak
+    // the raw zod issue array.
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_supersede');
+      throw err;
+    }
     // Cited-id resolution warnings (board fc053051, F3 review finding: every
     // other write path emits these — knowledge_supersede was the one gap).
     // Computed on `parsed` (post-schema, pre-store) so a scan sees exactly
@@ -4404,7 +5207,9 @@ export class SterlingTools {
     });
   }
 
-  maintenanceQuery(filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number } = {}): DurableRecord[] {
+  maintenanceQuery(
+    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; offset?: number } = {}
+  ): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap. contains
     // (work order d9960c98) and feature_slug (board e725979c) ride the same
@@ -4416,12 +5221,21 @@ export class SterlingTools {
       contains: filter.contains,
       feature_slug: filter.feature_slug,
       cap: filter.cap,
+      offset: filter.offset,
     });
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
   maintenanceQueryResult(
-    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; projection?: Projection } = {}
+    filter: {
+      system_reason?: string;
+      file_keys?: string[];
+      contains?: string;
+      feature_slug?: string;
+      cap?: number;
+      offset?: number;
+      projection?: BoardProjection;
+    } = {}
   ): BoardQueryResult {
     return this.boardQueryResult({
       source: 'system',
@@ -4430,6 +5244,7 @@ export class SterlingTools {
       contains: filter.contains,
       feature_slug: filter.feature_slug,
       cap: filter.cap,
+      offset: filter.offset,
       projection: filter.projection,
     });
   }
