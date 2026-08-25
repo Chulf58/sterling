@@ -400,10 +400,10 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_promote',
     {
       description:
-        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome.',
-      inputSchema: strict({ id: z.string(), domain: z.string() }),
+        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome. METADATA SANITISATION (board ff07e314): file_keys never crosses (repo-relative paths are project-scoped) and stack_tags is INTERSECTED with the target domain rather than copied wholesale — both disclosed on the receipt (dropped_file_keys/dropped_stack_tags/kept_stack_tags) alongside a warn-only scan for suspicious project-local labels (slice labels, repo-relative path mentions) still sitting in the promoted prose. The echoed record defaults to its one-line digest under `promoted`; pass projection:"full" for the whole stored record.',
+      inputSchema: strict({ id: z.string(), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, domain }) => json(tools.knowledgePromote(id, domain))
+    ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection))
   );
 
   server.registerTool(

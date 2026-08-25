@@ -2140,6 +2140,14 @@ export class SterlingTools {
     if (result && typeof result === 'object' && 'record' in result) {
       return { ...(result as Record<string, unknown>), record: this.digestWriteEcho((result as { record: unknown }).record as Record<string, unknown>) };
     }
+    // knowledge_promote's envelope carries the written record under `promoted`
+    // (not `record` — the field name says what happened to it), so it needs
+    // its own branch rather than falling through to the bare-record case below,
+    // which would run digestRecord over the WHOLE envelope (promoted/retired/
+    // drained_review/warnings) instead of just the record it names.
+    if (result && typeof result === 'object' && 'promoted' in result) {
+      return { ...(result as Record<string, unknown>), promoted: this.digestWriteEcho((result as { promoted: unknown }).promoted as Record<string, unknown>) };
+    }
     return this.digestWriteEcho(result as unknown as Record<string, unknown>);
   }
 
@@ -3700,8 +3708,33 @@ export class SterlingTools {
    * drained (done = removed). feature_article is always project (§3.3); todo is
    * a project surface — neither promotes. An unmounted target domain is
    * rejected loudly by the store routing before anything is written.
+   *
+   * METADATA SANITISATION (board ff07e314, measured 2026-08-22): a whole-record
+   * copy was carrying LOCAL SCAFFOLDING verbatim into the shared per-user
+   * domain store — file_keys (a repo-relative path means nothing outside the
+   * originating project) and stack_tags (copied wholesale, so a record
+   * promoted to one domain kept advertising every OTHER stack tag its origin
+   * project happened to carry). Both are sanitised at this one crossing point:
+   * file_keys is dropped entirely (optional at the schema layer — nothing to
+   * backfill), stack_tags is INTERSECTED with the target domain, and the drop
+   * is disclosed on the receipt (dropped_file_keys/dropped_stack_tags/
+   * kept_stack_tags) alongside a warn-only scan for suspicious project-local
+   * labels (slice labels, repo-relative path mentions) still sitting in the
+   * promoted prose — never a refusal (P1): the reviewer sanitises the source
+   * record and re-promotes if it actually matters.
    */
-  knowledgePromote(id: string, domain: string): { promoted: DurableRecord; retired: string; drained_review: string | null } {
+  knowledgePromote(
+    id: string,
+    domain: string
+  ): {
+    promoted: DurableRecord;
+    retired: string;
+    drained_review: string | null;
+    dropped_file_keys: number;
+    dropped_stack_tags: string[];
+    kept_stack_tags: string[];
+    warnings: string[];
+  } {
     // Through the SHARED LADDER (decision 2debab53), not a raw store.get: a
     // slug or an 8-char citation prefix resolves here exactly as it does
     // everywhere else, and — the reason this changed — a HISTORICAL id now
@@ -3725,8 +3758,32 @@ export class SterlingTools {
     const ts = this.now();
     // copy content; the envelope (id/clocks/status/scope/links) is rebuilt for the domain
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, scope: _sc, links: _l, ...content } = original as unknown as Record<string, unknown>;
+
+    // (1) DROP file_keys — a repo-relative path is by definition project-scoped;
+    // the schema leaves the field optional everywhere, so omitting it entirely
+    // satisfies the write with nothing to backfill.
+    const originalFileKeys = Array.isArray((content as Record<string, unknown>).file_keys)
+      ? ((content as Record<string, unknown>).file_keys as unknown[])
+      : [];
+    delete (content as Record<string, unknown>).file_keys;
+
+    // (2) INTERSECT stack_tags with the target domain rather than copying —
+    // promoting to domain:node keeps 'node', drops every other tag (e.g. the
+    // origin project's own 'sterling') the record happened to carry.
+    const originalStackTags = Array.isArray((content as Record<string, unknown>).stack_tags)
+      ? ((content as Record<string, unknown>).stack_tags as string[])
+      : [];
+    const keptStackTags = originalStackTags.filter((t) => t === domain);
+    const droppedStackTags = originalStackTags.filter((t) => t !== domain);
+    // Empty-intersection invisibility (review finding): a record tagged only
+    // for OTHER stacks (e.g. only 'sterling', promoted to domain:node) is a
+    // legitimate promote, but the result carries NO stack_tags at all — and a
+    // zero-tag record is unreachable by every stack_tags-filtered query while
+    // the project original sits tombstoned. Warned, never blocked (P1).
+
     const promoted = this.store.create({
       ...content,
+      stack_tags: keptStackTags,
       id: this.newId(),
       created_at: ts,
       updated_at: ts,
@@ -3743,7 +3800,68 @@ export class SterlingTools {
       (t) => (t as { feature_link?: string }).feature_link === originalId
     );
     if (review) this.store.remove(review.id, ts);
-    return { promoted, retired: originalId, drained_review: review?.id ?? null };
+
+    // (3) RECEIPT DISCLOSURE: what crossed the project→domain boundary and
+    // what did not, surfaced on the write result — warn-only, never a
+    // refusal (P1).
+    const warnings: string[] = [];
+    if (originalFileKeys.length) {
+      warnings.push(`dropped ${originalFileKeys.length} file_keys (repo-relative paths are project-scoped and meaningless in a shared domain store)`);
+    }
+    if (droppedStackTags.length) {
+      warnings.push(`dropped stack_tags not shared by domain:${domain}: ${droppedStackTags.join(', ')}`);
+    }
+    if (keptStackTags.length === 0) {
+      warnings.push(
+        `promoted record carries no stack_tags — unreachable by tag-filtered queries; consider tagging it in the domain store`
+      );
+    }
+    warnings.push(...this.suspiciousLocalLabelWarnings(content as Record<string, unknown>));
+
+    return {
+      promoted,
+      retired: originalId,
+      drained_review: review?.id ?? null,
+      dropped_file_keys: originalFileKeys.length,
+      dropped_stack_tags: droppedStackTags,
+      kept_stack_tags: keptStackTags,
+      warnings,
+    };
+  }
+
+  /**
+   * knowledge_promote's warn-only scan (board ff07e314 (c)) over a record's
+   * PROSE for project-local labels that read as fine inside the originating
+   * project but are noise or actively misleading once shared: a slice label
+   * ('S1'/'S2', word-bounded so it never matches inside a longer token) and a
+   * repo-relative path mention (word/word.ext). Covers TOP-LEVEL string
+   * fields (answer/statement/summary/etc) AND the nested string leaves of the
+   * known array fields where the measured pollution actually lived —
+   * history[].event, alternatives_rejected[].{option,reason},
+   * current_ac[].text — walked cheaply rather than a generic deep-walk. Never
+   * a refusal — the finding is surfaced so the reviewer can judge it, per
+   * (3)'s warn-only contract.
+   */
+  private suspiciousLocalLabelWarnings(content: Record<string, unknown>): string[] {
+    const proseParts = Object.values(content).filter((v): v is string => typeof v === 'string');
+    const history = Array.isArray(content.history) ? (content.history as Record<string, unknown>[]) : [];
+    for (const entry of history) if (typeof entry?.event === 'string') proseParts.push(entry.event);
+    const alternatives = Array.isArray(content.alternatives_rejected) ? (content.alternatives_rejected as Record<string, unknown>[]) : [];
+    for (const alt of alternatives) {
+      if (typeof alt?.option === 'string') proseParts.push(alt.option);
+      if (typeof alt?.reason === 'string') proseParts.push(alt.reason);
+    }
+    const currentAc = Array.isArray(content.current_ac) ? (content.current_ac as Record<string, unknown>[]) : [];
+    for (const ac of currentAc) if (typeof ac?.text === 'string') proseParts.push(ac.text);
+    const prose = proseParts.join('\n');
+    const found = new Set<string>();
+    for (const m of prose.matchAll(/\bS\d{1,3}\b/g)) found.add(m[0]);
+    for (const m of prose.matchAll(/\b(?:[\w-]+\/)+[\w.-]+\.[a-zA-Z0-9]{1,6}\b/g)) found.add(m[0]);
+    if (!found.size) return [];
+    const list = [...found];
+    return [
+      `WARNING: possible project-local label(s) in the promoted prose — review before relying on this in a shared domain: ${list.slice(0, 10).join(', ')}${list.length > 10 ? ', …' : ''}`,
+    ];
   }
 
   // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------

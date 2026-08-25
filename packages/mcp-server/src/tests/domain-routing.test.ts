@@ -209,6 +209,190 @@ test('knowledge_promote refuses what §3.3 forbids: non-project scope, unpromota
   }
 });
 
+// === promote-metadata-sanitisation (board ff07e314, first half) ===
+// knowledge_promote sanitises local scaffolding at the promotion boundary:
+// file_keys are project-scoped and cannot mean anything in a shared per-user
+// domain store; stack_tags are intersected with the target domain; suspicious
+// project-local prose labels warn (never refuse). research_finding is used
+// throughout (unlike reference_material, it legitimately carries file_keys —
+// see the server.test.ts refusal pin cited in CLAUDE.md's per-type file-key
+// table) and is a real promotion candidate per §3.3.
+
+test('knowledge_promote drops file_keys at the promotion boundary — a repo-relative path is project-scoped and meaningless in a domain store', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const research = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'genesys retry semantics?', answer: 'a', source_urls: ['https://x'],
+      source_date: '2026-06-16', capture_date: '2026-06-16',
+      file_keys: ['packages/store/src/index.ts'],
+    }).record;
+
+    const out = tools.knowledgePromote(research.id, 'genesys');
+
+    // hard pin: the domain copy carries NO origin file_keys. Sabotage: stop
+    // sanitising file_keys on promote (pass `fields.file_keys` through
+    // unchanged instead of dropping them) — this goes red.
+    const domainRecord = store.get((out.promoted as { id: string }).id) as unknown as { file_keys?: string[] };
+    assert.deepEqual(domainRecord.file_keys ?? [], [], 'no origin file_keys cross the promotion boundary');
+
+    // disclosed: a dropped_file_keys count and/or a warning naming the drop.
+    // Sabotage: drop file_keys silently (no disclosure) — this goes red.
+    const disclosedCount = (out as unknown as { dropped_file_keys?: number }).dropped_file_keys;
+    const warnings = (out as unknown as { warnings?: string[] }).warnings ?? [];
+    assert.ok(
+      disclosedCount === 1 || warnings.some((w) => /file_keys/i.test(w)),
+      'the file_keys drop is disclosed on the result, not silent'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_promote CONTROL: stack_tags already scoped to exactly the target domain promote unchanged, nothing disclosed as dropped', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const research = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'q', answer: 'a', source_urls: ['https://x'],
+      source_date: '2026-06-16', capture_date: '2026-06-16', stack_tags: ['genesys'],
+    }).record;
+
+    const out = tools.knowledgePromote(research.id, 'genesys');
+
+    const domainRecord = store.get((out.promoted as { id: string }).id) as unknown as { stack_tags: string[] };
+    assert.deepEqual(domainRecord.stack_tags, ['genesys'], 'tags exactly matching the domain promote unchanged');
+
+    // control for the NEXT test: with nothing dropped, nothing is disclosed as
+    // dropped. Sabotage: unconditionally report a stack_tags drop — this goes red.
+    const warnings = (out as unknown as { warnings?: string[] }).warnings ?? [];
+    const droppedTags = (out as unknown as { dropped_stack_tags?: string[] }).dropped_stack_tags;
+    assert.ok(!warnings.some((w) => /stack_tag/i.test(w)), 'no tag-drop warning when nothing was dropped');
+    assert.ok(droppedTags === undefined || droppedTags.length === 0, 'no dropped_stack_tags when nothing was dropped');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_promote intersects stack_tags with the target domain — non-domain tags drop, the domain tag survives regardless of order', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const a = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'q1', answer: 'a', source_urls: ['https://x'],
+      source_date: '2026-06-16', capture_date: '2026-06-16', stack_tags: ['genesys', 'sterling'],
+    }).record;
+    const b = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'q2', answer: 'a', source_urls: ['https://x'],
+      source_date: '2026-06-16', capture_date: '2026-06-16', stack_tags: ['sterling', 'genesys'],
+    }).record;
+
+    const outA = tools.knowledgePromote(a.id, 'genesys');
+    const outB = tools.knowledgePromote(b.id, 'genesys');
+
+    // hard pin: only the target-domain tag survives, in BOTH orderings —
+    // sabotage: copy stack_tags through verbatim instead of intersecting with
+    // [domain] (this goes red), and a second sabotage that keeps only
+    // stack_tags[0] instead of really intersecting is caught by the reversed
+    // ordering in `b` (it would keep 'sterling' there, not 'genesys').
+    const recA = store.get((outA.promoted as { id: string }).id) as unknown as { stack_tags: string[] };
+    const recB = store.get((outB.promoted as { id: string }).id) as unknown as { stack_tags: string[] };
+    assert.deepEqual(recA.stack_tags, ['genesys'], 'only the domain tag survives (domain tag listed first)');
+    assert.deepEqual(recB.stack_tags, ['genesys'], 'only the domain tag survives (domain tag listed second)');
+
+    // disclosed: dropped ('sterling') and kept ('genesys') are both named.
+    // Sabotage: intersect correctly but never disclose the drop — this goes red.
+    const text = JSON.stringify(outA);
+    assert.match(text, /sterling/, 'the dropped tag is named in the disclosure');
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_promote CONTROL: clean, portable prose promotes with no project-local-label warning', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const research = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'q',
+      answer: 'SQLite WAL mode allows concurrent readers during a writer transaction; see sqlite.org docs for the durability tradeoffs.',
+      source_urls: ['https://sqlite.org'], source_date: '2026-06-16', capture_date: '2026-06-16',
+    }).record;
+
+    const out = tools.knowledgePromote(research.id, 'genesys');
+
+    // control for the next test: portable prose never trips the scan. Sabotage:
+    // warn unconditionally on every promote — this goes red.
+    const warnings = (out as unknown as { warnings?: string[] }).warnings ?? [];
+    assert.ok(
+      !warnings.some((w) => /\bS\d+\b/.test(w) || /project.local/i.test(w) || /packages\//.test(w)),
+      'portable prose triggers no suspicious-label warning'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_promote WARN-ONLY: a project-local slice label / repo-relative path in the prose warns but still promotes (never a refusal)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const research = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'q',
+      answer: 'Net guidance for S1: retry with backoff; see packages/store/src/index.ts for the write path.',
+      source_urls: ['https://x'], source_date: '2026-06-16', capture_date: '2026-06-16',
+    }).record;
+
+    // hard pin #1: promotion SUCCEEDS despite the suspicious label — sabotage:
+    // turn the warn into a refusal (throw on a flagged label) — this goes red.
+    const out = tools.knowledgePromote(research.id, 'genesys');
+    assert.equal((out.promoted as { scope: string }).scope, 'domain:genesys', 'promotion succeeded — warn-only, never a refusal');
+
+    // hard pin #2: the warning fires and names what tripped it — sabotage:
+    // remove the suspicious-label scan (never populate `warnings`) — this goes red.
+    const warnings = (out as unknown as { warnings?: string[] }).warnings ?? [];
+    assert.ok(
+      warnings.some((w) => /\bS1\b/.test(w) || /packages\/store\/src\/index\.ts/.test(w)),
+      'the warning names the flagged label or path'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_promote server-boundary receipt defaults to a slim digest (disclosures included, body dropped); projection:"full" opts back in (board 7ddf13a7 pattern)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const bigAnswer = `Net guidance for S1: ${'x'.repeat(3000)}`;
+
+    const r1 = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'q1', answer: bigAnswer, source_urls: ['https://x'],
+      source_date: '2026-06-16', capture_date: '2026-06-16',
+      file_keys: ['packages/store/src/index.ts'], stack_tags: ['genesys', 'sterling'],
+    }).record;
+
+    // DEFAULT — no projection argument passed to writeProjected — is the slim
+    // digest (board 7ddf13a7's write-tool convention). Sabotage: default the
+    // receipt projection to 'full' instead of 'digest' — this goes red (the
+    // 3KB body would be re-echoed).
+    const digested = tools.writeProjected(tools.knowledgePromote(r1.id, 'genesys')) as unknown;
+    assert.ok(
+      JSON.stringify(digested).length < bigAnswer.length,
+      'the digest receipt does not re-echo the body the caller just promoted'
+    );
+    assert.ok(
+      Array.isArray((digested as { warnings?: unknown[] }).warnings),
+      'the disclosure/warnings channel survives the digest projection'
+    );
+
+    // projection:'full' opts back into the whole record — sabotage: ignore the
+    // projection argument (always digest) — this goes red.
+    const r2 = tools.knowledgeCreate('research_finding', {
+      scope: 'project', question: 'q2', answer: bigAnswer, source_urls: ['https://x'],
+      source_date: '2026-06-16', capture_date: '2026-06-16',
+    }).record;
+    const full = tools.writeProjected(tools.knowledgePromote(r2.id, 'genesys'), 'full') as unknown;
+    assert.ok(JSON.stringify(full).includes(bigAnswer), 'projection:"full" opts back into the whole promoted record');
+  } finally {
+    cleanup();
+  }
+});
+
 test('maintenance_enqueue → board_remove lifecycle completes by id WITH a domain mounted (regression: todo b6fb321f)', () => {
   // The queue is PROJECT-LOCAL, but a system todo is created scope:project through
   // knowledgeCreate, so with a domain mounted the by-id paths (get/remove) must
