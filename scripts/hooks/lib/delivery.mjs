@@ -161,7 +161,8 @@ export function writeGuard(path, guard) {
 // ---------------------------------------------------------------------------
 
 /** Record types the deny-once floor treats as a "ruling" — decision is the
- *  measured case (dome-farmer, decision 9456cdc7), anti_pattern is included
+ *  measured case (recorded in the dome-farmer project's own store — that id is
+ *  deliberately not cited here, where it cannot resolve), anti_pattern is included
  *  because it is equally prescriptive ("do not do X") and carries the same
  *  status/scope/supersession fields the denial must disclose. feature_article/
  *  research_finding/disconfirmed_hypothesis stay OUT: they describe or answer,
