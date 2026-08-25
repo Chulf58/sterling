@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 `;
 
 // ---------------------------------------------------------------------------
-// Schema-version guard (stable-identity wave S1, extended by S2; decision
+// Schema-version guard (stable-identity S1, extended by S2; decision
 // [stable-identity-design-v2] / 2176748e): refuse-until-migrated. PRAGMA
 // user_version (research_finding 5555895c: a 32-bit application-owned integer
 // at header offset 60 — NEVER SQLite's own PRAGMA schema_version) is checked at
@@ -781,8 +781,8 @@ export class SterlingStore {
    * which fields may change.
    *
    * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of the wave.
-   * lifecycle is likewise preserved: retirement happens ONLY through
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
    * supersede/retireInFavorOf.
    */
   updateRecord(id: string, patch: unknown, opts: RecordWriteOptions = {}): DurableRecord {
