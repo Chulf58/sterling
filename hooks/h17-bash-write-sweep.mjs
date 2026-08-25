@@ -7039,22 +7039,36 @@ function isStateObject(v) {
 function ownKeys(o) {
   return Object.keys(o).filter((k) => Object.prototype.hasOwnProperty.call(o, k));
 }
+var STATE_FIELDS = {
+  absent: ["exists", "index"],
+  file: ["exists", "type", "mode", "index", "sha256"],
+  symlink: ["exists", "type", "mode", "index", "target"],
+  dir: ["exists", "type", "mode", "index", "children"]
+};
+function strayFieldError(v, allowed, where) {
+  for (const k of ownKeys(v)) {
+    if (!allowed.includes(k)) return `'${where}' carries an unexpected field '${k}' (allowed for this shape: ${allowed.join(", ")})`;
+  }
+  return null;
+}
 function stateShapeError(cwd2, v, where) {
   if (!isStateObject(v)) return `'${where}' is not a state object`;
   if (typeof v.exists !== "boolean") return `'${where}' has no boolean 'exists'`;
   if (!(v.index === null || typeof v.index === "string")) return `'${where}' has a non-string, non-null 'index'`;
-  if (!v.exists) return null;
+  if (!v.exists) return strayFieldError(v, STATE_FIELDS.absent, where);
   if (v.type !== "file" && v.type !== "symlink" && v.type !== "dir") return `'${where}' has an unrecognized 'type' (${JSON.stringify(v.type)})`;
   if (!Number.isInteger(v.mode) || v.mode < 0 || v.mode > 4095) return `'${where}' has an invalid 'mode' (${JSON.stringify(v.mode)})`;
   if (v.type === "file") {
     if (typeof v.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(v.sha256)) return `'${where}' is a file with no sha256 digest`;
-    return null;
+    return strayFieldError(v, STATE_FIELDS.file, where);
   }
   if (v.type === "symlink") {
     if (typeof v.target !== "string") return `'${where}' is a symlink with no string 'target'`;
-    return null;
+    return strayFieldError(v, STATE_FIELDS.symlink, where);
   }
   if (!isStateObject(v.children)) return `'${where}' is a directory with no explicit 'children' object`;
+  const stray = strayFieldError(v, STATE_FIELDS.dir, where);
+  if (stray) return stray;
   for (const k of ownKeys(v.children)) {
     if (!validateStateKey(cwd2, k)) return `'${where}' carries a child key that is not a repo-relative path inside the project ('${k}')`;
     const bad = stateShapeError(cwd2, v.children[k], k);
@@ -7536,6 +7550,11 @@ try {
       if (malformed) {
         deny(
           `H17: crafted attribution record entry rejected (${JSON.stringify(entry)} \u2014 not a well-formed repo-relative path: empty, '.', '..' or an empty segment). An entry that cannot be matched silently withdraws restore protection from everything under it, so it is refused BEFORE the sweep runs; no write performed, failing closed (P5). NOTE the limit of this check: it rejects malformed SHAPES, and cannot detect a tampered entry that names a different WELL-FORMED path \u2014 that residual is the forged-record class decision 2422e76a already accepts.`
+        );
+      }
+      if (!validateStateKey(cwd, norm)) {
+        deny(
+          `H17: crafted attribution record entry rejected (${JSON.stringify(entry)} \u2014 not a repo-relative path contained within the project root: absolute, drive-prefixed, NUL-bearing, or escaping the root). A recorded path that fails key validation is a PROTECTIVE input that cannot be trusted, so it is refused BEFORE the sweep runs rather than silently ignored (board 1f4b7af0 item 2); no write performed, failing closed (P5).`
         );
       }
       preDirty.add(norm);

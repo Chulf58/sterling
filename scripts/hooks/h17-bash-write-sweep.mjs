@@ -338,6 +338,28 @@ function ownKeys(o) {
   return Object.keys(o).filter((k) => Object.prototype.hasOwnProperty.call(o, k));
 }
 
+// The EXACT field set a per-path state carries, per shape (board 1f4b7af0 item
+// 3). pathState emits precisely these and nothing else, so any own field
+// outside the set is a crafted shape — an absent state carrying a type/mode/
+// digest, a file carrying stray `children`/`target`, a directory carrying a
+// `sha256`. An unexpected field is refused so validation is EXACT rather than
+// merely "the required fields are present" (AC12/AC14: an unexpected shape
+// denies).
+const STATE_FIELDS = {
+  absent: ['exists', 'index'],
+  file: ['exists', 'type', 'mode', 'index', 'sha256'],
+  symlink: ['exists', 'type', 'mode', 'index', 'target'],
+  dir: ['exists', 'type', 'mode', 'index', 'children'],
+};
+
+// Returns a reason when `v` carries any OWN field outside `allowed`, else null.
+function strayFieldError(v, allowed, where) {
+  for (const k of ownKeys(v)) {
+    if (!allowed.includes(k)) return `'${where}' carries an unexpected field '${k}' (allowed for this shape: ${allowed.join(', ')})`;
+  }
+  return null;
+}
+
 // Per-path VALUE validation for the Pre-STATE record (review finding 4). The
 // loader used to validate only the top-level object and its KEYS, so any value
 // shape at all was trusted by the comparison — and two shapes then compared
@@ -352,18 +374,25 @@ function stateShapeError(cwd, v, where) {
   if (!isStateObject(v)) return `'${where}' is not a state object`;
   if (typeof v.exists !== 'boolean') return `'${where}' has no boolean 'exists'`;
   if (!(v.index === null || typeof v.index === 'string')) return `'${where}' has a non-string, non-null 'index'`;
-  if (!v.exists) return null; // absence carries existence + index and nothing else
+  if (!v.exists) return strayFieldError(v, STATE_FIELDS.absent, where); // absence carries existence + index and NOTHING else
   if (v.type !== 'file' && v.type !== 'symlink' && v.type !== 'dir') return `'${where}' has an unrecognized 'type' (${JSON.stringify(v.type)})`;
   if (!Number.isInteger(v.mode) || v.mode < 0 || v.mode > 0o7777) return `'${where}' has an invalid 'mode' (${JSON.stringify(v.mode)})`;
   if (v.type === 'file') {
     if (typeof v.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(v.sha256)) return `'${where}' is a file with no sha256 digest`;
-    return null;
+    return strayFieldError(v, STATE_FIELDS.file, where);
   }
   if (v.type === 'symlink') {
     if (typeof v.target !== 'string') return `'${where}' is a symlink with no string 'target'`;
-    return null;
+    return strayFieldError(v, STATE_FIELDS.symlink, where);
   }
+  // NOTE: an EMPTY `children` map is deliberately NOT rejected here. A gitlink /
+  // submodule (index mode 160000) whose worktree directory is dirty produces a
+  // genuine `{exists:true,type:'dir',...,children:{}}` at the top level, so a
+  // non-empty requirement would false-DENY a real snapshot. The crafted
+  // empty-children pair stays in the forged-record class accepted by 2422e76a.
   if (!isStateObject(v.children)) return `'${where}' is a directory with no explicit 'children' object`;
+  const stray = strayFieldError(v, STATE_FIELDS.dir, where);
+  if (stray) return stray;
   for (const k of ownKeys(v.children)) {
     if (!validateStateKey(cwd, k)) return `'${where}' carries a child key that is not a repo-relative path inside the project ('${k}')`;
     const bad = stateShapeError(cwd, v.children[k], k);
@@ -1323,6 +1352,28 @@ try {
             `An entry that cannot be matched silently withdraws restore protection from everything under it, so it is refused BEFORE the sweep runs; ` +
             `no write performed, failing closed (P5). NOTE the limit of this check: it rejects malformed SHAPES, and cannot detect a tampered entry that ` +
             `names a different WELL-FORMED path — that residual is the forged-record class decision 2422e76a already accepts.`
+        );
+      }
+      // Beyond the malformed-SHAPE check above, mirror the per-call STATE
+      // record's key posture (validateStateKey, AC10/AC14) on this loaded entry:
+      // it must be a repo-relative POSIX path CONTAINED under the project root —
+      // no absolute path, no drive prefix, no NUL, no traversal resolving out
+      // (board 1f4b7af0 item 2). The attribution record became a PROTECTIVE input
+      // when coverage went ancestor-aware (board 7dd39b85): a recorded ancestor
+      // EXEMPTS its descendants from restore, so an entry that fails validation
+      // must DENY — the stated invariant "a recorded path failing key validation
+      // denies" — never be silently added to a set where it matches no
+      // enforcement predicate and is quietly ignored. validateStateKey is used
+      // here ONLY as a validator: its backslash-normalized RESULT is discarded and
+      // the original backslash-preserved `norm` is what enters preDirty, because
+      // preDirty keys are matched against raw porcelain paths and normalizing a
+      // POSIX backslash would wedge every sweep touching such a file (the same
+      // reason stated above for not normalizing backslashes here).
+      if (!validateStateKey(cwd, norm)) {
+        deny(
+          `H17: crafted attribution record entry rejected (${JSON.stringify(entry)} — not a repo-relative path contained within the project root: ` +
+            `absolute, drive-prefixed, NUL-bearing, or escaping the root). A recorded path that fails key validation is a PROTECTIVE input that cannot be ` +
+            `trusted, so it is refused BEFORE the sweep runs rather than silently ignored (board 1f4b7af0 item 2); no write performed, failing closed (P5).`
         );
       }
       preDirty.add(norm);
