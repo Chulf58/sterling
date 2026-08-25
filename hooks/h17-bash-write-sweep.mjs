@@ -6928,8 +6928,9 @@ function baselineFile(cwd2, runId, key) {
   const tag = projectTag(cwd2);
   return join2(tmpdir(), key ? `sterling-enforce-${tag}-${runId}-call-${key}.baseline.json` : `sterling-enforce-${tag}-${runId}.json`);
 }
-function dirtyFile(cwd2, runId) {
-  return join2(tmpdir(), `sterling-enforce-${projectTag(cwd2)}-${runId}.dirty.json`);
+function dirtyFile(cwd2, runId, key) {
+  const tag = projectTag(cwd2);
+  return join2(tmpdir(), key ? `sterling-enforce-${tag}-${runId}-call-${key}.dirty.json` : `sterling-enforce-${tag}-${runId}.dirty.json`);
 }
 function dirtyTrackedRels(cwd2) {
   const status = spawnSync("git", ["-C", cwd2, "status", "--porcelain", "-z"], { encoding: "utf8" });
@@ -7418,7 +7419,7 @@ if (event === "PreToolUse") {
     const key = callKey(input.tool_use_id);
     writeFileSync(baselineFile(cwd, runId, key), JSON.stringify(collectBaseline(cwd)));
     const dirtyRels = dirtyTrackedRels(cwd);
-    writeFileSync(dirtyFile(cwd, runId), JSON.stringify(dirtyRels));
+    writeFileSync(dirtyFile(cwd, runId, key), JSON.stringify(dirtyRels));
     if (key) {
       const idx = indexEntriesFor(cwd, dirtyRels);
       const states = {};
@@ -7480,13 +7481,18 @@ try {
   let degradedReason = null;
   let baselineShared = null;
   const baselineViolations = [];
+  let attributionShared = null;
   if (!storeErr) {
-    const dPath = dirtyFile(cwd, runId);
+    const dPath = dirtyFile(cwd, runId, callId);
+    if (!callId) {
+      attributionShared = "this hook call carries no usable `tool_use_id` (absent, empty/whitespace, or not a string), so the (A) ATTRIBUTION record in play is the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent Bash lane in this run instead of one keyed to this call \u2014 while it is shared, a second lane's Pre can OVERWRITE it after this lane's Pre ran, and a path that was genuinely dirty at this lane's Pre but MISSING from the overwritten record is then treated as clean-at-Pre and HEAD-restored (DELETED) as this command's write, destroying pre-existing conductor work (that is exactly why the per-call key exists, board 489554d4, and why this fallback is reported rather than assumed harmless)";
+    }
+    const sharedNote = attributionShared ? ` DEGRADED MODE \u2014 the record consulted here is the legacy SHARED per-run attribution file, not one keyed to this call: ${attributionShared}. Its absence or corruption is itself a degraded-mode observation, not necessarily a Pre that never ran.` : "";
     if (!existsSync3(dPath)) {
       deny(
         environmentDefectDenial(
           "H17",
-          `attribution record '${dPath}' absent at Post \u2014 cannot tell this command's writes from pre-existing ones; failing closed (P5). If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.`,
+          `attribution record '${dPath}' absent at Post \u2014 cannot tell this command's writes from pre-existing ones; failing closed (P5). If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.` + sharedNote,
           { agentId: input.agent_id }
         )
       );
@@ -7496,10 +7502,25 @@ try {
       recordedDirty = JSON.parse(readFileSync2(dPath, "utf8"));
     } catch {
       deny(
-        environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).`, {
+        environmentDefectDenial("H17", `attribution record '${dPath}' corrupt/unparseable \u2014 cannot attribute writes; failing closed (P5).` + sharedNote, {
           agentId: input.agent_id
         })
       );
+    }
+    if (callId) {
+      try {
+        rmSync(dPath, { force: true });
+      } catch {
+      }
+    }
+    if (attributionShared) {
+      try {
+        process.stderr.write(
+          `H17: DEGRADED (A) ATTRIBUTION \u2014 this Bash call carries no usable \`tool_use_id\`, so the attribution record it compared against was the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent lane in this run, not one keyed to this call. A concurrent lane's Pre could have OVERWRITTEN it after this lane's Pre ran \u2014 in which case a genuinely pre-dirty path MISSING from it is treated as this command's write and HEAD-restored (deleted). The verdict stands; what is unverifiable is that the pre-dirty set it trusted belonged to this call. (board 489554d4)
+`
+        );
+      } catch {
+      }
     }
     if (!Array.isArray(recordedDirty)) {
       deny(
@@ -7728,6 +7749,11 @@ try {
     if (baselineShared && baselineViolations.length) {
       parts.push(
         `H17: DEGRADED (B) VERIFICATION \u2014 the (B)-set path(s) above (${baselineViolations.join(", ")}) were compared and restored against a SHARED PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the pre-image it restored was this call's own.`
+      );
+    }
+    if (attributionShared && restoredPaths.length) {
+      parts.push(
+        `H17: DEGRADED (A) ATTRIBUTION \u2014 the tracked path(s) HEAD-restored above (${restoredPaths.join(", ")}) were attributed to this command against a SHARED PER-RUN attribution record, not one keyed to this Bash call: ${attributionShared}. The verdict stands; what is degraded is the confidence that a restored path was this command's own write rather than pre-existing dirt missing from an overwritten shared record.`
       );
     }
     if (preExisting.length) {

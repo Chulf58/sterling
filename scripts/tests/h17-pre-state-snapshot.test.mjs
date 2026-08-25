@@ -391,7 +391,7 @@ function perCallRecords(fx) {
   const all = tempRecords(projectTag);
   const byName = all.filter((p) => isStateRecord(p, fx));
   if (byName.length > 0) return byName;
-  return all.filter((p) => p !== baselinePath && p !== dirtyPath && !/baseline/i.test(recordName(p)));
+  return all.filter((p) => p !== baselinePath && p !== dirtyPath && !/baseline/i.test(recordName(p)) && !recordName(p).endsWith('.dirty.json'));
 }
 
 // The (B) CONTENT BASELINE record(s) this call's Pre wrote, under EITHER key —
@@ -400,7 +400,18 @@ function perCallRecords(fx) {
 // that the key is run-scoped, which is the very thing 11609d1f changes.
 function baselineRecords(fx) {
   const { projectTag, dirtyPath } = fx;
-  return tempRecords(projectTag).filter((p) => p !== dirtyPath && !isStateRecord(p, fx));
+  return tempRecords(projectTag).filter((p) => p !== dirtyPath && !isStateRecord(p, fx) && !recordName(p).endsWith('.dirty.json'));
+}
+
+// The PER-CALL attribution record(s) — the '(A) attribution record' is now
+// keyed per call too (board 489554d4 rules the run-keyed name a HIGH defect),
+// so a call's own `.dirty.json` no longer has the predictable legacy
+// per-run name (`fx.dirtyPath`). Selection is by suffix, excluding the
+// legacy per-run path, mirroring the (A) state record / (B) baseline
+// selection idiom above.
+function attributionRecords(fx) {           // the per-call .dirty.json under this call's key
+  const legacy = recordName(fx.dirtyPath);
+  return tempRecords(fx.projectTag).filter(p => recordName(p).endsWith('.dirty.json') && recordName(p) !== legacy);
 }
 
 // run h17 in Pre (snapshot) or Post (verify+sweep) mode. agent_id + tool_use_id
@@ -888,7 +899,7 @@ test('PIN-NO-RECORD: a MISSING per-call snapshot record DENIES (fail-closed) eve
       existsSync(baselinePath) || baselineRecords(fx).length >= 1,
       `the (B) content baseline for this call is deliberately left intact, isolating this branch — none found under either key. Temp files present for this project tag: ${tempRecords(fx.projectTag).map(recordName).join(', ') || '(none)'}`
     );
-    assert.equal(existsSync(dirtyPath), true, 'the per-run attribution record is deliberately left intact, isolating this branch');
+    assert.ok(existsSync(dirtyPath) || attributionRecords(fx).length >= 1, 'the attribution record for this call is left intact, isolating this branch');
 
     const r = h17(dir, 'PostToolUse', L);
     assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
@@ -2628,14 +2639,15 @@ test('PIN-RECORD-KEY-TRAILING-SLASH: a recorded pre-dirty ancestor keyed WITH a 
     const L = lane('trailingslash');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0);
 
-    assert.equal(existsSync(dirtyPath), true, 'PRECONDITION: the per-run attribution record exists after Pre');
-    const parsed = JSON.parse(readFileSync(dirtyPath, 'utf8'));
+    const [attrPath] = attributionRecords(fx);
+    assert.ok(attrPath, 'PRECONDITION: the per-call attribution record exists after Pre');
+    const parsed = JSON.parse(readFileSync(attrPath, 'utf8'));
     const hits = addTrailingSlash(parsed, 'hooks/newdir');
     assert.ok(
       hits >= 1,
       'PRECONDITION: the attribution record must record the recorded directory path in its normal (no trailing slash) form for this tamper to be unambiguous — if this fails, the fixture is not exercising the defect'
     );
-    writeFileSync(dirtyPath, JSON.stringify(parsed));
+    writeFileSync(attrPath, JSON.stringify(parsed));
 
     git(dir, ['add', '-A'], { must: true });
     assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: staging makes the child its own porcelain entry, the same trigger as PIN-CHILD-SURVIVES-STAGE');
@@ -2746,14 +2758,15 @@ test('PIN-RECORD-MALFORMED-ENTRY-REFUSED-AT-LOAD: a malformed non-empty attribut
     const L = lane('malformedentry');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0);
 
-    assert.equal(existsSync(dirtyPath), true, 'PRECONDITION: the per-run attribution record exists after Pre');
-    const parsed = JSON.parse(readFileSync(dirtyPath, 'utf8'));
+    const [attrPath] = attributionRecords(fx);
+    assert.ok(attrPath, 'PRECONDITION: the per-call attribution record exists after Pre');
+    const parsed = JSON.parse(readFileSync(attrPath, 'utf8'));
     const hits = addTrailingSlash(parsed, 'hooks/newdir', 'hooks/newdir/.');
     assert.ok(
       hits >= 1,
       'PRECONDITION: the attribution record must record the recorded directory path in its normal (no trailing slash) form for this tamper to be unambiguous — if this fails, the fixture is not exercising the defect, and the pin would otherwise pass for the wrong reason'
     );
-    writeFileSync(dirtyPath, JSON.stringify(parsed));
+    writeFileSync(attrPath, JSON.stringify(parsed));
 
     git(dir, ['add', '-A'], { must: true });
     assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: staging makes the child its own porcelain entry, the same trigger as PIN-CHILD-SURVIVES-STAGE and PIN-RECORD-KEY-TRAILING-SLASH');
