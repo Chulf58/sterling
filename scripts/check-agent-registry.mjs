@@ -24,9 +24,9 @@ const registryChecks = checkRegistryConsistency({
   //
   // packages/store/src + packages/tui/src (board c05da1d1): a banned term
   // living in store source propagated into 17 built bundles while this scan
-  // stayed structurally blind to packages/ entirely. Other packages
-  // (mcp-server, schemas) are not yet in scope here — their own residue is a
-  // separate lane's fix, not silently swept in by widening this list.
+  // stayed structurally blind to packages/ entirely. packages/mcp-server/src
+  // + packages/schemas/src joined in the same board item's follow-up slice,
+  // closing the remaining gap over comment-level residue in those packages.
   scanDirs: [
     join(pluginRoot, 'templates'),
     join(pluginRoot, 'commands'),
@@ -34,6 +34,8 @@ const registryChecks = checkRegistryConsistency({
     join(pluginRoot, 'scripts', 'hooks'),
     join(pluginRoot, 'packages', 'store', 'src'),
     join(pluginRoot, 'packages', 'tui', 'src'),
+    join(pluginRoot, 'packages', 'mcp-server', 'src'),
+    join(pluginRoot, 'packages', 'schemas', 'src'),
   ],
   // hooks/ is the BUILT bundle output (scripts/hooks/ above is its source) —
   // verify-only: a hit here means "rebuild bundles", not "edit this file".
