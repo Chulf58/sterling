@@ -5560,8 +5560,8 @@ var SterlingStore = class _SterlingStore {
    * which fields may change.
    *
    * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of the wave.
-   * lifecycle is likewise preserved: retirement happens ONLY through
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
    * supersede/retireInFavorOf.
    */
   updateRecord(id, patch, opts = {}) {
@@ -5764,12 +5764,21 @@ var SterlingStore = class _SterlingStore {
     if (candidate.type !== "todo" || candidate.source !== "system") {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
     }
+    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
+      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
+    }
     const keyOf = (t) => {
-      const files = [...t.file_keys ?? []].sort();
+      const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
     };
     const wantKey = keyOf(candidate);
+    const textsEquivalent = (a, b) => {
+      if (candidate.system_reason !== "state_review")
+        return a === b;
+      const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+      return strip(a) === strip(b);
+    };
     let existing;
     let textUpdated = false;
     this.tx(() => {
@@ -5787,9 +5796,18 @@ var SterlingStore = class _SterlingStore {
         this.insertRecord(candidate);
         return;
       }
-      if ((existing.text ?? "") !== (candidate.text ?? "")) {
-        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({ ...cur, text: candidate.text, updated_at: candidate.updated_at }), {});
-        textUpdated = true;
+      const priorFiles = [...existing.file_keys ?? []].sort();
+      const nextFiles = [...candidate.file_keys ?? []].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
+      if (textChanged || filesChanged) {
+        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
+          ...cur,
+          updated_at: candidate.updated_at,
+          ...textChanged ? { text: candidate.text } : {},
+          ...filesChanged ? { file_keys: candidate.file_keys } : {}
+        }), {});
+        textUpdated = textChanged;
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {

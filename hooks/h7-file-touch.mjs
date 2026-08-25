@@ -6,8 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h7-file-touch.mjs
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3 } from "node:fs";
+import { writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
 import { join as join2, dirname as dirname3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5562,8 +5561,8 @@ var SterlingStore = class _SterlingStore {
    * which fields may change.
    *
    * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of the wave.
-   * lifecycle is likewise preserved: retirement happens ONLY through
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
    * supersede/retireInFavorOf.
    */
   updateRecord(id, patch, opts = {}) {
@@ -5766,12 +5765,21 @@ var SterlingStore = class _SterlingStore {
     if (candidate.type !== "todo" || candidate.source !== "system") {
       throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
     }
+    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
+      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
+    }
     const keyOf = (t) => {
-      const files = [...t.file_keys ?? []].sort();
+      const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
     };
     const wantKey = keyOf(candidate);
+    const textsEquivalent = (a, b) => {
+      if (candidate.system_reason !== "state_review")
+        return a === b;
+      const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+      return strip(a) === strip(b);
+    };
     let existing;
     let textUpdated = false;
     this.tx(() => {
@@ -5789,9 +5797,18 @@ var SterlingStore = class _SterlingStore {
         this.insertRecord(candidate);
         return;
       }
-      if ((existing.text ?? "") !== (candidate.text ?? "")) {
-        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({ ...cur, text: candidate.text, updated_at: candidate.updated_at }), {});
-        textUpdated = true;
+      const priorFiles = [...existing.file_keys ?? []].sort();
+      const nextFiles = [...candidate.file_keys ?? []].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
+      if (textChanged || filesChanged) {
+        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
+          ...cur,
+          updated_at: candidate.updated_at,
+          ...textChanged ? { text: candidate.text } : {},
+          ...filesChanged ? { file_keys: candidate.file_keys } : {}
+        }), {});
+        textUpdated = textChanged;
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
@@ -6789,33 +6806,6 @@ var SterlingStore = class _SterlingStore {
 };
 
 // scripts/hooks/lib/common.mjs
-function changedLineRanges(toolInput, content) {
-  if (typeof content !== "string") return [];
-  const pieces = [];
-  if (typeof toolInput?.new_string === "string") pieces.push(toolInput.new_string);
-  for (const e of Array.isArray(toolInput?.edits) ? toolInput.edits : []) {
-    if (typeof e?.new_string === "string") pieces.push(e.new_string);
-  }
-  const ranges = [];
-  for (const p of pieces) {
-    if (!p) continue;
-    const idx = content.indexOf(p);
-    if (idx === -1) continue;
-    const start = content.slice(0, idx).split("\n").length;
-    ranges.push([start, start + p.split("\n").length - 1]);
-  }
-  ranges.sort((a, b) => a[0] - b[0]);
-  const merged = [];
-  for (const r of ranges) {
-    const last = merged[merged.length - 1];
-    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]);
-    else merged.push([...r]);
-  }
-  return merged;
-}
-function formatLineRanges(ranges) {
-  return (ranges ?? []).map(([a, b]) => a === b ? `${a}` : `${a}-${b}`).join(", ");
-}
 function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
@@ -6854,6 +6844,77 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/settlement.mjs
+import { readFileSync as readFileSync2, mkdirSync as mkdirSync2, rmSync, statSync } from "node:fs";
+var LOCK_DEADLINE_MS = 150;
+var LOCK_STALE_MS = 3e3;
+var LOCK_POLL_MS = 20;
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withFileLock(targetPath, fn, { onTimeout } = {}) {
+  const lockPath = `${targetPath}.lock`;
+  const deadline = Date.now() + LOCK_DEADLINE_MS;
+  let acquired = false;
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync2(lockPath);
+      acquired = true;
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      sleepMs(LOCK_POLL_MS);
+    }
+  }
+  if (!acquired && onTimeout) {
+    try {
+      onTimeout();
+    } catch {
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (acquired) {
+      try {
+        rmSync(lockPath, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  }
+}
+function parseTouchesContent(raw) {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[")) {
+    try {
+      const arr = JSON.parse(trimmed);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
+  const out = [];
+  for (const line of trimmed.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj && typeof obj === "object") out.push(obj);
+    } catch {
+    }
+  }
+  return out;
+}
+
 // scripts/hooks/h7-file-touch.mjs
 var input = readStdin();
 var rel = repoRel(input.tool_input?.file_path, input.cwd);
@@ -6862,43 +6923,23 @@ if (rel === ".git" || rel.startsWith(".git/")) allow();
 var store = openStore(input.cwd);
 if (!store) allow();
 try {
-  const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
   const run = store.getRun();
   if (run) {
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
     for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
   } else {
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    let where = "";
-    try {
-      const ranges = changedLineRanges(input.tool_input, readFileSync2(join2(input.cwd, rel), "utf8"));
-      if (ranges.length) where = `, near line${ranges.length > 1 || ranges[0][0] !== ranges[0][1] ? "s" : ""} ${formatLineRanges(ranges)}`;
-    } catch {
-      where = "";
-    }
-    for (const article of owners) {
-      store.enqueueSystemTodo({
-        id: randomUUID2(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: article.type === "reference_material" ? `reconcile reference '${article.title}' \u2014 its document was touched in direct mode; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${article.slug}' \u2014 owned file ${rel} was touched in direct mode${where}`,
-        source: "system",
-        system_reason: "reconcile_needed",
-        file_keys: [rel],
-        feature_link: article.id
-      });
-    }
     const touchesPath = join2(input.cwd, ".sterling", "transient", "touches.json");
-    mkdirSync2(dirname3(touchesPath), { recursive: true });
-    const touches = existsSync3(touchesPath) ? JSON.parse(readFileSync2(touchesPath, "utf8")) : [];
-    touches.push({ path: rel, at: now });
-    writeFileSync(touchesPath, JSON.stringify(touches));
+    mkdirSync3(dirname3(touchesPath), { recursive: true });
+    withFileLock(
+      touchesPath,
+      () => {
+        const touches = existsSync3(touchesPath) ? parseTouchesContent(readFileSync3(touchesPath, "utf8")) : [];
+        touches.push({ path: rel, at: now });
+        writeFileSync(touchesPath, JSON.stringify(touches));
+      },
+      { onTimeout: () => store.recordCheckSkipped("h7-touches-lock", "lock_timeout", void 0, now) }
+    );
   }
   allow();
 } catch (e) {

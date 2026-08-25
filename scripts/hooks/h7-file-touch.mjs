@@ -1,11 +1,33 @@
 // H7 — file-touch reconcile register (spec §6 H7). PostToolUse
 // Edit|Write|MultiEdit, non-blocking. Look up owning articles (file-key join);
-// mark reconcile_needed on the run (pipeline) or the maintenance queue
-// (direct). Direct mode also registers the touch for H10's capture check.
-import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+// mark reconcile_needed on the run (pipeline mode — unchanged by board
+// c198866d). In DIRECT MODE this hook is now CANDIDATE-ONLY (board c198866d,
+// H7 CANDIDATE-ONLY + SETTLEMENT-TIME MINTING): it registers the touched path
+// in the transient touch register (.sterling/transient/touches.json) — the
+// same register H10 already reads for its capture check — and mints NOTHING
+// itself. Minting moves to SETTLEMENT: scripts/hooks/lib/settlement.mjs's
+// mintSettlementReconcile, called from h10-direct-capture.mjs's Stop and
+// direct-merge.mjs's pre-merge backstop, hashes the FINAL candidate content
+// against the owning article's CURRENT baseline — so an edit-then-revert, or
+// a path an intervening knowledge_update already rebaselined, never mints.
+//
+// R3, ROUND 2 (board c198866d round-4 fixer): an append-only JSONL rewrite of
+// this register was tried first to close the H7-vs-H7 read-modify-write race,
+// but it broke multiple ALREADY-GREEN frozen tests that spawn this real hook
+// and then `JSON.parse` touches.json expecting a top-level ARRAY — the
+// ON-DISK SHAPE stays exactly what it always was (a JSON array, read/written
+// whole). The race is closed instead with MUTUAL EXCLUSION around this same
+// read-modify-write: withFileLock (scripts/hooks/lib/settlement.mjs, the
+// same lock-dir idiom already used by H22's review-ledger lock and
+// lib/delivery.mjs) holds a sibling touches.json.lock directory for the
+// whole read+push+write below, so two concurrent H7s serialize instead of
+// racing. A lock that cannot be acquired within its short deadline degrades
+// to today's unlocked RMW (a Stop/PostToolUse hook must never hang the
+// session, P1) and records check_skipped so the degrade is never silent.
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { readStdin, allow, warnNonBlocking, openStore, repoRel, changedLineRanges, formatLineRanges } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, openStore, repoRel } from './lib/common.mjs';
+import { withFileLock, parseTouchesContent } from './lib/settlement.mjs';
 
 const input = readStdin();
 const rel = repoRel(input.tool_input?.file_path, input.cwd);
@@ -19,67 +41,39 @@ const store = openStore(input.cwd);
 if (!store) allow();
 
 try {
-  // §3.2.5: repo-located reference docs (kind: doc) join the reconcile economy —
-  // their location doubles as a file_key, so the same join finds them here.
-  // Records declaring a working_tree describe a DIFFERENT tree (comsoft-juiced
-  // 2026-07-17): a same-named path in this session's root is not their file —
-  // they never receive a touch-driven reconcile from here.
-  const owners = store
-    .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-    .filter((r) => !r.working_tree);
   const run = store.getRun();
 
   if (run) {
+    // Pipeline mode: unchanged by board c198866d — H7 still mints reconcile
+    // debt on the RUN at touch time (the run's own disposal/completeness
+    // gates are its settlement boundary, not this hook).
+    // §3.2.5: repo-located reference docs (kind: doc) join the reconcile
+    // economy — their location doubles as a file_key, so the same join finds
+    // them here. Records declaring a working_tree describe a DIFFERENT tree
+    // (comsoft-juiced 2026-07-17): a same-named path in this session's root
+    // is not their file — they never receive a touch-driven reconcile here.
+    const owners = store
+      .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
+      .filter((r) => !r.working_tree);
     for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
   } else {
-    // direct mode: maintenance queue (deduped per record) + transient touch register for H10
+    // Direct mode: CANDIDATE-ONLY — register the touch, mint nothing here.
     const now = new Date().toISOString();
-    // WHERE the file changed, so a co-owner can dismiss an irrelevant item without
-    // re-auditing its article (board b7269100). Best-effort by design: a failed
-    // read or a Write with no new_string yields no hint, never an error and never
-    // a guess — this is triage help, not a claim.
-    let where = '';
-    try {
-      const ranges = changedLineRanges(input.tool_input, readFileSync(join(input.cwd, rel), 'utf8'));
-      if (ranges.length) where = `, near line${ranges.length > 1 || ranges[0][0] !== ranges[0][1] ? 's' : ''} ${formatLineRanges(ranges)}`;
-    } catch {
-      where = '';
-    }
-    for (const article of owners) {
-      // ONE dedup definition, in the store, ATOMIC (board 2ded3b4b). This used to
-      // be a hand-rolled query-then-insert keyed on the ARTICLE — one of four
-      // such copies, all racing each other (two concurrent producers each read
-      // "no open item" before either insert committed, which is how a consuming
-      // project measured seven byte-identical pairs 2-3ms apart) and all omitting
-      // the FILE from the key, which silently suppressed a second drifting file's
-      // item. enqueueSystemTodo does the check inside the insert transaction and
-      // keys on (reason, feature_link, file), so this hook just states the fact.
-      store.enqueueSystemTodo({
-        id: randomUUID(),
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text:
-          article.type === 'reference_material'
-            ? `reconcile reference '${article.title}' — its document was touched in direct mode; refresh summary + source_date (§3.2.5)`
-            : `reconcile article '${article.slug}' — owned file ${rel} was touched in direct mode${where}`,
-        source: 'system',
-        system_reason: 'reconcile_needed',
-        file_keys: [rel],
-        feature_link: article.id,
-      });
-    }
     const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');
     mkdirSync(dirname(touchesPath), { recursive: true });
-    const touches = existsSync(touchesPath) ? JSON.parse(readFileSync(touchesPath, 'utf8')) : [];
-    touches.push({ path: rel, at: now });
-    writeFileSync(touchesPath, JSON.stringify(touches));
+    withFileLock(
+      touchesPath,
+      () => {
+        // parseTouchesContent (micro-round fixer, shared with H10 via
+        // settlement.mjs), not a bare JSON.parse: a stray/malformed line on
+        // disk must never throw here and silently stop every future H7
+        // append (a bare JSON.parse would have thrown for this whole write).
+        const touches = existsSync(touchesPath) ? parseTouchesContent(readFileSync(touchesPath, 'utf8')) : [];
+        touches.push({ path: rel, at: now });
+        writeFileSync(touchesPath, JSON.stringify(touches));
+      },
+      { onTimeout: () => store.recordCheckSkipped('h7-touches-lock', 'lock_timeout', undefined, now) }
+    );
   }
   allow();
 } catch (e) {
