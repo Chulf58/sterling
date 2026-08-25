@@ -27,7 +27,7 @@
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { readStdin, allow, warnNonBlocking, openStore, repoRel } from './lib/common.mjs';
-import { withFileLock, parseTouchesContent } from './lib/settlement.mjs';
+import { withFileLock, parseTouchesContent, loadGeneratedProjections } from './lib/settlement.mjs';
 
 const input = readStdin();
 const rel = repoRel(input.tool_input?.file_path, input.cwd);
@@ -47,15 +47,32 @@ try {
     // Pipeline mode: unchanged by board c198866d — H7 still mints reconcile
     // debt on the RUN at touch time (the run's own disposal/completeness
     // gates are its settlement boundary, not this hook).
-    // §3.2.5: repo-located reference docs (kind: doc) join the reconcile
-    // economy — their location doubles as a file_key, so the same join finds
-    // them here. Records declaring a working_tree describe a DIFFERENT tree
-    // (comsoft-juiced 2026-07-17): a same-named path in this session's root
-    // is not their file — they never receive a touch-driven reconcile here.
-    const owners = store
-      .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-      .filter((r) => !r.working_tree);
-    for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
+    // GENERATED-PROJECTIONS EXEMPTION (ruling e1275166, restored per board
+    // 1784d6fc — mirrors the direct arm's mintSettlementReconcile in
+    // settlement.mjs): a touched path listed in config.generated_projections
+    // is the system's own regenerated output, not drift, and must never mint
+    // reconcile debt — filtered on the TOUCHED PATH itself, up front, before
+    // the owner join, so an article that also owns a non-exempt path is still
+    // marked when THAT path is touched.
+    const exempt = loadGeneratedProjections(input.cwd);
+    if (!exempt.has(rel)) {
+      // §3.2.5: repo-located reference docs (kind: doc) join the reconcile
+      // economy — their location doubles as a file_key, so the same join
+      // finds them here. Records declaring a working_tree describe a
+      // DIFFERENT tree (comsoft-juiced 2026-07-17): a same-named path in this
+      // session's root is not their file — they never receive a
+      // touch-driven reconcile here.
+      const owners = store
+        .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
+        .filter((r) => !r.working_tree);
+      for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
+    } else {
+      // Exempt touch mints nothing — but still normalize reconcile_needed to
+      // a read-back array (the schema leaves it undefined until the first
+      // mint) so a run whose only touches were exempt settles to [] rather
+      // than undefined.
+      store.updateRunOptimistic(run.id, (current) => (current.reconcile_needed ? current : { ...current, reconcile_needed: [] }));
+    }
   } else {
     // Direct mode: CANDIDATE-ONLY — register the touch, mint nothing here.
     const now = new Date().toISOString();
