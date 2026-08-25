@@ -4950,6 +4950,16 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // exemption register, article slug -> justifying decision id. Consulted at
+  // the article_oversize minting site (articleOversizeWarnings,
+  // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
+  // maintenance item — the exemption suppresses the mint ONLY while the cited
+  // decision resolves and is live (status active, not superseded/retired) in
+  // the store the minting code already has open. A missing/unresolvable/dead
+  // citation VOIDS the exemption; the mint proceeds with the void reason
+  // appended to the item text — never a silent suppression (P5).
+  article_oversize_exempt: external_exports.record(external_exports.string(), external_exports.string()).default({}),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
   // with more entries than this keeps the first article_history_genesis_entries
   // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on

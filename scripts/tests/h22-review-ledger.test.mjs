@@ -154,7 +154,7 @@ test('H22 ledger: SubagentStop for a reviewer-* entry PROMOTES it into .sterling
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 1);
     const entry = ledger[0];
-    assert.deepEqual(Object.keys(entry).sort(), ['agent_type', 'at', 'files'], 'the promoted entry carries EXACTLY these three fields — no agent_id, no session_id');
+    assert.deepEqual(Object.keys(entry).sort(), ['agent_type', 'at', 'base_sha', 'branch', 'files', 'session_id'], 'decision 0408b295 (review-ledger-receipt-expiry) reverses the three-key exclusion — the promoted entry now ALSO carries session_id/branch/base_sha (six keys total; git-less contexts degrade branch/base_sha to null, never absent keys)');
     assert.equal(entry.agent_type, 'reviewer-correctness');
     assert.deepEqual(entry.files, ['src/a.mjs', 'src/b.mjs']);
     assert.equal(entry.at, '2026-08-22T00:00:00.000Z');

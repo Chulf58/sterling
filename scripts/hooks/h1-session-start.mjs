@@ -5,7 +5,7 @@
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
 import { randomUUID } from 'node:crypto';
-import { readFileSync, existsSync, readdirSync, statSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -190,7 +190,140 @@ function computeH1DeadDispatchResidue(cwd, source) {
   return lines;
 }
 
+/**
+ * SURVIVING REVIEW RECEIPTS (decision review-ledger-receipt-expiry, 0408b295;
+ * board 09e03d76). A receipt still sitting in .sterling/review-ledger.json at
+ * SessionStart is one that OUTLIVED the session that earned it — the exact
+ * shape scripts/commit-reviewed.mjs now refuses to stamp (foreign session_id
+ * or branch: disclosed, never silently spent). Withholding the stamp without
+ * this report would just move the leak: the receipt would sit there unspendable
+ * and invisible. This is the surface that names it.
+ *
+ * READ-ONLY, deliberately: H1 wipes the transient registers but NEVER the
+ * ledger. A receipt is real reviewer evidence, and deciding it is worthless is
+ * a human judgement — the ledger's survival across the session boundary is the
+ * whole point of it living at the store root (decision review-receipt-ledger).
+ * Age-independent for the same reason the dead-dispatch residue above is: at a
+ * session boundary EVERY receipt present is by construction from an earlier
+ * session, so there is no TTL to wait out. Pure filesystem, fail-open.
+ */
+/** Sanitize ONE receipt-derived value before it is interpolated into
+ *  additionalContext (Codex review, MEDIUM). A ledger entry is JSON on disk and
+ *  every field in it is arbitrary: a newline-bearing agent_type, session_id,
+ *  branch or file path would inject VERBATIM LINES into a block the model reads
+ *  as H1's own prose — a value forging the surface that reports it. Control
+ *  characters (newlines included) collapse to a space and the result is clamped,
+ *  so one hostile or corrupt field can neither counterfeit a line nor flood the
+ *  injection. Callers have already narrowed to a non-empty string, so this never
+ *  calls String() on an arbitrary value (the {toString:null} throw class). */
+const RECEIPT_FIELD_CLAMP = 120;
+function safeReceiptField(v) {
+  if (typeof v !== 'string') return '';
+  // Code-point filter rather than a control-character regex class: it states
+  // the ranges as numbers (no escape sequence to get subtly wrong, and no
+  // literal control character in the source), and it covers C0 — LF and CR
+  // included, which is the whole point, a newline is what forges a line — plus
+  // DEL and the C1 block some terminals still act on.
+  const cleaned = [...v]
+    .map((ch) => {
+      const c = ch.codePointAt(0);
+      return c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f) ? ' ' : ch;
+    })
+    .join('')
+    .trim();
+  return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}…(truncated)` : cleaned;
+}
+
+function reviewReceiptLines(cwd) {
+  const ledgerPath = join(cwd, '.sterling', 'review-ledger.json');
+  if (!existsSync(ledgerPath)) return [];
+  let entries = [];
+  try {
+    const parsed = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    if (Array.isArray(parsed)) entries = parsed;
+  } catch {
+    return []; // malformed ledger degrades to silence here (same posture as every H1 read); commit-reviewed reports it at spend time
+  }
+  return entries
+    .filter((e) => e && typeof e === 'object')
+    .map((e) => {
+      const parsedAt = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
+      // Same 'X.Xh' convention as commit-reviewed's staleness advisory, so one
+      // receipt reads identically on both surfaces.
+      const age = Number.isNaN(parsedAt) ? 'age unknown (no usable timestamp)' : `${((Date.now() - parsedAt) / 3_600_000).toFixed(1)}h old`;
+      // EVERY receipt-derived string below goes through safeReceiptField before
+      // it reaches the injected block — agent_type, session_id, branch and file
+      // paths alike. A field that sanitizes down to empty is treated as absent,
+      // so a control-character-only value cannot smuggle in a blank label
+      // either.
+      const type = safeReceiptField(e.agent_type) || 'unknown reviewer';
+      const session = safeReceiptField(e.session_id);
+      const branch = safeReceiptField(e.branch);
+      const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(', ');
+      const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
+      return `- ${type} — ${age}${origin ? ` (earned in ${origin})` : ' (no recorded session/branch — a pre-expiry receipt)'}${files.length ? `; files: ${files.slice(0, 5).join(', ')}` : ''}`;
+    });
+}
+
 const input = readStdin();
+
+// CURRENT-SESSION MARKER (decision review-ledger-receipt-expiry, 0408b295).
+// SessionStart is the ONE moment the platform hands Sterling a session_id at a
+// known point in a session's life. scripts/commit-reviewed.mjs is a bare CLI —
+// no hook stdin, no injected env — so without this cell it cannot tell whether
+// a review receipt was earned in THIS session or an earlier one, and receipt
+// expiry has nothing to compare against. A latest-value cell keyed by session
+// and superseded by the next SessionStart (the shape H10's pressure/gauge/
+// delegation markers already use): P4 by supersession, never by a remembered
+// cleanup step. Gated on .sterling/config.json's EXISTENCE, the same gate H22
+// uses, so H1 never creates a store directory in a non-Sterling project (P1).
+// Fail-open: a failed write costs only expiry precision — commit-reviewed then
+// reads no marker, cannot judge session identity, and treats every receipt as
+// unjudgeable-hence-eligible, i.e. exactly the pre-expiry behavior.
+//
+// PUBLISHED ATOMICALLY (tmp + rename, the primitive both ledger writers already
+// use — Codex review, MEDIUM). A bare writeFileSync can be read TORN by a
+// concurrent scripts/commit-reviewed.mjs; its JSON.parse then fails, the
+// identity channel goes dark, and a PRESENT-FOREIGN receipt stamps — the exact
+// outcome receipt expiry exists to prevent, reached through a race rather than
+// through a missing field. rename() on the same filesystem is atomic, so a
+// reader sees either the previous marker or this one, never half of one. The
+// pid in the staging name keeps two concurrent SessionStarts from clobbering
+// each other's tmp file.
+const sessionMarkerPath = join(input.cwd, '.sterling', 'transient', 'session.json');
+const sessionMarkerTmp = join(input.cwd, '.sterling', 'transient', `session.json.tmp-${process.pid}`);
+try {
+  if (existsSync(join(input.cwd, '.sterling', 'config.json'))) {
+    mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(
+      sessionMarkerTmp,
+      JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: new Date().toISOString() })
+    );
+    renameSync(sessionMarkerTmp, sessionMarkerPath);
+  }
+} catch {
+  // fail-open — never break SessionStart for a marker (P1). But a PREVIOUS
+  // session's marker surviving a failed write is stale positive evidence: it
+  // would make every receipt promoted THIS session read as foreign and hard-
+  // refuse the commit gate on a false premise. Absence is the honest state —
+  // commit-reviewed then cannot judge session identity and stays eligible.
+  // recursive AS WELL AS force: `force` suppresses ENOENT only, so a marker
+  // path occupied by a non-empty DIRECTORY (a corrupted tree, a botched manual
+  // fix) would survive every cleanup AND block every future write — permanently
+  // stale evidence, which is the precise state this catch exists to prevent.
+  // The path is Sterling-owned transient state, so removing whatever shape sits
+  // there is unambiguous: nothing else can legitimately own
+  // .sterling/transient/session.json.
+  try {
+    rmSync(sessionMarkerPath, { recursive: true, force: true });
+    // A staging file orphaned between write and rename dies with the attempt
+    // that created it (P4) — no later sweep is relied on to notice it.
+    rmSync(sessionMarkerTmp, { recursive: true, force: true });
+  } catch {
+    // even the removal is best-effort — never break SessionStart (P1)
+  }
+}
+
 const dispatchResidueLines = (() => {
   try {
     return computeH1DeadDispatchResidue(input.cwd, input.source);
@@ -198,12 +331,28 @@ const dispatchResidueLines = (() => {
     return [];
   }
 })();
+const receiptLines = (() => {
+  try {
+    return reviewReceiptLines(input.cwd);
+  } catch {
+    return [];
+  }
+})();
+const receiptContext = receiptLines.length
+  ? `\n\nSURVIVING REVIEW RECEIPTS (H1): ${receiptLines.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json — earned by a reviewer dispatch that ended, but never stamped into a commit.\n` +
+    receiptLines.join('\n') +
+    `\nA receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) — its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed. Judge each one and remove it by hand, or re-dispatch a reviewer for the work it covered.`
+  : '';
 const store = openStore(input.cwd);
 if (!store) {
-  if (dispatchResidueLines.length) {
+  // The receipt report rides this early exit too: H22's ledger gate is
+  // .sterling/config.json (not sterling.db), so a project with a config but no
+  // initialized store CAN accumulate receipts — reporting them only on the
+  // store-present path below would leave exactly those projects silent.
+  if (dispatchResidueLines.length || receiptContext) {
     process.stdout.write(
       JSON.stringify({
-        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: dispatchResidueLines.join('\n\n') },
+        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: dispatchResidueLines.join('\n\n') + receiptContext },
       })
     );
   }
@@ -876,7 +1025,7 @@ const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurre
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

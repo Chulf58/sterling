@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync as readFileSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, renameSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { dirname as dirname5, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -4953,6 +4953,16 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // exemption register, article slug -> justifying decision id. Consulted at
+  // the article_oversize minting site (articleOversizeWarnings,
+  // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
+  // maintenance item — the exemption suppresses the mint ONLY while the cited
+  // decision resolves and is live (status active, not superseded/retired) in
+  // the store the minting code already has open. A missing/unresolvable/dead
+  // citation VOIDS the exemption; the mint proceeds with the void reason
+  // appended to the item text — never a silent suppression (P5).
+  article_oversize_exempt: external_exports.record(external_exports.string(), external_exports.string()).default({}),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
   // with more entries than this keeps the first article_history_genesis_entries
   // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
@@ -7113,7 +7123,55 @@ function computeH1DeadDispatchResidue(cwd, source) {
   }
   return lines;
 }
+var RECEIPT_FIELD_CLAMP = 120;
+function safeReceiptField(v) {
+  if (typeof v !== "string") return "";
+  const cleaned = [...v].map((ch) => {
+    const c = ch.codePointAt(0);
+    return c < 32 || c === 127 || c >= 128 && c <= 159 ? " " : ch;
+  }).join("").trim();
+  return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}\u2026(truncated)` : cleaned;
+}
+function reviewReceiptLines(cwd) {
+  const ledgerPath = join4(cwd, ".sterling", "review-ledger.json");
+  if (!existsSync3(ledgerPath)) return [];
+  let entries = [];
+  try {
+    const parsed = JSON.parse(readFileSync2(ledgerPath, "utf8"));
+    if (Array.isArray(parsed)) entries = parsed;
+  } catch {
+    return [];
+  }
+  return entries.filter((e) => e && typeof e === "object").map((e) => {
+    const parsedAt = typeof e.at === "string" ? Date.parse(e.at) : NaN;
+    const age = Number.isNaN(parsedAt) ? "age unknown (no usable timestamp)" : `${((Date.now() - parsedAt) / 36e5).toFixed(1)}h old`;
+    const type = safeReceiptField(e.agent_type) || "unknown reviewer";
+    const session = safeReceiptField(e.session_id);
+    const branch = safeReceiptField(e.branch);
+    const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(", ");
+    const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
+    return `- ${type} \u2014 ${age}${origin ? ` (earned in ${origin})` : " (no recorded session/branch \u2014 a pre-expiry receipt)"}${files.length ? `; files: ${files.slice(0, 5).join(", ")}` : ""}`;
+  });
+}
 var input = readStdin();
+var sessionMarkerPath = join4(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join4(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+try {
+  if (existsSync3(join4(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
+    writeFileSync(
+      sessionMarkerTmp,
+      JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
+    );
+    renameSync(sessionMarkerTmp, sessionMarkerPath);
+  }
+} catch {
+  try {
+    rmSync(sessionMarkerPath, { recursive: true, force: true });
+    rmSync(sessionMarkerTmp, { recursive: true, force: true });
+  } catch {
+  }
+}
 var dispatchResidueLines = (() => {
   try {
     return computeH1DeadDispatchResidue(input.cwd, input.source);
@@ -7121,12 +7179,24 @@ var dispatchResidueLines = (() => {
     return [];
   }
 })();
+var receiptLines = (() => {
+  try {
+    return reviewReceiptLines(input.cwd);
+  } catch {
+    return [];
+  }
+})();
+var receiptContext = receiptLines.length ? `
+
+SURVIVING REVIEW RECEIPTS (H1): ${receiptLines.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json \u2014 earned by a reviewer dispatch that ended, but never stamped into a commit.
+` + receiptLines.join("\n") + `
+A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) \u2014 its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed. Judge each one and remove it by hand, or re-dispatch a reviewer for the work it covered.` : "";
 var store = openStore(input.cwd);
 if (!store) {
-  if (dispatchResidueLines.length) {
+  if (dispatchResidueLines.length || receiptContext) {
     process.stdout.write(
       JSON.stringify({
-        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: dispatchResidueLines.join("\n\n") }
+        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: dispatchResidueLines.join("\n\n") + receiptContext }
       })
     );
   }
@@ -7489,7 +7559,7 @@ try {
 var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

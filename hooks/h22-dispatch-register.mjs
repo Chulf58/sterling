@@ -7,6 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h22-dispatch-register.mjs
 import { existsSync as existsSync4, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, rmdirSync, rmSync, statSync as statSync2 } from "node:fs";
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { join as join2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -4848,6 +4849,16 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // exemption register, article slug -> justifying decision id. Consulted at
+  // the article_oversize minting site (articleOversizeWarnings,
+  // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
+  // maintenance item — the exemption suppresses the mint ONLY while the cited
+  // decision resolves and is live (status active, not superseded/retired) in
+  // the store the minting code already has open. A missing/unresolvable/dead
+  // citation VOIDS the exemption; the mint proceeds with the void reason
+  // appended to the item text — never a silent suppression (P5).
+  article_oversize_exempt: external_exports.record(external_exports.string(), external_exports.string()).default({}),
   // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
   // with more entries than this keeps the first article_history_genesis_entries
   // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
@@ -5232,6 +5243,26 @@ function loadExclusiveResourceNames(cwd) {
     return [];
   }
 }
+function gitReceiptIdentity(cwd) {
+  const git = (args) => {
+    try {
+      const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
+      return r.status === 0 ? normIdentity(r.stdout) : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    branch: git(["symbolic-ref", "--quiet", "--short", "HEAD"]),
+    base_sha: git(["rev-parse", "HEAD"])
+  };
+}
+function normIdentity(v) {
+  if (typeof v === "string") return v.trim() === "" ? null : v.trim();
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  if (typeof v === "boolean") return String(v);
+  return null;
+}
 var MAX_WALK_BACK = 20;
 function attributeBlocks(transcriptPath, agentType) {
   const lastBlocks = lastDispatchBlocks(transcriptPath, 0);
@@ -5349,6 +5380,7 @@ try {
     }
     if (departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-")) {
       const sterlingDir = join2(input.cwd, ".sterling");
+      const identity = gitReceiptIdentity(input.cwd);
       withLedgerLock(sterlingDir, () => {
         const ledgerPath = join2(sterlingDir, "review-ledger.json");
         let ledger = [];
@@ -5360,7 +5392,14 @@ try {
         } catch {
           ledger = [];
         }
-        ledger.push({ agent_type: departing.agent_type, files: departing.files, at: departing.at });
+        ledger.push({
+          agent_type: departing.agent_type,
+          files: departing.files,
+          at: departing.at,
+          session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
+          branch: identity.branch,
+          base_sha: identity.base_sha
+        });
         const ledgerTmpPath = join2(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
         writeFileSync(ledgerTmpPath, JSON.stringify(ledger));
         renameSync(ledgerTmpPath, ledgerPath);
