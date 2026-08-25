@@ -18,6 +18,7 @@
 // (same precedent as update-launcher.mjs) — builtins only.
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stampBody, verifyStamp } from './generated-marker.mjs';
 
 export const CONSUMER_CHECK_LAUNCHER_NAME = 'sterling-check.mjs';
 
@@ -41,14 +42,23 @@ const fwd = (p) => p.replace(/\\/g, '/');
 // regardless of the path's separator style.
 export function renderConsumerCheckLauncher(pluginRoot) {
   const template = readFileSync(join(pluginRoot, 'templates', 'check-consumer.mjs'), 'utf8');
-  return template.replace('{{PLUGIN_DIR}}', JSON.stringify(fwd(pluginRoot)));
+  const body = template.replace('{{PLUGIN_DIR}}', JSON.stringify(fwd(pluginRoot)));
+  return stampBody(body, '//');
 }
 
 /**
- * Ensure semantics (§12): created / matches / differs / skipped — never
- * overwrites content it cannot prove it generated. Also ensures the target's
- * .gitignore carries the entry (mirrors ensureUpdateLauncher): a generated
- * machine artifact must never surface as untracked noise in a sibling repo.
+ * Ensure semantics (§12): created / matches / refreshed / differs / skipped —
+ * never overwrites content it cannot prove it generated. Also ensures the
+ * target's .gitignore carries the entry (mirrors ensureUpdateLauncher): a
+ * generated machine artifact must never surface as untracked noise in a
+ * sibling repo.
+ *
+ * REFRESH (board bb3aa162): a mismatch against the freshly rendered expected
+ * no longer means "leave it, might be hand-edited" — the on-disk file's own
+ * embedded content-hash marker (generated-marker.mjs) proves whether it was
+ * touched since ITS generation. Unmodified-but-stale (a clone move, a
+ * template edit) refreshes freely; a marker mismatch (or no marker at all —
+ * a legacy or foreign file) still leaves it untouched as 'differs'.
  */
 export function ensureConsumerCheckLauncher(target, pluginRoot) {
   if (!existsSync(target)) {
@@ -64,10 +74,19 @@ export function ensureConsumerCheckLauncher(target, pluginRoot) {
   if (!existsSync(launcherPath)) {
     writeFileSync(launcherPath, expected);
     result = { status: 'created', detail: 'node sterling-check.mjs — runs record-citations + stale-claim checks against this project' };
-  } else if (normalize(readFileSync(launcherPath, 'utf8')) === normalize(expected)) {
-    result = { status: 'matches', detail: 'unchanged' };
   } else {
-    result = { status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' };
+    const diskNorm = normalize(readFileSync(launcherPath, 'utf8'));
+    if (diskNorm === normalize(expected)) {
+      result = { status: 'matches', detail: 'unchanged' };
+    } else {
+      const stamp = verifyStamp(diskNorm, '//');
+      if (stamp && stamp.unmodified) {
+        writeFileSync(launcherPath, expected);
+        result = { status: 'refreshed', detail: 'regenerated: unmodified since last generation, but this machine now renders it differently (clone moved or template changed)' };
+      } else {
+        result = { status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' };
+      }
+    }
   }
 
   const gitignorePath = join(target, '.gitignore');

@@ -24,7 +24,7 @@
 // as differing, never silently overwritten or silently used.
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Baked at generation time as the POSIX/WSL form (the form init/update run
 // under) via JSON.stringify — a self-quoting, correctly escaped literal
@@ -63,6 +63,19 @@ const argOf = (name) => {
   const i = process.argv.indexOf(name);
   return i !== -1 ? process.argv[i + 1] : undefined;
 };
+
+// CLONE-CURRENCY CAVEAT (board 4ccf0644): reuses H1's existing passive
+// throttled-fetch signal (decision 558895a9) — this launcher never fetches
+// on its own, it only reads whatever ref state H1's own cadence has already
+// established via scripts/lib/clone-currency.mjs. Informational only: never
+// fails or blocks the checks below, even when the probe itself errors.
+try {
+  const { cloneCurrencyCaveat } = await import(pathToFileURL(join(PLUGIN_DIR, 'scripts', 'lib', 'clone-currency.mjs')).href);
+  const caveat = cloneCurrencyCaveat(PLUGIN_DIR);
+  if (caveat) console.log(`\n${caveat}`);
+} catch {
+  // informational only — a probe failure never blocks or fails the check
+}
 
 // origin/HEAD names the default branch, but stripping 'origin/' assumes a
 // LOCAL branch of that name exists — not true right after a fresh clone or
