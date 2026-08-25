@@ -186,6 +186,36 @@ export function contentChangedAgainstBaseline(root, rel, baselines) {
   return current !== baseline;
 }
 
+/**
+ * GENERATED-PROJECTIONS EXEMPTION (settled ruling e1275166: files
+ * REGENERATED from the store — architecture.md et al — are exempt from
+ * drift machinery). The settlement-time minting path (board c198866d)
+ * initially dropped this exemption entirely, measured 2026-08-25 as a
+ * merge-blocking regen<->reconcile loop: a regenerated projection always
+ * shows live content drift against its recorded baseline, so it minted a
+ * reconcile_needed item forever and direct-merge refused on its own
+ * gate's output. Reads config.generated_projections FRESH, LOCALLY, on
+ * every call — missing file / missing key / non-array / a JSON parse
+ * error all degrade to an EMPTY exemption set (nothing exempted, today's
+ * behavior). This local guard is deliberately narrow: it must never be
+ * read as license for a CALLER's own config read to swallow the same
+ * failure — H10's Stop and direct-merge's openProject each parse config
+ * themselves BEFORE ever reaching this module, and stay fail-closed/loud
+ * on a malformed config exactly as ruling e13f0fb5 requires; a malformed
+ * config never reaches this helper because the caller has already
+ * refused.
+ */
+export function loadGeneratedProjections(root) {
+  try {
+    const raw = readFileSync(join(root, '.sterling', 'config.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    const list = parsed?.generated_projections;
+    return new Set(Array.isArray(list) ? list : []);
+  } catch {
+    return new Set();
+  }
+}
+
 /** Builds the enqueueSystemTodo payload for one article's reconcile_needed item. */
 function buildReconcileItem(article, fileKeys, now) {
   return {
@@ -237,7 +267,13 @@ function buildReconcileItem(article, fileKeys, now) {
  * item and re-minting the union — one open item per article, always.
  */
 export function mintSettlementReconcile(store, root, candidatePaths, now = new Date().toISOString()) {
-  const paths = [...new Set((candidatePaths ?? []).filter(Boolean))];
+  // Exempt paths are dropped from the candidate set UP FRONT (e1275166) — an
+  // exempt path can never reach byArticle grouping below, so it can never
+  // appear in a minted item's file_keys, even when it shows live drift. An
+  // unlisted co-candidate owned by the same article is unaffected and still
+  // mints normally.
+  const exempt = loadGeneratedProjections(root);
+  const paths = [...new Set((candidatePaths ?? []).filter(Boolean))].filter((rel) => !exempt.has(rel));
   if (!paths.length) return [];
 
   // Every OPEN reconcile_needed item, indexed by its owning article — only
@@ -265,7 +301,7 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
   const minted = [];
   for (const { article, freshPaths } of byArticle.values()) {
     const existing = openByArticle.get(article.id);
-    const existingSet = new Set(existing?.file_keys ?? []);
+    const existingSet = new Set((existing?.file_keys ?? []).filter((k) => !exempt.has(k)));
     // Candidates NOT already covered by the existing item, filtered to those
     // showing LIVE drift right now (F1's deletion-is-drift folds in here too).
     const newlyDrifted = [...freshPaths]
@@ -318,5 +354,16 @@ export function isLiveReconcileDebt(store, root, item) {
   if (!item.feature_link || !files.length) return true;
   const article = store.get(item.feature_link);
   if (!article) return true;
-  return files.some((f) => contentChangedAgainstBaseline(root, f, article.file_baselines));
+  // GENERATED-PROJECTIONS EXEMPTION (e1275166): drop exempt paths BEFORE the
+  // liveness check. An item whose file_keys are ONLY exempt paths is
+  // therefore NOT live, even when those files are genuinely drifted; an item
+  // mixing one exempt path with one genuinely-drifted UNLISTED path stays
+  // live on the unlisted path alone. Deliberately not the same as the
+  // "no named files" case above: naming zero files means nothing could be
+  // checked (stays LIVE, the safe direction); naming only exempt files means
+  // everything named HAS been checked and cleared.
+  const exempt = loadGeneratedProjections(root);
+  const considered = files.filter((f) => !exempt.has(f));
+  if (!considered.length) return false;
+  return considered.some((f) => contentChangedAgainstBaseline(root, f, article.file_baselines));
 }

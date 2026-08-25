@@ -6961,6 +6961,16 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
   if (current === void 0) return true;
   return current !== baseline;
 }
+function loadGeneratedProjections(root) {
+  try {
+    const raw = readFileSync2(join2(root, ".sterling", "config.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    const list = parsed?.generated_projections;
+    return new Set(Array.isArray(list) ? list : []);
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
 function buildReconcileItem(article, fileKeys, now) {
   return {
     id: randomUUID2(),
@@ -6981,7 +6991,8 @@ function buildReconcileItem(article, fileKeys, now) {
   };
 }
 function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE__ */ new Date()).toISOString()) {
-  const paths = [...new Set((candidatePaths ?? []).filter(Boolean))];
+  const exempt = loadGeneratedProjections(root);
+  const paths = [...new Set((candidatePaths ?? []).filter(Boolean))].filter((rel) => !exempt.has(rel));
   if (!paths.length) return [];
   const openByArticle = /* @__PURE__ */ new Map();
   for (const t of store2.query({ types: ["todo"], cap: 1e3 })) {
@@ -7000,7 +7011,7 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
   const minted = [];
   for (const { article, freshPaths } of byArticle.values()) {
     const existing = openByArticle.get(article.id);
-    const existingSet = new Set(existing?.file_keys ?? []);
+    const existingSet = new Set((existing?.file_keys ?? []).filter((k) => !exempt.has(k)));
     const newlyDrifted = [...freshPaths].filter((rel) => !existingSet.has(rel)).filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
     if (!newlyDrifted.length) continue;
     if (!existing) {
