@@ -341,13 +341,66 @@ function tempRecords(projectTag) {
 }
 
 // The PER-CALL snapshot records: everything for this project tag EXCEPT the
-// per-run (B) baseline and the per-run paths-only attribution record. Sparing
-// those two is what keeps the fail-closed pins honest — deleting the
+// (B) content baseline and the per-run paths-only attribution record. Sparing
+// those is what keeps the fail-closed pins honest — deleting the
 // attribution record would deny through the ALREADY-pinned "missing attribution
 // record" branch (enforcement.test.mjs:1505) and the test would pass without
 // ever exercising the new per-path state comparison.
-function perCallRecords({ projectTag, baselinePath, dirtyPath }) {
-  return tempRecords(projectTag).filter((p) => p !== baselinePath && p !== dirtyPath);
+//
+// SELECTION IS BY THE (A) STATE RECORD'S OWN NAME, not by subtracting two known
+// filenames (2026-08-25, ahead of board 11609d1f). The (B) content baseline is
+// being re-keyed PER CALL — the same laundering fix AC14 already applied to
+// THIS (A) record — so a SECOND, filename-unpredictable
+// `sterling-enforce-<projectTag>-*` temp file will exist per lane, and a
+// subtract-the-two-known-names filter would then hand that baseline to
+// soleRecordPath / PIN-CORRUPT-RECORD / PIN-RECORD-DIR-NO-CHILDREN /
+// PIN-RECORD-PROTO / PIN-RECORD-NO-BYTES-BLOAT as though it were the (A) state
+// record — one pin would tamper the wrong file and the rest would fire their
+// exactly-one precondition. AC14 names the (A) record exactly
+// (`sterling-enforce-<projectTag>-<runId>-call-<hash>.json`), and a per-call
+// (B) baseline MUST carry some further distinguishing token because two files
+// cannot share one path, so that exact shape is the discriminator.
+//
+// THE SUBTRACTIVE FORM IS KEPT AS A FALLBACK, deliberately: this helper must
+// never return an EMPTY set, which would quietly turn a real pin into a vacuous
+// pass. If no temp file matches the AC14 shape, selection degrades to
+// "everything except the two per-run files and anything naming itself a
+// baseline" — the pre-2026-08-25 behaviour plus that one exclusion.
+function recordName(p) {
+  return String(p).split(/[\\/]/).pop() ?? '';
+}
+
+// does this temp file carry the (A) per-call STATE record's AC14 filename?
+// (nit, roster F7: projectTag/runId used to be interpolated UNESCAPED into a
+// RegExp — safe for the current hex/UUID-derived fixtures, but a latent trap
+// for any future value carrying a regex metacharacter. Plain prefix/suffix
+// string comparison plus a hex-only check on the extracted middle segment
+// preserves the EXACT prior semantics — ^sterling-enforce-<tag>-<runId>-call-
+// [0-9a-f]+\.json$ — without ever feeding projectTag/runId to `new RegExp`.)
+function isStateRecord(p, { projectTag, runId }) {
+  const name = recordName(p);
+  const prefix = `sterling-enforce-${projectTag}-${runId}-call-`;
+  const suffix = '.json';
+  if (!name.startsWith(prefix) || !name.endsWith(suffix)) return false;
+  const middle = name.slice(prefix.length, name.length - suffix.length);
+  return middle.length > 0 && /^[0-9a-f]+$/.test(middle);
+}
+
+function perCallRecords(fx) {
+  const { projectTag, baselinePath, dirtyPath } = fx;
+  const all = tempRecords(projectTag);
+  const byName = all.filter((p) => isStateRecord(p, fx));
+  if (byName.length > 0) return byName;
+  return all.filter((p) => p !== baselinePath && p !== dirtyPath && !/baseline/i.test(recordName(p)));
+}
+
+// The (B) CONTENT BASELINE record(s) this call's Pre wrote, under EITHER key —
+// the legacy per-run path or a per-call-keyed one (board 11609d1f). Lets a pin
+// assert "Pre wrote a baseline and it is still there" without also asserting
+// that the key is run-scoped, which is the very thing 11609d1f changes.
+function baselineRecords(fx) {
+  const { projectTag, dirtyPath } = fx;
+  return tempRecords(projectTag).filter((p) => p !== dirtyPath && !isStateRecord(p, fx));
 }
 
 // run h17 in Pre (snapshot) or Post (verify+sweep) mode. agent_id + tool_use_id
@@ -826,7 +879,15 @@ test('PIN-NO-RECORD: a MISSING per-call snapshot record DENIES (fail-closed) eve
       'PRECONDITION: Pre must write a PER-CALL snapshot record, discoverable as a sterling-enforce-<projectTag>-* temp file that is neither the per-run baseline nor the per-run .dirty.json — per-call keying by sha256(tool_use_id) makes the per-run attribution file structurally unable to serve as one'
     );
     for (const p of records) rmSync(p, { force: true });
-    assert.equal(existsSync(baselinePath), true, 'the (B) baseline is deliberately left intact, isolating this branch');
+    // The (B) content baseline FOR THIS CALL must still be there, under EITHER
+    // key: the legacy per-run filename or the per-call one board 11609d1f
+    // introduces. This pin's subject is "Pre wrote a baseline and this branch
+    // left it intact", never "the baseline key is run-scoped" — asserting the
+    // run-keyed path specifically would pin the very defect 11609d1f corrects.
+    assert.ok(
+      existsSync(baselinePath) || baselineRecords(fx).length >= 1,
+      `the (B) content baseline for this call is deliberately left intact, isolating this branch — none found under either key. Temp files present for this project tag: ${tempRecords(fx.projectTag).map(recordName).join(', ') || '(none)'}`
+    );
     assert.equal(existsSync(dirtyPath), true, 'the per-run attribution record is deliberately left intact, isolating this branch');
 
     const r = h17(dir, 'PostToolUse', L);
