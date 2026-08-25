@@ -22,16 +22,21 @@ const registryChecks = checkRegistryConsistency({
   // undetected, and text copied VERBATIM out of H1 into a template then failed
   // the merge for carrying the very term H1 itself carried.
   //
-  // packages/store/src + packages/tui/src (board c05da1d1): a banned term
-  // living in store source propagated into 17 built bundles while this scan
-  // stayed structurally blind to packages/ entirely. packages/mcp-server/src
-  // + packages/schemas/src joined in the same board item's follow-up slice,
-  // closing the remaining gap over comment-level residue in those packages.
   scanDirs: [
     join(pluginRoot, 'templates'),
     join(pluginRoot, 'commands'),
     join(pluginRoot, 'skills'),
     join(pluginRoot, 'scripts', 'hooks'),
+  ],
+  // packages/store/src + packages/tui/src (board c05da1d1): a banned term
+  // living in store source propagated into 17 built bundles while this scan
+  // stayed structurally blind to packages/ entirely. packages/mcp-server/src
+  // + packages/schemas/src joined in the same board item's follow-up slice,
+  // closing the remaining gap over comment-level residue in those packages.
+  // Raw source scans STRICT (board 481c9ec3): case-insensitive whole-word
+  // matching over-fires on ordinary English prose in code comments ('forge an
+  // id') — codeScanDirs uses STRICT_DEAD_TERM_PATTERNS instead.
+  codeScanDirs: [
     join(pluginRoot, 'packages', 'store', 'src'),
     join(pluginRoot, 'packages', 'tui', 'src'),
     join(pluginRoot, 'packages', 'mcp-server', 'src'),

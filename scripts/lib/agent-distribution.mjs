@@ -15,7 +15,7 @@ import { AGENT_MODEL_KEY } from '@sterling/schemas';
 // predecessor's vocabulary in anything shipped, scaffolded, or generated.
 export const DEAD_TERM_PATTERNS = [
   { term: 'Forge', re: /\bforge\b/i },
-  { term: 'Quatermain/Quartermain(e)', re: /quart?ermaine?/i },
+  { term: 'Quatermain/Quartermain(e)', re: /qua(?:rt?|t)ermaine?/i },
   { term: 'wave', re: /\bwaves?\b/i },
   { term: 'brainstormer', re: /brainstormers?/i },
 ];
@@ -23,6 +23,35 @@ export const DEAD_TERM_PATTERNS = [
 export function findDeadTerms(text) {
   const hits = [];
   for (const { term, re } of DEAD_TERM_PATTERNS) {
+    const m = text.match(re);
+    if (m) hits.push({ term, match: m[0] });
+  }
+  return hits;
+}
+
+// Strict variant for raw SOURCE-CODE scanning (board 481c9ec3, measured
+// 2026-08-25): the case-insensitive whole-word DEAD_TERM_PATTERNS above is
+// correct for shipped/scaffolded USER-FACING content (agent templates,
+// generated CLAUDE.md, commands/skills prose, the hook-injection surface)
+// where the banned codename can plausibly appear in any casing — but widening
+// the scan to raw package source (packages/*/src, board c05da1d1) turned it
+// into a false-positive generator: ordinary English verbs/nouns ('forge an
+// id', 'a wave of calls') in code comments are not codename residue. A real
+// codename residue in source is a standalone CAPITALIZED token — nobody
+// writes the banned product name in lowercase mid-sentence there. Terms with
+// no ordinary-English collision (Quatermain, brainstormer) keep whole-word
+// case-insensitive matching; 'wave' has no capitalized-codename form distinct
+// from the common noun, so per the item's own remedy it is dropped from the
+// strict source scan rather than force-matched into false positives.
+export const STRICT_DEAD_TERM_PATTERNS = [
+  { term: 'Forge', re: /\bForge\b/ },
+  { term: 'Quatermain/Quartermain(e)', re: /qua(?:rt?|t)ermaine?/i },
+  { term: 'brainstormer', re: /brainstormers?/i },
+];
+
+export function findDeadTermsStrict(text) {
+  const hits = [];
+  for (const { term, re } of STRICT_DEAD_TERM_PATTERNS) {
     const m = text.match(re);
     if (m) hits.push({ term, match: m[0] });
   }
@@ -416,7 +445,13 @@ function collectDeadTermScanFiles(dir, { excludeTests = false } = {}) {
 // — the fix is `npm run build` (rebuild), never an edit to the bundle itself.
 // Reported as its own `dead_term_bundle` kind so tooling and humans can tell
 // the two apart at a glance.
-export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs = [], bundleScanDirs = [] }) {
+//
+// `codeScanDirs` is a separate surface from `scanDirs` (board 481c9ec3): raw
+// package source (packages/*/src) is scanned with STRICT_DEAD_TERM_PATTERNS
+// (case-sensitive capitalized codename tokens) instead of the relaxed
+// case-insensitive DEAD_TERM_PATTERNS `scanDirs` uses — code comments carry
+// ordinary English prose ('forge an id') that the relaxed patterns false-flag.
+export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs = [], codeScanDirs = [], bundleScanDirs = [] }) {
   const violations = [];
   let registry;
   try {
@@ -457,6 +492,12 @@ export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs 
   for (const p of scanTargets) {
     const hits = findDeadTerms(readFileSync(p, 'utf8'));
     for (const h of hits) violations.push({ kind: 'dead_term', detail: `${p}: '${h.match}' (${h.term})` });
+  }
+  for (const dir of codeScanDirs) {
+    for (const p of collectDeadTermScanFiles(dir, { excludeTests: true })) {
+      const hits = findDeadTermsStrict(readFileSync(p, 'utf8'));
+      for (const h of hits) violations.push({ kind: 'dead_term', detail: `${p}: '${h.match}' (${h.term})` });
+    }
   }
   for (const dir of bundleScanDirs) {
     for (const p of collectDeadTermScanFiles(dir)) {

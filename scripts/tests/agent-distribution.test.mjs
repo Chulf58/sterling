@@ -13,6 +13,8 @@ import {
   checkAgentsVisible,
   checkRegistryConsistency,
   findDeadTerms,
+  findDeadTermsStrict,
+  STRICT_DEAD_TERM_PATTERNS,
   findBackslashHookCommands,
   extractHookCommandLines,
   extractBakedCommandPaths,
@@ -369,6 +371,65 @@ test('checkRegistryConsistency: pass and each violation kind', () => {
 test('dead-term patterns match the canonical kill list and nothing legitimate', () => {
   assert.equal(findDeadTerms('Quartermaine called a wave of brainstormers from the forge').length, 4);
   assert.equal(findDeadTerms('Sterling phase execution; intake; steps; wavelength; forget').length, 0);
+});
+
+// =============================================================================
+// STRICT dead-term scan (board 481c9ec3): the relaxed, case-insensitive
+// \bforge\b / \bwave\b check false-positives on ordinary English verbs
+// ('forge an id', 'a wave of calls') once the scan widens to source dirs. The
+// STRICT scan (STRICT_DEAD_TERM_PATTERNS / findDeadTermsStrict, wired into
+// checkRegistryConsistency via a new codeScanDirs param) fixes this by
+// requiring a case-sensitive, standalone-capitalized 'Forge' token and
+// deliberately DROPPING 'wave' from the source-scan list entirely, while
+// keeping Quatermain / brainstormer as codename residue.
+// =============================================================================
+
+test('findDeadTermsStrict: does NOT flag ordinary English "forge"/"wave" prose (the measured false positive, board 481c9ec3)', () => {
+  const prose = 'forge an id for the request, then send a wave of calls';
+  assert.deepEqual(findDeadTermsStrict(prose), [], 'lowercase English "forge" and "wave" are not codename hits under the strict scan');
+});
+
+test('findDeadTermsStrict: flags standalone capitalized "Forge", "Quatermain", "brainstormer" — naming each term', () => {
+  const content = 'Inherited from Forge. Ask Quatermain about the old brainstormer flow.';
+  const hits = findDeadTermsStrict(content);
+  assert.ok(hits.length >= 3, `expected at least 3 hits (Forge, Quatermain, brainstormer), got ${JSON.stringify(hits)}`);
+  const hitText = JSON.stringify(hits);
+  assert.match(hitText, /Forge/, 'hit set names Forge');
+  assert.match(hitText, /Quatermain/, 'hit set names Quatermain');
+  assert.match(hitText, /brainstormer/, 'hit set names brainstormer');
+});
+
+test('checkRegistryConsistency: codeScanDirs runs the STRICT scan over source dirs — planted capitalized "Forge" fails naming the violation; ordinary "forge"/"wave" prose passes', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe-agent.md': TEMPLATE });
+    const codeDir = join(dir, 'src-fixture');
+    mkdirSync(codeDir, { recursive: true });
+
+    // Control arm, placed first: genuinely boring content (no dead terms of any
+    // kind) must PASS. This rules out "codeScanDirs denies everything" as the
+    // cause of any later failure — a pass path must exist before a fail means
+    // anything.
+    writeFileSync(join(codeDir, 'note.ts'), '// nothing interesting here at all');
+    let v = checkRegistryConsistency({ templatesDir, registryPath, codeScanDirs: [codeDir] });
+    assert.deepEqual(v, [], 'control: ordinary content with no dead terms passes');
+
+    // Positive: a planted capitalized "Forge" token in the scanned source dir
+    // must fail, naming the offending term.
+    writeFileSync(join(codeDir, 'note.ts'), '// Inherited from Forge legacy naming');
+    v = checkRegistryConsistency({ templatesDir, registryPath, codeScanDirs: [codeDir] });
+    assert.ok(v.length > 0, 'a planted capitalized Forge token in a codeScanDirs source file must be flagged');
+    assert.match(JSON.stringify(v), /Forge/, 'the violation names the offending term');
+
+    // Negative: the same fixture holding only ordinary English "forge an id" /
+    // "wave of retries" prose must pass — pins that the LOOP runs the STRICT
+    // patterns (case-sensitive, no bare "wave"), not the relaxed ones.
+    writeFileSync(join(codeDir, 'note.ts'), '// forge an id for the request, then a wave of retries');
+    v = checkRegistryConsistency({ templatesDir, registryPath, codeScanDirs: [codeDir] });
+    assert.deepEqual(v, [], 'ordinary English forge/wave prose in a codeScanDirs source file is not flagged by the strict scan');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // =============================================================================
