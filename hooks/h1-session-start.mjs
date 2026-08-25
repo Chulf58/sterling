@@ -8,7 +8,7 @@ var __export = (target, all) => {
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync2, existsSync as existsSync3, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { dirname as dirname5, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6903,6 +6903,57 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/hooks/lib/dispatch-residue.mjs
+import { spawnSync } from "node:child_process";
+
+// scripts/hooks/lib/dispatch-advisory.mjs
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+
+// scripts/hooks/lib/dispatch-residue.mjs
+function probeDirtyPaths(projectDir, files) {
+  const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
+  if (declared.length === 0) return { verified: true, dirty: [] };
+  let r;
+  try {
+    r = spawnSync("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
+      cwd: projectDir,
+      encoding: "utf8",
+      timeout: 1e4
+    });
+  } catch (err) {
+    return { verified: false, dirty: declared, reason: String(err?.message ?? err).slice(0, 200) };
+  }
+  if (r.error || r.status !== 0) {
+    const reason = String(r.error?.message || r.stderr || "git status failed").trim().slice(0, 200);
+    return { verified: false, dirty: declared, reason };
+  }
+  const flagged = /* @__PURE__ */ new Set();
+  const tokens = String(r.stdout ?? "").split("\0").filter((t) => t.length > 0);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length < 3) continue;
+    const status = token.slice(0, 2);
+    const path = token.slice(3);
+    flagged.add(path);
+    if ((status[0] === "R" || status[1] === "R" || status[0] === "C" || status[1] === "C") && i + 1 < tokens.length) {
+      flagged.add(tokens[i + 1]);
+      i++;
+    }
+  }
+  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+}
+function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
+  const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
+  const list = (Array.isArray(paths) && paths.length ? paths : ["<no declared files>"]).join(", ");
+  const marker = verified ? "" : ` [tree-state-unverified${reason ? `: ${reason}` : ""}]`;
+  return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
+}
+
 // scripts/lib/agent-distribution.mjs
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
@@ -7039,9 +7090,58 @@ function pluginVersion() {
   }
   return null;
 }
+function computeH1DeadDispatchResidue(cwd, source) {
+  if (source !== "startup" && source !== "clear") return [];
+  const registerPath = join4(cwd, ".sterling", "transient", "dispatch-register.json");
+  let raw = [];
+  try {
+    if (existsSync3(registerPath)) {
+      const parsed = JSON.parse(readFileSync2(registerPath, "utf8"));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  const lines = [];
+  for (const entry of raw) {
+    if (!entry || entry.residue_reported_at) continue;
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue;
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+  }
+  return lines;
+}
 var input = readStdin();
+var dispatchResidueLines = (() => {
+  try {
+    return computeH1DeadDispatchResidue(input.cwd, input.source);
+  } catch {
+    return [];
+  }
+})();
 var store = openStore(input.cwd);
-if (!store) allow();
+if (!store) {
+  if (dispatchResidueLines.length) {
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: dispatchResidueLines.join("\n\n") }
+      })
+    );
+  }
+  if (input.source === "startup" || input.source === "clear") {
+    try {
+      const transientDir = join4(input.cwd, ".sterling", "transient");
+      rmSync(join4(transientDir, "dispatch-register.json"), { force: true });
+      for (const f of readdirSync(transientDir)) {
+        if (f.startsWith("dispatch-register.json.tmp-")) rmSync(join4(transientDir, f), { force: true });
+      }
+    } catch {
+    }
+  }
+  allow();
+}
 var config = null;
 try {
   config = loadConfig(input.cwd);
@@ -7078,7 +7178,7 @@ try {
     }
     if (role !== "authoring") {
       const git = (args, timeout = 5e3) => {
-        const r = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout });
+        const r = spawnSync2("git", args, { cwd: root, encoding: "utf8", timeout });
         return r.status === 0 ? (r.stdout ?? "").trim() : null;
       };
       const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -7093,7 +7193,7 @@ try {
         } catch {
         }
         if (!fresh) {
-          spawnSync("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+          spawnSync2("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
             writeFileSync(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
@@ -7120,7 +7220,7 @@ try {
       rmSync(notePath, { force: true });
       const head = (() => {
         try {
-          const r = spawnSync("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+          const r = spawnSync2("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
           return r.status === 0 ? (r.stdout ?? "").trim() : null;
         } catch {
           return null;
@@ -7136,7 +7236,7 @@ try {
           commitsAheadUnverified = true;
         } else {
           try {
-            const countR = spawnSync("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+            const countR = spawnSync2("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
             const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
             if (Number.isFinite(actual)) {
               if (actual !== note.commits_ahead) {
@@ -7173,6 +7273,10 @@ try {
   }
 } catch {
 }
+var dispatchResidueContext = dispatchResidueLines.length ? `
+
+DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).
+` + dispatchResidueLines.join("\n") : "";
 try {
   const transientDir = join4(input.cwd, ".sterling", "transient");
   rmSync(join4(transientDir, "dispatch-register.json"), { force: true });
@@ -7385,7 +7489,7 @@ try {
 var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

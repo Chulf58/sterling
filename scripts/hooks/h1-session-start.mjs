@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
+import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths } from '../lib/agent-distribution.mjs';
@@ -149,9 +150,84 @@ function pluginVersion() {
   return null;
 }
 
+/**
+ * DEAD-DISPATCH RESIDUE AT THE SESSION BOUNDARY (SPEC A items 2/3b, boards
+ * 03ed9d35/31565253; shared lib scripts/hooks/lib/dispatch-residue.mjs). A
+ * pure filesystem+git fact about the H22 register — computed BEFORE the
+ * `if (!store) allow()` bail below so it still fires for a cwd carrying a
+ * register + config but no initialized knowledge store yet (mirrors H10's
+ * same store-independent placement). Age-independent by design: at H1 the
+ * register belongs to a DEAD session by construction (its SubagentStop never
+ * fired), so no TTL wait is needed, unlike H10's Stop-time check. Only on
+ * source startup|clear — resume/compact continue the same logical session and
+ * keep their registers, same gating as the residue-conversion block further
+ * down. Read-side print-once only (a truthy residue_reported_at, however it
+ * got there — H10's Stop-side stamp included — suppresses); H1 never needs to
+ * write the stamp itself since the register is deleted unconditionally right
+ * after this runs.
+ */
+function computeH1DeadDispatchResidue(cwd, source) {
+  if (source !== 'startup' && source !== 'clear') return [];
+  const registerPath = join(cwd, '.sterling', 'transient', 'dispatch-register.json');
+  let raw = [];
+  try {
+    if (existsSync(registerPath)) {
+      const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  const lines = [];
+  for (const entry of raw) {
+    if (!entry || entry.residue_reported_at) continue; // print-once, cross-surface with H10
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+  }
+  return lines;
+}
+
 const input = readStdin();
+const dispatchResidueLines = (() => {
+  try {
+    return computeH1DeadDispatchResidue(input.cwd, input.source);
+  } catch {
+    return [];
+  }
+})();
 const store = openStore(input.cwd);
-if (!store) allow(); // not a Sterling project — no ceremony (P1)
+if (!store) {
+  if (dispatchResidueLines.length) {
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: dispatchResidueLines.join('\n\n') },
+      })
+    );
+  }
+  // FIXER ADDENDUM A (2026-08-25): the register wipe below is pure
+  // filesystem — it needs no open store — so a project with .sterling/
+  // (config.json present, per H22's widened gate) but no sterling.db yet
+  // must still get it HERE, on this early exit, or its register accumulates
+  // forever and every startup re-reports the same residue without ever
+  // wiping. Gated to startup|clear only, mirroring
+  // computeH1DeadDispatchResidue's own gate above — resume/compact stay
+  // untouched on this branch too, same as the store-present path below.
+  if (input.source === 'startup' || input.source === 'clear') {
+    try {
+      const transientDir = join(input.cwd, '.sterling', 'transient');
+      rmSync(join(transientDir, 'dispatch-register.json'), { force: true });
+      for (const f of readdirSync(transientDir)) {
+        if (f.startsWith('dispatch-register.json.tmp-')) rmSync(join(transientDir, f), { force: true });
+      }
+    } catch {
+      // fail-open — a failed delete costs deferral precision, never this early exit
+    }
+  }
+  allow(); // not a Sterling project — no further ceremony (P1)
+}
 
 // H1 is SOFT (banner + conventions + counts): a malformed config must cost the
 // deep-queue threshold, never the conventions injection, so this read is guarded
@@ -368,6 +444,15 @@ try {
 } catch {
   // fail-open — a failed clear costs freshness, never the conventions injection
 }
+
+// DEAD-DISPATCH RESIDUE AT THE SESSION BOUNDARY (SPEC A items 2/3b): the lines
+// were already computed store-independently, above the `if (!store) allow()`
+// bail (computeH1DeadDispatchResidue) — folded into additionalContext here for
+// the normal (store-present) path.
+const dispatchResidueContext = dispatchResidueLines.length
+  ? `\n\nDEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary — its SubagentStop(s) never fired, so the register is about to be wiped (P4).\n` +
+    dispatchResidueLines.join('\n')
+  : '';
 
 // IN-FLIGHT DISPATCH REGISTER (decision ec9eacaa): deleted UNCONDITIONALLY —
 // every source, resume included. Unlike H10's other three registers there is no
@@ -789,7 +874,7 @@ const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurre
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

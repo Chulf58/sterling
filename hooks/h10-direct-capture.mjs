@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 import { readFileSync as readFileSync3, writeFileSync, rmSync as rmSync2, existsSync as existsSync4, mkdirSync as mkdirSync3, renameSync } from "node:fs";
 import { join as join3 } from "node:path";
 
@@ -7067,10 +7067,66 @@ function fillPct(usage, windowSize) {
   return 100 * used / windowSize;
 }
 
-// scripts/lib/test-integrity.mjs
+// scripts/hooks/lib/dispatch-residue.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
+
+// scripts/hooks/lib/dispatch-advisory.mjs
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+
+// scripts/hooks/lib/dispatch-residue.mjs
+function isOrphan(entry, staleMinutes, nowMs = Date.now()) {
+  const t = Date.parse(entry?.at ?? "");
+  if (Number.isNaN(t)) return true;
+  return nowMs - t > staleMinutes * 6e4;
+}
+function probeDirtyPaths(projectDir, files) {
+  const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
+  if (declared.length === 0) return { verified: true, dirty: [] };
+  let r;
+  try {
+    r = spawnSync2("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
+      cwd: projectDir,
+      encoding: "utf8",
+      timeout: 1e4
+    });
+  } catch (err) {
+    return { verified: false, dirty: declared, reason: String(err?.message ?? err).slice(0, 200) };
+  }
+  if (r.error || r.status !== 0) {
+    const reason = String(r.error?.message || r.stderr || "git status failed").trim().slice(0, 200);
+    return { verified: false, dirty: declared, reason };
+  }
+  const flagged = /* @__PURE__ */ new Set();
+  const tokens = String(r.stdout ?? "").split("\0").filter((t) => t.length > 0);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length < 3) continue;
+    const status = token.slice(0, 2);
+    const path = token.slice(3);
+    flagged.add(path);
+    if ((status[0] === "R" || status[1] === "R" || status[0] === "C" || status[1] === "C") && i + 1 < tokens.length) {
+      flagged.add(tokens[i + 1]);
+      i++;
+    }
+  }
+  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+}
+function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
+  const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
+  const list = (Array.isArray(paths) && paths.length ? paths : ["<no declared files>"]).join(", ");
+  const marker = verified ? "" : ` [tree-state-unverified${reason ? `: ${reason}` : ""}]`;
+  return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
+}
+
+// scripts/lib/test-integrity.mjs
+import { spawnSync as spawnSync3 } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
-  const r = spawnSync2("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync3("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
@@ -7094,9 +7150,76 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 }
 
 // scripts/hooks/h10-direct-capture.mjs
+function computeDeadDispatchResidue(cwd, sessionId) {
+  const registerPath = join3(cwd, ".sterling", "transient", "dispatch-register.json");
+  let raw = [];
+  try {
+    if (existsSync4(registerPath)) {
+      const parsed = JSON.parse(readFileSync3(registerPath, "utf8"));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  let staleMinutes = 60;
+  try {
+    staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
+  } catch {
+  }
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const nowMs = Date.parse(nowIso);
+  const lines = [];
+  const stampIds = /* @__PURE__ */ new Set();
+  for (const entry of raw) {
+    if (!entry || entry.session_id !== sessionId) continue;
+    if (!isOrphan(entry, staleMinutes, nowMs)) continue;
+    if (entry.residue_reported_at) continue;
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue;
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    stampIds.add(entry.agent_id);
+  }
+  if (stampIds.size) {
+    try {
+      let fresh = [];
+      try {
+        if (existsSync4(registerPath)) {
+          const parsed = JSON.parse(readFileSync3(registerPath, "utf8"));
+          if (Array.isArray(parsed)) fresh = parsed;
+        }
+      } catch {
+        fresh = [];
+      }
+      for (const entry of fresh) {
+        if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
+          entry.residue_reported_at = nowIso;
+        }
+      }
+      const transient = join3(cwd, ".sterling", "transient");
+      mkdirSync3(transient, { recursive: true });
+      const tmpPath = join3(transient, `dispatch-register.json.tmp-${process.pid}`);
+      writeFileSync(tmpPath, JSON.stringify(fresh));
+      renameSync(tmpPath, registerPath);
+    } catch {
+    }
+  }
+  return lines;
+}
 var input = readStdin();
+var residueLines = (() => {
+  try {
+    return computeDeadDispatchResidue(input.cwd, input.session_id);
+  } catch {
+    return [];
+  }
+})();
 var store = openStore(input.cwd);
-if (!store) allow();
+if (!store) {
+  if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
+  allow();
+}
 var touchesPath = join3(input.cwd, ".sterling", "transient", "touches.json");
 var eventsPath = join3(input.cwd, ".sterling", "transient", "session-events.json");
 var nagMarker = join3(input.cwd, ".sterling", "transient", "capture-nagged.json");
@@ -7140,7 +7263,7 @@ try {
   const dirtyPaths = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      const st = spawnSync3("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      const st = spawnSync4("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
       if (st.status !== 0) {
         store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
         return 0;
@@ -7391,6 +7514,7 @@ try {
   const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
   const disclosureParts = [];
+  if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     disclosureParts.push(
       `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}] \u2014 duty re-arms when they land`
@@ -7523,7 +7647,7 @@ try {
   }
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync3("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+    const head = spawnSync4("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4

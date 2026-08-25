@@ -34,12 +34,110 @@ import { join } from 'node:path';
 import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking, gitIgnored } from './lib/common.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent } from './lib/settlement.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
+import { isOrphan, probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 
+/**
+ * DEAD-DISPATCH RESIDUE (SPEC A, boards 03ed9d35/31565253; shared lib
+ * scripts/hooks/lib/dispatch-residue.mjs). A pure filesystem+git fact about
+ * the H22 register — deliberately independent of the knowledge store (a
+ * register + config can exist before/without a store, and the residue must
+ * still surface, SPEC A item 7's fail-loud posture applied to the STORE gate
+ * itself, not only the git probe): computed once, up front, before the
+ * `if (!store) allow()` bail below, so a store-less cwd still reports and
+ * stamps. When a store IS present the caller folds the returned lines into
+ * the normal disclosure surface instead of printing them standalone.
+ * Print-once via a truthy residue_reported_at persisted directly onto the
+ * matching register entries — additive only (never removes/reorders), so the
+ * existing "H10 never mutates the register" deferral pin (a LIVE entry, never
+ * an orphan) stays true.
+ */
+function computeDeadDispatchResidue(cwd, sessionId) {
+  const registerPath = join(cwd, '.sterling', 'transient', 'dispatch-register.json');
+  let raw = [];
+  try {
+    if (existsSync(registerPath)) {
+      const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
+      if (Array.isArray(parsed)) raw = parsed;
+    }
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) return [];
+  let staleMinutes = 60; // schema default (decision ec9eacaa) when config cannot be read
+  try {
+    staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
+  } catch {
+    // fall back to the schema default rather than skipping the residue check
+  }
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.parse(nowIso);
+  const lines = [];
+  const stampIds = new Set();
+  for (const entry of raw) {
+    if (!entry || entry.session_id !== sessionId) continue;
+    if (!isOrphan(entry, staleMinutes, nowMs)) continue;
+    if (entry.residue_reported_at) continue; // print-once
+    const probe = probeDirtyPaths(cwd, entry.files);
+    const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+    if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
+    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    stampIds.add(entry.agent_id);
+  }
+  if (stampIds.size) {
+    // FRESH-READ MERGE, matching H22's own register-write discipline exactly
+    // (tmp-${pid} + renameSync atomic publish) rather than inventing a new
+    // cross-hook lock: H22 itself does NOT lock the register's
+    // read-modify-write (only its durable review-ledger write is
+    // lock-guarded — see its header comment), accepting a bounded lost
+    // update there. What this fixes is narrower and load-bearing: re-reading
+    // immediately before persisting and stamping ONLY entries still present
+    // (by agent_id) means an entry a concurrent H22 SubagentStop removed
+    // between our first read and now is simply left unstamped, never
+    // resurrected by writing back a stale copy of it — and a torn concurrent
+    // read degrading to [] here costs only this stamp, never the live
+    // register (we write back the FRESH read, not our own stale `raw`).
+    try {
+      let fresh = [];
+      try {
+        if (existsSync(registerPath)) {
+          const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
+          if (Array.isArray(parsed)) fresh = parsed;
+        }
+      } catch {
+        fresh = []; // a torn/corrupt read degrades to empty — nothing to stamp, never a re-add
+      }
+      for (const entry of fresh) {
+        if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
+          entry.residue_reported_at = nowIso;
+        }
+      }
+      const transient = join(cwd, '.sterling', 'transient');
+      mkdirSync(transient, { recursive: true });
+      const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
+      writeFileSync(tmpPath, JSON.stringify(fresh));
+      renameSync(tmpPath, registerPath);
+    } catch {
+      // best-effort — a failed stamp costs only print-once across Stops, never this report
+    }
+  }
+  return lines;
+}
+
 const input = readStdin();
+const residueLines = (() => {
+  try {
+    return computeDeadDispatchResidue(input.cwd, input.session_id);
+  } catch {
+    return [];
+  }
+})();
 const store = openStore(input.cwd);
-if (!store) allow();
+if (!store) {
+  if (residueLines.length) process.stderr.write(residueLines.join('\n\n'));
+  allow();
+}
 
 const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');
 const eventsPath = join(input.cwd, '.sterling', 'transient', 'session-events.json');
@@ -497,6 +595,7 @@ try {
   };
   const liveDispatches = dispatchEntries.filter(isLive);
   const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern b3972717) while
   // the dispatch prompt names the plain repo-relative path — an exact-string
@@ -539,6 +638,7 @@ try {
   // produce. Deliberately avoids the article-demand and capture-nag wording —
   // a deferred duty is not owed to the conductor right now.
   const disclosureParts = [];
+  if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     disclosureParts.push(
       `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}] — duty re-arms when they land`

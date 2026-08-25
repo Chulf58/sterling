@@ -5023,6 +5023,10 @@ function warnNonBlocking(message) {
   process.stderr.write(message);
   process.exit(1);
 }
+function loadConfig(cwd) {
+  const p = join(cwd, ".sterling", "config.json");
+  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
 function repoRel(toolPath, cwd) {
   if (!toolPath) return null;
   const fwd = String(toolPath).replace(/\\/g, "/");
@@ -5155,7 +5159,27 @@ function isReadOnlyDispatchType(type) {
   return lower === "explorer" || lower === "explore" || lower === "plan";
 }
 
+// scripts/hooks/lib/dispatch-residue.mjs
+function claimedResources(promptText, configuredNames) {
+  const names = (Array.isArray(configuredNames) ? configuredNames : []).filter(
+    (n) => typeof n === "string" && n.trim().length > 0
+  );
+  if (names.length === 0) return [];
+  const prompt = String(promptText ?? "");
+  const claimed = [];
+  for (const name of names) {
+    const pattern = new RegExp(escapeRe(name), "i");
+    if (hasUnsuppressedMatch(prompt, pattern, { checkSubjectVerb: false })) claimed.push(name);
+  }
+  return claimed;
+}
+
 // scripts/hooks/h26-dispatch-overlap.mjs
+function buildResourceAdvisory(contested) {
+  const resourceList = [...new Set(contested.map((c) => c.name))].map((n) => `'${n}'`).join(", ");
+  const holderList = [...new Set(contested.map((c) => `${c.agentType}:${c.agentId}`))].join(", ");
+  return `H26 RESOURCE OVERLAP ADVISORY \u2014 this dispatch's brief claims exclusive resource(s) ${resourceList}, already held by live in-flight dispatch(es): ${holderList}. This is warn-only, never a block. Remedy: coordinate with the holder before proceeding, or drop the resource claim.`;
+}
 var input;
 try {
   input = readStdin();
@@ -5170,9 +5194,33 @@ function emit(additionalContext) {
   );
 }
 try {
-  if (!existsSync3(join3(input.cwd ?? ".", ".sterling", "sterling.db"))) allow();
-  if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) allow();
+  let finish = function(fileAdvisory) {
+    const parts = [fileAdvisory, resourceAdvisory].filter(Boolean);
+    if (parts.length) emit(parts.join("\n\n"));
+    allow();
+  };
   const prompt = input.tool_input?.prompt;
+  const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
+  const cfg = loadConfig(input.cwd);
+  const configuredNames = Array.isArray(cfg?.exclusive_resources) ? cfg.exclusive_resources.filter((n) => typeof n === "string" && n.trim()) : [];
+  let resourceAdvisory = "";
+  if (configuredNames.length) {
+    const claimed = claimedResources(prompt, configuredNames);
+    if (claimed.length) {
+      const contested = [];
+      for (const e of live) {
+        if (!e || !e.agent_id || e.attribution !== "block" || !Array.isArray(e.exclusive_resources)) continue;
+        for (const name of claimed) {
+          if (e.exclusive_resources.includes(name)) {
+            contested.push({ name, agentType: e.agent_type ?? "agent", agentId: e.agent_id });
+          }
+        }
+      }
+      if (contested.length) resourceAdvisory = buildResourceAdvisory(contested);
+    }
+  }
+  if (!existsSync3(join3(input.cwd ?? ".", ".sterling", "sterling.db"))) finish();
+  if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) finish();
   const candidates = extractPathCandidates(prompt);
   const normalized = candidates.map((raw) => ({ raw, norm: repoRel(raw, input.cwd) })).filter((p) => p.norm).filter(
     (p) => p.norm !== ".git" && !p.norm.startsWith(".git/") && !p.norm.startsWith(".sterling/") && !p.norm.startsWith("sterling/") && !p.norm.startsWith("git/")
@@ -5182,10 +5230,9 @@ try {
       normalized.filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false })).map((p) => p.norm)
     )
   ];
-  if (!files.length) allow();
+  if (!files.length) finish();
   const candidateSet = new Set(files);
-  const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
-  if (!live.length) allow();
+  if (!live.length) finish();
   const overlaps = [];
   const overlapPaths = /* @__PURE__ */ new Set();
   for (const e of live) {
@@ -5197,13 +5244,12 @@ try {
       matched.forEach((f) => overlapPaths.add(f));
     }
   }
-  if (!overlaps.length) allow();
+  if (!overlaps.length) finish();
   const pathList = [...overlapPaths].map((p) => `'${p}'`).join(", ");
   const entryList = overlaps.map((o) => `${o.agentType}:${o.agentId} (${o.files.join(", ")})`).join("; ");
-  emit(
+  finish(
     `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap a LIVE in-flight dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is warn-only, never a block \u2014 the prompt extraction only approximates write territory, and this hook compares only dispatches already present in the live register when this PreToolUse fires. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
   );
-  allow();
 } catch (e) {
   warnNonBlocking(`H26: dispatch-overlap advisory failed: ${e && e.message || e}`);
 }
