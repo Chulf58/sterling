@@ -1005,6 +1005,40 @@ export class SterlingTools {
   }
 
   /**
+   * FIELD-EFFECT VISIBILITY (board 8659a573): a small, DATA-DRIVEN map of
+   * fields whose consumer is server-side and invisible in-session — a caller
+   * has no way to observe these fields' effect within a single tool response.
+   * Measured cost of the gap: volatility_hint was judged "unconsumed" (it
+   * drives stale_research's staleness clocks) and working_tree judged
+   * "unused" (it resolves a record's file paths server-side), both false
+   * claims that invited removal of load-bearing fields (research_finding
+   * 179d8161). Every entry here MUST be a VERIFIED consumer (grepped, not
+   * inferred) — an invented consumed_by is worse than none.
+   *
+   * Keyed by `${type}:${field}`, NOT by bare field name (review finding):
+   * a note is a claim about ONE type's verified consumer, and two types can
+   * share a field name with only one of them actually consumed server-side
+   * (or consumed differently) — a bare-name key would let any future type
+   * reusing the name silently inherit an unverified note.
+   */
+  private static readonly FIELD_CONSUMERS: Readonly<Record<string, string>> = {
+    // Consumed at the staleness threshold lookup (config.staleness.research_days
+    // keyed by volatility_hint) that decides when a research_finding reads as
+    // flagged_stale — a read-time computation with no caller-visible trace.
+    // volatility_hint is declared only on research_finding today.
+    'research_finding:volatility_hint': 'drives stale_research staleness clocks (research_days threshold lookup)',
+    // Consumed by treeRootFor()'s working-tree resolution (config.working_trees):
+    // unset means the project root; a mapped name resolves file paths
+    // server-side for the read-time drift/baseline checks and H7/H10
+    // ownership — none of which surfaces the lookup itself to the caller.
+    // Verified for BOTH types that declare working_tree: computeBaselines
+    // (tools.ts) gates on type === 'feature_article' || 'reference_material'
+    // before calling treeRootFor, so both consumers are confirmed, not assumed.
+    'feature_article:working_tree': 'resolves copy-file paths server-side (config.working_trees lookup for drift/baseline checks)',
+    'reference_material:working_tree': 'resolves copy-file paths server-side (config.working_trees lookup for drift/baseline checks)',
+  };
+
+  /**
    * knowledge_schema — ask what a type requires instead of guessing (board
    * 7acfbe48). Read-only, derived from the registered zod schema, so it cannot
    * drift from what a write will actually accept. Listing the registered type
@@ -1013,7 +1047,7 @@ export class SterlingTools {
    */
   knowledgeSchema(
     type: string
-  ): { type: string; fields: (FieldShape & { server_owned?: boolean })[]; required: string[]; optional: string[] } {
+  ): { type: string; fields: (FieldShape & { server_owned?: boolean; consumed_by?: string })[]; required: string[]; optional: string[] } {
     const described = schemaFor(type);
     if (!described) {
       throw new Error(`knowledge_schema: '${type}' is not a registered record type. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
@@ -1039,13 +1073,15 @@ export class SterlingTools {
     // exactly the set a create must supply.
     const serverOwned = new Set(SterlingTools.SERVER_OWNED_FIELDS);
     const defaulted = new Set(SterlingTools.CREATE_DEFAULTED_FIELDS);
-    const fields = described.fields.map((f) =>
-      serverOwned.has(f.name)
-        ? { ...f, required: false, server_owned: true }
+    const fields = described.fields.map((f) => {
+      const consumedBy = SterlingTools.FIELD_CONSUMERS[`${described.type}:${f.name}`];
+      const withConsumer = consumedBy !== undefined ? { consumed_by: consumedBy } : {};
+      return serverOwned.has(f.name)
+        ? { ...f, ...withConsumer, required: false, server_owned: true }
         : defaulted.has(f.name)
-          ? { ...f, required: false }
-          : f
-    );
+          ? { ...f, ...withConsumer, required: false }
+          : { ...f, ...withConsumer };
+    });
     // The split lists are redundant with `fields` on purpose — "what must I
     // supply" is the actual question, and making the reader filter the array to
     // answer it is how the guessing starts.
@@ -4255,7 +4291,19 @@ export class SterlingTools {
     // old.id (the resolved canonical id), not the caller's possibly-short
     // citation — a mounted domain store's routing (storeHolding) keys off the
     // real id, and a bare prefix would not resolve there.
-    return this.store.updateTodo(old.id, next as typeof old);
+    //
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 2): store.updateTodo
+    // re-parses the merged candidate against the todo schema (e.g. an empty
+    // `text` fails its min(1)) and throws the raw ZodError across the store
+    // boundary — caught and re-rendered the same way as knowledgeUpdate's
+    // own store-validation catch, rather than leaking the raw issue array on
+    // a caller-triggerable, constantly-used surface.
+    try {
+      return this.store.updateTodo(old.id, next as typeof old);
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, 'todo', 'board_update');
+      throw err;
+    }
   }
 
   /**
@@ -4864,7 +4912,19 @@ export class SterlingTools {
     candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_supersede') ?? [];
     this.refuseUnknownFields(type, candidate, 'knowledge_supersede');
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
-    const parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 1): this parse is directly
+    // MCP-reachable and does not route through knowledgeUpdate, so it was
+    // untouched by the original knowledge_create/append/edit fix (board
+    // 03c92e2a). Caught and re-rendered the same way (renderValidationFailure)
+    // rather than letting a bad field (e.g. a malformed history element) leak
+    // the raw zod issue array.
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_supersede');
+      throw err;
+    }
     // Cited-id resolution warnings (board fc053051, F3 review finding: every
     // other write path emits these — knowledge_supersede was the one gap).
     // Computed on `parsed` (post-schema, pre-store) so a scan sees exactly
