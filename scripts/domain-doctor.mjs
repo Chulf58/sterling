@@ -50,8 +50,15 @@
 //     record_versions snapshot COUNT. Id resolution: an exact id always wins;
 //     otherwise an unambiguous prefix resolves and an ambiguous one is refused
 //     naming every candidate (decision 6d5a6719 — a read is recoverable, so
-//     the id ladder applies). Exit 0 found (a multi-successor conflict is
-//     still a found-and-printed record, not a refusal); exit 3 not-found
+//     the id ladder applies) — the ladder's candidate pool is the UNION of
+//     `records.id` and `record_aliases.historical_id` (buildResolver,
+//     scripts/lib/citations.mjs — the resolver check-record-citations and
+//     knowledge-export already share), so a --id that is a HISTORICAL id
+//     resolves to its live canonical record instead of reporting a false
+//     not-found; the result discloses the forward (old id -> current id)
+//     rather than silently printing the canonical record as if --id had named
+//     it directly (board 4d13968f). Exit 0 found (a multi-successor conflict
+//     is still a found-and-printed record, not a refusal); exit 3 not-found
 //     (names the id and the db path searched); exit 2 malformed/unsafe input,
 //     an unparseable body, or a store that isn't (or isn't fully) a Sterling
 //     store — never a raw driver exception.
@@ -84,6 +91,7 @@ import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore, resolveDomainMounts } from '@sterling/store';
 import { parseConfig } from '@sterling/schemas';
+import { buildResolver } from './lib/citations.mjs';
 
 function fail(msg, code = 2) {
   console.error(`domain-doctor: ${msg}`);
@@ -785,30 +793,91 @@ function show() {
       const nullIdCount = rawIds.filter((x) => typeof x !== 'string').length;
       const allIds = [...new Set(rawIds.filter((x) => typeof x === 'string'))];
 
-      let resolvedId;
-      if (allIds.includes(id)) {
-        // an exact id always wins, even when it shares a prefix with another
-        // (an exact match is not itself ambiguous — decision 6d5a6719).
-        resolvedId = id;
-      } else {
-        const matches = allIds.filter((x) => x.startsWith(id));
-        if (matches.length === 0) {
-          return { error: { code: 3, msg: `no record matching '${id}' found in '${dbPath}'.`, nullIdCount } };
+      // ALIAS-AWARE RESOLUTION (board 4d13968f): show's id ladder must resolve
+      // a historical id through record_aliases the same way the rest of the
+      // surface does (idsAndAliasesIn, migrate's collision guard) — a
+      // forensics tool answering "no record matching" for an id the store's
+      // own alias table maps to a live canonical record is exactly the false
+      // clean this closes. Reuses buildResolver (scripts/lib/citations.mjs,
+      // the shared resolver behind check-record-citations/knowledge-export)
+      // rather than a second hand-rolled ladder: it folds record_aliases rows
+      // into the SAME candidate pool as record ids, so exact-id-beats-prefix
+      // and ambiguous-prefix-refuses-naming-every-candidate apply uniformly
+      // whether a hit lands on a live record or a historical alias. A
+      // `{id,type,status}` shape is fabricated for each record id (buildResolver
+      // never inspects type/status, only `id`) so this stays a plain-object
+      // shim rather than requiring a real SterlingStore — a real one always
+      // opens a WRITABLE handle (packages/store/src/index.ts:405), which would
+      // reintroduce the WAL-mutation-on-close hazard readOnlyProbe exists to
+      // avoid, and would refuse to open some of the very corrupt/legacy stores
+      // show() must still diagnose.
+      let rawAliasRows = [];
+      if (tables.has('record_aliases')) {
+        try {
+          rawAliasRows = db.prepare('SELECT historical_id, canonical_id, archived_version FROM record_aliases').all();
+        } catch (e) {
+          return { error: { code: 2, msg: `the 'record_aliases' table in '${dbPath}' could not be queried for its id ladder — its column shape does not match what show() expects.`, nullIdCount } };
         }
-        if (matches.length > 1) {
-          return { error: { code: 2, msg: `'${id}' is an ambiguous prefix in '${dbPath}' — it matches ${matches.length} records: ${matches.join(', ')}.`, nullIdCount } };
+      }
+      // A NULL/non-string historical_id is the same observed-legacy-shape
+      // hazard as a null record id (review finding, board 4d13968f follow-up):
+      // left unfiltered it reaches citations.mjs's r.id.slice(0,8) and this
+      // file's x.startsWith(id) below, both of which throw on a non-string —
+      // caught by the outer try at the bottom of show() but misreported as a
+      // generic "could not be read as a valid SQLite/Sterling store", hiding
+      // that the actual defect is a malformed alias row. Filtered the same
+      // way as record ids, with its own reported count.
+      const nullAliasIdCount = rawAliasRows.filter((a) => typeof a.historical_id !== 'string').length;
+      const aliasRows = rawAliasRows.filter((a) => typeof a.historical_id === 'string');
+      const canonicalOf = new Map(aliasRows.map((a) => [a.historical_id, a.canonical_id]));
+      const resolver = buildResolver({
+        recordIdIndex: () => allIds.map((rid) => ({ id: rid, type: 'record', status: 'active' })),
+        recordAliases: () => aliasRows,
+      });
+
+      const resolved = resolver.resolve(id);
+      if (resolved === undefined) {
+        return { error: { code: 3, msg: `no record matching '${id}' found in '${dbPath}'.`, nullIdCount, nullAliasIdCount } };
+      }
+      if (resolved === 'ambiguous') {
+        // resolve() only signals the ladder's VERDICT ('ambiguous'), not which
+        // ids collided — show's refusal must name every candidate, so they are
+        // re-derived here from the same combined pool the resolver consulted.
+        const universe = [...allIds, ...aliasRows.map((a) => a.historical_id)];
+        const candidates = [...new Set(universe.filter((x) => x.startsWith(id)))];
+        return { error: { code: 2, msg: `'${id}' is an ambiguous prefix in '${dbPath}' — it matches ${candidates.length} records: ${candidates.join(', ')}.`, nullIdCount, nullAliasIdCount } };
+      }
+
+      let resolvedId = resolved.id;
+      let forwardedFrom = null;
+      if (resolved.type === 'alias') {
+        // A historical id resolved — disclose the forward (old id -> current
+        // id) rather than silently showing the canonical record as if `id`
+        // had named it directly.
+        forwardedFrom = resolved.id;
+        resolvedId = canonicalOf.get(resolved.id);
+        if (!resolvedId || !allIds.includes(resolvedId)) {
+          return {
+            error: {
+              code: 2,
+              msg: `'${id}' resolves via record_aliases to historical id '${forwardedFrom}', whose canonical_id '${resolvedId ?? 'null'}' does not exist in '${dbPath}' — a dangling alias.`,
+              nullIdCount,
+              nullAliasIdCount,
+            },
+          };
         }
-        [resolvedId] = matches;
       }
 
       let rows;
       try {
         rows = db.prepare('SELECT body FROM records WHERE id = ?').all(resolvedId).map((r) => JSON.parse(r.body));
       } catch (e) {
-        return { error: { code: 2, msg: `record '${resolvedId}' in '${dbPath}' has an unparseable JSON body: ${e.message}`, nullIdCount } };
+        return { error: { code: 2, msg: `record '${resolvedId}' in '${dbPath}' has an unparseable JSON body: ${e.message}`, nullIdCount, nullAliasIdCount } };
       }
 
-      const found = { resolvedId, rows, nullIdCount };
+      const found = {
+        resolvedId, rows, nullIdCount, nullAliasIdCount, forwardedFrom,
+      };
       // v2 provenance — only present (and only queried) on a v2 store; a
       // pre-v2 store has none of these tables, and this must never refuse or
       // fall back to migrate's v2-required guard for their absence (that
@@ -866,14 +935,23 @@ function show() {
     if (result.error.nullIdCount) {
       console.error(`domain-doctor: FINDING: ${result.error.nullIdCount} record(s) in '${dbPath}' have a null/non-string id and were excluded from id resolution.`);
     }
+    if (result.error.nullAliasIdCount) {
+      console.error(`domain-doctor: FINDING: ${result.error.nullAliasIdCount} record_aliases row(s) in '${dbPath}' have a null/non-string historical_id and were excluded from id resolution.`);
+    }
     fail(result.error.msg, result.error.code);
   }
 
   const {
-    resolvedId, rows, successors, historicalIds, versionCount, nullIdCount, relationsAbsent, aliasesAbsent, versionsAbsent,
+    resolvedId, rows, successors, historicalIds, versionCount, nullIdCount, nullAliasIdCount, relationsAbsent, aliasesAbsent, versionsAbsent,
+    forwardedFrom,
   } = result.ok;
   if (nullIdCount) console.log(`FINDING: ${nullIdCount} record(s) in '${dbPath}' have a null/non-string id and were excluded from id resolution.`);
-  console.log(`domain-doctor show: '${id}' resolved to '${resolvedId}' in '${dbPath}'`);
+  if (nullAliasIdCount) console.log(`FINDING: ${nullAliasIdCount} record_aliases row(s) in '${dbPath}' have a null/non-string historical_id and were excluded from id resolution.`);
+  if (forwardedFrom) {
+    console.log(`domain-doctor show: '${id}' resolved via record_aliases: historical id '${forwardedFrom}' -> canonical '${resolvedId}' in '${dbPath}'`);
+  } else {
+    console.log(`domain-doctor show: '${id}' resolved to '${resolvedId}' in '${dbPath}'`);
+  }
   rows.forEach((r) => console.log(`  record: ${JSON.stringify(r)}`));
   if (relationsAbsent) {
     console.log('  record_relations: table absent — successor provenance NOT checked');
