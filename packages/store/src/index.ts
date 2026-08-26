@@ -1984,6 +1984,14 @@ export class SterlingStore {
   casTransitionMerge(observed: MachineState, runId: string, mutate: (fresh: RunRecord) => RunRecord, attempts = 5): RunRecord {
     this.assertWritable('casTransitionMerge');
     for (let i = 0; i < attempts; i++) {
+      // Re-read the live schema version at the TOP of every retry iteration
+      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
+      // each attempt, so a migration by another process landing mid-retry could
+      // otherwise let this stale-schema handle read a newer body, parse it
+      // through the OLD schema, and rewrite it dropping newly-added fields. The
+      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
+      // window spanning the whole loop by throwing the SAME live-drift error.
+      this.assertLiveSchemaVersion('casTransitionMerge');
       const row = this.db.prepare('SELECT body, machine_state, pending_exit FROM runs WHERE id = ?').get(runId) as
         | { body: string; machine_state: string; pending_exit: string | null }
         | undefined;
@@ -2086,6 +2094,14 @@ export class SterlingStore {
   updateRunOptimistic(runId: string, mutate: (run: RunRecord) => RunRecord, attempts = 5): RunRecord {
     this.assertWritable('updateRunOptimistic');
     for (let i = 0; i < attempts; i++) {
+      // Re-read the live schema version at the TOP of every retry iteration
+      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
+      // each attempt, so a migration by another process landing mid-retry could
+      // otherwise let this stale-schema handle read a newer body, parse it
+      // through the OLD schema, and rewrite it dropping newly-added fields. The
+      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
+      // window spanning the whole loop by throwing the SAME live-drift error.
+      this.assertLiveSchemaVersion('updateRunOptimistic');
       const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
       if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
       const current = JSON.parse(row.body) as RunRecord;
