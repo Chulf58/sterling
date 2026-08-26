@@ -219,7 +219,30 @@ export interface KnowledgePreflightResult {
   answerability: 'ungoverned' | 'verify_targets' | 'insufficient';
   reason?: 'too_little_vocabulary';
   terms: string[];
-  matches: { id: string; type: string; title: string; matched_on: string[]; central: string[] }[];
+  matches: {
+    id: string;
+    type: string;
+    title: string;
+    matched_on: string[];
+    central: string[];
+    /** board c6e3561f disclosure-carry: records elsewhere holding a
+     *  rel:'supersedes' edge onto this match — same shape knowledge_get and
+     *  knowledge_query-full surface, OMITTED when there are none. */
+    inbound_supersedes?: InboundSupersedesEntry[];
+  }[];
+}
+
+/** One entry of the additive `inbound_supersedes` disclosure — {id} always,
+ *  slug/title when cheaply available, `status` pinned, and `superseded_by`
+ *  present only when the holder is itself not active (board c6e3561f). Shared
+ *  by knowledge_get, knowledge_query-full and knowledge_preflight so the shape
+ *  is declared once (see SterlingTools.inboundSupersedesEntry). */
+export interface InboundSupersedesEntry {
+  id: string;
+  slug?: string;
+  title?: string;
+  status: string;
+  superseded_by?: string;
 }
 
 /**
@@ -2343,15 +2366,22 @@ export class SterlingTools {
     if (terms.length < AXIS_MIN_HITS) {
       return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matches: [] };
     }
-    const matches = this.axisCandidateMatches(text, terms).map(({ record, hits }) => ({
-      id: record.id,
-      type: record.type,
-      // research_finding carries no title — its question IS the identity;
-      // an article's slug beats its long title as the handle.
-      title: SterlingTools.axisRecordTitle(record),
-      matched_on: hits,
-      central: recordCentralityHits(record, text),
-    }));
+    const matches = this.axisCandidateMatches(text, terms).map(({ record, hits }) => {
+      // board c6e3561f disclosure-carry: a matched record carries the same
+      // inbound-supersedes disclosure as knowledge_get / knowledge_query-full,
+      // omitted when nothing supersedes it.
+      const inbound = this.inboundSupersedesFor(record.id);
+      return {
+        id: record.id,
+        type: record.type,
+        // research_finding carries no title — its question IS the identity;
+        // an article's slug beats its long title as the handle.
+        title: SterlingTools.axisRecordTitle(record),
+        matched_on: hits,
+        central: recordCentralityHits(record, text),
+        ...(inbound.length ? { inbound_supersedes: inbound } : {}),
+      };
+    });
     return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
   }
 
@@ -2495,7 +2525,19 @@ export class SterlingTools {
     const links = (rest.links ?? []) as { rel: string; target_id: string }[];
     const semantic = links.filter((l) => l.rel !== 'supersedes');
     const supersedesCount = links.length - semantic.length;
-    return { ...rest, links: semantic, ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}) };
+    // board c6e3561f disclosure-carry: the FULL projection carries the same
+    // inbound-supersedes disclosure knowledge_get does (records elsewhere
+    // holding a rel:'supersedes' edge onto this one). DIGEST deliberately does
+    // NOT — digestRecord is a separate path that never reaches here, keeping
+    // the per-record reverse-edge lookup off the landscape projection (perf).
+    // Omitted when empty, matching the omit-when-empty contract.
+    const inbound = this.inboundSupersedesFor(record.id);
+    return {
+      ...rest,
+      links: semantic,
+      ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}),
+      ...(inbound.length ? { inbound_supersedes: inbound } : {}),
+    };
   }
 
   /** The citation format the repo actually writes: 8-char id prefixes. */
@@ -2703,9 +2745,7 @@ export class SterlingTools {
     // read already follows.
     let served: Record<string, unknown> = full as unknown as Record<string, unknown>;
     if (options?.version === undefined && options?.field === undefined) {
-      const inbound = this.store
-        .inboundSupersedes(record.id)
-        .map((r) => SterlingTools.inboundSupersedesEntry(r));
+      const inbound = this.inboundSupersedesFor(record.id);
       if (inbound.length) {
         served = { ...served, inbound_supersedes: inbound };
       }
@@ -2731,9 +2771,7 @@ export class SterlingTools {
    * dropped by the existing undefined filter in inboundSupersedes() —
    * removal already deletes the edge rows, so that case does not reach here.
    */
-  private static inboundSupersedesEntry(
-    record: DurableRecord
-  ): { id: string; slug?: string; title?: string; status: string; superseded_by?: string } {
+  private static inboundSupersedesEntry(record: DurableRecord): InboundSupersedesEntry {
     const slug = (record as unknown as { slug?: string }).slug;
     const title = SterlingTools.axisRecordTitle(record);
     const supersededBy = (record as unknown as { superseded_by?: string | null }).superseded_by;
@@ -2744,6 +2782,20 @@ export class SterlingTools {
       status: record.status,
       ...(record.status !== 'active' && supersededBy ? { superseded_by: supersededBy } : {}),
     };
+  }
+
+  /**
+   * The single inbound-supersedes computation shared by every read surface
+   * that carries the disclosure (knowledge_get part (a); knowledge_query-full
+   * and knowledge_preflight, board c6e3561f): store.inboundSupersedes fans the
+   * reverse edge across mounts, each holder is hydrated to the pinned
+   * {id, slug?, title?, status, superseded_by?} entry shape. Returns [] when
+   * nothing supersedes the record — every caller spreads it conditionally so
+   * the key is OMITTED (never present-and-empty), matching the omit-when-empty
+   * contract the rest of the read surface follows.
+   */
+  private inboundSupersedesFor(id: string): InboundSupersedesEntry[] {
+    return this.store.inboundSupersedes(id).map((r) => SterlingTools.inboundSupersedesEntry(r));
   }
 
   /**
