@@ -6953,6 +6953,18 @@ var SterlingStore = class _SterlingStore {
     });
     return result;
   }
+  /**
+   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
+   * withTransaction above): on a plain SterlingStore there is only ONE
+   * physical store, so routing by scope is a no-op — this is a straight alias
+   * for withTransaction, kept as its own method so SterlingStore and
+   * MountedStores satisfy the same ToolStore surface and the tool layer never
+   * has to know whether domains are mounted. MountedStores overrides this to
+   * actually route by scope and to guard against cross-mount nesting.
+   */
+  withTransactionForScope(_scope, fn) {
+    return this.withTransaction(fn);
+  }
 };
 
 // scripts/hooks/lib/common.mjs
