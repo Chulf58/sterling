@@ -40,11 +40,13 @@ interface FeatureArticleRec {
   files: { path: string }[];
   dependencies: { relies_on: string[] };
   version: number;
+  current_ac?: { ac_id: string; text: string; untestable_because?: { reason: string; blocking_record_id: string } }[];
 }
 
 interface DecisionRec {
   id: string; slug?: string; title: string; statement: string; rationale: string;
   alternatives_rejected: { option: string; reason: string }[];
+  authority?: string;
 }
 
 interface AntiPatternRec {
@@ -67,11 +69,29 @@ export function toCard(rec: unknown): Card {
   switch (r.type) {
     case 'feature_article': {
       const a = rec as FeatureArticleRec;
+      // Gated: an article whose ACs carry no untestable_because renders
+      // byte-identical to before (no section at all) — only MARKED ACs ever
+      // appear here, never the full current_ac list, so an ordinary article's
+      // body is unaffected by this addition (review finding, S4b fixer pass).
+      const markedAcLines = (a.current_ac ?? [])
+        .filter((ac) => ac.untestable_because)
+        .map((ac) => {
+          const u = ac.untestable_because!;
+          return `  - ${ac.ac_id}: ${ac.text} [untestable: ${u.reason} — blocking ${String(u.blocking_record_id).slice(0, 8)}]`;
+        });
+      const AC_SECTION_CAP = 12;
+      const shownAcLines = markedAcLines.slice(0, AC_SECTION_CAP);
+      const acRemainder = markedAcLines.length - shownAcLines.length;
+      const acSection = shownAcLines.length
+        ? `\n\nAcceptance criteria (untestable):\n${shownAcLines.join('\n')}${
+            acRemainder > 0 ? `\n  … +${acRemainder} more (cap ${AC_SECTION_CAP})` : ''
+          }`
+        : '';
       return {
         id: a.id,
         type: 'feature_article',
         title: a.title,
-        body: `What it does:\n${a.what_it_does}\n\nIntended behaviour:\n${a.intended_behavior}`,
+        body: `What it does:\n${a.what_it_does}\n\nIntended behaviour:\n${a.intended_behavior}${acSection}`,
         detail: `${a.slug} · ${a.state} · v${a.version} · ${a.files.length} file(s) · relies on ${a.dependencies.relies_on.length}`,
       };
     }
@@ -86,7 +106,7 @@ export function toCard(rec: unknown): Card {
         type: 'decision',
         title: d.title,
         body: `${d.statement}\n\nWhy:\n${d.rationale}${altSection}`,
-        detail: [d.slug, d.title].filter(Boolean).join(' · '),
+        detail: [d.authority ? `[${d.authority}]` : '', d.slug, d.title].filter(Boolean).join(' · '),
       };
     }
     case 'anti_pattern': {

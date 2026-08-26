@@ -564,3 +564,40 @@ test('AC8: vocabulary appearing only AFTER the first 16,000 chars is never match
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// S4b rendering marker (c): decision.authority renders the same "[authority]"
+// bracketed marker on the H23 output-axis decision pointer line that H19 uses
+// on its statement pointer; absent authority renders no marker at all — same
+// present/absent contract, different delivery surface.
+// ---------------------------------------------------------------------------
+
+test('S4b (c): a decision with authority renders "[authority]" on its H23 pointer line', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const dec = store.create(markedDecision('DEC-GAMMA', { authority: 'one_off' }));
+    const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    const payload = pendingOf(dir)[0].payload;
+    const line = payload.split('\n').find((l) => l.includes(`knowledge_get ${dec.id}`));
+    assert.ok(line, 'the decision pointer line renders');
+    assert.match(line, /\[one_off\]/, 'authority renders as a bracketed marker on the pointer line');
+  } finally {
+    cleanup();
+  }
+});
+
+test('S4b (c): a decision WITHOUT authority renders its H23 pointer line with no bracketed marker', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const dec = store.create(markedDecision('DEC-GAMMA')); // no authority
+    const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    const payload = pendingOf(dir)[0].payload;
+    const line = payload.split('\n').find((l) => l.includes(`knowledge_get ${dec.id}`));
+    assert.ok(line, 'the decision pointer line renders');
+    assert.doesNotMatch(line, /\[(standing|session_scoped|one_off)\]/, 'no authority → no bracketed marker at all');
+  } finally {
+    cleanup();
+  }
+});

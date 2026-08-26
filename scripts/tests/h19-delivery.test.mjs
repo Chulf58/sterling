@@ -621,6 +621,131 @@ test('H19: a long rejected list is clipped to its budget, not emitted whole', ()
   }
 });
 
+// ---------------------------------------------------------------------------
+// S4b rendering markers (a): decision.authority renders "[authority] "
+// prefixed directly before the statement pointer; a decision without
+// authority renders byte-identical to before (no marker, no extra space).
+// ---------------------------------------------------------------------------
+
+test('H19 (S4b a): a decision with authority renders its statement pointer prefixed "[authority] "', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(decisionRecord('chose x', ['src/a.mjs'], { authority: 'one_off' }));
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /→ \[one_off\] chose x/, 'authority renders as a bracketed prefix directly before the statement');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19 (S4b a): the same prefix renders for each of the three authority values', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(decisionRecord('standing choice', ['src/a.mjs'], { authority: 'standing' }));
+    store.create(decisionRecord('session choice', ['src/a.mjs'], { authority: 'session_scoped' }));
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /→ \[standing\] standing choice/);
+    assert.match(ctx, /→ \[session_scoped\] session choice/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19 (S4b a): a decision WITHOUT authority renders its statement pointer with no marker and no extra space (unchanged)', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    store.create(decisionRecord('chose y', ['src/a.mjs'])); // no authority field at all
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /→ chose y/, 'the plain pointer still renders');
+    assert.doesNotMatch(ctx, /\[(standing|session_scoped|one_off)\] chose y/, 'no authority → no bracketed marker, no extra space before the statement');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// S4b rendering markers (b): current_ac[].untestable_because appends
+// " [untestable: <reason> — blocking <id8>]" to the AC line; unmarked ACs are
+// unchanged; a very long reason is clipped, never emitted whole.
+// ---------------------------------------------------------------------------
+
+test('H19 (S4b b): an AC marked untestable_because renders " [untestable: <reason> — blocking <id8>]" appended to its AC line', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    const blockingId = randomUUID();
+    store.create(
+      article('alpha', ['src/a.mjs'], {
+        current_ac: [
+          {
+            ac_id: 'AC1',
+            text: 'alpha works',
+            verifiable_at: 'final',
+            untestable_because: { reason: 'no harness can drive a real browser download', blocking_record_id: blockingId },
+          },
+        ],
+      })
+    );
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    const id8 = blockingId.slice(0, 8);
+    assert.match(
+      ctx,
+      new RegExp(`AC1: alpha works \\[untestable: no harness can drive a real browser download — blocking ${id8}\\]`),
+      'the untestable annotation is appended to the AC line'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19 (S4b b): an AC without untestable_because renders unchanged — no [untestable: ...] suffix', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs'])); // default current_ac carries no untestable_because
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /AC1: alpha works/, 'the plain AC line still renders');
+    assert.doesNotMatch(ctx, /\[untestable:/, 'no marker at all when nothing is untestable');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H19 (S4b b): a very long untestable_because reason is CLIPPED on the AC line, not emitted whole', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    const blockingId = randomUUID();
+    const longReason = 'x'.repeat(500);
+    store.create(
+      article('alpha', ['src/a.mjs'], {
+        current_ac: [
+          { ac_id: 'AC1', text: 'alpha works', verifiable_at: 'final', untestable_because: { reason: longReason, blocking_record_id: blockingId } },
+        ],
+      })
+    );
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    const line = ctx.split('\n').find((l) => l.includes('AC1: alpha works'));
+    assert.ok(line, 'the AC line renders');
+    assert.ok(!line.includes(longReason), 'the raw 500-char reason is not emitted whole — clip() bounds it (P6 flood half)');
+    assert.ok(line.length < longReason.length, 'the rendered line stays well short of the raw reason length');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H19: hazards and decisions are guarded per record like articles — a repeat touch re-delivers nothing', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {

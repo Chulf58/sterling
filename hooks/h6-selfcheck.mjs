@@ -4525,7 +4525,9 @@ var RECORD_TYPES = {
     fileKeys: (r) => r.file_keys ?? [],
     // slug leads for the same reason it does on feature_article: it is the
     // handle that survives supersession (board 1e639f32); the title states the ruling.
-    digest: { slug: "plain", title: "plain" }
+    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
+    // shows scope alongside the ruling, not only on knowledge_get.
+    digest: { slug: "plain", title: "plain", authority: "plain" }
   },
   anti_pattern: {
     schema: antiPatternSchema,
@@ -6043,6 +6045,25 @@ var SterlingStore = class _SterlingStore {
       hops += 1;
     }
     return { id: current.id, status: current.status, hops };
+  }
+  /**
+   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
+   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
+   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * it only ever has something to say about a record that was itself retired
+   * via supersede(). A record can also be named the target of a rel:'supersedes'
+   * link WITHOUT ever being retired — a clause-level or partial override
+   * recorded via knowledge_link — and that leaves no trace on the target's own
+   * status/terminus. This is the read-time counterpart that makes such edges
+   * visible from the target side. Purely additive/advisory: never mutates
+   * status, never feeds resolveTerminus, never touches the terminus block.
+   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
+   * mount, because an edge lives with its SOURCE record (addLink routes by
+   * source), which may sit in a different store than the target.
+   */
+  inboundSupersedes(id) {
+    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`).all(id);
+    return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
   }
   /**
    * The §3.4 base filter (status + type + stack-tag + file-key join) shared

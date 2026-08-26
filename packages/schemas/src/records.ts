@@ -582,7 +582,9 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
     // slug leads for the same reason it does on feature_article: it is the
     // handle that survives supersession (board 1e639f32); the title states the ruling.
-    digest: { slug: 'plain', title: 'plain' },
+    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
+    // shows scope alongside the ruling, not only on knowledge_get.
+    digest: { slug: 'plain', title: 'plain', authority: 'plain' },
   },
   anti_pattern: {
     schema: antiPatternSchema,

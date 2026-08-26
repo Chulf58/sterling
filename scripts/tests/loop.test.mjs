@@ -901,6 +901,46 @@ test('AC3: a non-empty required_by_contract join (staged decision ∈ brief.deci
 });
 
 // ---------------------------------------------------------------------------
+// S4b rendering marker (d): prep.mjs's reviewer-slice decision row carries the
+// same "[authority]" bracketed present/absent contract as H19/H23, reusing the
+// required_by_contract mandatory-item render surface the AC3 tests above
+// already proved is reachable (a genuine render harness — not faked).
+// ---------------------------------------------------------------------------
+
+test('S4b (d): a required_by_contract decision with authority renders "[authority]" near its row in the reviewer slice', () => {
+  const fix = makeLoopProject({ decisionInDecisionsMade: true });
+  const { dir, tools, decision } = fix;
+  try {
+    tools.knowledgeUpdate(decision.id, { authority: 'one_off', version: 2 });
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.equal(prep.code, 0, prep.stderr);
+    const reviewer = readFileSync(join(RUN_DIR(dir), 'dispatch_slice-p1-reviewer.md'), 'utf8');
+    const idx = reviewer.indexOf(decision.id);
+    assert.ok(idx >= 0, 'the required_by_contract decision row renders (full UUID)');
+    const window = reviewer.slice(Math.max(0, idx - 50), idx + 700); // EXCERPT_CHARS(600)-sized window
+    assert.match(window, /\[one_off\]/, 'authority renders as a bracketed marker near the decision row');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+test('S4b (d): a required_by_contract decision WITHOUT authority renders its row with no bracketed marker nearby', () => {
+  const fix = makeLoopProject({ decisionInDecisionsMade: true }); // fixture decision carries no authority
+  const { dir, decision } = fix;
+  try {
+    const prep = runScript('prep.mjs', ['--run', 'r-loop', '--phase', 'p1', '--target', dir], dir);
+    assert.equal(prep.code, 0, prep.stderr);
+    const reviewer = readFileSync(join(RUN_DIR(dir), 'dispatch_slice-p1-reviewer.md'), 'utf8');
+    const idx = reviewer.indexOf(decision.id);
+    assert.ok(idx >= 0, 'the required_by_contract decision row renders (full UUID)');
+    const window = reviewer.slice(Math.max(0, idx - 50), idx + 700);
+    assert.doesNotMatch(window, /\[(standing|session_scoped|one_off)\]/, 'no authority → no bracketed marker anywhere near the row');
+  } finally {
+    fix.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // AC5 (run r-d630 phase 3) — dispose-run folds the undispositioned remainder into
 // the surviving summaries BEFORE deleting transients; merge-gate prints it.
 // ---------------------------------------------------------------------------

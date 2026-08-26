@@ -4539,7 +4539,9 @@ var RECORD_TYPES = {
     fileKeys: (r) => r.file_keys ?? [],
     // slug leads for the same reason it does on feature_article: it is the
     // handle that survives supersession (board 1e639f32); the title states the ruling.
-    digest: { slug: "plain", title: "plain" }
+    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
+    // shows scope alongside the ruling, not only on knowledge_get.
+    digest: { slug: "plain", title: "plain", authority: "plain" }
   },
   anti_pattern: {
     schema: antiPatternSchema,
@@ -6059,6 +6061,25 @@ var SterlingStore = class _SterlingStore {
     return { id: current.id, status: current.status, hops };
   }
   /**
+   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
+   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
+   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * it only ever has something to say about a record that was itself retired
+   * via supersede(). A record can also be named the target of a rel:'supersedes'
+   * link WITHOUT ever being retired — a clause-level or partial override
+   * recorded via knowledge_link — and that leaves no trace on the target's own
+   * status/terminus. This is the read-time counterpart that makes such edges
+   * visible from the target side. Purely additive/advisory: never mutates
+   * status, never feeds resolveTerminus, never touches the terminus block.
+   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
+   * mount, because an edge lives with its SOURCE record (addLink routes by
+   * source), which may sit in a different store than the target.
+   */
+  inboundSupersedes(id) {
+    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`).all(id);
+    return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+  }
+  /**
    * The §3.4 base filter (status + type + stack-tag + file-key join) shared
    * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
    * cap. One definition so count() can never drift from what query() would
@@ -7052,6 +7073,7 @@ function pointerLine(store2, kind, slug) {
   }
   return `  \u2192 ${kind} [[${slug}]]: ${head}`;
 }
+var UNTESTABLE_REASON_CLIP = 140;
 function renderArticle(store2, article, charCap) {
   const lines = [
     `\u25B8 article '${article.slug}' (${article.state}${article.concept_family ? `, concept family '${article.concept_family}'` : ""})`,
@@ -7059,7 +7081,13 @@ function renderArticle(store2, article, charCap) {
     `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
   ];
   if (article.current_ac?.length) {
-    lines.push(`ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => `${a.ac_id}: ${a.text}`).join(" | ")}`);
+    lines.push(
+      `ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => {
+        const u = a.untestable_because;
+        const suffix = u ? ` [untestable: ${clip(u.reason, UNTESTABLE_REASON_CLIP)} \u2014 blocking ${String(u.blocking_record_id).slice(0, 8)}]` : "";
+        return `${a.ac_id}: ${a.text}${suffix}`;
+      }).join(" | ")}`
+    );
   }
   const relies = article.dependencies?.relies_on ?? [];
   const relied = article.dependencies?.relied_by ?? [];
@@ -7103,7 +7131,8 @@ function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { r
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
-    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
+    const authorityMarker = d.authority ? `[${d.authority}] ` : "";
+    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
