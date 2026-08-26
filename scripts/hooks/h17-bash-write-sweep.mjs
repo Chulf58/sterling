@@ -90,7 +90,21 @@
 // first charge; (3) STRUCTURAL walk budgets (nodes + depth) whose overflow is
 // the hook's own BLOCKING deny naming the tripped budget, never an OOM/timeout;
 // (4) BOUNDED, size-prechecked JSON reads for the stamp and the temp records.
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, readlinkSync, realpathSync, constants as FS } from 'node:fs';
+// v3.8 SLICE 1 of the secure-I/O / (B) baseline-integrity redesign (decision
+// 532a4383 h17-baseline-integrity-redesign-rulings-abcd; design f2bc631f;
+// platform posture 2a69a8d7): the shared READ + CLASSIFY layer. (1) RULING C —
+// the Linux arm's /proc/self/fd anchor is PREFLIGHTED at the top of the agent
+// path and its absence — or its PRESENCE WITHOUT FUNCTION — is a HARD DENY
+// ('secure I/O unavailable: ...'), never an automatic degrade to detection. (2) RULING B — a SYMLINK's
+// state is UNATTESTABLE: pathState no longer readlinks it, and the recorded
+// marker is NEVER equal and NEVER stamp-attestable, so an untouched link is
+// denied rather than reported "unchanged" on the strength of a racy read.
+// (3) The component walk (classifyPathComponents) resolves each component
+// through a PINNED PARENT DESCRIPTOR on Linux and the byte-read primitives open
+// their leaf O_NOFOLLOW / identity-verified. S2 (descriptor-pinned write+delete),
+// S3 (git read-blob restore), S4 ((B) detect-and-deny) and S5 (Pre-snapshot
+// atomicity) are the remaining slices and are NOT in this file yet.
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, statSync, realpathSync, constants as FS } from 'node:fs';
 import { join, dirname, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -103,6 +117,220 @@ import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 // settings.local.json is enforcement surface but git is blind to it).
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
 const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
+
+// ---------------------------------------------------------------------------
+// THE SHARED SECURE-I/O LAYER — SLICE 1: READ + CLASSIFY (decision 532a4383
+// h17-baseline-integrity-redesign-rulings-abcd, design f2bc631f, platform
+// posture 2a69a8d7). Everything below exists so that a path this hook reads or
+// classifies cannot be REDIRECTED by a symlink swapped in under the gate. The
+// write/delete primitives (S2), the git read-blob restore (S3) and the (B)
+// detect-and-deny stamp manifest (S4) are separate slices and are NOT here.
+//
+// TWO ARMS, ONE FLOW (2a69a8d7):
+//   * LINUX — PREVENTION. Every component is resolved RELATIVE TO A PINNED
+//     PARENT DESCRIPTOR through /proc/self/fd/<fd>/<name>, and every open on
+//     the walk is O_DIRECTORY|O_NOFOLLOW. Once a directory fd is held, the
+//     NAME it was opened under is irrelevant: swapping `hooks` for a symlink
+//     afterwards cannot re-aim a resolution that starts from the descriptor.
+//   * NATIVE WINDOWS — DETECTION, NOT PREVENTION (named accepted residual,
+//     2a69a8d7). libuv silently ignores O_NOFOLLOW on win32, there is no
+//     openat, and Node cannot open a directory as a descriptor at all — so the
+//     ancestor walk stays path-addressed (lstat per component, as before) and
+//     the LEAF is identity-verified with lstat/fstat {bigint:true} dev/ino/type
+//     equality across the open. An adversary racing path resolution itself can
+//     evade that; the residual is disclosed, not silently closed.
+//
+// RULING C — /proc/self/fd ABSENT IS A HARD DENY, NEVER AN AUTO-DEGRADE. The
+// whole Linux arm is built on procfs being mounted; a hardened container may
+// not mount it. Falling back to the Windows detect-and-abort arm there was
+// EXPLICITLY REJECTED (532a4383, on P5 grounds): losing the prevention
+// mechanism must HALT, because a silent drop to defeatable detection is
+// indistinguishable, from the outside, from the guarantee it replaced.
+// Degradation may only ever be an explicit operator opt-in, and none exists.
+//
+// THE ENV SEAM IS A TEST SEAM, NOT A LOOSENING. Unset — the production case —
+// this is byte-identical to hardcoding '/proc/self/fd'. Pointed anywhere else,
+// the anchor is FUNCTIONALLY VERIFIED fail-closed (see
+// `secureIoUnavailableReason`) and every anchored resolution goes through that
+// same path, so a wrong value denies rather than degrades. It exists because
+// genuine procfs absence cannot be constructed in a test without root and a
+// mount-namespace change.
+const PROCFS_FD_DIR = process.env.STERLING_H17_PROCFS_FD_DIR || '/proc/self/fd';
+const IS_WIN32 = process.platform === 'win32';
+
+// The marker a state carries when the snapshot could not KNOW it (Ruling B).
+// One shared constant so the record's shape, its validator and its comparison
+// can never drift apart.
+const UNATTESTABLE_SYMLINK = 'symlink-target';
+
+// Ruling C's preflight, as a pure probe: null when secure I/O is available on
+// this platform, else the EXACT operator-facing reason. Called once, at the top
+// of the agent path, before any store/git/baseline touch — a prevention
+// mechanism that is missing must stop the command, not be discovered halfway
+// through a sweep that has already read something.
+//
+// PRESENCE IS NOT FUNCTION — the fail-open this repair closes (found
+// independently by both reviewers of the first Slice 1 landing). The probe used
+// to be `existsSync(PROCFS_FD_DIR)` alone, so an anchor that was PRESENT BUT
+// WRONG (any existing directory: a hardened container's stub, a stale bind
+// mount, the seam pointed at /tmp) passed as "available". Every anchored path
+// then resolved to `<wrongdir>/<fd>/<name>`, which does not exist; every
+// component classified 'absent'; 'absent' is explicitly NOT a violation; and the
+// ancestor guard judged every path freshly creatable — the whole mechanism
+// DEGRADED TO ALLOW. That is precisely the auto-degrade Ruling C rejected by
+// name (532a4383), reached silently and by accident. The old comment claiming
+// "a wrong value denies rather than degrades" documented the opposite of the
+// behavior; this function is what makes it true.
+//
+// WHAT "WORKING" IS ESTABLISHED BY, and why a weaker test would not do. A
+// non-empty listing proves nothing (any populated directory passes), and a
+// string comparison against '/proc/self/fd' verifies nothing about the anchor at
+// all — it only agrees with the two obvious tests by coincidence, and would
+// refuse a genuinely working alternative such as /proc/thread-self/fd. So the
+// probe performs THE VERY OPERATION the layer depends on: it pins a real
+// directory descriptor, then requires that `<ANCHOR>/<fd>` (a) lstats as a magic
+// SYMLINK, as every procfs fd entry is — which a directory of numeric-named
+// regular-file decoys fails — and (b) RESOLVES, through stat, to the exact
+// object that descriptor holds, compared by dev+ino against the descriptor's own
+// fstat. An anchor that satisfies both is a working descriptor directory
+// whatever it is called; anything else is unavailable and hard-denies.
+// `probeDir` is the repo root — the same trust anchor the component walk starts
+// from — so the preflight exercises the real path, not a synthetic one.
+function secureIoUnavailableReason(probeDir) {
+  if (IS_WIN32) return null; // the detect-and-abort arm needs no procfs (2a69a8d7)
+  if (!existsSync(PROCFS_FD_DIR)) return 'secure I/O unavailable: /proc/self/fd absent';
+  let fd = null;
+  try {
+    fd = openRootAnchorDir(probeDir);
+    const anchored = `${PROCFS_FD_DIR}/${fd}`;
+    const entry = lstatSync(anchored); // the fd entry ITSELF, unfollowed
+    const through = statSync(anchored); // ... and what it resolves to
+    const direct = fstatSync(fd); // ... versus what the descriptor actually holds
+    closeSync(fd);
+    fd = null;
+    if (!entry.isSymbolicLink()) {
+      return `secure I/O unavailable: '${PROCFS_FD_DIR}' exists but its descriptor entries are not the magic symlinks a /proc/self/fd directory is made of`;
+    }
+    if (through.dev !== direct.dev || through.ino !== direct.ino) {
+      return (
+        `secure I/O unavailable: '${PROCFS_FD_DIR}/<fd>' does not resolve to the object that descriptor holds ` +
+        `(resolved dev/ino ${through.dev}/${through.ino}, descriptor ${direct.dev}/${direct.ino}) — it is present but is not a working descriptor directory`
+      );
+    }
+    return null;
+  } catch (e) {
+    return `secure I/O unavailable: '${PROCFS_FD_DIR}' could not be verified as a working descriptor directory (${(e && e.code) || (e && e.message) || e})`;
+  } finally {
+    // Only reachable with fd still open when an exception is already driving the
+    // verdict, so a close failure must not displace it (same rule as closePinned).
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+// Open a DIRECTORY as a pinned descriptor, no-follow. Linux only — Node cannot
+// open a directory descriptor on win32, which is precisely why the Windows arm
+// classifies by path (Fork 2 of f2bc631f, option (b): a weaker, disclosed
+// ancestor guarantee rather than a native addon that breaks invariant 4).
+// O_NONBLOCK so a fifo/device swapped in cannot BLOCK the open itself — a
+// blocked hook is timeout-killed into a non-2 exit, which the platform treats
+// as ALLOW (the same fail-open shape Codex F2 closed on the byte-read path).
+function openPinnedDir(path) {
+  return openSync(path, FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
+}
+
+// The REPO ROOT anchor — the ONE directory opened WITHOUT O_NOFOLLOW, and the
+// distinction is deliberate, not an oversight (repair of an availability
+// regression the first Slice 1 landing introduced: `~/proj -> /mnt/data/proj` is
+// an entirely ordinary arrangement, and a no-follow open of a symlinked project
+// root throws ENOTDIR/ELOOP into the fail-closed catch, DENYING EVERY agent Bash
+// call. The pre-slice code never lstat'd cwd itself, so nothing was lost by
+// following here; this cluster has been reverted twice over exactly this class
+// of false deny.)
+//
+// THE CONFLATION TO AVOID: Ruling B (532a4383) makes a symlink's TARGET STATE
+// unattestable — H17 never reads through a link to decide whether a protected
+// path changed, and every pin of that behavior is untouched by this function.
+// Ruling B says nothing about the PATH ONE REACHES THE REPO THROUGH. The root is
+// the TRUST ANCHOR handed to this hook by the platform (input.cwd, normalized to
+// the project root): it is never a component under test, never classified and
+// never attested — it is the origin the classification is relative TO. Once this
+// descriptor is held, every component BELOW it is still resolved through the
+// anchor with O_NOFOLLOW, so the prevention guarantee is unchanged: following
+// the root link once, at the start, cannot re-aim anything inside the repo.
+// Still O_DIRECTORY, so a root symlink pointing at a NON-directory fails
+// (ENOTDIR) rather than being accepted; still O_NONBLOCK, same reason as above.
+function openRootAnchorDir(path) {
+  return openSync(path, FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NONBLOCK);
+}
+
+// The path that resolves `name` RELATIVE TO the pinned directory descriptor
+// `fd` — Node's stand-in for openat/fstatat, and the reason the Linux arm is
+// prevention rather than detection.
+function anchoredPath(fd, name) {
+  return `${PROCFS_FD_DIR}/${fd}/${name}`;
+}
+
+// A component name safe to resolve through an anchor. '', '.' and '..' would
+// each re-aim the walk at a directory the anchor was chosen to exclude (the
+// repo root, or above it), and a NUL or embedded separator would smuggle a
+// second component past the per-component check. Lexical validation before any
+// resolution is the Linux design's first step (f2bc631f).
+function assertResolvableComponent(component, rel, what) {
+  if (component === '' || component === '.' || component === '..' || component.includes('\0') || component.includes('/')) {
+    throw new Error(
+      `${what}: refusing to resolve '${rel}' — its component ${JSON.stringify(component)} is not a plain path segment; ` +
+        `an empty, '.', '..', NUL-bearing or separator-bearing component cannot be anchored and is denied on sight, never resolved`
+    );
+  }
+}
+
+// Close a descriptor on a path that is already unwinding. A close failure with
+// no primary exception pending IS the failure (a leaked fd marches toward an
+// EMFILE fail-open, Codex F5) and propagates; with one pending it must not
+// displace the verdict already being carried.
+function closePinned(fd, primary) {
+  if (fd === null) return;
+  try {
+    closeSync(fd);
+  } catch (closeErr) {
+    if (!primary) throw closeErr;
+  }
+}
+
+// Open a LEAF for reading with the platform's strongest available no-follow
+// guarantee. LINUX: O_NOFOLLOW makes a symlink at the leaf fail the open
+// outright (ELOOP) instead of being read through. WIN32: O_NOFOLLOW is
+// silently ignored by libuv, so identity is VERIFIED instead — lstat before,
+// fstat after, both {bigint:true} because number-valued fs.Stats truncate the
+// 64-bit file id and a truncated ino makes the check unsound (2a69a8d7). A
+// mismatch ABORTS (throws → the caller's fail-closed catch → deny), which is
+// detection, not prevention: an adversary racing the resolution itself, before
+// the lstat and back after, evades it. That residual is the disclosed,
+// accepted Windows envelope.
+function openLeafNoFollow(abs, extraFlags = 0) {
+  if (!IS_WIN32) return openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK | FS.O_NOFOLLOW | extraFlags);
+  const before = lstatSync(abs, { bigint: true });
+  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK | extraFlags);
+  try {
+    const after = fstatSync(fd, { bigint: true });
+    const sameKind = before.isFile() === after.isFile() && before.isDirectory() === after.isDirectory() && before.isSymbolicLink() === after.isSymbolicLink();
+    if (before.dev !== after.dev || before.ino !== after.ino || !sameKind) {
+      throw new Error(
+        `'${abs}' is not the same object across its own open (lstat dev/ino ${before.dev}/${before.ino}, fstat ${after.dev}/${after.ino}) — ` +
+          `refusing to read it. On this platform H17 verifies identity across the open (detection) rather than preventing the swap ` +
+          `(decision h17-windows-detect-and-abort): a mismatch aborts the check, it never reads whatever was substituted.`
+      );
+    }
+    return fd;
+  } catch (e) {
+    closePinned(fd, e);
+    throw e;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // THE BOUNDED-RESOURCE LAYER (board 55fcccac). Everything below exists so that
@@ -208,9 +436,14 @@ function newWalkBudget() {
 // exit. O_NONBLOCK makes the open return immediately for those types so the
 // fstat regular-file check can reject them; a regular file ignores O_NONBLOCK,
 // so its reads behave exactly as before. A prior lstat cannot substitute — it
-// leaves the fifo-swap race between the lstat and the open. (The descriptor is
-// NOT yet the no-follow anchor of decision h17-windows-detect-and-abort — the
-// O_NOFOLLOW/identity-verification layer is that decision's own slice.)
+// leaves the fifo-swap race between the lstat and the open. (SLICE 1, decision
+// 532a4383: the open now goes through `openLeafNoFollow`, which adds
+// O_NOFOLLOW on Linux and lstat/fstat bigint identity verification on native
+// Windows — the layer decision h17-windows-detect-and-abort called its own
+// slice. The ANCESTOR chain of `abs` is still classified by the caller rather
+// than descriptor-anchored here, because this function is addressed by an
+// absolute path; anchoring the read itself belongs to the S2 write/read
+// primitives that take (cwd, rel).)
 // BOUNDED READ, NOT A SIZE CAP (Codex F3): the read is bounded to the INITIAL
 // fstat size and re-fstats afterward, throwing on any size/mtime/ctime change.
 // An unbounded read-until-EOF loop chases a file appended-to faster than the
@@ -222,7 +455,7 @@ function newWalkBudget() {
 // is correct on both counts. Throws on any I/O error, as the readFileSync it
 // replaces did.
 function sha256OfFileStreamed(abs) {
-  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  const fd = openLeafNoFollow(abs); // SLICE 1: no-follow (Linux) / identity-verified (win32)
   let primary;
   try {
     const st = fstatSync(fd);
@@ -284,7 +517,7 @@ function sha256OfFileStreamed(abs) {
 // look like an unauthorized addition and get REMOVED. Requiring total === size
 // AND an unchanged re-fstat rejects a truncation as loudly as a growth.
 function readBoundedFile(abs, maxBytes, what) {
-  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  const fd = openLeafNoFollow(abs); // SLICE 1: no-follow (Linux) / identity-verified (win32)
   let primary;
   try {
     const st = fstatSync(fd);
@@ -520,6 +753,30 @@ function indexEntriesFor(cwd, rels) {
 // (`budget`, `depth`), because a collapsed untracked directory is an
 // attacker-or-accident-controlled amount of WORK that streaming cannot bound.
 function pathState(cwd, rel, idx, budget = WALK_BUDGET, depth = 0) {
+  // THE ANCESTOR CHAIN IS CLASSIFIED BEFORE THE STATE IS TAKEN (repair of an
+  // outside-family review finding). Everything below is PATH-ADDRESSED: the
+  // lstat, and the stream-hash that follows it, both resolve `cwd/rel` from the
+  // root again, so O_NOFOLLOW at the LEAF says nothing about the ANCESTORS. An
+  // enforcement path whose ancestor directory is replaced by a symlink to an
+  // out-of-repo decoy therefore lstat'd as an ordinary regular file and hashed
+  // to whatever the decoy held: present a byte-identical decoy and the guard
+  // reports "unchanged" about a file it has never read. Ruling B's "never read
+  // through a symlink" (532a4383) covers an ancestor exactly as it covers a
+  // leaf, so classify the chain first — descriptor-pinned on Linux — and let a
+  // non-directory ancestor THROW into the caller's fail-closed catch (deny at
+  // Post; deny at Pre, where a symlinked ancestor over an enforcement path is a
+  // pre-existing environment defect, the same disposition the (B) walk has
+  // always given it).
+  // DEPTH 0 ONLY, and that is sufficient rather than lazy: the recursion's own
+  // children are classified by their own lstat one level down (a symlinked child
+  // becomes an `unattestable` state, never followed), so the chain that needs
+  // proving is the one ABOVE the path git reported — and classifying it once per
+  // reported path keeps this off the per-entry hot path.
+  // NAMED RESIDUAL, not closed here: classification and the byte read are still
+  // two separate path resolutions, so the INTRA-CALL window between them remains
+  // open. Closing it needs the descriptor-pinned read primitives of S2, not this
+  // slice; what this closes is the Pre→Post instantiation of the same invariant.
+  if (depth === 0) assertRealAncestors(cwd, rel, `(A) state snapshot of '${rel}'`);
   const abs = join(cwd, rel);
   const index = idx.get(rel) ?? null;
   let st;
@@ -530,7 +787,21 @@ function pathState(cwd, rel, idx, budget = WALK_BUDGET, depth = 0) {
     throw e; // any OTHER lstat error is unverifiable -> AC9 fail-closed
   }
   const mode = st.mode & 0o7777; // PERMISSION bits only; the type is its own term
-  if (st.isSymbolicLink()) return { exists: true, type: 'symlink', mode, index, target: readlinkSync(abs) };
+  // RULING B (decision 532a4383, h17-baseline-integrity-redesign-rulings-abcd):
+  // A SYMLINK'S STATE IS UNATTESTABLE. The old term here was `target:
+  // readlinkSync(abs)` — a value this hook cannot securely obtain: pinning a
+  // symlink ITSELF (to read its target without following it) needs
+  // O_PATH|O_NOFOLLOW + readlinkat, which pure Node does not expose and which a
+  // native addon would only buy at the cost of the dependency-light-hooks
+  // invariant (invariant 4, already refused once by 2a69a8d7). A path-addressed
+  // readlink races the very swap this layer exists to stop, so the value it
+  // returns is evidence of nothing. The honest disposition is fail-closed:
+  // record that the state was UNKNOWABLE, never a target to compare. `sameState`
+  // and `stampCouldAttest` treat this exactly as `walk_budget_exceeded` is
+  // treated — NEVER equal, NEVER attestable — so a symlink is denied on the (A)
+  // state surface even when it demonstrably did not move, rather than reported
+  // "unchanged" on the strength of a racy read.
+  if (st.isSymbolicLink()) return { exists: true, type: 'symlink', mode, index, unattestable: UNATTESTABLE_SYMLINK };
   if (st.isFile()) return { exists: true, type: 'file', mode, index, sha256: sha256OfFileStreamed(abs) };
   if (st.isDirectory()) {
     // An untracked directory reaches the sweep as its COLLAPSED path (`?? dir/`),
@@ -611,10 +882,23 @@ function sameState(a, b) {
   if (!isStateObject(a) || !isStateObject(b)) return false;
   if (a.exists !== b.exists) return false; // EXISTENCE
   if (a.index !== b.index) return false; // INDEX ENTRY (stage, mode, blob OID)
+  // RULING B / UNATTESTABLE (532a4383): an endpoint whose state was UNKNOWABLE
+  // can never be reported "unchanged" — there is nothing to compare it against.
+  // Checked BEFORE the absent-state return AND before the type terms, so it
+  // covers every shape a marker can ever land on. (Repair of an outside-family
+  // review finding: it used to sit AFTER `if (!a.exists) return true`, so a
+  // recorded ABSENT state carrying a marker compared EQUAL before the marker was
+  // ever consulted — the guard described itself as universal and was not. No
+  // well-formed record reaches that combination, since pathState emits absence
+  // as {exists,index} alone and stateShapeError refuses a stray field on it, so
+  // hoisting the check only ever makes a CRAFTED record stricter.)
+  // Defense in depth with the explicit symlink arm below: BOTH must be stripped
+  // for a link to compare equal again.
+  if (a.unattestable || b.unattestable) return false;
   if (!a.exists) return true;
   if (a.type !== b.type) return false; // FILE TYPE
   if (a.mode !== b.mode) return false; // MODE
-  if (a.type === 'symlink') return a.target === b.target; // SYMLINK TARGET (readlink)
+  if (a.type === 'symlink') return false; // SYMLINK: unattestable by construction (Ruling B) — never equal, target never read
   if (a.type === 'file') return a.sha256 === b.sha256; // BYTES (raw-byte sha256, whole file)
   if (a.type === 'dir') {
     // AN UNATTESTED WALK IS NEVER "UNCHANGED" (board 55fcccac clause 3): a
@@ -659,7 +943,11 @@ function ownKeys(o) {
 const STATE_FIELDS = {
   absent: ['exists', 'index'],
   file: ['exists', 'type', 'mode', 'index', 'sha256'],
-  symlink: ['exists', 'type', 'mode', 'index', 'target'],
+  // RULING B (532a4383): a symlink carries an `unattestable` MARKER, never a
+  // `target` — the target was the racy read-through this ruling removed. A
+  // record that still carries `target` (an older snapshot, or a crafted one)
+  // is a stray field and DENIES, which is the fail-closed direction.
+  symlink: ['exists', 'type', 'mode', 'index', 'unattestable'],
   // `walk_budget_exceeded` is OPTIONAL and appears only on a Pre snapshot whose
   // walk tripped a structural budget (board 55fcccac). Admitting it to the
   // allowed set opens nothing: its only effect anywhere is to make a state
@@ -698,7 +986,20 @@ function stateShapeError(cwd, v, where) {
     return strayFieldError(v, STATE_FIELDS.file, where);
   }
   if (v.type === 'symlink') {
-    if (typeof v.target !== 'string') return `'${where}' is a symlink with no string 'target'`;
+    // RULING B: the ONLY thing a recorded symlink may carry is the
+    // unattestable marker. A recorded link with no marker cannot be spoken for
+    // by this comparison at all (it would fall through the marker check and be
+    // judged on type/mode alone), so it is refused here — unparseable in every
+    // sense that matters, exactly like a directory with no `children`.
+    // THE LITERAL MARKER, not merely "some non-empty string" (repair of an
+    // outside-family review finding): a validator that accepts any string
+    // accepts a crafted record whose marker is a value nothing else in this file
+    // recognizes, and the shared constant exists precisely so the record's
+    // shape, its validator and its comparison cannot drift apart. Checking the
+    // exact value is what makes that guarantee real.
+    if (v.unattestable !== UNATTESTABLE_SYMLINK) {
+      return `'${where}' is a symlink whose 'unattestable' marker is not the literal ${JSON.stringify(UNATTESTABLE_SYMLINK)} (${JSON.stringify(v.unattestable)})`;
+    }
     return strayFieldError(v, STATE_FIELDS.symlink, where);
   }
   // NOTE: an EMPTY `children` map is deliberately NOT rejected here. A gitlink /
@@ -732,6 +1033,11 @@ function stateShapeError(cwd, v, where) {
 // what a byte hash (or a {deleted:true} entry) can attest.
 function stampCouldAttest(recorded, current) {
   if (!isStateObject(recorded) || !isStateObject(current)) return false;
+  // RULING B / UNATTESTABLE (532a4383): a state the snapshot could not know is
+  // not a difference a byte hash can speak for — same disposition the
+  // walk_budget_exceeded marker already gets below, hoisted so it covers every
+  // shape carrying a marker (a symlink today).
+  if (recorded.unattestable || current.unattestable) return false;
   if (recorded.index !== current.index) return false; // INDEX: unattestable
   if (!current.exists) return recorded.exists === true; // present -> absent: {path, deleted:true}
   if (!recorded.exists) return false; // absent -> present: an existence flip, unattestable
@@ -952,14 +1258,76 @@ function toRel(cwd, abs) {
 // on the first symlink or other non-regular kind found at ANY component,
 // intermediate or final — so a directory is always classified BEFORE it is
 // walked or listed, never interleaved with the walk itself.
-// OUT OF SCOPE (boarded separately, 6c1e0890): the check/use TOCTOU between
-// this classification and the read/write that follows — a descriptor-based
-// O_NOFOLLOW open is a platform-parity design question (Windows included).
 // `what` names the surface in the refusal so one walk can serve the (B) read,
 // the (B) restore write, the (B) delete arm and the (A) tracked restore
 // without four copies of the most security-critical loop in this hook.
+//
+// SLICE 1 (decision 532a4383) MOVED THIS WALK ONTO THE SECURE-I/O LAYER. The
+// induction above ("every path handed to lstat has zero symlinks in its
+// verified prefix") was only ever true AT THE INSTANT each lstat ran: the walk
+// re-resolved the whole path STRING from the root on every component, so a
+// swap landing between component i and component i+1 re-aimed everything after
+// it (board 6c1e0890, the check/use TOCTOU this layer closes). On LINUX the
+// walk now carries a PINNED DIRECTORY DESCRIPTOR: each component is resolved
+// as /proc/self/fd/<parentFd>/<name>, so the prefix cannot be re-aimed once
+// pinned — a swapped ancestor changes what the NAME means, not what the
+// descriptor IS. On NATIVE WINDOWS the walk stays path-addressed exactly as
+// before (Node cannot hold a directory descriptor there; Fork 2 of f2bc631f,
+// option (b)) — a DISCLOSED weaker ancestor guarantee, not a silent one.
 function classifyPathComponents(cwd, rel, what = '(B) baseline') {
   const segments = rel.split('/');
+  if (IS_WIN32) return classifyPathComponentsByPath(cwd, rel, segments, what);
+  let parentFd = null;
+  let primary;
+  try {
+    // The repo root is the TRUST ANCHOR, never itself classified — and it is
+    // opened FOLLOWING (openRootAnchorDir), because a symlinked project root is
+    // an ordinary arrangement and no-following it denies every agent Bash. See
+    // openRootAnchorDir for why that does not weaken Ruling B by a hair.
+    parentFd = openRootAnchorDir(cwd);
+    let soFar = '';
+    for (let i = 0; i < segments.length; i++) {
+      assertResolvableComponent(segments[i], rel, what);
+      soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
+      const anchored = anchoredPath(parentFd, segments[i]);
+      // lstat THROUGH the anchor, never openSync: an lstat cannot block, so a
+      // fifo/socket/device component is classified ('other') instead of hanging
+      // the hook, and only a component confirmed to be a real directory is ever
+      // opened below.
+      const kind = lstatKind(anchored);
+      if (kind === 'absent') return 'absent'; // nothing further to resolve — not a violation
+      if (i === segments.length - 1) return kind;
+      if (kind !== 'dir') {
+        throw new Error(
+          `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
+            `through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+        );
+      }
+      // Pin the confirmed directory, then drop the previous anchor. O_NOFOLLOW
+      // is the race-closer: if the component was swapped for a symlink between
+      // the lstat above and this open, the open FAILS (ELOOP) instead of
+      // opening the link's target — the swap becomes a deny, never a redirect.
+      const nextFd = openPinnedDir(anchored);
+      const prev = parentFd;
+      parentFd = nextFd;
+      closePinned(prev, undefined);
+    }
+    return 'absent'; // unreachable — rel is always non-empty
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(parentFd, primary);
+  }
+}
+
+// The NATIVE WINDOWS arm: today's path-addressed lstat walk, unchanged, kept in
+// its own function so the two platforms' guarantees are legible side by side
+// rather than interleaved. DISCLOSED RESIDUAL (2a69a8d7): this is detection at
+// the leaf and best-effort above it — an adversary swapping an ancestor between
+// two components' lstats re-aims the remainder, and pure Node on Windows offers
+// no descriptor to pin against it.
+function classifyPathComponentsByPath(cwd, rel, segments, what) {
   let abs = cwd;
   let soFar = '';
   for (let i = 0; i < segments.length; i++) {
@@ -992,11 +1360,13 @@ function classifyPathComponents(cwd, rel, what = '(B) baseline') {
 // (A) side already settled on for attribution ambiguity (decision
 // h17-coverage-is-ancestor-aware-and-an-ambiguous-descendant-denies-without-
 // restoring): removing the write from the ambiguous case entirely rather than
-// trying to make it safe. This check STILL RACES with the primitive that
-// follows it (lstat-then-write is not atomic); that residual is knowingly
-// accepted and tracked separately (board 6c1e0890) — an lstat guard shrinks the
-// window, only an O_NOFOLLOW descriptor closes it, and that is a Windows-parity
-// design question this slice deliberately does not open.
+// trying to make it safe. SLICE 1 (532a4383) hardened the CLASSIFICATION this
+// calls — on Linux the component walk is descriptor-anchored, so the ancestor
+// chain can no longer be re-aimed DURING the walk. It STILL RACES with the
+// primitive that FOLLOWS it: the write/delete/restore primitives are addressed
+// by path, so classify-then-write is not atomic. Closing that is S2/S3 of the
+// same decision (descriptor-pinned write/delete, git read-blob restore), not
+// this slice.
 // Returns the IMMEDIATE PARENT's own kind ('dir' when it is already there,
 // 'absent' when the primitive may create it fresh — nothing to follow yet);
 // throws on anything else, and on the first non-directory component above it.
@@ -1473,12 +1843,59 @@ function restoreTracked(cwd, relRaw) {
   }
 }
 
-const input = readStdin();
+// THE INPUT BOUNDARY IS ITSELF A GATE (repair of an outside-family review
+// finding). `readStdin()` reads fd 0 and JSON.parses it, both unguarded. Called
+// bare at the top level — as it was — a truncated or non-JSON stdin threw OUT of
+// the hook, Node exited 1, and exit 1 is the platform's NON-BLOCKING code: the
+// runner reads it as ALLOW. Everything downstream — the Ruling C preflight, the
+// whole sweep, every line of the classify layer — was skipped and the command
+// ran unexamined. A gate that cannot read its own input has verified NOTHING and
+// must fail CLOSED (exit 2, P5), which is what this catch guarantees. It is
+// deliberately the FIRST statement of the agent path, ahead of even the
+// conductor short-circuit, because that short-circuit reads `input.agent_id` and
+// so cannot run until there is an input to read.
+let input;
+try {
+  input = readStdin();
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      'H17',
+      `[stdin] hook input could not be read or parsed (${(e && e.message) || e}) — a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). ` +
+        `An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the command would be ALLOWED unexamined).`
+    )
+  );
+}
 const cwd = input.cwd;
 
 // (conductor) — legitimately edits the enforcement surface. Short-circuit BEFORE
 // any store/git/baseline touch (AC5).
 if (!input.agent_id) allow();
+
+// RULING C PREFLIGHT (decision 532a4383) — placed HERE deliberately: AFTER the
+// conductor short-circuit, so a missing prevention mechanism never denies the
+// conductor's own Bash (this hook exempts the conductor entirely, c8ccb06e),
+// and BEFORE any store/git/baseline/read touch, so the first thing an agent
+// command meets in an environment without secure I/O is the refusal — not a
+// sweep that has already read something through an unprotected path. HARD-DENY,
+// NEVER AUTO-DEGRADE: falling back to the Windows detect-and-abort arm when
+// procfs is absent was explicitly rejected on P5 grounds — silently trading
+// prevention for defeatable detection is invisible from the outside, and an
+// unexpected environment that removes a guarantee must halt. Framed as an
+// ENVIRONMENT DEFECT because it is broken state, not the agent's conduct.
+const secureIoReason = secureIoUnavailableReason(cwd);
+if (secureIoReason) {
+  deny(
+    environmentDefectDenial(
+      'H17',
+      `${secureIoReason} — this hook's descriptor-pinned no-follow I/O layer resolves every path component through '${PROCFS_FD_DIR}', ` +
+        `and without it H17 cannot prevent a symlink swap from redirecting its own reads. Denying every agent Bash command until it is ` +
+        `available (decision h17-baseline-integrity-redesign-rulings-abcd, Ruling C): degrading to detection-only would silently weaken ` +
+        `the guarantee instead of halting, and that degrade was rejected.`,
+      { agentId: input.agent_id }
+    )
+  );
+}
 
 const event = input.hook_event_name;
 

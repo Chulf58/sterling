@@ -249,32 +249,104 @@ function requireV2(dbPath, side) {
  *
  * GATHERS ONLY — every refusal is raised by the caller, after the probe has
  * closed and cleaned up (see readOnlyProbe).
+ *
+ * EVERY QUERY IS GUARDED, exactly as show() guards its own satellite reads: a
+ * table being ABSENT is already handled structurally (`missing` -> the
+ * caller's refuseStructure), but a table being present and the query still
+ * THROWING is a different hazard entirely — SQLITE_BUSY under a concurrent
+ * exclusive transaction, DDL racing this survey, a corrupt page. Unguarded,
+ * that throw escaped both this probe and the top-level dispatcher as an exit-1
+ * stack trace: a crash ON THE REFUSAL PATH, which is worse than the hazard the
+ * refusal guards. So each read reports through `error` (never fail() from
+ * inside the probe — process.exit would skip readOnlyProbe's finally and leak
+ * the handle plus the sidecar litter it exists to prevent) and the wrapper
+ * below raises it as the promised exit 2 once the probe has closed.
  */
-function surveyStore(dbPath, claimedVersion, { withBodies = false } = {}) {
-  return readOnlyProbe(dbPath, (db) => {
-    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
-    const survey = { missing: [], bodies: [], ids: new Set(), aliasIds: new Set(), versionKeys: new Set() };
-    if (!tables.has('records')) {
-      survey.missing.push('records');
-      return survey;
-    }
-    if (claimedVersion === SUPPORTED_SCHEMA_VERSION) {
-      for (const t of ['record_versions', 'record_aliases', 'record_relations']) {
-        if (!tables.has(t)) survey.missing.push(t);
+function surveyStore(dbPath, claimedVersion, { withBodies = false, side = 'source' } = {}) {
+  const unreadable = (what, e) =>
+    `refusing: the ${side} store '${dbPath}' could not be surveyed — ${what} failed (${e.message}). A concurrent exclusive ` +
+    `transaction, a schema change racing this read, or a corrupt file all land here, and a survey that cannot read a table ` +
+    `cannot prove anything about it. Nothing was written.`;
+  let survey;
+  try {
+    survey = readOnlyProbe(dbPath, (db) => {
+      const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
+      const out = {
+        missing: [], bodies: [], ids: new Set(), aliasIds: new Set(), versionKeys: new Set(), relationCount: 0,
+        columnState: new Map(), error: null,
+      };
+      if (!tables.has('records')) {
+        out.missing.push('records');
+        return out;
       }
-    }
-    survey.ids = new Set(db.prepare('SELECT id FROM records').all().map((r) => r.id));
-    if (withBodies) survey.bodies = db.prepare('SELECT body FROM records').all().map((r) => JSON.parse(r.body));
-    if (tables.has('record_aliases')) {
-      survey.aliasIds = new Set(db.prepare('SELECT historical_id FROM record_aliases').all().map((r) => r.historical_id));
-    }
-    if (tables.has('record_versions')) {
-      survey.versionKeys = new Set(
-        db.prepare('SELECT record_id, version FROM record_versions').all().map((r) => `${r.record_id}@v${r.version}`)
-      );
-    }
-    return survey;
-  });
+      if (claimedVersion === SUPPORTED_SCHEMA_VERSION) {
+        for (const t of ['record_versions', 'record_aliases', 'record_relations']) {
+          if (!tables.has(t)) out.missing.push(t);
+        }
+      }
+      try {
+        out.ids = new Set(db.prepare('SELECT id FROM records').all().map((r) => r.id));
+        if (withBodies) {
+          // COLUMN-RESIDENT STATE travels beside the body: storableBody
+          // (packages/store/src/index.ts:692-698) strips status/superseded_by
+          // from every persisted v2 body and derives them from the COLUMNS at
+          // read time, so two records can hold identical bodies while
+          // disagreeing about whether one of them is retired. The columns are
+          // read only when the table actually carries them — a legacy shape
+          // without them has no column-resident state to disagree about.
+          const cols = new Set(db.prepare('PRAGMA table_info(records)').all().map((c) => c.name));
+          const stateful = cols.has('status') && cols.has('superseded_by');
+          const rows = db.prepare(`SELECT id, body${stateful ? ', status, superseded_by' : ''} FROM records`).all();
+          out.bodies = rows.map((r) => JSON.parse(r.body));
+          if (stateful) {
+            for (const r of rows) out.columnState.set(r.id, { status: r.status ?? null, superseded_by: r.superseded_by ?? null });
+          }
+        }
+      } catch (e) {
+        out.error = unreadable("reading the 'records' table", e);
+        return out;
+      }
+      if (tables.has('record_aliases')) {
+        try {
+          out.aliasIds = new Set(db.prepare('SELECT historical_id FROM record_aliases').all().map((r) => r.historical_id));
+        } catch (e) {
+          out.error = unreadable("reading the 'record_aliases' table", e);
+          return out;
+        }
+      }
+      if (tables.has('record_versions')) {
+        try {
+          out.versionKeys = new Set(
+            db.prepare('SELECT record_id, version FROM record_versions').all().map((r) => `${r.record_id}@v${r.version}`)
+          );
+        } catch (e) {
+          out.error = unreadable("reading the 'record_versions' table", e);
+          return out;
+        }
+      }
+      // record_relations is the third table the migrate copy loop cannot carry
+      // (board b96ebf47, AC20) — a row COUNT, not mere presence, is what the
+      // caller's guard gates on: every mkV2 fixture carries the empty v2
+      // provenance tables, so an existence-only check would refuse a clean
+      // store with zero relations too.
+      if (tables.has('record_relations')) {
+        try {
+          out.relationCount = db.prepare('SELECT COUNT(*) AS n FROM record_relations').get().n;
+        } catch (e) {
+          out.error = unreadable("counting 'record_relations' rows", e);
+          return out;
+        }
+      }
+      return out;
+    });
+  } catch (e) {
+    // The open itself, the sqlite_master probe, or anything else past this
+    // file's own guards — deliberate exit 2 naming what went wrong, never
+    // node's default exit 1 + stack trace.
+    fail(unreadable('opening it read-only for the survey', e));
+  }
+  if (survey.error) fail(survey.error);
+  return survey;
 }
 
 /** A store that is not what it claims to be is a STOP, in either mode: a file
@@ -357,6 +429,48 @@ function projectContext(projectDir) {
   return { config, storePath };
 }
 
+/** KEY-ORDER-INDEPENDENT structural equality over two parsed record bodies
+ *  (board b96ebf47, AC21) — used ONLY to decide whether a same-id record on
+ *  both sides of a migrate is an idempotent skip or a genuine conflict.
+ *  Deliberately a plain recursive compare rather than a JSON.stringify
+ *  compare: two bodies serialized through the same schema at different times
+ *  are not guaranteed identical KEY order, and a stringify compare would
+ *  false-positive a conflict on a byte-identical record.
+ *
+ *  ARRAY ORDER IS SIGNIFICANT, and that is deliberate, not an oversight of the
+ *  same relaxation: links[], files[] and history[] are ORDER-BEARING, so two
+ *  arrays holding the same entries in a different sequence are a real
+ *  difference between the two stores and must conflict rather than skip.
+ *  "Order-independent" above refers to object KEY order only.
+ *
+ *  DEPTH-BOUNDED. The inputs are RAW pre-validation JSON read straight out of
+ *  a foreign store's `records.body`, so nothing upstream has capped their
+ *  nesting: an unbounded recursion turns a pathological (or corrupt) body into
+ *  a RangeError that escapes as exit 1 + a stack trace instead of the promised
+ *  refusal. Exceeding the bound THROWS a plain message the caller turns into a
+ *  clean exit-2 refusal naming the record — the bound is far past any legal
+ *  record shape, so hitting it is itself the finding. */
+const MAX_BODY_COMPARE_DEPTH = 64;
+
+function deepEqual(a, b, depth = 0) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`its nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record body`);
+  }
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((v, i) => deepEqual(v, b[i], depth + 1));
+  }
+  if (typeof a === 'object') {
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every((k) => Object.prototype.hasOwnProperty.call(b, k) && deepEqual(a[k], b[k], depth + 1));
+  }
+  return false;
+}
+
 /** migrate --from <store.db> --to <store.db> [--apply]: copy every record the
  *  destination does not hold, preserving the envelope (ids, clocks, scope: this
  *  heals ONE logical store split across two physical files by a context flip;
@@ -370,7 +484,11 @@ function projectContext(projectDir) {
  *  that table — its archived versions, its historical-id aliases, the inbound
  *  supersedes relation a retired record's successor lives in — cannot cross
  *  here at all. Those cases are REFUSED before the first write rather than
- *  half-copied, and `adopt` is the mode that carries them. */
+ *  half-copied. Whole-file adoption is the SHAPE that would carry them, but
+ *  `adopt` is a read-only probe with no apply path (board 44434103), so today
+ *  those refusals have no operable route past them — stated plainly in the
+ *  messages rather than pointing at a mode that cannot write (decision
+ *  [migrate-relations-containment-narrows-migrate-to-unlinked-stores]). */
 function migrate() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
@@ -384,13 +502,14 @@ function migrate() {
   refuseSameFile(from, to, 'migrate');
   const fromProbe = requireV2(from, 'source');
   const toProbe = requireV2(to, 'destination');
-  const src = surveyStore(from, fromProbe.version, { withBodies: true });
+  const src = surveyStore(from, fromProbe.version, { withBodies: true, side: 'source' });
   refuseStructure(from, 'source', src, fromProbe.version);
-  const dst = surveyStore(to, toProbe.version);
+  const dst = surveyStore(to, toProbe.version, { withBodies: true, side: 'destination' });
   refuseStructure(to, 'destination', dst, toProbe.version);
   const rows = src.bodies;
   const versionRows = src.versionKeys.size;
   const aliasRows = src.aliasIds.size;
+  const relationRows = src.relationCount;
   const retired = rows.filter((r) => r.lifecycle === 'retired');
   if (versionRows) {
     fail(
@@ -413,6 +532,20 @@ function migrate() {
         `validated create path refuses it outright. Use 'adopt' (whole-file, provenance intact). Nothing was written.`
     );
   }
+  // Checked AFTER the retired-lifecycle guard above: retiring a record is the
+  // one existing, already-pinned path that ALSO leaves a record_relations row
+  // (the inbound supersedes relation), so a retired-record fixture trips both
+  // — the more specific "retired" refusal is the one a human wants to read.
+  if (relationRows) {
+    fail(
+      `refusing: the source holds ${relationRows} record_relations row(s) — relations live outside the records table and the ` +
+        `validated create path rebuilds them (lossily, and only self-links a body's own convenience links[] names) rather than ` +
+        `copying them structurally, so every one would be silently lost or restamped. THERE IS NO WORKING ROUTE FOR A LINKED ` +
+        `STORE TODAY (decision [migrate-relations-containment-narrows-migrate-to-unlinked-stores]): whole-file adoption is the ` +
+        `shape that would carry relations intact, but 'adopt' is a READ-ONLY probe — it can only report whether adopting WOULD ` +
+        `be safe, it cannot perform it, and its write half is unbuilt (board 44434103). Nothing was written.`
+    );
+  }
   // THE DESTINATION'S RESOLVABLE-ID NAMESPACE IS A UNION, not one table
   // (anti_pattern 44d4f74f): record_aliases is an id namespace in its own
   // right, so a live source record whose id equals a destination HISTORICAL id
@@ -430,7 +563,62 @@ function migrate() {
     );
   }
   const have = dst.ids;
-  const missing = rows.filter((r) => !have.has(r.id));
+  // Same-id present on BOTH sides is not automatically a skip (board b96ebf47,
+  // AC21): a same-id/different-body pair is exactly what a split store
+  // produces, and dropping it silently loses whichever side did not win. An
+  // identical body stays an idempotent skip; a differing one is a HARD
+  // CONFLICT, refused here — BEFORE the plan is even printed — so the
+  // dry-run's plan and --apply's actual behavior are the same diff, never a
+  // plan that lies about what --apply would do.
+  const dstBodyById = new Map(dst.bodies.map((r) => [r.id, r]));
+  const missing = [];
+  const conflicts = [];
+  const stateConflicts = [];
+  for (const r of rows) {
+    if (!have.has(r.id)) { missing.push(r); continue; }
+    let identical;
+    try {
+      identical = deepEqual(r, dstBodyById.get(r.id));
+    } catch (e) {
+      fail(
+        `refusing: record '${r.id}' exists in BOTH stores but could not be compared — ${e.message}. A body this shape is either ` +
+          `corrupt or hostile, and skipping it would silently drop whichever side did not win. Nothing was written.`
+      );
+    }
+    if (!identical) { conflicts.push(r.id); continue; }
+    // BODY-IDENTICAL IS NOT STATE-IDENTICAL. `status` and `superseded_by` are
+    // stripped from every persisted v2 body and derived from the COLUMNS
+    // (storableBody, packages/store/src/index.ts:692-698), so a record retired
+    // on one side and live on the other compares byte-identical here. Ruled a
+    // CONFLICT, same treatment as a differing body: the two sides disagree
+    // about what the record IS, which is exactly the condition this conflict
+    // path exists for, and a silent skip would lose a supersession pointer
+    // permanently — the successor never crosses, and nothing later can tell
+    // that it did not.
+    const srcState = src.columnState.get(r.id);
+    const dstState = dst.columnState.get(r.id);
+    if (srcState && dstState && (srcState.status !== dstState.status || srcState.superseded_by !== dstState.superseded_by)) {
+      stateConflicts.push({ id: r.id, srcState, dstState });
+    }
+  }
+  if (conflicts.length) {
+    fail(
+      `refusing: ${conflicts.length} record id(s) exist in BOTH stores with DIFFERING bodies (${conflicts.join(', ')}) — the source ` +
+        `and destination disagree about what these record(s) ARE, which is not something to skip past and continue. Reconcile the ` +
+        `conflicting record(s) by hand, then re-run. Nothing was written.`
+    );
+  }
+  if (stateConflicts.length) {
+    const shown = (s) => `status ${s.status ?? 'null'}, superseded_by ${s.superseded_by ?? 'null'}`;
+    fail(
+      `refusing: ${stateConflicts.length} record id(s) exist in BOTH stores with IDENTICAL bodies but DIFFERING column-resident ` +
+        `lifecycle state (${stateConflicts.map((c) => `${c.id}: source [${shown(c.srcState)}] vs destination [${shown(c.dstState)}]`).join('; ')}) — ` +
+        `status and superseded_by live in the records COLUMNS, not the body, so this disagreement is invisible to a body compare. ` +
+        `It is a CONFLICT, not a skip: the two sides disagree about what the record IS, and skipping it would lose a supersession ` +
+        `pointer permanently — the successor would never cross, and nothing afterwards could tell that it had not. Reconcile the ` +
+        `conflicting record(s) by hand, then re-run. Nothing was written.`
+    );
+  }
   console.log(`migrate ${from} → ${to}: ${rows.length} source record(s), skipped ${rows.length - missing.length} already present, ${missing.length} to copy`);
   console.log(`  schema: source v${fromProbe.version} (${fromProbe.source}), destination v${toProbe.version} (${toProbe.source})`);
   for (const r of missing) console.log(`  copy: ${r.id} (${r.type}, ${r.status}, ${r.created_at})`);
@@ -697,10 +885,10 @@ function adopt() {
     }
   }
 
-  const src = surveyStore(from, fromProbe.version);
+  const src = surveyStore(from, fromProbe.version, { side: 'source' });
   refuseStructure(from, 'source', src, fromProbe.version);
-  const empty = { missing: [], ids: new Set(), aliasIds: new Set(), versionKeys: new Set() };
-  const dst = destExists ? surveyStore(to, toProbe.version) : empty;
+  const empty = { missing: [], ids: new Set(), aliasIds: new Set(), versionKeys: new Set(), columnState: new Map() };
+  const dst = destExists ? surveyStore(to, toProbe.version, { side: 'destination' }) : empty;
   if (destExists) refuseStructure(to, 'destination', dst, toProbe.version);
 
   // THE PROOF, over every table that carries identity — not `records` alone
@@ -1208,10 +1396,23 @@ function restore() {
 }
 
 const mode = process.argv[2];
-if (mode === 'scan') scan();
-else if (mode === 'sweep') sweep();
-else if (mode === 'restore') restore();
-else if (mode === 'migrate') migrate();
-else if (mode === 'adopt') adopt();
-else if (mode === 'show') show();
-else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt|show … (got '${mode ?? ''}')`);
+// LAST LINE OF DEFENCE: no driver exception leaves this file as a bare exit-1
+// stack trace. Every anticipated failure is already a fail() with its own
+// message; anything that gets past them (a driver-level throw racing a probe,
+// an unreadable file this build has no specific guard for) still exits 2 —
+// this tool's "the request could not safely be carried out" code — naming the
+// mode and the underlying message. A crash on the refusal path is worse than
+// the hazard the refusal guards, since it says nothing about what was or was
+// not written. process.exit() does not throw, so every deliberate exit code
+// (0/2/3) still passes through untouched.
+try {
+  if (mode === 'scan') scan();
+  else if (mode === 'sweep') sweep();
+  else if (mode === 'restore') restore();
+  else if (mode === 'migrate') migrate();
+  else if (mode === 'adopt') adopt();
+  else if (mode === 'show') show();
+  else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt|show … (got '${mode ?? ''}')`);
+} catch (e) {
+  fail(`'${mode}' failed unexpectedly and was abandoned where it stood: ${e?.message ?? e}`);
+}
