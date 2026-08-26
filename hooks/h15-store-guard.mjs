@@ -5284,6 +5284,81 @@ function unquotedText(str) {
   }
   return out;
 }
+function executableWords(str) {
+  const words = [];
+  let current = "";
+  let started = false;
+  let inSingle = false;
+  let inDouble = false;
+  const push = () => {
+    if (started) {
+      words.push(current);
+      current = "";
+      started = false;
+    }
+  };
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      else current += c;
+      continue;
+    }
+    if (inDouble) {
+      if (c === '"' && str[i - 1] !== "\\") inDouble = false;
+      else current += c;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      started = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      started = true;
+      continue;
+    }
+    if (c === "<" && str[i + 1] === "<") {
+      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
+      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
+      if (delim) {
+        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const rest = str.slice(i);
+        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
+        const span = end ? end.index + end[0].length : rest.length;
+        i += span - 1;
+        push();
+        continue;
+      }
+    }
+    if (/\s/.test(c)) {
+      push();
+      continue;
+    }
+    if (c === "#" && !started) break;
+    started = true;
+    current += c;
+  }
+  push();
+  return words;
+}
+var INTERPRETER_WORDS = /* @__PURE__ */ new Set(["node", "nodejs", "bash", "sh", "zsh", "python", "python3"]);
+function isSanctionedScript(word, entries) {
+  const w = word.startsWith("./") ? word.slice(2) : word;
+  return entries.some((entry) => w === entry);
+}
+function fragmentRunsSanctionedScript(fragment, entries) {
+  const words = executableWords(fragment);
+  if (!words.length) return false;
+  if (isSanctionedScript(words[0], entries)) return true;
+  if (!INTERPRETER_WORDS.has(words[0])) return false;
+  for (let i = 1; i < words.length; i++) {
+    if (words[i].startsWith("-")) continue;
+    return isSanctionedScript(words[i], entries);
+  }
+  return false;
+}
 var PLAIN_WORD_RE = /^[A-Za-z0-9_./~+-]+$/;
 function redirectsIntoStore(str) {
   const text = unquotedText(str);
@@ -5303,7 +5378,7 @@ function classifyFragment(fragment) {
   if (!trimmed || !STORE_MENTION_RE.test(trimmed) && !STORE_MENTION_RE.test(unquotedText(trimmed))) {
     return { write: false, fragment: trimmed };
   }
-  if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed };
+  if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed, dbSeal: true };
   if (redirectsIntoStore(trimmed)) return { write: true, fragment: trimmed };
   const verb = firstWord(trimmed);
   if (verb === "sed") {
@@ -5318,12 +5393,14 @@ function classifyFragment(fragment) {
   return { write: true, fragment: trimmed };
 }
 var offending = null;
+var offendingIsDbSeal = false;
 try {
   for (const frag of splitFragments(command)) {
-    if (allowScripts.some((s) => frag.includes(s))) continue;
+    if (fragmentRunsSanctionedScript(frag, allowScripts)) continue;
     const result = classifyFragment(frag);
     if (result.write) {
       offending = result.fragment;
+      offendingIsDbSeal = Boolean(result.dbSeal);
       break;
     }
   }
@@ -5337,6 +5414,20 @@ try {
   );
 }
 if (!offending) allow();
+if (offendingIsDbSeal) {
+  const match = DB_MENTION_RE.exec(command);
+  const matchedText = match ? match[0] : "sterling.db";
+  const offset = match ? match.index : command.search(DB_MENTION_RE);
+  deny(
+    `H15: shell access to the Sterling store's database file is denied \u2014 DB access is the MCP tool surface's job, never raw shell.
+Denied fragment: ${offending}
+Matched substring: "${matchedText}" at offset ${offset} in the command text.
+This is a raw command-text DB seal: it matches the literal text of the command, not a resolved path or write target, so syntactic role and verb are intentionally ignored \u2014 it fires the same whether the literal sits in a path, inside a quoted search pattern, or in a redirect target, and regardless of whether the verb is a write or a normally read-only one like grep.
+Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
+Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 a sanctioned name exempts a fragment ONLY when it is that fragment's EXECUTABLE argument; the same name in a comment, a quoted flag value, or an unrelated path exempts nothing.
+If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`
+  );
+}
 deny(
   `H15: shell write access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
 Denied fragment: ${offending}
