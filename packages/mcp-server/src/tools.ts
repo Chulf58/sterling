@@ -3008,8 +3008,37 @@ export class SterlingTools {
     'g'
   );
 
+  // The SAME origin-only marker the knowledge-export exporter honors
+  // (scripts/knowledge-export.mjs ORIGIN_IDS_OPEN/CLOSE, board c3705a15 design
+  // pass 2026-08-24): prose wrapped in [origin-ids: <reason>] ... [/origin-ids]
+  // legitimately carries ids that resolve on ANOTHER machine (a payload's
+  // provenance block, an id map recorded in an article's history) and is never
+  // meant to be treated as a fresh citation here. Duplicated rather than
+  // imported — scripts/ stays standalone .mjs, tools.ts is compiled TypeScript
+  // in a different workspace — so the two constants are kept textually
+  // identical on purpose; a future divergence must change both call sites.
+  private static readonly ORIGIN_IDS_OPEN_RE = /\[origin-ids:/g;
+  private static readonly ORIGIN_IDS_CLOSE_RE = /\[\/origin-ids\]/g;
+  private static readonly ORIGIN_IDS_BLOCK_RE = /\[origin-ids:[\s\S]*?\[\/origin-ids\]/g;
+
+  /**
+   * Strip balanced origin-ids regions before a citation scan. UNLIKE the
+   * exporter (which REFUSES on an unbalanced marker — it can afford to, since
+   * nothing has shipped yet), this write path only ever WARNS, so an
+   * unbalanced '[origin-ids:' grants NO exemption at all rather than guessing
+   * which close it pairs with — the citation(s) it would have shielded are
+   * scanned and, if fabricated, still warned about. Fail-safe, not fail-open.
+   */
+  private stripOriginIdsRegions(text: string): string {
+    const opens = (text.match(SterlingTools.ORIGIN_IDS_OPEN_RE) ?? []).length;
+    const closes = (text.match(SterlingTools.ORIGIN_IDS_CLOSE_RE) ?? []).length;
+    if (opens === 0 || opens !== closes) return text;
+    return text.replace(SterlingTools.ORIGIN_IDS_BLOCK_RE, '');
+  }
+
   private citedIdWarnings(text: string): string[] {
     if (!text) return [];
+    const scanText = this.stripOriginIdsRegions(text);
     const index = this.store.recordIdIndex();
     // ALIASES COUNT AS RESOLUTION ([stable-identity-design-v2] contract 3): a
     // HISTORICAL id resolves — knowledge_get serves its archived snapshot with a
@@ -3021,11 +3050,32 @@ export class SterlingTools {
     const aliases = this.store.recordAliases();
     const seen = new Set<string>();
     const warnings: string[] = [];
-    for (const match of text.matchAll(SterlingTools.CITATION_RE)) {
+    for (const match of scanText.matchAll(SterlingTools.CITATION_RE)) {
       const cited = match[1];
       const lower = cited.toLowerCase();
       if (seen.has(lower)) continue;
       seen.add(lower);
+      // AMBIGUOUS PREFIX (board c3705a15 design pass): the same rule
+      // scripts/lib/citations.mjs buildResolver enforces — a FULL id must
+      // match a FULL id (no ambiguity is possible there, only exists/doesn't),
+      // but a bare 8-hex-char citation with no dashed remainder is a PREFIX,
+      // and a prefix matching more than one record's id (or historical alias)
+      // is not a clean resolve — it is a distinct record picked ambiguously,
+      // which must never pass silently as "resolves" just because SOME record
+      // happens to start with it.
+      if (lower.length === 8) {
+        const hits = new Set<string>();
+        for (const r of index) if (r.id.toLowerCase().startsWith(lower)) hits.add(r.id.toLowerCase());
+        for (const a of aliases) if (a.historical_id.toLowerCase().startsWith(lower)) hits.add(a.historical_id.toLowerCase());
+        if (hits.size === 0) {
+          warnings.push(
+            `cited id '${cited}' does not resolve to any record in the project store or any mounted domain, at any status — check for a fabricated or mistyped citation`
+          );
+        } else if (hits.size > 1) {
+          warnings.push(`cited id '${cited}' is an ambiguous 8-char prefix — it matches more than one record; cite more of the id`);
+        }
+        continue;
+      }
       const resolves =
         index.some((r) => r.id.toLowerCase().startsWith(lower)) ||
         aliases.some((a) => a.historical_id.toLowerCase().startsWith(lower));
