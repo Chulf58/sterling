@@ -4306,7 +4306,7 @@ var researchFindingSchema = base.extend({
   slug: external_exports.string().min(1).optional(),
   question: external_exports.string().min(1),
   answer: external_exports.string().min(1),
-  source_urls: external_exports.array(external_exports.string()),
+  source_urls: external_exports.array(external_exports.string()).default([]),
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
