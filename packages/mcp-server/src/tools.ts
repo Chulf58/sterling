@@ -404,10 +404,22 @@ export class SterlingTools {
     this.repoRoot = deps.repoRoot;
   }
 
-  /** §16.1.9: unbuilt checks emit check_skipped where they would have run — never silent success. */
-  private skip(check: string, runId: string | undefined): SkippedCheck {
+  /**
+   * §16.1.9: unbuilt checks emit check_skipped where they would have run — never
+   * silent success. `persist` (default true) writes the audit row immediately;
+   * pass false to DEFER persistence — the caller then gets the SkippedCheck back
+   * (via the result's check_skipped) and is responsible for recording the audit
+   * row itself. The only deferring caller is knowledge_extract on a domain-scoped
+   * source: its txn opens on the DOMAIN mount, but recordCheckSkipped always
+   * routes to the PROJECT mount (MountedStores.recordCheckSkipped), so an
+   * in-transaction audit write would commit independently of the domain BEGIN and
+   * survive a rolled-back extract. Deferring lets extract persist the audit rows
+   * only AFTER the mount transaction commits, keeping a rollback trace-free while
+   * staying never-silent on success.
+   */
+  private skip(check: string, runId: string | undefined, persist = true): SkippedCheck {
     const skipped = { check, reason: 'not_built' };
-    this.store.recordCheckSkipped(check, skipped.reason, runId, this.now());
+    if (persist) this.store.recordCheckSkipped(check, skipped.reason, runId, this.now());
     return skipped;
   }
 
@@ -1160,7 +1172,13 @@ export class SterlingTools {
     };
   }
 
-  knowledgeCreate(type: string, fields: Record<string, unknown>): CreateResult {
+  knowledgeCreate(type: string, fields: Record<string, unknown>, opts?: { deferCheckSkipped?: boolean }): CreateResult {
+    // deferCheckSkipped (default false): when true, the check_skipped audit rows
+    // are NOT persisted here — they are still returned on the result so the
+    // caller records them itself. Only knowledge_extract sets this, and only so a
+    // domain-mount transaction's audit rows land post-commit (see `skip`). Every
+    // other caller omits it, so their behaviour is byte-identical.
+    const persistSkips = opts?.deferCheckSkipped !== true;
     this.refuseServerOwnedFields(fields, 'knowledge_create');
     const ts = this.now();
     // The envelope is SERVER-OWNED: strip these keys from caller fields before
@@ -1249,7 +1267,7 @@ export class SterlingTools {
           );
         }
       }
-      skipped.push(this.skip('noise-gate', this.activeRunId()));
+      skipped.push(this.skip('noise-gate', this.activeRunId(), persistSkips));
     } else if (type === 'feature_article') {
       // SLUG COLLISION IS REFUSED LOUD (board 56c8a509). Two records under one
       // slug is worse than one wrong record, because retrieval serves BOTH and
@@ -1278,11 +1296,11 @@ export class SterlingTools {
           );
         }
       }
-      skipped.push(this.skip('dedup-merge', this.activeRunId()));
+      skipped.push(this.skip('dedup-merge', this.activeRunId(), persistSkips));
     } else {
       // dedup guarding is defined for anti_patterns and feature_article slugs;
       // other types skip loudly
-      skipped.push(this.skip('dedup-merge', this.activeRunId()));
+      skipped.push(this.skip('dedup-merge', this.activeRunId(), persistSkips));
     }
 
     // STABLE HANDLES (board 1e639f32): decision / anti_pattern / research_finding
@@ -3954,16 +3972,19 @@ export class SterlingTools {
       );
     }
 
-    // FIXER-MODE (converging review finding, domain atomicity): MountedStores'
-    // withTransaction targets the PROJECT store only (see mounted.ts) — a
-    // domain-scoped source's create + source-trim + both addLinks would route
-    // to the domain store and commit OUTSIDE this method's transaction, so a
-    // late failure could orphan partial state. No existing ToolStore/MountedStores
-    // API reaches the per-mount store instance without new plumbing, so a
-    // domain-scoped source is refused loudly rather than accepted unsafely.
-    if (original.scope !== 'project') {
+    // PER-MOUNT TRANSACTION ROUTING (board d47a9e2d): a domain-scoped source's
+    // create + source-trim + both addLinks now commit atomically on the ONE
+    // mount that owns the source, via store.withTransactionForScope(original.scope, ...)
+    // below — see mounted.ts's storeFor/withTransactionForScope. The one
+    // remaining hazard is `resolves`: maintenance todos are always
+    // project-local (mounted.ts, §3.3), and extract removes each claimed item
+    // INSIDE the transaction (below) — a domain-scoped transaction cannot
+    // atomically delete a project-store row, so a non-empty `resolves` is
+    // refused loudly for a domain-scoped source rather than silently split
+    // across two connections.
+    if (original.scope !== 'project' && resolves && resolves.length > 0) {
       throw new Error(
-        `knowledge_extract: source '${original.id}' is domain-scoped (${original.scope}) — extract currently supports project-scoped sources only; domain source refused pending per-mount transaction routing. Nothing was written.`
+        `knowledge_extract: source '${original.id}' is domain-scoped (${original.scope}) and 'resolves' names ${resolves.length} item(s) — maintenance todos are project-local, so a domain-scoped extract's transaction cannot atomically close them. Retry without resolves, or close those items separately. Nothing was written.`
       );
     }
 
@@ -4050,15 +4071,49 @@ export class SterlingTools {
 
     let newId!: string;
     let sourceVersion!: number;
-    // ONE transaction (mirrors knowledgeSplit): create the new record, trim the
-    // source, write BOTH provenance edges, drain resolves — any failure rolls the
-    // whole thing back byte-for-byte.
-    this.store.withTransaction(() => {
+    let deferredSkips: SkippedCheck[] = [];
+    // FIXER-MODE (converging review finding, project-scope regression): only a
+    // DOMAIN-scoped source needs the defer-then-flush dance below — its
+    // transaction opens on the domain mount, while recordCheckSkipped always
+    // routes to the PROJECT mount (see the comment above), so an inline audit
+    // write there would commit independently of the domain BEGIN. A
+    // project-scoped source's transaction already IS the project mount, so
+    // its audit row was atomic inline before board d47a9e2d and stays that way
+    // here — deferring it would instead turn a committed project extract into
+    // a window where a post-commit flush failure errors after the records are
+    // already durable. original.scope is 'project' or 'domain:<name>' (see the
+    // PER-MOUNT TRANSACTION ROUTING comment above / the !== 'project' checks
+    // elsewhere in this method), so the same test used there decides here.
+    const isDomainScope = original.scope !== 'project';
+    // ONE transaction on the source's OWNING mount (board d47a9e2d): create the
+    // new record, trim the source, write BOTH provenance edges, drain resolves.
+    // The knowledge RECORDS and their provenance links commit atomically on the
+    // owning mount — any failure inside this body rolls all of them back. What
+    // does NOT belong inside is the check_skipped AUDIT ROW: recordCheckSkipped
+    // always routes to the PROJECT mount (MountedStores.recordCheckSkipped), so
+    // for a domain-scoped source it would commit independently of this domain
+    // BEGIN and survive a rollback. So knowledgeCreate DEFERS its skips here and
+    // they are persisted AFTER a successful commit below — a rolled-back extract
+    // therefore leaves NO audit row, a committed one still records them (P5). Note
+    // the SEAM (deliberately narrow, not the atomicity guarantee the records get):
+    // an audit-row write that itself failed after a successful record commit would
+    // lose the audit row, not corrupt the records. original.scope is the SOLE
+    // routing input here (id/alias/slug/prefix resolution above already ran across
+    // every mount; once `original` is resolved, only its own scope decides where
+    // this transaction opens).
+    this.store.withTransactionForScope(original.scope, () => {
       // scope inherited from the source (Q5); an explicit new_record.fields.scope
       // that DIFFERS from the source's scope was already refused above, so the
       // spread here can only ever carry the same scope back (or none at all) —
       // it can no longer override it.
-      const created = this.knowledgeCreate(newType, { scope: original.scope, ...new_record.fields });
+      const created = this.knowledgeCreate(newType, { scope: original.scope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
+      // created.check_skipped is populated either way (knowledgeCreate always
+      // returns what it skipped) — but for a project-scoped source it was
+      // ALREADY persisted inline above (deferCheckSkipped: false), so only a
+      // domain-scoped source's skips are collected here for the post-commit
+      // flush; collecting them unconditionally would double-write the audit
+      // row for project scope.
+      deferredSkips = isDomainScope ? (created.check_skipped ?? []) : [];
       newId = created.record.id;
       const updateBody: Record<string, unknown> = { [field]: splicedValue };
       if (typeHasHistory) {
@@ -4081,6 +4136,13 @@ export class SterlingTools {
       // transaction so a claim only lands alongside an extract that landed.
       for (const claim of resolveClaims) this.store.remove(claim.id, ts);
     });
+
+    // Post-commit: persist the deferred check_skipped audit rows now that the
+    // mount transaction has committed (see the deferCheckSkipped rationale above).
+    // Same (check, reason, runId, at) shape the in-line skip() would have used.
+    for (const s of deferredSkips) {
+      this.store.recordCheckSkipped(s.check, s.reason, this.activeRunId(), this.now());
+    }
 
     return {
       extracted: find,

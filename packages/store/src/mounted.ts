@@ -381,7 +381,48 @@ export class MountedStores {
    *  only — feature_article is always project-scoped (§3.3), so the split's
    *  children-plus-parent transaction never needs to span a domain mount. */
   withTransaction<T>(fn: () => T): T {
-    return this.project.withTransaction(fn);
+    return this.runScopedTransaction('project', this.project, fn);
+  }
+
+  /** Per-mount transaction boundary (board d47a9e2d): routes to the SterlingStore
+   *  holding `scope` (project → the project store; domain:<name> → that domain
+   *  store, storeFor's existing routing — an unmounted domain throws loudly
+   *  BEFORE any transaction opens) so a tool-layer write whose records all
+   *  belong to one owning mount (e.g. a domain-scoped knowledge_extract) can
+   *  commit create/update/link atomically on that mount, exactly as
+   *  withTransaction does for the project store. Guarded against CROSS-MOUNT
+   *  nesting the same way withTransaction is (see runScopedTransaction) —
+   *  same-store nesting still joins via the physical store's own txDepth. */
+  withTransactionForScope<T>(scope: string, fn: () => T): T {
+    return this.runScopedTransaction(scope, this.storeFor(scope), fn);
+  }
+
+  /** Tracks which scope's transaction is currently open across THIS
+   *  MountedStores instance (not per-physical-store — a physical store's own
+   *  txDepth only knows about ITSELF) and refuses a NESTED call that targets a
+   *  DIFFERENT scope: opening a second BEGIN IMMEDIATE on a different SQLite
+   *  connection while the outer transaction is still open would let the inner
+   *  one commit independently, so a later failure in the outer transaction
+   *  could no longer roll the inner write back — silently breaking atomicity.
+   *  A nested call to the SAME scope still joins cleanly, because it reaches
+   *  the same physical store's reentrant `tx()` (txDepth). */
+  private activeTransactionScope: string | undefined;
+
+  private runScopedTransaction<T>(scope: string, store: SterlingStore, fn: () => T): T {
+    if (this.activeTransactionScope !== undefined && this.activeTransactionScope !== scope) {
+      throw new Error(
+        `nested transaction: cannot open a transaction for scope '${scope}' while a transaction for scope ` +
+          `'${this.activeTransactionScope}' is still open on this MountedStores — cross-mount transaction nesting ` +
+          `is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`
+      );
+    }
+    const isOutermost = this.activeTransactionScope === undefined;
+    if (isOutermost) this.activeTransactionScope = scope;
+    try {
+      return store.withTransaction(fn);
+    } finally {
+      if (isOutermost) this.activeTransactionScope = undefined;
+    }
   }
 
   /** Per-store snapshot (§2.3): each store snapshots independently; the caller
