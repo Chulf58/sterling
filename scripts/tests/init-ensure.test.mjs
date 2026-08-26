@@ -1168,3 +1168,97 @@ test('sparring-partner-win case 5: an unrecognized STERLING_CODEX_PROBE_WIN valu
 // SABOTAGE: treat any unrecognized STERLING_CODEX_PROBE_WIN value as equivalent
 // to unset (fall through to the real probe or to a default forced outcome)
 // instead of failing loud — r.code stays 0 and the notEqual assertion goes red.
+
+test('sparring-partner-win case 6: managed refresh — a pre-existing sterling-only sterling-mcp-win.json gains a codex entry once the NATIVE-WINDOWS probe later succeeds; sterling entry unchanged; reported "refreshed" naming codex', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    // Step 1: the fixture EVERY existing clone is actually in — a sterling-only
+    // win config, as an earlier run (probe absent, e.g. no Windows codex install)
+    // produced. This is not a hypothetical: the plugin repo's own checked-out
+    // .claude-plugin/sterling-mcp-win.json is exactly this shape.
+    const first = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'absent' });
+    assert.equal(first.code, 0, first.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp-win.json');
+    const before = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(before.mcpServers && before.mcpServers.sterling, 'precondition: sterling-only win config exists after the absent-probe fresh init');
+    assert.ok(!('codex' in before.mcpServers), 'precondition: no codex entry yet');
+
+    // Step 2: flagless re-run with the native-Windows probe now succeeding — the
+    // managed refresh. WITHOUT it the arm is unreachable on every existing clone:
+    // the compare reports 'differs — left untouched' forever and the only route to
+    // a codex entry is deleting the file by hand.
+    const rerun = init(dir, [], { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'ok' });
+    assert.equal(rerun.code, 0, rerun.stderr);
+
+    const after = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.deepEqual(after.mcpServers.sterling, before.mcpServers.sterling, 'sterling entry (Windows node command + store arg) unchanged by the managed refresh');
+    assert.deepEqual(after.mcpServers.codex, { command: 'codex', args: ['mcp-server'] }, 'codex entry added, matching CODEX_MCP_ENTRY exactly — the same entry the WSL branch wires');
+
+    const line = rerun.stdout.match(/^\.claude-plugin\/sterling-mcp-win\.json\s+.+$/m);
+    assert.ok(line, 'a report line exists for the native-Windows MCP config on the managed-refresh re-run');
+    assert.match(line[0], /\brefreshed\b/, "the report line says 'refreshed'");
+    assert.ok(!/\bdiffers\b/.test(line[0]), "the report line does NOT say 'differs' on a managed refresh");
+    assert.ok(!/\bcreated\b/.test(line[0]), "the report line does NOT say 'created' — the file already existed");
+    assert.match(line[0], /codex/i, 'the refresh detail names codex');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE (one line): delete the `isManagedCodexAddWin` branch in init.mjs's
+// native-Windows else-block so it falls straight through to the 'differs' push —
+// the codex deepEqual and the /refreshed/ match both go red. The guard carrying
+// the verdict is `isManagedCodexAddWin` in scripts/init.mjs, NOT the create-path
+// `withCodexEntry` call (win case 1 already covers that one, and it stays green
+// under this sabotage — which is how the two are told apart).
+
+test('sparring-partner-win case 7: never-overwrite holds through the native-Windows codex refresh — a hand-edited sterling entry blocks the write; file untouched byte-for-byte, reported "differs"', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const first = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'absent' });
+    assert.equal(first.code, 0, first.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp-win.json');
+
+    const handEdited = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    handEdited.mcpServers.sterling.args = [...handEdited.mcpServers.sterling.args, '--hand-tuned-flag'];
+    writeFileSync(mcpPath, JSON.stringify(handEdited, null, 2));
+    const beforeBytes = readFileSync(mcpPath, 'utf8');
+
+    const rerun = init(dir, [], { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'ok' });
+    assert.equal(rerun.code, 0, rerun.stderr);
+
+    assert.equal(readFileSync(mcpPath, 'utf8'), beforeBytes, 'never-overwrite: a hand-edited sterling entry blocks the managed codex refresh — file untouched byte-for-byte');
+    const line = rerun.stdout.match(/^\.claude-plugin\/sterling-mcp-win\.json\s+.+$/m);
+    assert.ok(line, 'a report line exists for the native-Windows MCP config on the guarded re-run');
+    assert.match(line[0], /\bdiffers\b/, "the report line says 'differs' when the sterling entry was hand-edited");
+    assert.ok(!/\brefreshed\b/.test(line[0]), "the report line does NOT say 'refreshed' when blocked by the never-overwrite guard");
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: drop the `canonical(existingWin) === canonical(desiredWinMinusCodex)`
+// conjunct from isManagedCodexAddWin (keep only the "codex key missing" test) —
+// the hand-edited file gets clobbered and the byte-equality assertion goes red.
+
+test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win probe STILL absent leaves the sterling-only file reported "matches", never "refreshed" — the refresh is probe-driven, not an unconditional rewrite', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const first = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'absent' });
+    assert.equal(first.code, 0, first.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp-win.json');
+    const beforeBytes = readFileSync(mcpPath, 'utf8');
+
+    const rerun = init(dir, [], { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'absent' });
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.equal(readFileSync(mcpPath, 'utf8'), beforeBytes, 'no write at all when the probe still fails');
+    const line = rerun.stdout.match(/^\.claude-plugin\/sterling-mcp-win\.json\s+.+$/m);
+    assert.ok(line, 'a report line exists');
+    assert.match(line[0], /\bmatches\b/, "an unchanged sterling-only file with a failing probe reports 'matches' — this arm must pass for the OPPOSITE reason to case 6");
+    assert.ok(!/\brefreshed\b/.test(line[0]), "never 'refreshed' without a succeeding probe");
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: drop the `codexProbeWin.ok` conjunct from isManagedCodexAddWin — with
+// a failing probe desiredWin has no codex, so this case still reports 'matches'
+// and stays green; it goes red only if the refresh becomes an unconditional
+// rewrite. That is exactly the discrimination this control arm buys.

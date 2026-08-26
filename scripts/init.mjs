@@ -500,8 +500,8 @@ if (fwd(target) === fwd(pluginRootMatch)) {
   // (binary absent, not logged in, or a timeout), report a loud skip line and wire nothing
   // — never blocking the rest of init (P5 degraded-loud, same pattern as the
   // sterling-windows.bat skip below). NOTE: the native-Windows sterling-mcp-win.json is
-  // DELIBERATELY untouched by this probe — its codex story needs its own Windows-node
-  // probe and is out of scope for this slice.
+  // untouched by THIS probe — it has its own Windows-node probe (probeCodexWin /
+  // STERLING_CODEX_PROBE_WIN) in the native-Windows branch further down.
   // STERLING_CODEX_PROBE: test-isolation seam mirroring STERLING_WIN_NODE — honored
   // at THIS call site (not inside probeCodex), same precedent as `winNode` above.
   // unset/'' -> real probe; 'ok' -> force success; 'absent' -> force binary-absent;
@@ -623,7 +623,36 @@ if (fwd(target) === fwd(pluginRootMatch)) {
       if (existingWin && canonical(existingWin) === canonical(desiredWin)) {
         items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'matches', detail: 'native-claude MCP config as generated' });
       } else {
-        items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
+        // Managed refresh — the EXACT mirror of the WSL branch above (review D1's
+        // upgrade path), and load-bearing for THIS arm rather than a nicety: every
+        // clone that ever ran init already carries a sterling-only
+        // sterling-mcp-win.json (this repo's own copy does), so without the refresh
+        // the codex entry could never arrive once a native-Windows codex install
+        // makes probeCodexWin succeed — the compare would report 'differs — left
+        // untouched' forever and the only route would be deleting the file by hand.
+        // Additive-only and provably ours: the sterling entry and every OTHER key
+        // must already equal what init would generate, and ONLY the codex key may be
+        // missing. Any other difference still reports 'differs — left untouched'.
+        const desiredWinMinusCodex = {
+          mcpServers: Object.fromEntries(Object.entries(desiredWin.mcpServers).filter(([k]) => k !== 'codex')),
+        };
+        const isManagedCodexAddWin =
+          codexProbeWin.ok &&
+          existingWin &&
+          typeof existingWin === 'object' &&
+          existingWin.mcpServers &&
+          !('codex' in existingWin.mcpServers) &&
+          canonical(existingWin) === canonical(desiredWinMinusCodex);
+        if (isManagedCodexAddWin) {
+          writeFileSync(winMcpConfigPath, JSON.stringify(desiredWin, null, 2));
+          items.push({
+            item: '.claude-plugin/sterling-mcp-win.json',
+            status: 'refreshed',
+            detail: 'refreshed — added generated codex entry (native-Windows probe succeeded; sterling entry and all other keys unchanged)',
+          });
+        } else {
+          items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
+        }
       }
     }
   } else {
