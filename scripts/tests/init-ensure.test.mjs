@@ -24,8 +24,18 @@ function init(dir, args = [], extraEnv = {}) {
     timeout: 180_000,
     // isolate the machine-global project registry to this test's temp dir, so
     // init's registration never pollutes the real ~/.sterling/registry.db; pin
-    // STERLING_WIN_NODE so the native launcher generates without a real Windows node.
-    env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db'), STERLING_WIN_NODE: WIN_NODE_FAKE, ...extraEnv },
+    // STERLING_WIN_NODE so the native launcher generates without a real Windows
+    // node. STERLING_CODEX_PROBE_WIN defaults to 'absent' for the SAME reason
+    // STERLING_WIN_NODE is pinned: every FRESH_FLAGS init generates
+    // sterling-windows.bat (native launcher present), which per board 43051819
+    // now also wires codex into .claude-plugin/sterling-mcp-win.json — LOAD-
+    // BEARING, not cosmetic: without this default, every existing case in this
+    // file that calls init() without overriding the win seam would incidentally
+    // invoke the REAL unmocked probeCodexWin (a live where.exe + codex login
+    // status through WSL interop), and their determinism would depend on this
+    // machine's WSL interop being fast — a latent flake. A case that wants the
+    // real or a different forced outcome overrides it via extraEnv.
+    env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db'), STERLING_WIN_NODE: WIN_NODE_FAKE, STERLING_CODEX_PROBE_WIN: 'absent', ...extraEnv },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -980,3 +990,181 @@ test('sparring-partner case 7: never-overwrite guard holds through the codex man
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
+// =============================================================================
+// Part D (board 43051819, article sparring-partner) — native-Windows codex
+// probe wiring into sterling-mcp-win.json. SPEC-ONLY: init.mjs's implementation
+// body was NOT read to author these — it landed before its tests because H5
+// correctly denied the implementing agent test-file writes; these pins are
+// authored against the dispatch spec and must be honored as written.
+//
+// CORRECTED PREMISE: sterling-mcp-win.json is PLUGIN-REPO-ONLY, exactly like
+// sterling-mcp.json — it is NOT generated whenever the native launcher is (an
+// earlier version of this file's five probe-behavior pins below wrongly
+// assumed a per-project copy; an implementer correctly refused to move
+// production code to satisfy that error). templates/launcher-win-native.bat:34
+// hardcodes --mcp-config against
+// "{{WIN_PLUGIN_DIR}}\.claude-plugin\sterling-mcp-win.json" — the ONE
+// plugin-repo clone's copy every project's native launcher points at (matches
+// the standing architecture: every project launches with --plugin-dir pointing
+// at the single clone). init.mjs correctly gates that file's generation to
+// fwd(target) === fwd(pluginRootMatch), identical to how it gates
+// sterling-mcp.json — a per-project copy would be dead weight nothing reads.
+// Every probe-behavior case below therefore sets STERLING_PLUGIN_ROOT_MATCH:
+// dir so the generation block actually runs; a dedicated pin (immediately
+// after the control arm) proves the omission directly in an ordinary
+// consuming project that never sets it.
+//
+// Seam: STERLING_CODEX_PROBE_WIN — unset/'' via the init() helper's own default
+// = forced 'absent' (see the load-bearing default added to init() above); 'ok'
+// = force probe success; 'absent' = force reason 'binary-absent'; 'not-logged-in'
+// = force reason 'not-logged-in'; any other value = init fails loud (mirrors
+// STERLING_CODEX_PROBE exactly).
+// =============================================================================
+
+test('CONTROL ARM — the WSL and native-Windows codex probes are independently keyed: forcing one to fail while the other succeeds in the SAME init run wires codex into exactly one file, never both/neither', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, {
+      STERLING_PLUGIN_ROOT_MATCH: dir, // generates sterling-mcp.json too, in the same run
+      STERLING_CODEX_PROBE: 'ok', // WSL probe succeeds
+      STERLING_CODEX_PROBE_WIN: 'absent', // native-Windows probe forced to fail
+    });
+    assert.equal(r.code, 0, r.stderr);
+    const wsl = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'sterling-mcp.json'), 'utf8'));
+    const win = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json'), 'utf8'));
+    assert.deepEqual(wsl.mcpServers.codex, { command: 'codex', args: ['mcp-server'] }, 'WSL file gets codex — its own probe (STERLING_CODEX_PROBE) succeeded');
+    assert.ok(!('codex' in win.mcpServers), 'native-Windows file gets NO codex — its own probe (STERLING_CODEX_PROBE_WIN) was forced to fail, independent of the WSL probe succeeding in the SAME run');
+    assert.ok(win.mcpServers.sterling, 'win file still generated sterling-only');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: make the win branch read STERLING_CODEX_PROBE (reusing the WSL
+// seam/flag) instead of its own STERLING_CODEX_PROBE_WIN — the win file would
+// then also gain a codex entry despite being forced absent, and the
+// `!('codex' in win.mcpServers)` assertion goes red.
+
+test('sparring-partner-win: outside the plugin repo (no STERLING_PLUGIN_ROOT_MATCH), sterling-mcp-win.json is NOT generated at all — plugin-repo-only, exactly like sterling-mcp.json', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    // No STERLING_PLUGIN_ROOT_MATCH: this fixture is an ordinary consuming
+    // project, not the plugin-repo clone. The probe is forced 'ok' so the
+    // omission below is provably the plugin-root gate, not a probe-driven
+    // skip — if generation were probe-gated only, 'ok' would produce the file.
+    const r = init(dir, FRESH_FLAGS, { STERLING_CODEX_PROBE_WIN: 'ok' });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no per-project sterling-mcp-win.json — generation is gated to the plugin-repo branch (fwd(target) === fwd(pluginRootMatch)), identical to sterling-mcp.json; a per-project copy would be dead weight nothing reads (templates/launcher-win-native.bat:34 always points at the single plugin-repo clone)');
+    // the native launcher itself is still produced — only the win MCP config is plugin-repo-only
+    assert.ok(existsSync(join(dir, 'sterling-windows.bat')), 'native launcher still generated in an ordinary consuming project');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: gate sterling-mcp-win.json generation on "native launcher present"
+// (STERLING_WIN_NODE resolvable, which the init() helper always sets) instead
+// of fwd(target) === fwd(pluginRootMatch) — the file would be written in this
+// ordinary consuming-project fixture and the `!existsSync(...)` assertion goes
+// red.
+
+test('sparring-partner-win case 1: probe OK wires codex into sterling-mcp-win.json — the SAME CODEX_MCP_ENTRY the WSL branch uses — sterling entry preserved', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'ok' });
+    assert.equal(r.code, 0, r.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp-win.json');
+    assert.ok(existsSync(mcpPath), 'native-Windows MCP config generated (plugin-repo branch)');
+    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(mcp.mcpServers && mcp.mcpServers.sterling, 'sterling entry present alongside codex');
+    assert.deepEqual(mcp.mcpServers.codex, { command: 'codex', args: ['mcp-server'] }, 'codex entry matches CODEX_MCP_ENTRY exactly — the same entry object the WSL branch wires, not a win-specific variant');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: wire a different literal on the win branch (e.g. omit 'args', or
+// hardcode a duplicated/altered command string) instead of reusing
+// CODEX_MCP_ENTRY — the deepEqual against {command:'codex', args:['mcp-server']}
+// goes red.
+
+test('sparring-partner-win case 2: probe forced absent -> no codex entry; loud actionable skip line; file still generated sterling-only', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'absent' });
+    assert.equal(r.code, 0, r.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp-win.json');
+    assert.ok(existsSync(mcpPath), 'win MCP config still generated despite the codex skip — P5: a missing Codex is a loud probe absence, never a silent omission of the whole file');
+    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(!('codex' in mcp.mcpServers), 'no codex key added when the win probe reports binary-absent');
+    assert.ok(mcp.mcpServers.sterling, 'sterling entry still present — file generated sterling-only');
+    const report = r.stdout + r.stderr;
+    const line = report.match(/^codex mcp: skipped — .+/m);
+    assert.ok(line, 'loud skip line present (reused codexSkipLine, not a bare prefix)');
+    assert.ok(line[0].length > 'codex mcp: skipped — '.length, 'skip line carries actionable content beyond the bare prefix');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: drop the codexSkipLine push on the win branch's failure path (wire
+// nothing, report nothing) — the skip-line `line` match goes null and the
+// `assert.ok(line, ...)` goes red; or make the win branch bail out of writing
+// the whole file on probe failure instead of emitting it sterling-only — the
+// `existsSync(mcpPath)` assertion goes red.
+
+test('sparring-partner-win case 3: probe forced not-logged-in -> no codex entry; loud actionable skip line; file still generated sterling-only', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'not-logged-in' });
+    assert.equal(r.code, 0, r.stderr);
+    const mcpPath = join(dir, '.claude-plugin', 'sterling-mcp-win.json');
+    assert.ok(existsSync(mcpPath), 'win MCP config still generated despite the codex skip');
+    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    assert.ok(!('codex' in mcp.mcpServers), 'no codex key added when the win probe reports not-logged-in');
+    assert.ok(mcp.mcpServers.sterling, 'sterling entry still present — file generated sterling-only');
+    const report = r.stdout + r.stderr;
+    const line = report.match(/^codex mcp: skipped — .+/m);
+    assert.ok(line, 'loud skip line present');
+    assert.ok(line[0].length > 'codex mcp: skipped — '.length, 'skip line carries actionable content beyond the bare prefix');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: drop the codexSkipLine push on the win branch's not-logged-in path
+// (report nothing) — the `line` match goes null and `assert.ok(line, ...)`
+// goes red.
+
+test('sparring-partner-win cases 2+3 together: the binary-absent and not-logged-in win skip lines are distinguishable from each other (never one generic message)', () => {
+  const dirAbsent = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  const dirLogin = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const rAbsent = init(dirAbsent, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dirAbsent, STERLING_CODEX_PROBE_WIN: 'absent' });
+    const rLogin = init(dirLogin, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dirLogin, STERLING_CODEX_PROBE_WIN: 'not-logged-in' });
+    assert.equal(rAbsent.code, 0, rAbsent.stderr);
+    assert.equal(rLogin.code, 0, rLogin.stderr);
+    const lineAbsent = (rAbsent.stdout + rAbsent.stderr).match(/^codex mcp: skipped — .+/m);
+    const lineLogin = (rLogin.stdout + rLogin.stderr).match(/^codex mcp: skipped — .+/m);
+    assert.ok(lineAbsent, 'binary-absent case reports a skip line');
+    assert.ok(lineLogin, 'not-logged-in case reports a skip line');
+    assert.notEqual(lineAbsent[0], lineLogin[0], 'the two win-probe failure reasons produce distinguishable skip lines, not one generic message');
+  } finally {
+    rmSync(dirAbsent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dirLogin, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: pass a single hardcoded reason (or the raw probe object without its
+// discriminating `reason` field) into codexSkipLine on the win call site,
+// regardless of which failure probeCodexWin actually returned — lineAbsent and
+// lineLogin become byte-identical and the notEqual assertion goes red.
+
+test('sparring-partner-win case 5: an unrecognized STERLING_CODEX_PROBE_WIN value fails init loud, never silently proceeding', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-codexwin-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'garbage' });
+    assert.notEqual(r.code, 0, 'an unrecognized win-probe override value must fail init (nonzero exit), never proceed as if unset');
+    assert.ok((r.stderr ?? '').length > 0, 'the loud failure is accompanied by a diagnostic on stderr, not a silent nonzero');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: treat any unrecognized STERLING_CODEX_PROBE_WIN value as equivalent
+// to unset (fall through to the real probe or to a default forced outcome)
+// instead of failing loud — r.code stays 0 and the notEqual assertion goes red.

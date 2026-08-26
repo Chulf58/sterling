@@ -394,6 +394,124 @@ function unquotedText(str) {
   return out;
 }
 
+// ── ANCHORED allow_scripts EXEMPTION ─────────────────────────────────────
+// A sanctioned name exempts a fragment ONLY when it is that fragment's
+// EXECUTABLE argument (anti_pattern `unanchored-substring-allowlist-in-
+// command-guard`, severity BLOCK). The previous test — `frag.includes(entry)`
+// over the RAW fragment text, evaluated BEFORE classification — was a
+// CONFIRMED, REPRODUCED bypass: splitFragments is quote/heredoc-aware but has
+// no `#` handling, so a comment tail stays inside its fragment and appending
+// `# scripts/init.mjs` exempted ANY command. Measured 2026-08-26 as ALLOW:
+// `rm -f .sterling/sterling.db # scripts/init.mjs`, `rm -rf .sterling # …`,
+// a quoted flag value (`--label "scripts/init.mjs"`) and an unrelated path
+// token (`/tmp/scripts/init.mjs`). The agent-reachable one is
+// `grep -c . .sterling/sterling.db # scripts/init.mjs` — store
+// read-exfiltration straight through the seal decision fd9e96e0 keeps broad.
+//
+// SCOPE, DELIBERATELY: this narrows an over-broad EXEMPTION and nothing else,
+// so it does not reopen decision ccc44a8e (the broad command-TEXT classifier
+// is the accepted terminal design) — it closes a false-ALLOW, which is the
+// class ccc44a8e keeps closed. Comment stripping happens HERE and NOWHERE
+// ELSE: classifyFragment still sees the whole fragment INCLUDING its comment
+// text, because stripping comments before classification would silently
+// narrow the deny surface decisions ccc44a8e/a8bec43f keep broad on purpose
+// (`ls /tmp # .sterling/sterling.db` must keep denying).
+
+// Shell WORDS of a fragment, for the exemption test only. Quotes DELIMIT but
+// never SPLIT — `"rm" -f x` is still the word `rm`, so a quoted verb can
+// never be dissolved to promote a later sanctioned token into executable
+// position (which is what tokenizing over unquotedText would do). A heredoc
+// marker + body + terminator is DATA and yields no words (same span logic as
+// unquotedText). An unquoted `#` that STARTS a word ends the line as a
+// comment, exactly as bash reads it (`foo#bar` keeps its literal `#`).
+function executableWords(str) {
+  const words = [];
+  let current = '';
+  let started = false; // a word is in progress (possibly empty, via `''`)
+  let inSingle = false;
+  let inDouble = false;
+  const push = () => {
+    if (started) {
+      words.push(current);
+      current = '';
+      started = false;
+    }
+  };
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      else current += c;
+      continue;
+    }
+    if (inDouble) {
+      if (c === '"' && str[i - 1] !== '\\') inDouble = false;
+      else current += c;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      started = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      started = true;
+      continue;
+    }
+    if (c === '<' && str[i + 1] === '<') {
+      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
+      const delim = m ? (m[1] ?? m[2] ?? m[3]) : null;
+      if (delim) {
+        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rest = str.slice(i);
+        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
+        const span = end ? end.index + end[0].length : rest.length;
+        i += span - 1;
+        push();
+        continue;
+      }
+    }
+    if (/\s/.test(c)) {
+      push();
+      continue;
+    }
+    if (c === '#' && !started) break; // unquoted `#` at word start — comment tail
+    started = true;
+    current += c;
+  }
+  push();
+  return words;
+}
+
+// Interpreters whose FIRST non-flag argument is the script they execute.
+// Matched by EXACT word, not basename: `/tmp/evil/node scripts/init.mjs`
+// must not inherit the exemption (fail-closed, this file's standing posture —
+// a missed exemption only ever costs a deny).
+const INTERPRETER_WORDS = new Set(['node', 'nodejs', 'bash', 'sh', 'zsh', 'python', 'python3']);
+
+// Whole-word EQUALITY, never endsWith/includes: `/tmp/scripts/init.mjs` is a
+// DIFFERENT, attacker-choosable file that merely ends with the sanctioned
+// name, and any writable directory with that suffix would otherwise unlock
+// the store. Only a leading `./` is normalized away — `./scripts/init.mjs`
+// and `scripts/init.mjs` name the same file.
+function isSanctionedScript(word, entries) {
+  const w = word.startsWith('./') ? word.slice(2) : word;
+  return entries.some((entry) => w === entry);
+}
+
+function fragmentRunsSanctionedScript(fragment, entries) {
+  const words = executableWords(fragment);
+  if (!words.length) return false;
+  if (isSanctionedScript(words[0], entries)) return true; // directly executed
+  if (!INTERPRETER_WORDS.has(words[0])) return false;
+  for (let i = 1; i < words.length; i++) {
+    if (words[i].startsWith('-')) continue; // an interpreter flag, not the script
+    return isSanctionedScript(words[i], entries); // the first non-flag arg IS the script
+  }
+  return false;
+}
+
 // Decision 0b4d3c8c denies redirections INTO the store, not every redirection
 // that merely appears on a line naming a store path — a store READ with an
 // outward redirect (`grep foo .sterling/x.json > /tmp/out`, `cat
@@ -449,7 +567,7 @@ function classifyFragment(fragment) {
   }
 
   // AC5: sterling.db is sealed to shell for EVERY verb, reads included.
-  if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed };
+  if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed, dbSeal: true };
 
   // (a) an unquoted output-redirect operator whose TARGET names a store path
   // — a redirect INTO the store — is a write regardless of verb. A redirect
@@ -478,16 +596,20 @@ function classifyFragment(fragment) {
 }
 
 let offending = null;
+let offendingIsDbSeal = false;
 try {
   for (const frag of splitFragments(command)) {
     // The sanctioned-script escape is judged PER FRAGMENT (AC-E): a sanctioned
     // script elsewhere in a compound command must never launder a writing
     // fragment alongside it (`node scripts/x.mjs && rm .sterling/…` still
-    // denies, naming the rm fragment).
-    if (allowScripts.some((s) => frag.includes(s))) continue;
+    // denies, naming the rm fragment). And ANCHORED to the fragment's
+    // EXECUTABLE argument — mere presence of the name in the fragment's text
+    // is never sufficient; see fragmentRunsSanctionedScript above.
+    if (fragmentRunsSanctionedScript(frag, allowScripts)) continue;
     const result = classifyFragment(frag);
     if (result.write) {
       offending = result.fragment;
+      offendingIsDbSeal = Boolean(result.dbSeal);
       break;
     }
   }
@@ -505,6 +627,29 @@ try {
   );
 }
 if (!offending) allow();
+
+// DISCLOSURE-ONLY message for the raw command-text DB seal (decisions
+// h15-broad-command-text-guard-is-terminal-accepted and
+// h15-db-seal-residual-discharged-by-disclosure): the allow surface here is
+// UNCHANGED from the generic deny below — only the wording differs, naming
+// the exact matched substring, its offset, and the seal's discriminator, and
+// dropping the generic message's false "only redirections INTO .sterling/"
+// claim (a redirect whose target merely CONTAINS the literal while pointing
+// OUTSIDE .sterling/ is denied too).
+if (offendingIsDbSeal) {
+  const match = DB_MENTION_RE.exec(command);
+  const matchedText = match ? match[0] : 'sterling.db';
+  const offset = match ? match.index : command.search(DB_MENTION_RE);
+  deny(
+    "H15: shell access to the Sterling store's database file is denied — DB access is the MCP tool surface's job, never raw shell.\n" +
+      `Denied fragment: ${offending}\n` +
+      `Matched substring: "${matchedText}" at offset ${offset} in the command text.\n` +
+      'This is a raw command-text DB seal: it matches the literal text of the command, not a resolved path or write target, so syntactic role and verb are intentionally ignored — it fires the same whether the literal sits in a path, inside a quoted search pattern, or in a redirect target, and regardless of whether the verb is a write or a normally read-only one like grep.\n' +
+      'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
+      `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts) — a sanctioned name exempts a fragment ONLY when it is that fragment's EXECUTABLE argument; the same name in a comment, a quoted flag value, or an unrelated path exempts nothing.\n` +
+      'If the running MCP server predates the current code, RESTART THE SESSION — never write around the surface.'
+  );
+}
 
 deny(
   'H15: shell write access to the Sterling store is denied — the store is read and written through the §10 MCP tool surface ONLY.\n' +

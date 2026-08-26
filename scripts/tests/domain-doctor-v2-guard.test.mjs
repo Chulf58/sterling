@@ -1075,3 +1075,523 @@ test('AC19: adopt reports a destination-only alias/version row even when records
   assert.match(out, /record_aliases/);
   assert.deepEqual(snapshotDir(dir), before1, 'a read-only probe changes nothing regardless of its verdict');
 });
+
+// ---------------------------------------------------------------------------
+// SLICE 1 (record_relations containment guard) — provisional AC20, not yet
+// reflected in the feature article's current_ac (article version 19 stops at
+// AC19; this pin is authored ahead of implementation, symmetrical with AC6's
+// record_versions/record_aliases refusals). MEASURED GAP (conductor
+// dispatch, verified at HEAD 302a2bb): the structural survey backing AC17
+// reads only record_versions and record_aliases — record_relations is
+// neither guarded nor copied, so any number of its rows reach the copy loop
+// today: the rebuild stamps record.updated_at instead of the original
+// created_at and skips self-links, and an addLink() relation never reaches
+// the record body at all, so relations are silently lost or restamped. Fix:
+// refuse (exit 2, nothing written) when the source holds any record_relations
+// row, naming the table and the row count. BOTH TESTS BELOW ARE RED TODAY
+// (the guard does not exist yet). Control placed FIRST per decisions
+// cf863d84 / 23afbc83.
+// ---------------------------------------------------------------------------
+
+test('AC20-control: a v2 source with zero record_relations rows still migrates normally', (t) => {
+  if (!sqliteAvailable) { t.skip('node:sqlite unavailable in this runtime'); return; }
+  const dir = tmp('doctor-ac20ctrl-');
+  const onlyInSource = randomUUID();
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [mk(onlyInSource, 'plain answer, no relations')]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), []);
+  const r = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  // SABOTAGE: make the new record_relations guard refuse whenever the
+  // record_relations TABLE exists (rather than gating on its row COUNT) —
+  // this control goes red because every mkV2 store carries the empty v2
+  // provenance tables, so an existence-only check would refuse this clean
+  // fixture too, proving the guard is count-gated and not "table present ->
+  // refuse".
+  assert.equal(r.code, 0, `a clean v2 source with no relations must still migrate: ${oneLine(r.stderr)}`);
+  assert.ok(listIds(to).includes(onlyInSource), 'the record actually landed in the destination');
+});
+
+test('AC20: migrate refuses when the source holds any record_relations rows, naming the table and the count, before any write', (t) => {
+  if (!sqliteAvailable) { t.skip('node:sqlite unavailable in this runtime'); return; }
+  const dir = tmp('doctor-ac20-');
+  const a = randomUUID();
+  const b = randomUUID();
+  const fromPath = join(dir, 'from', 'sterling.db');
+  mkV2(fromPath, [mk(a, 'record a'), mk(b, 'record b')]);
+  const rw = openRW(fromPath);
+  insertRelation(rw, a, 'relies_on', b, '2026-06-01T00:00:00.000Z');
+  insertRelation(rw, b, 'relies_on', a, '2026-06-01T00:00:00.000Z');
+  rw.close();
+  const to = mkV2(join(dir, 'to', 'sterling.db'), []);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', fromPath, '--to', to], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // SABOTAGE: delete the record_relations refusal branch (or fold it into a
+  // no-op) — the exit-code assertion goes red first (code stays 0, or the
+  // create-storm's 3), and the table/count assertions go red regardless
+  // since the message never mentions record_relations at all.
+  assert.strictEqual(r.code, 2, `relations that would be silently lost or restamped must block the copy: ${out}`);
+  assert.match(out, /record_relations/, 'names the table');
+  assert.match(out, /\b2\b/, 'names the row count');
+  assert.doesNotMatch(out, /REFUSED:/, 'the guard fires before any write is attempted, not inside the create-storm catch');
+  assert.deepEqual(snapshotDir(dir), before1, 'nothing copied — the refusal happens before any write to the destination');
+});
+
+// ---------------------------------------------------------------------------
+// SLICE 2 (same-id body-equality on the migrate skip path) — provisional
+// AC21, not yet reflected in the feature article's current_ac. MEASURED GAP
+// (conductor dispatch): today an id present in BOTH stores is filtered out of
+// the copy plan by id membership alone — nothing ever compares the two
+// bodies — so a same-id/different-body pair (exactly what a split store
+// produces) is silently dropped rather than flagged. Fix: identical bodies
+// stay an idempotent skip; differing bodies become a HARD CONFLICT (exit 2,
+// naming the id), detected in BOTH the dry-run/plan path and under --apply —
+// the diff that decides the plan is the same diff --apply acts on, so the
+// conflict cannot be apply-gated without the plan lying about what it will
+// do. CONTROL FIRST per decisions cf863d84 / 23afbc83. AC21-control and the
+// identical-body skip test are GREEN TODAY already (today's id-only filter
+// produces this outcome by coincidence, not by comparing bodies — see the
+// sibling suite's "migrate copies records verbatim..." test, which exercises
+// this exact identical-body-shared-id shape). The two conflict tests below
+// are RED today: a differing body is currently silently dropped exactly like
+// an identical one, exit 0, no mention of the conflicting id anywhere.
+// ---------------------------------------------------------------------------
+
+test('AC21-control: an unrelated, non-colliding pair of records on each side still migrates and is left alone normally', () => {
+  const dir = tmp('doctor-ac21ctrl-');
+  const onlyInSource = randomUUID();
+  const onlyInDest = randomUUID();
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [mk(onlyInSource, 'brand new record')]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [mk(onlyInDest, 'totally unrelated pre-existing record')]);
+  const r = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // SABOTAGE: broaden the new body-comparison to fire on ANY cross-id pair
+  // whose bodies differ (e.g., compare every destination record against
+  // every source record instead of only same-id pairs) — this control goes
+  // red because onlyInSource and onlyInDest differ in every field and would
+  // be spuriously reported as a conflict, refusing the whole run.
+  assert.equal(r.code, 0, `no id collides here at all — must not be affected by the new same-id conflict check: ${out}`);
+  const check = new SterlingStore(to);
+  const landed = check.get(onlyInSource);
+  const untouched = check.get(onlyInDest);
+  check.close();
+  assert.ok(landed, 'the new record landed');
+  assert.equal(landed.answer, 'brand new record');
+  assert.ok(untouched, 'the unrelated pre-existing destination record is untouched');
+  assert.equal(untouched.answer, 'totally unrelated pre-existing record');
+});
+
+test('AC21: same id, IDENTICAL body (incl. a matching extra field and scope) on both sides — idempotent skip, exit 0, reported as skipped rather than copied, stable under a repeated --apply', () => {
+  const dir = tmp('doctor-ac21skip-');
+  const shared = randomUUID();
+  const onlyInSource = randomUUID();
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [
+    mk(shared, 'identical shared answer', { version: 3 }),
+    mk(onlyInSource, 'the actually-missing record'),
+  ]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [mk(shared, 'identical shared answer', { version: 3 })]);
+
+  const dry = doctor(['migrate', '--from', from, '--to', to], dir);
+  const dryOut = oneLine(dry.stdout + dry.stderr);
+  // SABOTAGE: flip the new equality comparison to always treat same-id
+  // bodies as differing (e.g., compare object identity/reference instead of
+  // deep value equality) — this pair is byte-identical, so this assertion
+  // goes red: the plan would report a conflict (exit 2) instead of a skip.
+  assert.equal(dry.code, 0, `identical bodies at a shared id must not be a conflict: ${dryOut}`);
+  assert.match(dryOut, /skipped 1/i, 'reported as skipped, not planned for copy');
+  assert.match(dryOut, new RegExp(onlyInSource), 'the genuinely missing record is still named in the plan');
+
+  const applied1 = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  assert.equal(applied1.code, 0, oneLine(applied1.stderr));
+  const applied2 = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  assert.equal(applied2.code, 0, `a second --apply over an already-synced pair stays idempotent: ${oneLine(applied2.stderr)}`);
+
+  const check = new SterlingStore(to);
+  const landed = check.get(onlyInSource);
+  const stillShared = check.get(shared);
+  check.close();
+  assert.ok(landed, 'the genuinely missing record still copied');
+  assert.equal(stillShared.answer, 'identical shared answer', 'the identical shared record was never rewritten');
+});
+
+test('AC21: same id, DIFFERING body under --apply — HARD CONFLICT, exit 2, message names the conflicting id, nothing written', () => {
+  const dir = tmp('doctor-ac21conflict-apply-');
+  const shared = randomUUID();
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [mk(shared, 'the source-side answer')]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [mk(shared, 'a DIFFERENT destination-side answer')]);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // SABOTAGE: remove the body-difference check entirely, falling back to the
+  // current id-only skip filter — this assertion goes red because the
+  // differing destination body would be silently kept (exit 0) with no
+  // mention of `shared` anywhere in the output, instead of a named conflict.
+  assert.strictEqual(r.code, 2, `a same-id body mismatch cannot be silently dropped: ${out}`);
+  assert.match(out, new RegExp(shared), 'names the conflicting id verbatim');
+  assert.match(out, /conflict|differ|mismatch/i, 'names the nature of the refusal');
+  assert.doesNotMatch(out, /REFUSED:/, 'a guard-level refusal, not a per-record write failure inside the create-storm');
+  assert.deepEqual(snapshotDir(dir), before1, 'nothing written — including no partial write of any non-conflicting fields');
+});
+
+test('AC21: same id, DIFFERING body is detected in the dry-run/plan path too, not only under --apply', () => {
+  const dir = tmp('doctor-ac21conflict-dry-');
+  const shared = randomUUID();
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [mk(shared, 'the source-side answer')]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [mk(shared, 'a DIFFERENT destination-side answer')]);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', from, '--to', to], dir); // no --apply
+  const out = oneLine(r.stdout + r.stderr);
+  // SABOTAGE: gate the new conflict check behind the --apply flag (only run
+  // the body-equality comparison when args.apply is true) — this assertion
+  // goes red because the dry-run path would fall back to reporting a normal
+  // exit-0 plan (or a silent skip) instead of refusing, letting the plan lie
+  // about what --apply would actually do.
+  assert.strictEqual(r.code, 2, `the plan-time diff and the apply-time diff must be the same diff: ${out}`);
+  assert.match(out, new RegExp(shared), 'names the conflicting id verbatim');
+  assert.deepEqual(snapshotDir(dir), before1, 'dry-run never writes regardless — confirms this is the same detection, not a new write path');
+});
+
+// ---------------------------------------------------------------------------
+// STRENGTHENING ROUND (this revision) — two independent reviews found AC20
+// and AC21's existing pins insufficiently discriminating. Three gaps, in the
+// dispatch's own numbering. Every new pin below carries its own SABOTAGE
+// comment (decision 23afbc83) and, where its verdict could have more than
+// one cause, an explicit note on which earlier test in this file already
+// serves as its CONTROL arm (never re-litigated, only cited — the control
+// stays where it already is, physically earlier in the file, which is what
+// "placed first" means for a pin added by amendment rather than from
+// scratch).
+// ---------------------------------------------------------------------------
+
+// GAP 1 — AC20 SURVIVES AN OFF-BY-ONE. The only positive AC20 fixture above
+// carries exactly TWO relation rows, so `relationCount > 1` (or a hardcoded
+// expected count of 2) passes it identically to the correct `!== 0` gate.
+// CONTROL: 'AC20-control' above (zero rows -> exit 0) already rules out the
+// OTHER wrong shape ("table exists -> refuse unconditionally") — it is
+// unaffected by either `> 1` or `!== 0`, since both agree at zero. This new
+// test is the boundary the control cannot reach: exactly one row discriminates
+// `> 1` (wrongly allows) from `!== 0` (correctly refuses).
+test('AC20: migrate refuses when the source holds EXACTLY ONE record_relations row (off-by-one boundary), naming the table and the count', (t) => {
+  if (!sqliteAvailable) { t.skip('node:sqlite unavailable in this runtime'); return; }
+  const dir = tmp('doctor-ac20one-');
+  const a = randomUUID();
+  const b = randomUUID();
+  const fromPath = join(dir, 'from', 'sterling.db');
+  mkV2(fromPath, [mk(a, 'record a'), mk(b, 'record b')]);
+  const rw = openRW(fromPath);
+  insertRelation(rw, a, 'relies_on', b, '2026-06-01T00:00:00.000Z');
+  rw.close();
+  const to = mkV2(join(dir, 'to', 'sterling.db'), []);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', fromPath, '--to', to], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // SABOTAGE: write the guard as `relationCount > 1` (an off-by-one against
+  // the correct `!== 0`), or hardcode an expected count of 2 lifted from the
+  // only other fixture that exercises this guard — this fixture has exactly
+  // ONE relation row, so either wrong shape lets the source through
+  // untouched: exit stays 0 (or 3, from the create-storm) and the relation
+  // is silently lost, while the correct `!== 0` gate must still refuse.
+  assert.strictEqual(r.code, 2, `a single record_relations row must still block the copy, not only two or more: ${out}`);
+  assert.match(out, /record_relations/, 'names the table');
+  assert.match(out, /\b1\b/, 'names the row count (1), not a hardcoded 2');
+  assert.doesNotMatch(out, /REFUSED:/, 'the guard fires before any write is attempted, not inside the create-storm catch');
+  assert.deepEqual(snapshotDir(dir), before1, 'nothing copied — the refusal happens before any write to the destination');
+});
+
+// GAP 2 — AC21 SURVIVES A SHALLOW COMPARATOR. Both existing differing-body
+// AC21 fixtures vary only the scalar `answer`, so `a.answer === b.answer`
+// passes every existing AC21 test (research_finding.source_urls is confirmed
+// optional-with-default([]) by board 37862e86 / packages/schemas/src/tests/
+// research-finding-source-urls-optional.test.ts). The four pins below all
+// hold `answer` IDENTICAL on both sides, so a shallow `answer`-only
+// comparator cannot tell any of them apart from a genuine duplicate — only a
+// real deep/structural comparison can.
+//
+// FIXTURE REPAIR (2026-08-26) — WHY NONE OF THESE FOUR CARRY links[] ANY MORE.
+// Three of them were originally built on links[{rel, target_id}] entries.
+// `create()` mints a record_relations row for EVERY body link, so a SOURCE
+// fixture carrying body links now trips the AC20 relations-containment guard
+// and migrate refuses at exit 2 BEFORE the body comparator is ever reached
+// (decision [migrate-relations-containment-narrows-migrate-to-unlinked-
+// stores], 88f3db69: migrate refuses ANY source holding ANY record_relations
+// row; that ruling is shipped and twice-reviewed). The consequences were:
+// the control could never reach its exit-0 skip, and the two conflict pins
+// exited 2 for the WRONG REASON — a relations refusal, not a body conflict —
+// so their "names the conflicting id" assertion could not pass and the pins
+// proved nothing about deep equality. NEITHER the ruling NOR the production
+// guard ORDER is the thing to change (exempting body-derived relations would
+// narrow a settled decision; reordering the guards is an unrequested
+// behavioural change) — the FIXTURES were wrong, so the FIXTURES were rebuilt
+// on RELATION-FREE nested fields of the same record type:
+//   * file_keys[]   — an array of repo-relative POSIX paths, which
+//                     research_finding defines (CLAUDE.md, "which field
+//                     carries paths is PER TYPE": research_finding →
+//                     file_keys[]). Carries the nested INNER-VALUE difference.
+//   * source_urls[] — an array of plain strings, ORDER-BEARING and stored as
+//                     authored: MEASURED on live research_finding 8add62e0,
+//                     whose three source_urls sit in non-alphabetical author
+//                     order, so the store neither sorts nor canonicalizes
+//                     them. It also passes through none of the path
+//                     normalization file_keys goes through, which is exactly
+//                     why the ARRAY-ORDER pin uses source_urls and not
+//                     file_keys: a path normalizer that ever sorted or
+//                     deduped would silently dissolve an order pin built on
+//                     paths, turning a real difference into no difference.
+// Neither field mints a relation row, so all four fixtures leave their SOURCE
+// store with ZERO record_relations rows and reach the body comparator.
+//
+// FIXTURE DISTINCTNESS FROM THE AC20 ONE-ROW PIN ABOVE (the reason these two
+// subjects cannot now be confused): that pin's source is the ONLY fixture in
+// this file whose source holds a record_relations row, and it acquires it
+// EXPLICITLY via insertRelation() over a link-free body — never as a side
+// effect of a body link. "Holds exactly one relation row" (AC20's boundary)
+// and "holds a nested structure" (AC21's subject) are therefore carried by
+// disjoint fixture shapes: sabotaging the relations guard moves ONLY the AC20
+// pin, sabotaging the body comparator moves ONLY these four, and no single
+// mutation can move both and leave the cause ambiguous.
+//
+// The first of the four is the CONTROL, placed FIRST: it proves a same-id
+// pair with a NESTED, non-empty structure (not just a scalar) is STILL
+// correctly reported as an idempotent skip when truly identical — ruling out
+// "any same-id pair with a non-trivial body always conflicts" as the cause
+// behind the three conflict pins that follow it.
+
+test("AC21-control: same id, IDENTICAL body INCLUDING NESTED ARRAY structure (file_keys[] + source_urls[], both multi-element) — idempotent skip, proven on more than scalars", () => {
+  const dir = tmp('doctor-ac21nested-ctrl-');
+  const shared = randomUUID();
+  // Written out LONGHAND on both sides — never a shared array reference — so
+  // the two nested structures are genuinely separate object instances with
+  // equal content, which is the precondition the reference-identity sabotage
+  // below needs in order to be able to fire at all.
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [
+    mk(shared, 'same top-level answer', {
+      file_keys: ['packages/store/src/index.ts', 'scripts/domain-doctor.mjs'],
+      source_urls: ['https://example.com/alpha', 'https://example.com/beta'],
+    }),
+  ]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [
+    mk(shared, 'same top-level answer', {
+      file_keys: ['packages/store/src/index.ts', 'scripts/domain-doctor.mjs'],
+      source_urls: ['https://example.com/alpha', 'https://example.com/beta'],
+    }),
+  ]);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', from, '--to', to], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // WHY THIS FIXTURE REACHES THE BEHAVIOUR IT NAMES: neither file_keys nor
+  // source_urls mints a record_relations row, so this source holds ZERO
+  // relation rows and the AC20 containment guard cannot fire — the exit-0
+  // verdict asserted below can only come from the body comparator (the
+  // previous links[]-based fixture could never get past the guard, see the
+  // GAP 2 header).
+  // SABOTAGE: compare same-id bodies by reference/identity (or via a
+  // comparator that treats any non-empty array field as automatically
+  // differing) instead of deep value equality — this assertion goes red
+  // because the file_keys/source_urls arrays here are separate instances with
+  // identical content, and a reference-based or arrays-always-differ
+  // comparator would wrongly report a conflict (exit 2) instead of a skip.
+  assert.strictEqual(r.code, 0, `identical bodies, including multi-element nested arrays, must not be a conflict: ${out}`);
+  assert.doesNotMatch(out, /conflict|mismatch/i, 'no conflict reported when the nested structure is genuinely identical');
+  assert.deepEqual(snapshotDir(dir), before1, 'a dry-run plan never writes');
+});
+
+test("AC21: same id, bodies differ ONLY in ONE INNER ELEMENT of a nested array (file_keys[1]) — HARD CONFLICT, exit 2, id named", () => {
+  const dir = tmp('doctor-ac21nested-diff-');
+  const shared = randomUUID();
+  // Same length, same element [0], one differing element [1] — so the arrays
+  // are distinguishable ONLY by looking inside them. `answer` is identical.
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [
+    mk(shared, 'same top-level answer', {
+      file_keys: ['packages/store/src/index.ts', 'scripts/domain-doctor.mjs'],
+    }),
+  ]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [
+    mk(shared, 'same top-level answer', {
+      file_keys: ['packages/store/src/index.ts', 'scripts/migrate-stores.mjs'],
+    }),
+  ]);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // WHY THIS FIXTURE REACHES THE BEHAVIOUR IT NAMES: file_keys mints no
+  // record_relations row, so the source holds ZERO relation rows and the exit
+  // 2 asserted below is the BODY COMPARATOR's conflict, not AC20's relations
+  // refusal — which is why "names the conflicting id" can pass at all. Under
+  // the previous links[]-based fixture this test exited 2 from the relations
+  // guard and the id assertion could never be reached.
+  // SABOTAGE: implement the same-id equality check by comparing only
+  // top-level scalar fields (e.g. `a.answer === b.answer`) — this assertion
+  // goes red because `answer` is identical on both sides here and only the
+  // nested file_keys[1] element differs, so a shallow comparator reports a
+  // clean skip (exit 0) instead of a conflict.
+  assert.strictEqual(r.code, 2, `bodies differing only in one inner element of a nested array must still conflict: ${out}`);
+  assert.match(out, new RegExp(shared), 'names the conflicting id verbatim');
+  assert.match(out, /conflict|differ|mismatch/i, 'names the nature of the refusal');
+  assert.doesNotMatch(out, /REFUSED:/, 'a guard-level refusal, not a per-record write failure inside the create-storm');
+  assert.deepEqual(snapshotDir(dir), before1, 'nothing written on a hard conflict');
+});
+
+test('AC21: same id, bodies differ ONLY by an OPTIONAL key present on one side and absent on the other (source_urls) — HARD CONFLICT, exit 2, id named', () => {
+  const dir = tmp('doctor-ac21optional-diff-');
+  const shared = randomUUID();
+  const fromRec = mk(shared, 'same top-level answer', { source_urls: ['https://example.com/found-here'] });
+  const toRec = mk(shared, 'same top-level answer');
+  delete toRec.source_urls; // physically absent — optional-with-default([]) per board 37862e86, not merely a different value
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [fromRec]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [toRec]);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // SABOTAGE: same shallow-comparator sabotage as the nested-value pin —
+  // `answer` matches on both sides, and a comparator limited to a fixed list
+  // of named scalar fields never looks at source_urls at all, reporting a
+  // clean skip instead of a conflict.
+  assert.strictEqual(r.code, 2, `a present-vs-absent optional key is a real difference and must conflict: ${out}`);
+  assert.match(out, new RegExp(shared), 'names the conflicting id verbatim');
+  assert.match(out, /conflict|differ|mismatch/i, 'names the nature of the refusal');
+  assert.doesNotMatch(out, /REFUSED:/, 'a guard-level refusal, not a per-record write failure inside the create-storm');
+  assert.deepEqual(snapshotDir(dir), before1, 'nothing written on a hard conflict');
+});
+
+test('AC21: same id, bodies differ ONLY in ARRAY ORDER of an order-bearing field (source_urls[]) — HARD CONFLICT, exit 2, id named, never a silent skip', () => {
+  const dir = tmp('doctor-ac21order-diff-');
+  const shared = randomUUID();
+  // The SAME two members on both sides, in opposite order — the only
+  // difference in either body. source_urls is the order-bearing array chosen
+  // here (over file_keys) because it is stored exactly as authored, MEASURED
+  // on live research_finding 8add62e0 whose source_urls sit in
+  // non-alphabetical author order: the store neither sorts nor canonicalizes
+  // it, and unlike file_keys it passes through no path normalization that
+  // could reorder or rewrite an element and dissolve the very difference this
+  // pin exists to detect. Deliberately NOT alphabetically ordered in either
+  // direction on its own, so no incidental sorting can be mistaken for a match.
+  const urlsForward = ['https://example.com/second-source', 'https://example.com/first-source'];
+  const urlsReversed = ['https://example.com/first-source', 'https://example.com/second-source'];
+  const from = mkV2(join(dir, 'from', 'sterling.db'), [mk(shared, 'same top-level answer', { source_urls: urlsForward })]);
+  const to = mkV2(join(dir, 'to', 'sterling.db'), [mk(shared, 'same top-level answer', { source_urls: urlsReversed })]);
+  const before1 = snapshotDir(dir);
+  const r = doctor(['migrate', '--from', from, '--to', to, '--apply'], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // WHY THIS FIXTURE REACHES THE BEHAVIOUR IT NAMES: source_urls mints no
+  // record_relations row, so the source holds ZERO relation rows and the exit
+  // 2 below is the body comparator's ORDER-SENSITIVE verdict, not AC20's
+  // relations refusal. The previous links[]-based fixture refused at the
+  // relations guard before any array was ever compared.
+  // SABOTAGE: compare the two source_urls[] arrays as SETS (sort-then-compare,
+  // or compare via a Set of the entries) instead of as an ORDER-SENSITIVE
+  // sequence — this assertion goes red under a set-based comparator: it sees
+  // the same two members present on both sides and reports a clean skip
+  // (exit 0) instead of a conflict.
+  // DIAGNOSING A FUTURE RED: the fixture's premise is that the store stores
+  // source_urls AS AUTHORED. This pin deliberately does not read the stored
+  // bodies back to assert that (an openRO between the before/after
+  // snapshotDir pair would risk creating exactly the sidecar litter the
+  // "nothing written" assertion checks for — see the file header). So if this
+  // ever reds while the output reports a clean skip, check FIRST whether the
+  // store began sorting/canonicalizing source_urls: that would dissolve the
+  // fixture's only difference and make the red a FIXTURE defect, not an
+  // implementation defect. Measured 2026-08-26 as NOT sorted (record
+  // 8add62e0 holds its source_urls in non-alphabetical author order).
+  assert.strictEqual(r.code, 2, `a reordered order-bearing array is a real difference and must conflict, never skip: ${out}`);
+  assert.match(out, new RegExp(shared), 'names the conflicting id verbatim');
+  assert.match(out, /conflict|differ|mismatch/i, 'names the nature of the refusal');
+  assert.doesNotMatch(out, /REFUSED:/, 'a guard-level refusal, not a per-record write failure inside the create-storm');
+  assert.deepEqual(snapshotDir(dir), before1, 'nothing written on a hard conflict');
+});
+
+// GAP 3 — COLUMN-RESIDENT STATE IS INVISIBLE TO A BODY-ONLY COMPARISON. Per
+// the v2 cutover (decision stable-identity-design-v2, and this file's own
+// AC17/README notes), `status` and `superseded_by` are stripped from the
+// stored body and derived from SQL COLUMNS at read time. Two same-id records
+// can therefore be byte-identical at the body level while their lifecycle
+// state differs — invisible to any comparator that reads only `records.body`.
+// FIXTURE REPAIR (2026-08-26) — THIS PIN WAS HOLLOW, AND THE HOLLOWNESS WAS
+// MUTATION-PROVEN. It used to build the destination's divergence with
+// s.retireInFavorOf(). That call does NOT confine itself to the columns: it
+// also rewrites `lifecycle` and `updated_at` INSIDE THE BODY. So the two
+// bodies were NOT byte-identical, the ordinary body comparator saw a
+// difference and refused, and the pin went green WITHOUT the column-state
+// check ever running — passing for a DIFFERENT reason than the one it names
+// ("byte-identical bodies"), which is the exact hollow class decision
+// 23afbc83 and the mutation-rigor rule exist to catch: sabotaging the
+// column-state check left it green.
+// REBUILT with a RAW UPDATE that touches ONLY the `status` and
+// `superseded_by` COLUMNS and no byte of any body. Raw SQL is used here
+// deliberately and narrowly — no store API exists that changes column state
+// without also stamping the body, and a body stamp is precisely what this pin
+// must not have. The two columns are the ones article 'domain-doctor'
+// (8ff011e4) names as column-resident post-v2 ("tombstoneInfo... reads
+// status/superseded_by from the SQL COLUMNS (v2 strips them from the body)").
+// The mutation is applied ONLY to the DESTINATION, so AC6's SOURCE-side
+// retired-record refusal — a genuinely different, already-pinned guard —
+// never fires and cannot be confused with this one; and the source carries no
+// body links, so AC20's relations guard cannot fire either. THE PREMISE IS NOW
+// ASSERTED, NOT ASSUMED: the two bodies are read back and compared BYTE FOR
+// BYTE in the test itself, and the two column states are read back and proven
+// to differ, so if a future store change ever stamps the body again this pin
+// fails LOUDLY on its own premise instead of quietly going hollow a second time.
+// CONTROL: 'AC21: same id, IDENTICAL body...idempotent skip' above already
+// establishes that an ordinary identical same-id pair (both active, no column
+// drift) with this same fixture shape (mkV2 + migrate) IS reported as a clean
+// skip — so a universally-broken implementation that crashes or refuses on
+// every input would already be caught red by that earlier, simpler test, and
+// cannot be the explanation if only THIS test goes red.
+// This pin asserts only the MUST-NOT the gap specifies plus the exit code that
+// MUST-NOT strictly implies — it does not assert the wording of the refusal
+// (which id/state names appear, in what form), because no article or decision
+// settles that message shape and inventing one here would make the pin red for
+// a reason it does not name.
+test('AC21: same id, byte-identical BODIES but differing column-resident lifecycle state (destination superseded, source active) must not be reported as a clean identical skip', (t) => {
+  if (!sqliteAvailable) { t.skip('node:sqlite unavailable in this runtime'); return; }
+  const dir = tmp('doctor-ac21column-');
+  const shared = randomUUID();
+  const successor = randomUUID();
+  const fromPath = join(dir, 'from', 'sterling.db');
+  const toPath = join(dir, 'to', 'sterling.db');
+  mkV2(fromPath, [mk(shared, 'same top-level answer')]);
+  mkV2(toPath, [mk(shared, 'same top-level answer')]);
+
+  // COLUMN-ONLY divergence. The destination holds exactly one record (asserted,
+  // so the WHERE-less UPDATE below is unambiguous and this fixture assumes no
+  // column name beyond the two it is deliberately writing).
+  assert.strictEqual(recordCount(toPath), 1, 'fixture premise: the destination holds exactly one record');
+  const rw = openRW(toPath);
+  rw.prepare('UPDATE records SET status = ?, superseded_by = ?').run('superseded', successor);
+  rw.close();
+
+  // FIXTURE PREMISE, ASSERTED RATHER THAN ASSUMED — this is the half whose
+  // absence made the previous version of this pin hollow.
+  const readOne = (p) => {
+    const db = openRO(p);
+    const row = db.prepare('SELECT body, status, superseded_by FROM records').get();
+    db.close();
+    return row;
+  };
+  const src = readOne(fromPath);
+  const dst = readOne(toPath);
+  assert.strictEqual(src.body, dst.body, 'PREMISE: the two stored bodies must be BYTE-IDENTICAL — if this fails the pin is testing an ordinary body conflict, not column-resident state');
+  assert.strictEqual(dst.status, 'superseded', 'PREMISE: the column-only UPDATE landed on the destination');
+  assert.strictEqual(dst.superseded_by, successor, 'PREMISE: the column-only UPDATE landed on the destination');
+  assert.notDeepStrictEqual(
+    { status: src.status, superseded_by: src.superseded_by },
+    { status: dst.status, superseded_by: dst.superseded_by },
+    'PREMISE: the two records differ in COLUMN state and in nothing else'
+  );
+
+  const r = doctor(['migrate', '--from', fromPath, '--to', toPath], dir);
+  const out = oneLine(r.stdout + r.stderr);
+  // SABOTAGE: drop the column-state check — i.e. compare same-id pairs by
+  // reading `records.body` alone (exactly the shape this gap describes).
+  // Both assertions below go red, because the two bodies really are
+  // byte-identical text (asserted above; status/superseded_by live in COLUMNS
+  // post-v2 and were never in the body), so a body-only comparator reports
+  // "skipped 1" at exit 0 as if nothing were different, even though the
+  // destination's copy is superseded and the source's is not.
+  assert.ok(
+    !(r.code === 0 && /skipped/i.test(out)),
+    `a same-id pair with differing column-resident lifecycle state must not be silently reported as a clean identical skip: code=${r.code} out=${out}`
+  );
+  // The MUST-NOT above is satisfiable by an implementation that exits 0 while
+  // wording its report differently ("identical 1", say); a hard conflict is
+  // ruled to exit non-zero, so pin that directly — message-shape independent.
+  assert.notStrictEqual(r.code, 0, `differing column-resident state is a real difference: it cannot be a success-shaped no-op, whatever the wording: ${out}`);
+});

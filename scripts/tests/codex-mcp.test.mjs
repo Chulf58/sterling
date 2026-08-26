@@ -26,7 +26,7 @@
 // real `codex` binary is installed or logged in on this machine.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { probeCodex, CODEX_MCP_ENTRY, withCodexEntry, codexSkipLine } from '../lib/codex-mcp.mjs';
+import { probeCodex, CODEX_MCP_ENTRY, withCodexEntry, codexSkipLine, probeCodexWin } from '../lib/codex-mcp.mjs';
 
 function spawnErrorFn() {
   // mirrors a real spawnSync's return on ENOENT: no status, an .error set
@@ -169,3 +169,159 @@ test('codexSkipLine("timeout") starts with the fixed prefix and is distinguishab
   assert.notEqual(timeoutLine, absentLine, 'timeout line is distinguishable from the binary-absent line');
   assert.notEqual(timeoutLine, loginLine, 'timeout line is distinguishable from the not-logged-in line');
 });
+
+// =============================================================================
+// Native-Windows probe — probeCodexWin({spawnFn, timeoutMs, env}) (board 43051819,
+// article sparring-partner, dispatch spec only — scripts/lib/codex-mcp.mjs's
+// implementation was NOT read to author these; it landed before its tests
+// because H5 correctly denied the implementing agent test-file writes).
+//
+// DECLARED CONTRACT under test:
+//   - same return shape as probeCodex: {ok:true} | {ok:false, reason} with
+//     reason ∈ {binary-absent, not-logged-in, timeout}.
+//   - resolves the binary via spawnFn('where.exe', ['codex'], ...) — reaching
+//     the WINDOWS PATH through WSL interop — deliberately NOT spawnSync('codex')
+//     directly, which would resolve under WSL's OWN PATH instead.
+//   - runs '<resolved> login status' through the SAME injected spawnFn.
+//   - env.STERLING_CODEX_WIN_PATH: KEY-PRESENCE (not truthiness) bypasses the
+//     where.exe detection — defined-even-if-empty bypasses; '' specifically
+//     forces binary-absent (nothing to run login status against).
+//
+// spawnFn stub convention: dispatches on the first argument, mirroring
+// probeCodex's fakes above and node:child_process's spawnSync return shape
+// ({error, status[, signal, stdout]}). Never spawns a real process, never
+// depends on whether a real `codex` binary is installed/logged-in on this
+// machine — determinism holds on every OS this suite runs on, including WSL
+// where no real where.exe resolution would ever succeed for a Windows path.
+// =============================================================================
+
+const WIN_CODEX_PATH = 'C:\\Users\\test\\AppData\\Roaming\\npm\\codex.cmd';
+
+function winWhereOkThenFn(loginResult) {
+  return (cmd) => {
+    if (cmd === 'where.exe') return { error: undefined, status: 0, stdout: WIN_CODEX_PATH + '\r\n' };
+    if (cmd === WIN_CODEX_PATH) return loginResult;
+    throw new Error(`unexpected spawnFn call for cmd ${cmd} — only 'where.exe' then the resolved path are expected`);
+  };
+}
+
+test('probeCodexWin: resolves via spawnFn("where.exe", ["codex"], ...) — the WINDOWS PATH through WSL interop — then runs "<resolved> login status" through the same injected spawnFn; both steps succeeding yields {ok:true}', () => {
+  // CONTROL ARM for the STERLING_CODEX_WIN_PATH bypass tests below: this proves
+  // where.exe DOES get called and login status DOES get attempted (and DOES
+  // reach {ok:true}) when no override is set — so a bypass test's "where.exe
+  // never called" assertion means the SEAM did it, not a general omission bug
+  // that never calls where.exe at all.
+  const calls = [];
+  const spawnFn = (cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === 'where.exe') return { error: undefined, status: 0, stdout: WIN_CODEX_PATH + '\r\n' };
+    if (cmd === WIN_CODEX_PATH) return { error: undefined, status: 0 };
+    throw new Error(`unexpected spawnFn call for cmd ${cmd}`);
+  };
+  const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
+  assert.equal(calls.length, 2, 'exactly two spawnFn calls — resolve, then login status');
+  assert.deepEqual(calls[0], { cmd: 'where.exe', args: ['codex'] }, 'first call resolves via where.exe, NOT spawnSync("codex") directly (which would resolve under WSL\'s own PATH)');
+  assert.deepEqual(calls[1], { cmd: WIN_CODEX_PATH, args: ['login', 'status'] }, 'second call runs "<resolved> login status" on the path where.exe returned');
+  assert.deepEqual(result, { ok: true }, 'both steps succeeding yields ok:true');
+});
+// SABOTAGE: call spawnFn('codex', ...) directly instead of resolving through
+// where.exe first — calls[0].cmd would be 'codex', not 'where.exe', and the
+// deepEqual on calls[0] goes red.
+
+test('probeCodexWin: where.exe non-zero exit (codex not on the Windows PATH) -> {ok:false, reason:"binary-absent"}, login-status never invoked', () => {
+  let loginCalled = false;
+  const spawnFn = (cmd) => {
+    if (cmd === 'where.exe') return { error: undefined, status: 1, stdout: '' };
+    loginCalled = true;
+    return { error: undefined, status: 0 };
+  };
+  const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
+  assert.deepEqual(result, { ok: false, reason: 'binary-absent' });
+  assert.equal(loginCalled, false, 'a where.exe miss short-circuits before ever attempting login status');
+});
+// SABOTAGE: treat where.exe's non-zero exit as success (proceed to call login
+// status anyway) — loginCalled flips true and that assertion goes red; or
+// misclassify the reason as 'not-logged-in' — the deepEqual on result goes red.
+
+test('probeCodexWin: where.exe spawn error (ENOENT — where.exe itself unreachable) -> {ok:false, reason:"binary-absent"}', () => {
+  const spawnFn = (cmd) => {
+    if (cmd === 'where.exe') return { error: Object.assign(new Error('spawn where.exe ENOENT'), { code: 'ENOENT' }), status: null };
+    throw new Error('login status must never be attempted when where.exe itself cannot spawn');
+  };
+  const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
+  assert.deepEqual(result, { ok: false, reason: 'binary-absent' });
+});
+// SABOTAGE: classify only `status !== 0` as binary-absent and leave a set
+// `.error` (no status at all, ENOENT-shaped) unhandled — the call either
+// throws instead of returning a probe result, or returns a reason other than
+// 'binary-absent', and the deepEqual goes red either way.
+
+test('probeCodexWin: where.exe resolves, login status exits non-zero -> {ok:false, reason:"not-logged-in"}', () => {
+  const result = probeCodexWin({ spawnFn: winWhereOkThenFn({ error: undefined, status: 1 }), timeoutMs: 2000, env: {} });
+  assert.deepEqual(result, { ok: false, reason: 'not-logged-in' });
+});
+// SABOTAGE: classify any login-status non-zero exit as 'binary-absent' (reuse
+// the where.exe-miss branch instead of a distinct not-logged-in branch) — the
+// deepEqual goes red on the reason value.
+
+test('probeCodexWin: login-status spawnSync-shaped timeout (error ETIMEDOUT + signal SIGTERM) -> reason "timeout", never "not-logged-in" or "binary-absent"', () => {
+  const timeoutResult = { error: Object.assign(new Error('spawn codex ETIMEDOUT'), { code: 'ETIMEDOUT' }), signal: 'SIGTERM', status: null };
+  const result = probeCodexWin({ spawnFn: winWhereOkThenFn(timeoutResult), timeoutMs: 2000, env: {} });
+  assert.equal(result.reason, 'timeout', 'a timed-out login-status step (error + signal set together) must report reason "timeout"');
+  assert.notEqual(result.reason, 'not-logged-in', 'must not be misclassified as not-logged-in merely because the exit was non-success-shaped');
+  assert.notEqual(result.reason, 'binary-absent', 'must not be misclassified as binary-absent merely because .error happens to be set');
+});
+// SABOTAGE: classify "any .error set" on the login-status step as binary-absent
+// or not-logged-in without checking .signal first (same bug class as
+// probeCodex's own timeout-discrimination review addendum above) — a hung or
+// slow codex login-status call would then misreport under the wrong reason.
+
+test('probeCodexWin: where.exe-resolution spawnSync-shaped timeout (error ETIMEDOUT + signal SIGTERM) -> reason "timeout", login-status never attempted', () => {
+  let loginCalled = false;
+  const spawnFn = (cmd) => {
+    if (cmd === 'where.exe') return { error: Object.assign(new Error('spawn where.exe ETIMEDOUT'), { code: 'ETIMEDOUT' }), signal: 'SIGTERM', status: null };
+    loginCalled = true;
+    return { error: undefined, status: 0 };
+  };
+  const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
+  assert.equal(result.reason, 'timeout');
+  assert.equal(loginCalled, false, 'a timed-out resolution step never proceeds to login status');
+});
+// SABOTAGE: treat a timed-out where.exe call identically to a plain miss
+// (reason 'binary-absent') — the result.reason assertion goes red.
+
+test('probeCodexWin: STERLING_CODEX_WIN_PATH set (non-empty) bypasses where.exe detection entirely — login status runs directly against the given path', () => {
+  const FORCED_PATH = 'C:\\forced\\codex.exe';
+  let whereCalled = false;
+  const spawnFn = (cmd) => {
+    if (cmd === 'where.exe') {
+      whereCalled = true;
+      return { error: undefined, status: 0, stdout: WIN_CODEX_PATH };
+    }
+    if (cmd === FORCED_PATH) return { error: undefined, status: 0 };
+    throw new Error(`unexpected spawnFn call for cmd ${cmd}`);
+  };
+  const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: { STERLING_CODEX_WIN_PATH: FORCED_PATH } });
+  assert.equal(whereCalled, false, 'where.exe is never invoked once STERLING_CODEX_WIN_PATH is defined — even the plain-path case bypasses detection (see the control-arm test above, where where.exe IS called with no override)');
+  assert.deepEqual(result, { ok: true }, 'login status against the forced path succeeds');
+});
+// SABOTAGE: read STERLING_CODEX_WIN_PATH but still call where.exe first as a
+// sanity check before honoring it — whereCalled flips true and that assertion
+// goes red.
+
+test('probeCodexWin: STERLING_CODEX_WIN_PATH set to the EMPTY STRING forces binary-absent — defined-even-if-empty still bypasses where.exe, but an empty path has nothing to run login status against', () => {
+  let anySpawnCalled = false;
+  const spawnFn = () => {
+    anySpawnCalled = true;
+    return { error: undefined, status: 0 };
+  };
+  const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: { STERLING_CODEX_WIN_PATH: '' } });
+  assert.deepEqual(result, { ok: false, reason: 'binary-absent' });
+  assert.equal(anySpawnCalled, false, 'an empty forced path never spawns anything — neither where.exe nor a login-status attempt against an empty command');
+});
+// SABOTAGE: check `env.STERLING_CODEX_WIN_PATH` by TRUTHINESS instead of KEY
+// PRESENCE (e.g. `if (env.STERLING_CODEX_WIN_PATH)`) — an empty string is
+// falsy, so this falls through to the real where.exe path; spawnFn here has no
+// where.exe branch, so the call throws instead of returning {ok:false,
+// reason:'binary-absent'}, and/or anySpawnCalled flips true — either way this
+// pin goes red, which is exactly how it catches the truthiness-vs-presence bug.

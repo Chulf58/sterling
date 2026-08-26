@@ -49,6 +49,70 @@ export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, 
   return { ok: true };
 }
 
+// probeCodexWin — the NATIVE-WINDOWS counterpart (board 43051819 slice A). init.mjs
+// runs under WSL node, so a bare spawnSync('codex', ...) would resolve `codex` under
+// WSL's OWN PATH (or find nothing, since a WSL-side install is a different binary from
+// the Windows-side one) — wrong side entirely for the native-claude sterling-mcp-win.json
+// this feeds. Resolution instead goes through `where.exe codex` (WSL interop reaching
+// the WINDOWS PATH, same mechanism as init.mjs's own whereWin('node')), THEN the
+// resolved path is probed with `login status` exactly like probeCodex above. Same
+// {ok, reason} contract, same injectable spawnFn/env/timeoutMs seams (one spawnFn
+// serves both the where.exe call and the login-status call — tests dispatch on the
+// first arg to stub each independently).
+export function probeCodexWin({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
+  let codexPath;
+  // STERLING_CODEX_WIN_PATH, when DEFINED (even empty), bypasses where.exe detection —
+  // mirrors STERLING_WIN_NODE's role for init.mjs's native-Windows node resolution: a
+  // path forces that path; '' forces the binary-absent path. Undefined -> auto-detect
+  // via `where.exe codex` through the injected spawnFn (test isolation without needing
+  // a real Windows machine).
+  if (env.STERLING_CODEX_WIN_PATH !== undefined) {
+    codexPath = env.STERLING_CODEX_WIN_PATH || undefined;
+  } else {
+    let whereResult;
+    try {
+      whereResult = spawnFn('where.exe', ['codex'], { encoding: 'utf8', timeout: timeoutMs, env });
+    } catch {
+      whereResult = null;
+    }
+    // Same ordering rationale as the login-status timeout check below: a
+    // timed-out where.exe RESOLUTION must be classified 'timeout', not
+    // folded into the generic miss/error path below (which would misreport
+    // it as 'binary-absent') — and it must never proceed to login status.
+    if (whereResult && (whereResult.signal || whereResult.error?.code === 'ETIMEDOUT')) {
+      return { ok: false, reason: 'timeout' };
+    }
+    if (whereResult && !whereResult.error && whereResult.status === 0) {
+      const lines = String(whereResult.stdout ?? '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      codexPath = lines.find((l) => l.toLowerCase().endsWith('.exe')) ?? lines[0];
+    }
+  }
+  if (!codexPath) {
+    return { ok: false, reason: 'binary-absent' };
+  }
+  let result;
+  try {
+    result = spawnFn(codexPath, ['login', 'status'], { encoding: 'utf8', timeout: timeoutMs, env });
+  } catch {
+    result = null;
+  }
+  if (!result) {
+    return { ok: false, reason: 'binary-absent' };
+  }
+  // Same ordering rationale as probeCodex: a timeout sets BOTH .error (ETIMEDOUT) AND
+  // .signal, so this check must precede the generic .error branch below.
+  if (result.signal || result.error?.code === 'ETIMEDOUT') {
+    return { ok: false, reason: 'timeout' };
+  }
+  if (result.error) {
+    return { ok: false, reason: 'binary-absent' };
+  }
+  if (result.status !== 0) {
+    return { ok: false, reason: 'not-logged-in' };
+  }
+  return { ok: true };
+}
+
 // The official codex mcp-server stdio subcommand — no wrapper (research_finding dadf858e).
 export const CODEX_MCP_ENTRY = { command: 'codex', args: ['mcp-server'] };
 

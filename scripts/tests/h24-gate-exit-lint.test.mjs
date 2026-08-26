@@ -41,7 +41,11 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const HOOKS = join(root, 'scripts', 'hooks');
+// Routing seam (slice S1, decision 1dab2a9f / board 5402a024 precondition P1):
+// STERLING_HOOKS_DIR overrides the spawn directory so a mutation-arm clean-room
+// bundle is reachable. Unset falls back to today's hard-coded scripts/hooks —
+// byte-identical behavior to before this seam existed.
+const HOOKS = process.env.STERLING_HOOKS_DIR || join(root, 'scripts', 'hooks');
 const HOOK_PATH = join(HOOKS, 'h24-gate-exit-lint.mjs');
 
 // The exact config shape given by the task: a config-declared non-floor gate

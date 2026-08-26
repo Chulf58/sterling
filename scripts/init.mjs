@@ -31,7 +31,7 @@ import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
-import { probeCodex, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
+import { probeCodex, probeCodexWin, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
 import { appendMissingRemediation } from './lib/store-remediation.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -576,17 +576,47 @@ if (fwd(target) === fwd(pluginRootMatch)) {
   // store, 2026-06-24). The documented idiom is the ${CLAUDE_PROJECT_DIR:-.} default: '.'
   // resolves against the server's cwd = the project dir. The PLUGIN config (above) keeps the
   // bare form — plugin-scope configs substitute it unconditionally, no default needed.
-  // NOTE: codex is DELIBERATELY NOT added to this Windows-native config in this slice
-  // (sparring-partner-partnership-shape) — the win config's codex story needs its own
-  // probe on Windows node (native `codex.exe`/login state differ from the WSL probe
-  // above) and is out of scope here. Leave this file WSL-codex-free until that's built.
+  // Sparring-partner auto-wire for NATIVE Windows claude (board 43051819 slice B,
+  // decision sparring-partner-partnership-shape) — this config's codex story needed
+  // its own Windows-node probe (native `codex.exe`/login state differ from the WSL
+  // probe above the plugin config uses) because a bare spawnSync('codex') here would
+  // resolve under WSL's own PATH, not the Windows one native claude actually runs in.
+  // probeCodexWin (scripts/lib/codex-mcp.mjs) resolves via `where.exe codex` instead.
+  // On failure, report a loud skip line — never silently omitted, and distinguishable
+  // from the feature being off in config (P5 degraded-loud). Reuses the SAME
+  // CODEX_MCP_ENTRY (via withCodexEntry) as the WSL branch — the entry itself is
+  // identical; only the PROBE differs.
   const winMcpConfigPath = join(target, '.claude-plugin', 'sterling-mcp-win.json');
   if (winNode) {
-    const desiredWin = { mcpServers: { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'] } } };
+    // STERLING_CODEX_PROBE_WIN: test-isolation seam mirroring STERLING_CODEX_PROBE
+    // above (same enum), scoped to this native-Windows probe. unset/'' -> real
+    // probeCodexWin(); 'ok'/'absent'/'not-logged-in' force the outcome; any other
+    // value fails init loud (unknown signals halt, P5).
+    const codexProbeWinOverride = process.env.STERLING_CODEX_PROBE_WIN;
+    const codexProbeWin = !codexProbeWinOverride
+      ? probeCodexWin()
+      : codexProbeWinOverride === 'ok'
+        ? { ok: true }
+        : codexProbeWinOverride === 'absent'
+          ? { ok: false, reason: 'binary-absent' }
+          : codexProbeWinOverride === 'not-logged-in'
+            ? { ok: false, reason: 'not-logged-in' }
+            : fail(`STERLING_CODEX_PROBE_WIN must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeWinOverride}')`, 2);
+    if (!codexProbeWin.ok) warns.push(codexSkipLine(codexProbeWin.reason));
+    const desiredWin = {
+      mcpServers: withCodexEntry(
+        { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'] } },
+        codexProbeWin,
+      ),
+    };
     if (!existsSync(winMcpConfigPath)) {
       mkdirSync(dirname(winMcpConfigPath), { recursive: true });
       writeFileSync(winMcpConfigPath, JSON.stringify(desiredWin, null, 2));
-      items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'created', detail: 'native-claude MCP config (Windows node) — referenced by sterling-windows.bat --mcp-config' });
+      items.push({
+        item: '.claude-plugin/sterling-mcp-win.json',
+        status: 'created',
+        detail: `native-claude MCP config (Windows node) — referenced by sterling-windows.bat --mcp-config${codexProbeWin.ok ? '; codex mcp-server wired (probe succeeded)' : ''}`,
+      });
     } else {
       let existingWin;
       try { existingWin = JSON.parse(readFileSync(winMcpConfigPath, 'utf8')); } catch { existingWin = undefined; }

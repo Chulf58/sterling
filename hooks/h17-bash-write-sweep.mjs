@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, readlinkSync, realpathSync, constants as FS } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, statSync, realpathSync, constants as FS } from "node:fs";
 import { join as join2, dirname as dirname3, relative, resolve as resolve2, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
@@ -7057,6 +7057,81 @@ function scopeCheck({ brief, debugScope, rel, amendments = [] }) {
 // scripts/hooks/h17-bash-write-sweep.mjs
 var BASELINE_GLOBS = [".claude/agents/**", ".sterling/config.json", ".claude/settings*.json"];
 var NO_RUN = "no-run";
+var PROCFS_FD_DIR = process.env.STERLING_H17_PROCFS_FD_DIR || "/proc/self/fd";
+var IS_WIN32 = process.platform === "win32";
+var UNATTESTABLE_SYMLINK = "symlink-target";
+function secureIoUnavailableReason(probeDir) {
+  if (IS_WIN32) return null;
+  if (!existsSync3(PROCFS_FD_DIR)) return "secure I/O unavailable: /proc/self/fd absent";
+  let fd = null;
+  try {
+    fd = openRootAnchorDir(probeDir);
+    const anchored = `${PROCFS_FD_DIR}/${fd}`;
+    const entry = lstatSync(anchored);
+    const through = statSync(anchored);
+    const direct = fstatSync(fd);
+    closeSync(fd);
+    fd = null;
+    if (!entry.isSymbolicLink()) {
+      return `secure I/O unavailable: '${PROCFS_FD_DIR}' exists but its descriptor entries are not the magic symlinks a /proc/self/fd directory is made of`;
+    }
+    if (through.dev !== direct.dev || through.ino !== direct.ino) {
+      return `secure I/O unavailable: '${PROCFS_FD_DIR}/<fd>' does not resolve to the object that descriptor holds (resolved dev/ino ${through.dev}/${through.ino}, descriptor ${direct.dev}/${direct.ino}) \u2014 it is present but is not a working descriptor directory`;
+    }
+    return null;
+  } catch (e) {
+    return `secure I/O unavailable: '${PROCFS_FD_DIR}' could not be verified as a working descriptor directory (${e && e.code || e && e.message || e})`;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+function openPinnedDir(path) {
+  return openSync(path, FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
+}
+function openRootAnchorDir(path) {
+  return openSync(path, FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NONBLOCK);
+}
+function anchoredPath(fd, name) {
+  return `${PROCFS_FD_DIR}/${fd}/${name}`;
+}
+function assertResolvableComponent(component, rel, what) {
+  if (component === "" || component === "." || component === ".." || component.includes("\0") || component.includes("/")) {
+    throw new Error(
+      `${what}: refusing to resolve '${rel}' \u2014 its component ${JSON.stringify(component)} is not a plain path segment; an empty, '.', '..', NUL-bearing or separator-bearing component cannot be anchored and is denied on sight, never resolved`
+    );
+  }
+}
+function closePinned(fd, primary) {
+  if (fd === null) return;
+  try {
+    closeSync(fd);
+  } catch (closeErr) {
+    if (!primary) throw closeErr;
+  }
+}
+function openLeafNoFollow(abs, extraFlags = 0) {
+  if (!IS_WIN32) return openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK | FS.O_NOFOLLOW | extraFlags);
+  const before = lstatSync(abs, { bigint: true });
+  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK | extraFlags);
+  try {
+    const after = fstatSync(fd, { bigint: true });
+    const sameKind = before.isFile() === after.isFile() && before.isDirectory() === after.isDirectory() && before.isSymbolicLink() === after.isSymbolicLink();
+    if (before.dev !== after.dev || before.ino !== after.ino || !sameKind) {
+      throw new Error(
+        `'${abs}' is not the same object across its own open (lstat dev/ino ${before.dev}/${before.ino}, fstat ${after.dev}/${after.ino}) \u2014 refusing to read it. On this platform H17 verifies identity across the open (detection) rather than preventing the swap (decision h17-windows-detect-and-abort): a mismatch aborts the check, it never reads whatever was substituted.`
+      );
+    }
+    return fd;
+  } catch (e) {
+    closePinned(fd, e);
+    throw e;
+  }
+}
 var HASH_CHUNK_BYTES = 64 * 1024;
 var MAX_WALK_NODES = 1e4;
 var MAX_WALK_DEPTH = 64;
@@ -7096,7 +7171,7 @@ function newWalkBudget() {
   };
 }
 function sha256OfFileStreamed(abs) {
-  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  const fd = openLeafNoFollow(abs);
   let primary;
   try {
     const st = fstatSync(fd);
@@ -7133,7 +7208,7 @@ function sha256OfFileStreamed(abs) {
   }
 }
 function readBoundedFile(abs, maxBytes, what) {
-  const fd = openSync(abs, FS.O_RDONLY | FS.O_NONBLOCK);
+  const fd = openLeafNoFollow(abs);
   let primary;
   try {
     const st = fstatSync(fd);
@@ -7246,6 +7321,7 @@ function indexEntriesFor(cwd2, rels) {
   return map;
 }
 function pathState(cwd2, rel, idx, budget = WALK_BUDGET, depth = 0) {
+  if (depth === 0) assertRealAncestors(cwd2, rel, `(A) state snapshot of '${rel}'`);
   const abs = join2(cwd2, rel);
   const index = idx.get(rel) ?? null;
   let st;
@@ -7256,7 +7332,7 @@ function pathState(cwd2, rel, idx, budget = WALK_BUDGET, depth = 0) {
     throw e;
   }
   const mode = st.mode & 4095;
-  if (st.isSymbolicLink()) return { exists: true, type: "symlink", mode, index, target: readlinkSync(abs) };
+  if (st.isSymbolicLink()) return { exists: true, type: "symlink", mode, index, unattestable: UNATTESTABLE_SYMLINK };
   if (st.isFile()) return { exists: true, type: "file", mode, index, sha256: sha256OfFileStreamed(abs) };
   if (st.isDirectory()) {
     budget.chargeDepth(depth, rel);
@@ -7301,10 +7377,11 @@ function sameState(a, b) {
   if (!isStateObject(a) || !isStateObject(b)) return false;
   if (a.exists !== b.exists) return false;
   if (a.index !== b.index) return false;
+  if (a.unattestable || b.unattestable) return false;
   if (!a.exists) return true;
   if (a.type !== b.type) return false;
   if (a.mode !== b.mode) return false;
-  if (a.type === "symlink") return a.target === b.target;
+  if (a.type === "symlink") return false;
   if (a.type === "file") return a.sha256 === b.sha256;
   if (a.type === "dir") {
     if (a.walk_budget_exceeded || b.walk_budget_exceeded) return false;
@@ -7329,7 +7406,11 @@ function ownKeys(o) {
 var STATE_FIELDS = {
   absent: ["exists", "index"],
   file: ["exists", "type", "mode", "index", "sha256"],
-  symlink: ["exists", "type", "mode", "index", "target"],
+  // RULING B (532a4383): a symlink carries an `unattestable` MARKER, never a
+  // `target` — the target was the racy read-through this ruling removed. A
+  // record that still carries `target` (an older snapshot, or a crafted one)
+  // is a stray field and DENIES, which is the fail-closed direction.
+  symlink: ["exists", "type", "mode", "index", "unattestable"],
   // `walk_budget_exceeded` is OPTIONAL and appears only on a Pre snapshot whose
   // walk tripped a structural budget (board 55fcccac). Admitting it to the
   // allowed set opens nothing: its only effect anywhere is to make a state
@@ -7355,7 +7436,9 @@ function stateShapeError(cwd2, v, where) {
     return strayFieldError(v, STATE_FIELDS.file, where);
   }
   if (v.type === "symlink") {
-    if (typeof v.target !== "string") return `'${where}' is a symlink with no string 'target'`;
+    if (v.unattestable !== UNATTESTABLE_SYMLINK) {
+      return `'${where}' is a symlink whose 'unattestable' marker is not the literal ${JSON.stringify(UNATTESTABLE_SYMLINK)} (${JSON.stringify(v.unattestable)})`;
+    }
     return strayFieldError(v, STATE_FIELDS.symlink, where);
   }
   if (!isStateObject(v.children)) return `'${where}' is a directory with no explicit 'children' object`;
@@ -7373,6 +7456,7 @@ function stateShapeError(cwd2, v, where) {
 }
 function stampCouldAttest(recorded, current) {
   if (!isStateObject(recorded) || !isStateObject(current)) return false;
+  if (recorded.unattestable || current.unattestable) return false;
   if (recorded.index !== current.index) return false;
   if (!current.exists) return recorded.exists === true;
   if (!recorded.exists) return false;
@@ -7468,6 +7552,38 @@ function toRel(cwd2, abs) {
 }
 function classifyPathComponents(cwd2, rel, what = "(B) baseline") {
   const segments = rel.split("/");
+  if (IS_WIN32) return classifyPathComponentsByPath(cwd2, rel, segments, what);
+  let parentFd = null;
+  let primary;
+  try {
+    parentFd = openRootAnchorDir(cwd2);
+    let soFar = "";
+    for (let i = 0; i < segments.length; i++) {
+      assertResolvableComponent(segments[i], rel, what);
+      soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
+      const anchored = anchoredPath(parentFd, segments[i]);
+      const kind = lstatKind(anchored);
+      if (kind === "absent") return "absent";
+      if (i === segments.length - 1) return kind;
+      if (kind !== "dir") {
+        throw new Error(
+          `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+        );
+      }
+      const nextFd = openPinnedDir(anchored);
+      const prev = parentFd;
+      parentFd = nextFd;
+      closePinned(prev, void 0);
+    }
+    return "absent";
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(parentFd, primary);
+  }
+}
+function classifyPathComponentsByPath(cwd2, rel, segments, what) {
   let abs = cwd2;
   let soFar = "";
   for (let i = 0; i < segments.length; i++) {
@@ -7741,9 +7857,29 @@ function restoreTracked(cwd2, relRaw) {
     rmSync(join2(cwd2, rel), { recursive: true, force: true });
   }
 }
-var input = readStdin();
+var input;
+try {
+  input = readStdin();
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      "H17",
+      `[stdin] hook input could not be read or parsed (${e && e.message || e}) \u2014 a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the command would be ALLOWED unexamined).`
+    )
+  );
+}
 var cwd = input.cwd;
 if (!input.agent_id) allow();
+var secureIoReason = secureIoUnavailableReason(cwd);
+if (secureIoReason) {
+  deny(
+    environmentDefectDenial(
+      "H17",
+      `${secureIoReason} \u2014 this hook's descriptor-pinned no-follow I/O layer resolves every path component through '${PROCFS_FD_DIR}', and without it H17 cannot prevent a symlink swap from redirecting its own reads. Denying every agent Bash command until it is available (decision h17-baseline-integrity-redesign-rulings-abcd, Ruling C): degrading to detection-only would silently weaken the guarantee instead of halting, and that degrade was rejected.`,
+      { agentId: input.agent_id }
+    )
+  );
+}
 var event = input.hook_event_name;
 if (event === "PreToolUse") {
   try {
