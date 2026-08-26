@@ -513,3 +513,117 @@ test(
     }
   }
 );
+
+// =========================================================================
+// PIN-C-SETTINGS-KEY-BACKSLASH-NON-INJECTIVITY — the (B) baseline surface's
+// OTHER collection site: `.claude/settings*.json`. H17 collects these files
+// into the (B) content baseline the same way it collects `.claude/agents/**`
+// (PIN-B above). This is the FOURTH normalization site the outside-family
+// review found, distinct from PIN-B's `.claude/agents/**` readdir walk: a
+// POSIX top-level `.claude` directory entry whose name LEXICALLY matches
+// `settings*.json` (starts with "settings", ends with ".json") but contains a
+// literal backslash byte in between (e.g. `.claude/settings\evil.json`) must
+// be REFUSED FAIL-CLOSED at Pre (exit 2) the instant the settings-loop's own
+// readdir/glob sees it — never silently skipped from the baseline.
+//
+// WHY SILENT OMISSION IS THE HOLE, NOT MERE MISS: the shared glob matcher
+// normalizes `\` -> `/` internally (correct for Windows, where backslash IS
+// the separator — CLAUDE.md invariant #2). Without a guard, a name like
+// `settings\evil.json` gets rewritten to `settings/evil.json` before the
+// glob test runs, that rewritten form FAILS the `settings*.json` glob (it now
+// has a `/` in it), and the file is silently OMITTED from the baseline
+// entirely — not denied, not collected, just invisible. A file invisible to
+// the baseline is a file whose tampering neither Pre nor Post can ever see.
+// This mirrors PIN-B's fix shape exactly: refuse the raw directory-entry name
+// on sight, on POSIX, before it is ever run through the glob/normalize path.
+//
+// CONTROL ARM, PLACED FIRST, for the same reason as PIN-B's: "Pre allowed"
+// alone doesn't prove the settings-loop guard is even reachable in this
+// fixture. The control is the UNMODIFIED default fixture — makeGitProject()
+// already writes a normal `.claude/settings.local.json` with no backslash —
+// and requires Pre to ALLOW, so the treatment arm's DENIAL below is legible
+// as being ABOUT the backslash-bearing settings file specifically, not about
+// the settings surface being denied unconditionally.
+//
+// THE PROPERTY THAT CANNOT BE FAKED BY A DENY THAT ALSO CORRUPTS: exactly
+// PIN-B's shape — a fail-closed refusal must refuse the CALL, not mutate the
+// tree. Both the legitimate `.claude/settings.local.json` and the offending
+// `.claude/settings\evil.json` must be byte-identical to what they were
+// before Pre ran.
+//
+// SABOTAGE (once green): remove the backslash reject from the settings-loop's
+// `.claude/settings*.json` collection walk (i.e. let a raw entry name
+// containing `\` reach the glob-normalize path unchecked, where it silently
+// fails the glob and is dropped). Pre goes back to exit 0 for the treatment
+// arm and the backslash-bearing settings file is silently omitted from the
+// baseline again — this assertion must flip RED under that one-line change.
+// The untouched-bytes assertions are not expected to move under this
+// particular sabotage (an omission doesn't mutate anything either); they pin
+// the separate no-corruption property, same division as PIN-B.
+// =========================================================================
+
+test(
+  'PIN-C-SETTINGS-KEY-BACKSLASH-NON-INJECTIVITY: CONTROL — Pre ALLOWS the normal .claude/settings.local.json baseline surface, no backslash-bearing settings file present',
+  SKIP,
+  () => {
+    const { dir, cleanup } = makeGitProject();
+    try {
+      const N = lane('settings-key-control');
+      const pre0 = h17(dir, 'PreToolUse', N);
+      assert.equal(
+        pre0.code,
+        0,
+        `CONTROL: Pre must ALLOW when .claude/settings*.json contains only the normal settings.local.json and no backslash-bearing entry — actual ${pre0.code}, stderr: ${oneLine(pre0.stderr)}`
+      );
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'PIN-C-SETTINGS-KEY-BACKSLASH-NON-INJECTIVITY: a backslash-bearing .claude/settings\\evil.json is refused FAIL-CLOSED at Pre — never collected into the baseline, never normalized, and the tree is left untouched',
+  SKIP,
+  () => {
+    const { dir, cleanup } = makeGitProject();
+    try {
+      const LOCAL_BYTES = readFileSync(join(dir, '.claude', 'settings.local.json'), 'utf8');
+      const EVIL_BYTES = '{"evil":"settings\\\\evil.json, a literal-backslash filename lexically matching settings*.json, refused on sight"}\n';
+      assert.notEqual(LOCAL_BYTES, EVIL_BYTES, 'PRECONDITION: the two settings files hold distinct bytes so any mutation on deny is observable');
+
+      const claudeDir = join(dir, '.claude');
+      const localPath = join(claudeDir, 'settings.local.json');
+      const evilPath = join(claudeDir, 'settings\\evil.json'); // ONE path segment: "settings" + literal backslash + "evil.json"
+      writeFileSync(evilPath, EVIL_BYTES);
+
+      assert.equal(
+        existsSync(localPath) && existsSync(evilPath),
+        true,
+        'PRECONDITION: both settings files exist on disk before Pre ever runs'
+      );
+
+      const M = lane('settings-key');
+      const pre = h17(dir, 'PreToolUse', M);
+
+      assert.notEqual(pre.code, 1, 'a security gate never fails with a non-blocking exit 1');
+      assert.equal(
+        pre.code,
+        2,
+        `FAIL-CLOSED: the settings-loop's .claude/settings*.json collection must refuse the backslash-bearing entry settings\\evil.json the moment its readdir/glob sees it — never collected, never silently omitted via a failed post-normalize glob test — actual ${pre.code}, stderr: ${oneLine(pre.stderr)}`
+      );
+
+      assert.equal(
+        readFileSync(evilPath, 'utf8'),
+        EVIL_BYTES,
+        'the denied Pre must not mutate the very file it refused — fail-closed means REFUSE THE CALL, never write, delete, or normalize the offending path in place'
+      );
+      assert.equal(
+        readFileSync(localPath, 'utf8'),
+        LOCAL_BYTES,
+        'the denied Pre must not touch the legitimate settings.local.json either — refusing the backslash entry denies the WHOLE call, it does not selectively mutate anything else on disk'
+      );
+    } finally {
+      cleanup();
+    }
+  }
+);
