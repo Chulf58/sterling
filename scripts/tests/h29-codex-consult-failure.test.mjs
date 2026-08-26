@@ -444,3 +444,37 @@ test('10 (regression): a clean short auth-failure fixture with no secret still f
 // test 10 proves it does NOT fire on ordinary auth vocabulary — a control
 // pair, since an implementation that redacts everything auth-shaped would
 // pass test 7 for the wrong reason but fails test 10.
+
+test('AUTH-HEADER-FULL: an Authorization header value is redacted WHOLE, not just its first token — advisory still fires with its recovery hint', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const secret = 'sk-abc123xyz-realtoken-9876543210';
+    const result = {
+      content: [{
+        type: 'text',
+        text: `Request failed with status 401: Unauthorized. Authorization: Bearer ${secret} was rejected; please re-authenticate.`,
+      }],
+      isError: true,
+    };
+    const r = runHook(postCodex(dir, result), dir);
+    assert.equal(r.code, 0, 'redaction must never turn an advisory into a block');
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'the advisory must still fire — this is a structural isError:true auth failure, detection is unaffected by redaction');
+    assert.ok(!ctx.includes(secret), 'the full literal Authorization header value must never reach additionalContext');
+    assert.ok(!ctx.includes('realtoken'), 'no fragment of the token (mid-token substring) may survive — the OLD regex left everything after the first token exposed');
+    assert.match(ctx, /Authorization:\s*\[REDACTED\]/, 'the whole header value is collapsed to a single [REDACTED] marker immediately after "Authorization:"');
+    assert.match(ctx, RECOVERY_HINT_RE, 'redaction of the header must not swallow the actionable recovery hint');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for AUTH-HEADER-FULL: narrow the Authorization redaction back to
+// only the literal words (e.g. change the pattern from
+// `/Authorization:\s*Bearer\s+\S+/gi` — which consumes the whole token run —
+// to `/Authorization:\s*Bearer\b/gi`, dropping the `\s+\S+` clause that
+// consumes the token itself) -> the raw token `sk-abc123xyz-realtoken-9876543210`
+// (and its `realtoken` fragment) survive untouched after "Authorization: Bearer ",
+// so both `assert.ok(!ctx.includes(secret), ...)` and
+// `assert.ok(!ctx.includes('realtoken'), ...)` go red — this is the exact
+// pre-fix leak shape (old regex left the token after `Authorization: Bearer`).

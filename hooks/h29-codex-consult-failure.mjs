@@ -5031,9 +5031,15 @@ function consultFailureMessage(error) {
 var AUTH_TEXT_MAX = 4e3;
 var RAW_TEXT_CAP = 500;
 var REDACTION_PATTERNS = [
-  // Authorization header, verbatim.
-  [/\bAuthorization\s*:\s*\S+/gi, "Authorization: [REDACTED]"],
-  // Bearer / OAuth token values.
+  // Authorization header, verbatim — redact the WHOLE header value to end of
+  // line, not just the first whitespace-delimited token. A first-token-only
+  // match (e.g. \S+) leaves the actual credential exposed after "Bearer" is
+  // consumed, and the separate Bearer/OAuth pattern below no longer matches
+  // it because "Authorization: " no longer precedes the token. [^\n\r]+
+  // keeps the match on one line (no greedy cross-line consumption).
+  [/\bAuthorization\s*:\s*[^\n\r]+/gi, "Authorization: [REDACTED]"],
+  // Bearer / OAuth token values (not behind an Authorization header, e.g. in
+  // a query string or a differently-labeled field).
   [/\b(Bearer|OAuth)\s+[A-Za-z0-9\-_.~+/]+=*/gi, "$1 [REDACTED]"],
   // Provider-shaped API keys (OpenAI sk-…, GitHub ghp_…, Slack xox?-…).
   [/\bsk-[A-Za-z0-9_-]{10,}\b/g, "[REDACTED]"],
