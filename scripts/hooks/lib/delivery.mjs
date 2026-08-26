@@ -458,14 +458,57 @@ function pointerLine(store, kind, slug) {
  *  (S4b fixer pass). */
 export const UNTESTABLE_REASON_CLIP = 140;
 
+/** Oversize-body guard (board 725299c8). Rendering a large what_it_does inline
+ *  overflowed the RECEIVING agent's tool-result view: the real 'knowledge-
+ *  delivery' article's own what_it_does is ~15k chars and its full block
+ *  reached ~18.9KB, past the ~17KB view threshold — delivery degraded exactly
+ *  at the surface it exists to serve. Past ARTICLE_BODY_FLOOR chars of body,
+ *  renderArticle DIGESTS: a bounded head excerpt plus a knowledge_get pointer
+ *  to the full record (its id, so the reader can fetch the withheld body),
+ *  never the whole thing. Delivery degrades to a pointer, it NEVER denies
+ *  (decision 9950dfff lineage / AC7 — this is not a gate). Below the floor,
+ *  delivery is byte-identical to before, so small articles are untouched. */
+export const ARTICLE_BODY_FLOOR = 4096;
+
+/** Head-excerpt budget in the digest branch. Small enough that the excerpt plus
+ *  the pointer line stays far under the 8192-byte delivery ceiling even when
+ *  charCap is large; large enough to still orient the reader before they fetch. */
+export const ARTICLE_DIGEST_EXCERPT = 1200;
+
+/** Clip bound for slug/concept_family in the digest header — the only otherwise
+ *  unbounded inputs to a digested block (board 725299c8, outside-family review).
+ *  Generous vs real kebab slugs (which are far shorter), so normal rendering is
+ *  unchanged while a pathological slug can no longer breach the delivery ceiling. */
+export const ARTICLE_SLUG_CLIP = 256;
+
 /** Render the delivery payload for one owning feature_article: its substance
  *  (what_it_does, intended_behavior, current ACs) plus one-hop POINTERS —
  *  slugs with one-liners, never full neighbor bodies (grill answer: article +
  *  one-hop pointers; P6 filter-first-capped). */
 export function renderArticle(store, article, charCap) {
+  // slug/concept_family are clipped (outside-family review, board 725299c8): they
+  // are the only unbounded inputs to the digest block below, so without this a
+  // pathological slug/family could push the digested block past the ~8192-byte
+  // delivery ceiling that clipping the body alone otherwise guarantees. Real
+  // kebab slugs sit far under this bound, so normal rendering is unchanged.
+  const header = `▸ article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ''})`;
+  const body = String(article.what_it_does ?? '');
+  // OVERSIZE (board 725299c8): digest the body and POINT to the full record
+  // instead of rendering the article whole. Withholding intended_behavior, the
+  // AC list and one-hop pointers behind the knowledge_get pointer is what keeps
+  // the block bounded no matter how large those fields grow — the measured
+  // offender carried a ~5k intended_behavior and 12 ACs on top of a ~15k body.
+  if (body.length > ARTICLE_BODY_FLOOR) {
+    return [
+      header,
+      `WHAT IT DOES (digested — full body is ${body.length} chars, withheld to fit the reader's view): ${clip(body, ARTICLE_DIGEST_EXCERPT)}`,
+      `▸ FULL RECORD (intended_behavior, acceptance criteria, one-hop dependencies withheld): knowledge_get ${article.id}` +
+        ` — windowed: knowledge_get ${article.id} field:"what_it_does" offset:0 length:4000, then page by offset.`,
+    ].join('\n');
+  }
   const lines = [
-    `▸ article '${article.slug}' (${article.state}${article.concept_family ? `, concept family '${article.concept_family}'` : ''})`,
-    `WHAT IT DOES: ${clip(article.what_it_does, charCap)}`,
+    header,
+    `WHAT IT DOES: ${clip(body, charCap)}`,
     `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
   ];
   if (article.current_ac?.length) {
