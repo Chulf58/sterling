@@ -25,6 +25,10 @@ import { join } from 'node:path';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
+// Also builtins-only (no @sterling/schemas import) — see that module's header:
+// update.mjs must stay loadable on a clone where the workspace packages are
+// NOT yet built, and ESM evaluates the whole module graph at import time.
+import { appendMissingRemediation } from './store-remediation.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -225,6 +229,70 @@ export function stampConsumerRoleIfAbsent(cwd, log) {
   }
 }
 
+/**
+ * Additively merge the two sanctioned migration-remediation scripts into
+ * <cwd>/.sterling/config.json's store_guard.allow_scripts WHEN THAT FIELD IS
+ * AN EXPLICIT ARRAY MISSING ONE OR BOTH (decision bc0f81e3, board 1b3c7bf3).
+ *
+ * TRAP THIS CLOSES: a config's explicit allow_scripts array REPLACES the zod
+ * schema default rather than extending it, so a config frozen before the
+ * default grew to include migrate-stores.mjs / migration-preflight.mjs never
+ * gains them — and the store's refuse-until-migrated posture then makes
+ * those two scripts the one thing an H15-denied consumer can never run to
+ * escape it. This merge is ADDITIVE-ONLY (never reorders or dedupes existing
+ * entries) and DISCLOSED via `log` (never silent — anti_pattern 94f16632).
+ *
+ * Read-modify-write, no schema import (bootstrap-independence: this module
+ * must load before the workspace packages are built) — mirrors
+ * stampConsumerRoleIfAbsent's shape exactly, including its LOUD-but-NONFATAL
+ * contract: the update itself already succeeded by the time runUpdate calls
+ * this, so any failure here is a warning via `log`, never a thrown error.
+ *
+ * SCOPE: this helper stamps the ONE config at <cwd>. runUpdate calls it for
+ * the clone's own config AND once per registered sibling project (passing each
+ * project's repo_path) — because the H15 refuse-until-migrated trap actually
+ * lives in the SIBLING projects' configs (the Salesforce incident), and those
+ * projects never run /sterling:update themselves. This mirrors the per-project
+ * store-migration sweep below (H1 fix), not the cwd-only machine-role stamp.
+ */
+export function stampRemediationScriptsIfMissing(cwd, log) {
+  const configPath = join(cwd, '.sterling', 'config.json');
+  if (!existsSync(configPath)) {
+    log('\n▸ remediation-script reach — SKIPPED: no .sterling/config.json (run /sterling:init here first)');
+    return;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+    const guard = parsed.store_guard;
+    if (guard === undefined) {
+      log('\n▸ remediation-script reach — no store_guard set, schema default already covers it');
+      return;
+    }
+    if (guard === null || typeof guard !== 'object' || Array.isArray(guard)) {
+      log('\n⚠ remediation-script reach — store_guard is not an object, skipping (its shape was not written by this mechanism and will not be replaced)');
+      return;
+    }
+    if (guard.allow_scripts === undefined) {
+      log('\n▸ remediation-script reach — store_guard.allow_scripts not set, schema default already covers it');
+      return;
+    }
+    if (!Array.isArray(guard.allow_scripts)) {
+      log('\n⚠ remediation-script reach — store_guard.allow_scripts is not an array, skipping (its shape was not written by this mechanism and will not be replaced)');
+      return;
+    }
+    const { next, added } = appendMissingRemediation(guard.allow_scripts);
+    if (!added.length) {
+      log('\n▸ remediation-script reach — already present, not modified');
+      return;
+    }
+    parsed.store_guard = { ...guard, allow_scripts: next };
+    writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n');
+    log(`\n▸ remediation-script reach — store_guard.allow_scripts gained missing script(s): ${added.join(', ')} (decision bc0f81e3)`);
+  } catch (err) {
+    log(`\n⚠ remediation-script reach FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
+  }
+}
+
 /** The one-line currency answer: what this machine is on, and how far behind. */
 export function currencyLine(c) {
   const id = c.describe && c.describe !== c.head_short ? `${c.describe} (${c.head_short})` : c.head_short;
@@ -340,7 +408,41 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     return report;
   }
 
+  // Config-space remediation reach for every registered sibling project
+  // (decision bc0f81e3, board 1b3c7bf3): the H15 refuse-until-migrated trap
+  // lives in the SIBLINGS' configs (the Salesforce incident), and those
+  // projects never run /sterling:update themselves — so the merge must follow
+  // the same per-project pattern as the store-migration sweep, not the
+  // cwd-only machine-role stamp. Disclosed per project (the log line names it),
+  // same loud-but-nonfatal contract as the clone's own stamp.
+  const stampSiblingRemediation = (list) => {
+    for (const p of list) {
+      stampRemediationScriptsIfMissing(p.repo_path, (m) =>
+        log(m.replace('remediation-script reach', `remediation-script reach [${p.name}]`))
+      );
+    }
+  };
+
   if (before.behind === 0 && !opts.force) {
+    // A no-op fast-forward still remediates config (decision bc0f81e3): a
+    // consumer already ON the fixed revision but carrying a frozen
+    // allow_scripts is otherwise never rescued, because remediation used to sit
+    // behind the "there were new commits" path. Run the SAME sweep the full
+    // path runs — the clone's own config plus every sibling — then stop. Placed
+    // after the refusal matrix (nothing runs if the update refused/aborted).
+    stampRemediationScriptsIfMissing(cwd, log);
+    // FULLY NONFATAL: resolving the registry can throw (open/list failure). An
+    // already-current update has already succeeded by the time we get here, so a
+    // registry failure must NOT reject the update or leave a half-applied state
+    // — log and continue to the success return (the clone stamp above already
+    // swallows its own errors; this guards the projects() resolution + sweep).
+    try {
+      const noopProjectList =
+        opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+      stampSiblingRemediation(noopProjectList);
+    } catch (err) {
+      log(`\n⚠ sibling remediation skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
+    }
     log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
     return report;
   }
@@ -377,6 +479,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   } else {
     log('\n▸ test battery — SKIPPED (--no-test)');
   }
+
+  // Fix the config BEFORE anything else runs against it — in particular
+  // before the store-migration loop below, whose refuse-until-migrated
+  // remediation scripts are exactly what a stale allow_scripts array can
+  // trap a consumer out of (decision bc0f81e3, board 1b3c7bf3). The later
+  // init-ensure re-bake (below) re-applies the same merge idempotently on
+  // the recorded config, which is fine.
+  stampRemediationScriptsIfMissing(cwd, log);
 
   let stores;
   try {
@@ -427,6 +537,11 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // Resolved HERE, not at startup: on a fresh clone the registry cannot be read
   // until the build above has run (see the projects param note).
   const projectList = opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+  // Config-space remediation reach for the siblings, BEFORE their store
+  // migration below (a stale allow_scripts is exactly what would trap a sibling
+  // out of the migration it is about to run) — same ordering the clone's own
+  // stamp keeps ahead of the machine-store loop (decision bc0f81e3).
+  stampSiblingRemediation(projectList);
   // Review fix H1: the machine-store loop above covers this clone + the domain
   // stores, but every OTHER registered project on this machine has its own
   // .sterling store that the new code refuses to write until migrated — and

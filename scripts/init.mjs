@@ -32,6 +32,7 @@ import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-dist
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
+import { appendMissingRemediation } from './lib/store-remediation.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Test-isolation seam (mirrors STERLING_REGISTRY_DB/STERLING_WIN_NODE): the
@@ -81,9 +82,15 @@ for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claud
 // recorded config = the declaration source on re-runs (§12 ensure-manifest)
 const configPath = join(target, '.sterling', 'config.json');
 let recorded;
+// the RAW parsed JSON, pre-schema — kept alongside `recorded` (which is
+// schema-EXPANDED, i.e. carries every default) so a managed mutation below
+// can be applied to what the config actually says on disk, never to a
+// defaults-materialized copy that would clobber an intentionally-absent field.
+let rawRecorded;
 if (existsSync(configPath)) {
   try {
-    recorded = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+    rawRecorded = JSON.parse(readFileSync(configPath, 'utf8'));
+    recorded = parseConfig(rawRecorded);
   } catch (e) {
     fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate — cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
   }
@@ -181,17 +188,65 @@ if (!recorded) {
       if (!present) warns.push(`warn: ${tc.adapter}: no ${cap} capability — ${cap} checks will skip loudly (§9.1)`);
     }
   }
-} else if (!recorded.stack_tags.includes(UNIVERSAL_DOMAIN)) {
-  // managed mutation (decision 47be4388): every project mounts the universal
-  // `sterling` domain. Surgically ADD it to the recorded config, preserving every
-  // hand-tuned field — NOT a regenerate-from-defaults (that would clobber tunings).
-  const updated = parseConfig({ ...recorded, stack_tags: eff.stackTags });
-  writeFileSync(configPath, JSON.stringify(updated, null, 2));
-  items.push({ item: '.sterling/config.json', status: 'refreshed', detail: `added the universal '${UNIVERSAL_DOMAIN}' domain to stack tags (now [${updated.stack_tags.join(', ')}])` });
-} else if (canonical(recorded) === canonical(expectedConfig)) {
-  items.push({ item: '.sterling/config.json', status: 'matches', detail: 'defaults + recorded declarations' });
 } else {
-  items.push({ item: '.sterling/config.json', status: 'differs', detail: 'left untouched (tuned or hand-edited) — declarations were read from it' });
+  // Independent managed mutations, applied to the RAW parsed JSON (never the
+  // schema-expanded `recorded`, which would materialize every default and
+  // clobber an intentionally-absent field) — validated ONCE with parseConfig
+  // before a single write. Folded together when more than one applies.
+  let mutated = rawRecorded;
+  const mutationNotes = [];
+
+  // managed mutation (decision 47be4388): every project mounts the universal
+  // `sterling` domain. Surgically ADD it, preserving every hand-tuned field —
+  // NOT a regenerate-from-defaults (that would clobber tunings).
+  if (!recorded.stack_tags.includes(UNIVERSAL_DOMAIN)) {
+    mutated = { ...mutated, stack_tags: eff.stackTags };
+    mutationNotes.push(`added the universal '${UNIVERSAL_DOMAIN}' domain to stack tags (now [${eff.stackTags.join(', ')}])`);
+  }
+
+  // Remediation-script reach (decision bc0f81e3, board 1b3c7bf3): a config
+  // frozen with an EXPLICIT store_guard.allow_scripts before the schema
+  // default grew never gains newly-sanctioned scripts, because an explicit
+  // array REPLACES the zod default rather than extending it — and the
+  // store's refuse-until-migrated posture then makes the mandated migration
+  // scripts the one thing an H15-denied consumer can never run to escape it.
+  // Additive-only, disclosed below (never silent — anti_pattern 94f16632);
+  // a wrong-shaped store_guard/allow_scripts is warned about and left alone,
+  // never replaced.
+  const rawGuard = mutated.store_guard;
+  if (rawGuard !== undefined) {
+    if (rawGuard === null || typeof rawGuard !== 'object' || Array.isArray(rawGuard)) {
+      warns.push("warn: .sterling/config.json store_guard is not an object — skipping the remediation-script reach merge (decision bc0f81e3); its shape was not written by init and will not be replaced");
+    } else if (rawGuard.allow_scripts !== undefined && !Array.isArray(rawGuard.allow_scripts)) {
+      warns.push('warn: .sterling/config.json store_guard.allow_scripts is not an array — skipping the remediation-script reach merge (decision bc0f81e3); its shape was not written by init and will not be replaced');
+    } else if (Array.isArray(rawGuard.allow_scripts)) {
+      const { next, added } = appendMissingRemediation(rawGuard.allow_scripts);
+      if (added.length) {
+        mutated = { ...mutated, store_guard: { ...rawGuard, allow_scripts: next } };
+        mutationNotes.push(`store_guard.allow_scripts gained missing remediation script(s): ${added.join(', ')} (decision bc0f81e3)`);
+      }
+    }
+    // allow_scripts absent on an explicit store_guard object: the schema
+    // default already supplies the grown list — nothing to merge.
+  }
+
+  if (mutationNotes.length) {
+    // parseConfig is a VALIDATION GATE only — it throws (refuses the write) if
+    // the merged config is invalid, but its RETURN value is discarded. Zod
+    // materializes every absent default and STRIPS tolerated unknown/future
+    // keys, so serializing its return would silently rewrite policy the merge
+    // never touched (additive-only violation, anti_pattern 94f16632). Serialize
+    // the RAW `mutated` object instead — rawRecorded plus only the additive
+    // changes above — so unknown keys survive and no defaults are materialized
+    // beyond what was already recorded on disk.
+    parseConfig(mutated);
+    writeFileSync(configPath, JSON.stringify(mutated, null, 2));
+    items.push({ item: '.sterling/config.json', status: 'refreshed', detail: mutationNotes.join('; ') });
+  } else if (canonical(recorded) === canonical(expectedConfig)) {
+    items.push({ item: '.sterling/config.json', status: 'matches', detail: 'defaults + recorded declarations' });
+  } else {
+    items.push({ item: '.sterling/config.json', status: 'differs', detail: 'left untouched (tuned or hand-edited) — declarations were read from it' });
+  }
 }
 
 // store: data, never recreated or compared — present means leave it alone
