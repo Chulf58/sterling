@@ -964,7 +964,7 @@ try {
 
   // Widened captured set: decision|anti_pattern|feature_article|research_finding|disconfirmed_hypothesis
   const captured = store
-    .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000, include_unconfirmed: true })
+    .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000 })
     .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
 
   // Research duty satisfaction: research_finding|decision|anti_pattern since earliest
@@ -1014,7 +1014,7 @@ try {
     // isValidAt guard above.
     const sessionAts = sessionEvents.map((e) => e.at).filter(isValidAt).sort();
     const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
-    const articles = store.query({ types: ['feature_article'], cap: 1000, include_unconfirmed: true });
+    const articles = store.query({ types: ['feature_article'], cap: 1000 });
     unmetFamilies = [...conceptFamilies.entries()]
       .filter(([family, since]) => {
         // No valid `at` anywhere in the family's events: the window is

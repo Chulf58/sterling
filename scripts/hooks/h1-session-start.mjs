@@ -694,7 +694,6 @@ try {
             .query({
               types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'],
               cap: 1000,
-              include_unconfirmed: true,
             })
             .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
         if (!paid) {
