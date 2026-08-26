@@ -3814,6 +3814,307 @@ export class SterlingTools {
   }
 
   /**
+   * knowledge_extract (decision knowledge-extract-design; board ff07e314): lift
+   * a PASSAGE out of one string field of a live record into a NEW standalone
+   * record, while the original stays active minus the extracted claim. Kin to
+   * knowledge_split (which redistributes a feature_article among children under
+   * one slug) but extract lifts a passage from a PROJECT-SCOPED, NON-ATTESTATION
+   * source (domain sources are refused, pending per-mount transaction routing;
+   * attestation sources are refused because knowledgeUpdate's supersession
+   * semantics contradict extract's stays-live contract) into a fresh record of a
+   * caller-chosen type — the point of the feature being that a half-portable
+   * clause in an article most wants to become a citable decision/research_finding.
+   *
+   * EXCISION IS PASSAGE-SCOPED, not field-scoped (Q1): the removed text is a
+   * (field, find) substring under the SAME exactly-once contract knowledge_edit
+   * enforces (occurrences = field.split(find).length - 1; 0 refused with the char
+   * count, >1 refused as ambiguous). The post-removal value is NEVER taken from
+   * the caller (Q2) — the single occurrence located by the exactly-once check is
+   * spliced in LITERALLY (never String.replace, which would interpret
+   * $&/$`/$'/$$ in caller-supplied `replace` text as substitution patterns),
+   * because the exactly-once check IS the safety property that a blind
+   * full-field retransmit would defeat. `replace` defaults to '' (pure excision).
+   *
+   * PROVENANCE BOTH WAYS (Q4, the architect-flagged highest-risk path): new
+   * --informed_by--> original (the edge knowledge_promote writes) AND original
+   * --cites--> new. Each direction is a real record_relations row written
+   * explicitly, because a generic relation materializes on the SOURCE only at
+   * read — so "both ways" needs one addLink per direction. Both addLink calls run
+   * INSIDE the outer store.withTransaction: `tx` is reentrant (txDepth), so the
+   * create, the source update, and both edges commit as ONE transaction and a
+   * mid-op failure rolls the whole thing back byte-for-byte (validated by the
+   * frozen suite's both-ways + atomicity invariants).
+   *
+   * Extract does NOT cross scope (Q5): the new record inherits the source's scope
+   * (project→project); project→domain stays knowledge_promote's job (compose
+   * extract-then-promote). todo and attestation are barred targets (Q3, mirrors
+   * promote's UNPROMOTABLE). resolves is the PLAIN lane (Q6): reconcile_needed +
+   * refresh_reference only, promotion_review always refused, chain membership by
+   * file_keys overlap with the source (see validateExtractResolveClaim) — drained
+   * inside the same transaction, exactly like knowledge_split's explicit-claim
+   * closure.
+   *
+   * NOTE (history) — the source-update appends ONE history entry ONLY for a
+   * source type whose schema actually defines a `history` field (feature_article
+   * / reference_material). A decision/research_finding/anti_pattern has no history
+   * field (a decision is immutable-by-design, §3.2.1), so a history write would be
+   * refused by refuseUnknownFields; the append is therefore conditional rather
+   * than unconditional as the design's STORE-OPS line reads literally.
+   */
+  knowledgeExtract(input: {
+    id: string;
+    field: string;
+    find: string;
+    replace?: string;
+    new_record: { type: string; fields: Record<string, unknown> };
+    reason?: string;
+    resolves?: string[];
+  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string } } {
+    const { id, field, find, new_record, reason, resolves } = input;
+    const replace = input.replace ?? '';
+
+    // new_record shape + barred target types FIRST (mirrors promote's
+    // UNPROMOTABLE) — a barred type is refused for BEING that type, before any
+    // field/find work, so the refusal names the type rather than an incidental
+    // downstream error.
+    if (!new_record || typeof new_record !== 'object' || typeof new_record.type !== 'string' || typeof new_record.fields !== 'object' || new_record.fields === null) {
+      throw new Error(`knowledge_extract: 'new_record' must be a { type, fields } object — nothing was written.`);
+    }
+    const newType = new_record.type;
+    const BARRED_TARGETS = ['todo', 'attestation'];
+    if (BARRED_TARGETS.includes(newType)) {
+      throw new Error(
+        `knowledge_extract: new_record.type '${newType}' is a barred extraction target — extract lifts a passage into a durable, citable knowledge record; a ${newType} is not one (mirrors knowledge_promote's UNPROMOTABLE). Nothing was written.`
+      );
+    }
+
+    // Resolve the source through the shared ladder, then guard: a superseded id
+    // gets the version-conflict redirect first (refuseStaleAddress), a
+    // non-active source is refused before any write.
+    const original = this.resolveRecordId(id, 'knowledge_extract');
+    this.refuseStaleAddress(original, id, 'knowledge_extract');
+    if (original.status !== 'active') {
+      throw new Error(
+        `knowledge_extract: source '${original.id}' is not active (status ${original.status}) — only a live record can be extracted from; nothing was written.`
+      );
+    }
+
+    // FIXER-MODE (converging review finding, domain atomicity): MountedStores'
+    // withTransaction targets the PROJECT store only (see mounted.ts) — a
+    // domain-scoped source's create + source-trim + both addLinks would route
+    // to the domain store and commit OUTSIDE this method's transaction, so a
+    // late failure could orphan partial state. No existing ToolStore/MountedStores
+    // API reaches the per-mount store instance without new plumbing, so a
+    // domain-scoped source is refused loudly rather than accepted unsafely.
+    if (original.scope !== 'project') {
+      throw new Error(
+        `knowledge_extract: source '${original.id}' is domain-scoped (${original.scope}) — extract currently supports project-scoped sources only; domain source refused pending per-mount transaction routing. Nothing was written.`
+      );
+    }
+
+    // FIXER-MODE (converging review finding, attestation source): knowledgeUpdate
+    // treats an attestation update as a concept REPLACEMENT (fresh id, retired
+    // predecessor — see the ATTESTATION ONLY branch above), which contradicts
+    // extract's "original stays live minus the passage" contract. Refused as a
+    // SOURCE type — attestation is now barred BOTH ways: as a new_record.type
+    // TARGET (BARRED_TARGETS above) and, here, as the extraction SOURCE.
+    // (todo sources remain allowed; only todo as a new_record.type TARGET is barred.)
+    if (original.type === 'attestation') {
+      throw new Error(
+        `knowledge_extract: source '${original.id}' is an attestation — knowledgeUpdate's attestation-supersession semantics (a fresh id + retired predecessor) contradict extract's stays-live contract; attestation sources are refused. Nothing was written.`
+      );
+    }
+
+    // FIXER-MODE (converging review finding, scope): a caller-supplied
+    // new_record.fields.scope must not silently win over the source's scope —
+    // extract NEVER crosses scope (decision knowledge-extract-design Q5); an
+    // explicit mismatching scope is refused, naming both values. An identical
+    // explicit scope is harmless and passes.
+    if (Object.prototype.hasOwnProperty.call(new_record.fields, 'scope') && new_record.fields.scope !== original.scope) {
+      throw new Error(
+        `knowledge_extract: new_record.fields.scope '${String(new_record.fields.scope)}' differs from the source's scope '${original.scope}' — extract never crosses scope (decision knowledge-extract-design Q5); nothing was written.`
+      );
+    }
+
+    // field/find validation (the same shape knowledge_edit uses): known string
+    // field, non-empty find, exactly-once occurrence.
+    if (typeof find !== 'string' || find.length === 0) {
+      throw new Error(`knowledge_extract: 'find' must be a non-empty string — an empty match would insert at every position; nothing was written.`);
+    }
+    this.refuseUnknownFields(original.type, { [field]: replace }, 'knowledge_extract');
+    const current = (original as unknown as Record<string, unknown>)[field];
+    if (typeof current !== 'string') {
+      throw new Error(
+        `knowledge_extract: '${field}' on ${original.type} is ${current === undefined ? 'absent' : typeof current}, not a string — extract lifts a passage out of a STRING field. Nothing was written.`
+      );
+    }
+    // split().length - 1 counts occurrences without a regex, so `find` is the
+    // literal text the caller saw — the SAME mechanism knowledge_edit uses.
+    const occurrences = current.split(find).length - 1;
+    if (occurrences === 0) {
+      throw new Error(
+        `knowledge_extract: 'find' appears 0 times in ${original.type}.${field} (${current.length} chars) — nothing was written. ` +
+          `Confirm the exact text (including whitespace and punctuation) before retrying.`
+      );
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `knowledge_extract: 'find' appears ${occurrences} times in ${original.type}.${field} — refused as ambiguous, nothing was written. ` +
+          `Extend find with surrounding text until it matches exactly one site.`
+      );
+    }
+    // FIXER-MODE (converging review finding, literal replacement): the
+    // exactly-once count above already guarantees a single occurrence, so
+    // splice on that occurrence's own indexOf position rather than
+    // String.replace(find, replace) — String.replace interprets $&/$`/$'/$$
+    // as substitution patterns in caller-supplied `replace` text (e.g.
+    // replace:'$&' would leave the passage in place instead of excising it).
+    const matchIndex = current.indexOf(find);
+    const splicedValue = current.slice(0, matchIndex) + replace + current.slice(matchIndex + find.length);
+
+    // resolves: validated BEFORE any write (P5) — plain lane, file_keys overlap
+    // with the source. Duplicate ids refused loudly, exactly like knowledgeUpdate.
+    if (resolves) {
+      const seen = new Set<string>();
+      for (const rid of resolves) {
+        if (seen.has(rid)) throw new Error(`resolves: '${rid}' is named more than once — an item can only be claimed once; nothing was written.`);
+        seen.add(rid);
+      }
+    }
+    const sourceFileKeys = Array.isArray((original as unknown as { file_keys?: unknown }).file_keys)
+      ? ((original as unknown as { file_keys: string[] }).file_keys)
+      : [];
+    const resolveClaims = (resolves ?? []).map((rid) => this.validateExtractResolveClaim(rid, sourceFileKeys));
+
+    const ts = this.now();
+    // History append is conditional on the source type actually defining a
+    // `history` field — see the NOTE on this method. Types without one (decision,
+    // research_finding, anti_pattern) skip it rather than have refuseUnknownFields
+    // reject the write.
+    const typeHasHistory = (knownFieldsFor(original.type) ?? new Set<string>()).has('history');
+
+    let newId!: string;
+    let sourceVersion!: number;
+    // ONE transaction (mirrors knowledgeSplit): create the new record, trim the
+    // source, write BOTH provenance edges, drain resolves — any failure rolls the
+    // whole thing back byte-for-byte.
+    this.store.withTransaction(() => {
+      // scope inherited from the source (Q5); an explicit new_record.fields.scope
+      // that DIFFERS from the source's scope was already refused above, so the
+      // spread here can only ever carry the same scope back (or none at all) —
+      // it can no longer override it.
+      const created = this.knowledgeCreate(newType, { scope: original.scope, ...new_record.fields });
+      newId = created.record.id;
+      const updateBody: Record<string, unknown> = { [field]: splicedValue };
+      if (typeHasHistory) {
+        const priorHistory = Array.isArray((original as unknown as { history?: unknown }).history)
+          ? ((original as unknown as { history: unknown[] }).history)
+          : [];
+        updateBody.history = [
+          ...priorHistory,
+          { date: ts, event: `extracted a passage from '${field}' into ${newType} '${newId}'${reason ? ` — ${reason}` : ''}` },
+        ];
+      }
+      const updated = this.knowledgeUpdate(original.id, updateBody);
+      sourceVersion = (updated as unknown as { version: number }).version;
+      // BOTH-WAYS provenance, each a real record_relations row (the flagged
+      // highest-risk path — direct addLink inside the outer tx, verified to
+      // persist both rows without a nested-tx conflict).
+      this.store.addLink(newId, 'informed_by', original.id);
+      this.store.addLink(original.id, 'cites', newId);
+      // Explicit-claim closure (decision 68988832), drained inside this same
+      // transaction so a claim only lands alongside an extract that landed.
+      for (const claim of resolveClaims) this.store.remove(claim.id, ts);
+    });
+
+    return {
+      extracted: find,
+      source: { id: original.id, version: sourceVersion },
+      edges: { informed_by: original.id, cites: newId },
+    };
+  }
+
+  /**
+   * knowledge_extract's MCP-facing wrapper (the *Result convention every other
+   * write surface follows): wraps knowledgeExtract — which stays exactly as the
+   * frozen extract suite calls and asserts it — and appends an ADDITIVE
+   * `warnings` sibling, covering the newly-created record AND the trimmed source,
+   * the same article_oversize re-measure knowledgeSplitResult/knowledgeUpdateResult
+   * carry. Warnings never gate the write (P1).
+   */
+  knowledgeExtractResult(input: {
+    id: string;
+    field: string;
+    find: string;
+    replace?: string;
+    new_record: { type: string; fields: Record<string, unknown> };
+    reason?: string;
+    resolves?: string[];
+  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string }; warnings: string[] } {
+    const result = this.knowledgeExtract(input);
+    const warnings: string[] = [];
+    const newRecord = this.store.get(result.edges.cites);
+    if (newRecord) warnings.push(...this.articleOversizeWarnings(newRecord));
+    const sourceRecord = this.store.get(result.source.id);
+    if (sourceRecord) warnings.push(...this.articleOversizeWarnings(sourceRecord));
+    return { ...result, warnings };
+  }
+
+  /**
+   * knowledge_extract's resolves validator — the PLAIN lane (reconcile_needed +
+   * refresh_reference; promotion_review and every other lane refused), keyed on
+   * FILE_KEYS OVERLAP with the source record rather than the feature_link/chain
+   * predicate validateResolveClaim uses. WHY IT DIVERGES: an extract source is
+   * commonly a decision/research_finding, whose reconcile debt is raised with
+   * file_keys but NO feature_link (feature_link points at feature_articles), so
+   * the feature_link/chain match validateResolveClaim performs would refuse every
+   * such item. Chain membership for a non-article source is therefore file_keys
+   * overlap (the frozen extract suite pins this; conductor ambiguity resolution
+   * #3). EXACT FULL ID ONLY, same as validateResolveClaim — a claim is
+   * hard-deleted as the write lands, so an abbreviation could silently retarget.
+   */
+  private validateExtractResolveClaim(id: string, sourceFileKeys: string[]): DurableRecord {
+    const record = this.store.get(id);
+    if (!record) {
+      if (!SterlingTools.FULL_UUID_RE.test(id)) {
+        throw new Error(
+          `resolves: names '${id}', which is not a full record id — resolves requires the FULL uuid of every maintenance item it claims. ` +
+            `A claimed item is HARD-DELETED as the write lands, so an abbreviated citation could silently retarget to a DIFFERENT item. ` +
+            `Look the item up with maintenance_query and cite its full id; nothing was written.`
+        );
+      }
+      const trace = this.store.drainLogEntry(id);
+      if (trace) {
+        throw new Error(
+          `resolves: names '${id}', which is not OPEN — it was already removed` +
+            (trace.drained_at ? ` at ${trace.drained_at}` : '') +
+            ` (per the drain log). A closed item cannot be re-claimed; nothing was written.`
+        );
+      }
+      throw new Error(
+        `resolves: names '${id}', which does not exist as a maintenance item under that EXACT id; nothing was written.`
+      );
+    }
+    const it = record as unknown as { type: string; source?: string; system_reason?: string; file_keys?: string[] };
+    if (it.type !== 'todo' || it.source !== 'system') {
+      throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
+    }
+    if (it.system_reason !== 'reconcile_needed' && it.system_reason !== 'refresh_reference') {
+      throw new Error(
+        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only reconcile_needed and refresh_reference items close via ` +
+          `resolves; every other lane, including promotion_review, closes only through its own mechanism. Nothing was written.`
+      );
+    }
+    const itemFileKeys = Array.isArray(it.file_keys) ? it.file_keys : [];
+    if (!itemFileKeys.some((k) => sourceFileKeys.includes(k))) {
+      throw new Error(
+        `resolves: names '${id}', whose file_keys do not overlap the extract source's — an extract only discharges reconcile debt on its own chain; nothing was written.`
+      );
+    }
+    return record;
+  }
+
+  /**
    * promotion_review stays a human gate (P1) — a supersession never DRAINS it,
    * it is not the review being paid. But leaving its feature_link pointed at a
    * now-superseded id STRANDS it silently (todo 6202a0f5): the review is still

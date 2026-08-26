@@ -292,6 +292,33 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_extract',
+    {
+      description:
+        'Lift a PASSAGE out of one string field of a live record into a NEW standalone record, while the original stays active minus the extracted claim (decision knowledge-extract-design; board ff07e314). Kin to knowledge_split, but extract lifts a passage from a PROJECT-SCOPED, NON-ATTESTATION source (domain sources are refused, pending per-mount transaction routing; attestation sources are refused because knowledgeUpdate\'s supersession semantics contradict extract\'s stays-live contract) into a fresh record of a caller-chosen type — a half-portable clause in an article most wants to become a citable decision/research_finding. The excision is passage-scoped: a (field, find) substring under the SAME exactly-once contract knowledge_edit enforces (0 matches refused with the char count, >1 refused as ambiguous); the post-removal value is computed server-side by literal replacement at the single located occurrence (never String.replace, so caller-supplied replace text carrying $&/$`/$\'/$$ is never interpreted as a substitution pattern; replace defaults to \'\'), never taken from the caller. Provenance is written BOTH ways as real edges — new --informed_by--> original (the edge knowledge_promote writes) AND original --cites--> new. new_record.type is REQUIRED and caller-chosen; todo and attestation are barred targets (mirrors promote\'s UNPROMOTABLE); an explicit new_record.fields.scope must match the source\'s scope. Extract does NOT cross scope — the new record inherits the source scope (compose extract-then-promote for project→domain). resolves is the plain lane (reconcile_needed + refresh_reference; promotion_review always refused), keyed on file_keys overlap with the source. All validation runs before any write, and the create + source-trim + both edges + resolves-drain land in ONE transaction, so a mid-op failure leaves the store byte-for-byte untouched. Returns {extracted, source:{id,version}, edges:{informed_by,cites}, warnings:[]} — warnings never gate the write and report an oversize new record or a still-oversize trimmed source.',
+      inputSchema: strict({
+        id: z.string(),
+        field: z.string(),
+        find: z.string(),
+        replace: z.string().optional().describe('the text that replaces the matched passage in the source field — defaults to \'\' (pure excision)'),
+        new_record: z
+          .object({
+            type: z.string(),
+            fields: z.record(z.string(), z.unknown()),
+          })
+          .strict(),
+        reason: z.string().optional(),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open maintenance-queue item ids this extract discharges — validated (plain lane, file_keys overlap) before the write'),
+      }),
+    },
+    ({ id, field, find, replace, new_record, reason, resolves }) =>
+      json(tools.knowledgeExtractResult({ id, field, find, replace, new_record, reason, resolves }))
+  );
+
+  server.registerTool(
     'knowledge_schema',
     {
       description:
