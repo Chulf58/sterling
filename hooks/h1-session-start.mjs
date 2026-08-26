@@ -6,9 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, renameSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { randomUUID as randomUUID2, createHash } from "node:crypto";
+import { readFileSync as readFileSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, renameSync, statSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname as dirname5, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7001,6 +7002,18 @@ var SterlingStore = class _SterlingStore {
     });
     return result;
   }
+  /**
+   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
+   * withTransaction above): on a plain SterlingStore there is only ONE
+   * physical store, so routing by scope is a no-op — this is a straight alias
+   * for withTransaction, kept as its own method so SterlingStore and
+   * MountedStores satisfy the same ToolStore surface and the tool layer never
+   * has to know whether domains are mounted. MountedStores overrides this to
+   * actually route by scope and to guard against cross-mount nesting.
+   */
+  withTransactionForScope(_scope, fn) {
+    return this.withTransaction(fn);
+  }
 };
 
 // scripts/hooks/lib/common.mjs
@@ -7476,6 +7489,32 @@ try {
 }
 try {
   rmSync(join4(input.cwd, ".sterling", "transient", "enforcement-stamp.json"), { force: true });
+} catch {
+}
+var PERCALL_TMP_TTL_MS = 60 * 60 * 1e3;
+var PERCALL_TMP_SWEEP_CAP = 500;
+try {
+  let tagRoot = input.cwd;
+  try {
+    tagRoot = realpathSync(input.cwd);
+  } catch {
+  }
+  const projectTag = createHash("sha256").update(tagRoot).digest("hex").slice(0, 16);
+  const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
+  const tmp = tmpdir();
+  const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
+  let removed = 0;
+  for (const name of readdirSync(tmp)) {
+    if (removed >= PERCALL_TMP_SWEEP_CAP) break;
+    if (!percallRe.test(name)) continue;
+    const p = join4(tmp, name);
+    try {
+      if (statSync(p).mtimeMs >= cutoff) continue;
+      rmSync(p, { force: true });
+      removed++;
+    } catch {
+    }
+  }
 } catch {
 }
 var residueContext = "";

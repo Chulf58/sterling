@@ -4,9 +4,10 @@
 // invisible; this is its visibility pressure. Banner art goes to stderr
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
-import { randomUUID } from 'node:crypto';
-import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs';
+import { randomUUID, createHash } from 'node:crypto';
+import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
@@ -636,6 +637,73 @@ try {
   rmSync(join(input.cwd, '.sterling', 'transient', 'enforcement-stamp.json'), { force: true });
 } catch {
   // fail-open — a failed delete costs re-attestation precision, never the injection
+}
+
+// LEAKED H17 PER-CALL TMPDIR RECLAMATION (board 2d4cf493). H17's Bash sweep
+// writes per-call transient records into os.tmpdir() — the (A) STATE record
+// `sterling-enforce-<tag>-<runId>-call-<key>.json`, the (B) content baseline
+// `…-call-<key>.baseline.json`, and the (A) attribution record `…-call-<key>.dirty.json`
+// — each consumed and unlinked by its OWN PostToolUse (P4). A Bash call whose
+// PostToolUse never fires (the subagent process was killed, the session died
+// mid-command) LEAKS its per-call file; and unlike H17's other transient state
+// these live OUTSIDE .sterling/ in the shared os.tmpdir(), so no .sterling sweep
+// above ever reaches them.
+//
+// WHY RECLAMATION LIVES HERE, NOT IN H17 (Codex approach C, outside-family
+// design review): H17 is the VERDICT-PRODUCING deny process, and it must do
+// ZERO extra work on the audited path — verdict isolation. An H17 exit-handler
+// sweep was built and REVERTED for exactly that reason (it made every audited
+// Bash call pay for cleanup of unrelated leaks, on the hottest enforcement
+// path). H1 produces no allow/deny verdict and is lifecycle-bound to the
+// SessionStart boundary (P4), so a bounded, best-effort sweep here costs an
+// enforcement decision nothing.
+//
+// SCOPED to THIS project's tag (H17's projectTag, matched verbatim); AGE-GATED
+// by a 1h TTL so a concurrent same-project session's in-flight Pre→Post files
+// (which are seconds apart) are NEVER reclaimed; CAPPED per run — the next
+// SessionStart continues. Best-effort: it never throws, never blocks, never
+// writes to stdout (H1's stdout is JSON-only), and never changes H1's exit —
+// failing open is correct here (cleanup, not enforcement).
+const PERCALL_TMP_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PERCALL_TMP_SWEEP_CAP = 500;
+try {
+  // projectTag computed EXACTLY as H17's projectTag() (scripts/hooks/
+  // h17-bash-write-sweep.mjs) — sha256 of the realpath'd cwd, first 16 hex — so
+  // the tag matched here is byte-identical to the one H17 embedded in the leaked
+  // filenames. realpath so WSL/symlink aliasing cannot split the writer's tag
+  // from the sweeper's; a raw-path fallback exactly mirrors H17's own catch.
+  let tagRoot = input.cwd;
+  try {
+    tagRoot = realpathSync(input.cwd);
+  } catch {
+    // cwd unreadable — fall back to the raw path, exactly as H17's projectTag does
+  }
+  const projectTag = createHash('sha256').update(tagRoot).digest('hex').slice(0, 16);
+  // Anchored BOTH ends; `[\s\S]` (never `.`) for the arbitrary <runId> so a
+  // newline in a runId cannot escape the end anchor. The optional
+  // `.dirty`/`.baseline` token covers all THREE per-call shapes, and the 32-hex
+  // key pins the per-call record precisely — a shorter, non-hex, no-`-call-`, or
+  // non-`.json` near-miss is deliberately NOT matched (it is not a per-call
+  // record and may be unrelated tmpdir content). projectTag is 16 hex chars, so
+  // it is regex-inert and needs no escaping.
+  const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
+  const tmp = tmpdir();
+  const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
+  let removed = 0;
+  for (const name of readdirSync(tmp)) {
+    if (removed >= PERCALL_TMP_SWEEP_CAP) break;
+    if (!percallRe.test(name)) continue;
+    const p = join(tmp, name);
+    try {
+      if (statSync(p).mtimeMs >= cutoff) continue; // younger than the TTL — may belong to a live concurrent session
+      rmSync(p, { force: true });
+      removed++;
+    } catch {
+      // one un-statable/un-removable entry (e.g. a concurrent Post consumed it) never aborts the sweep (P1)
+    }
+  }
+} catch {
+  // fail-open — the tmpdir janitor must never break, block, or delay SessionStart (P1)
 }
 
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
