@@ -774,6 +774,22 @@ function stampCouldAttest(recorded, current) {
 function validateStateKey(cwd, key) {
   if (typeof key !== 'string' || key.length === 0) return null;
   if (key.includes('\0')) return null;
+  // POSIX: a literal '\' is a legal filename byte, NOT a separator — normalizing
+  // it below would collapse two distinct paths (`a\b` and `a/b`) onto one key, so
+  // a stored Pre-state record could re-key onto a colliding sibling and a Post
+  // comparison read the wrong pre-image (silent tamper). Refuse fail-closed here;
+  // Windows still normalizes below, where '\' really is the separator.
+  // DEFENSE-IN-DEPTH, verified by reasoning not by an interface test (debugger
+  // 2026-08-26): at HEAD the (A) collision is MASKED — a recorded backslash path
+  // can't populate the normalized preState slot without also tripping the
+  // fail-closed "no pre-state entry" throw, so both HEAD and fixed deny and no
+  // red-on-HEAD/green-on-fixed pin is authorable. Kept anyway because these
+  // records live in os.tmpdir() (attacker-writable) and a future refactor that
+  // normalized preDirty, or softened that throw, would UNMASK a real silent-tamper
+  // false-ALLOW; this reject survives it. PIN-B in
+  // h17-backslash-non-injectivity.test.mjs carries the teeth for the (B)
+  // collectBaseline throws; this key-validator does not.
+  if (process.platform !== 'win32' && key.includes('\\')) return null;
   const fwd = key.replace(/\\/g, '/');
   if (fwd.startsWith('/') || /^[A-Za-z]:/.test(fwd)) return null; // absolute / drive prefix
   if (fwd.split('/').includes('..')) return null; // traversal
@@ -1039,6 +1055,19 @@ function collectBaseline(cwd) {
       );
     }
     for (const de of readdirSync(absDir, { withFileTypes: true })) {
+      // POSIX non-injectivity guard (files AND directories), BEFORE join/rel/
+      // recursion: a literal backslash in de.name is a legal POSIX filename byte
+      // but collapses to '/' when toRel keys the (B) content map below, so
+      // `.claude/agents/a\b.md` and `.claude/agents/a/b.md` would share one key —
+      // last readdir wins the slot and a tampered file compares "unchanged"
+      // against its colliding sibling. Refuse fail-closed; never normalized. A
+      // backslash-bearing directory is refused too, or its name would propagate
+      // through relDir into every descendant key.
+      if (process.platform !== 'win32' && de.name.includes('\\')) {
+        throw new Error(
+          `(B) baseline entry '${relDir ? relDir + '/' : ''}${de.name}' contains a backslash — refused on POSIX: '\\' is a legal filename byte here but collapses to '/' in the authorization key, so a distinct sibling would share one key and a restore could land on the wrong path; denied fail-closed, never normalized`
+        );
+      }
       const abs = join(absDir, de.name);
       const rel = relDir ? `${relDir}/${de.name}` : de.name;
       if (de.isSymbolicLink()) {
@@ -1073,6 +1102,23 @@ function collectBaseline(cwd) {
   if (claudeKind === 'dir') {
     for (const de of readdirSync(join(cwd, '.claude'), { withFileTypes: true })) {
       const rel = '.claude/' + de.name;
+      // matchesGlob normalizes '\'->'/' internally, so a POSIX settings-shaped
+      // name carrying a backslash (`settings\evil.json`) would be rewritten to
+      // `settings/evil.json`, FAIL the glob, and be silently skipped from the
+      // baseline — leaving tampering on it invisible to both Pre and Post. de.name
+      // is a single path component, so the case-sensitive `settings*.json` shape
+      // is exactly startsWith('settings') && endsWith('.json'); refuse it
+      // fail-closed BEFORE the normalizing glob can hide it.
+      if (
+        process.platform !== 'win32' &&
+        de.name.includes('\\') &&
+        de.name.startsWith('settings') &&
+        de.name.endsWith('.json')
+      ) {
+        throw new Error(
+          `(B) baseline settings entry '${rel}' contains a backslash — refused on POSIX: matchesGlob would normalize '\\'->'/' and silently skip this settings-shaped file from the baseline, leaving tampering on it invisible; denied fail-closed`
+        );
+      }
       if (!matchesGlob(rel, '.claude/settings*.json')) continue;
       if (!de.isFile()) {
         throw new Error(
@@ -1104,6 +1150,15 @@ function collectBaseline(cwd) {
 // traversal / absolute. Returns the normalized rel or null (a bad key → no write).
 function validateBaselineKey(key) {
   if (typeof key !== 'string' || key.length === 0) return null;
+  // POSIX: '\' is a legal filename byte, not a separator — normalizing it below
+  // would collapse distinct paths onto one baseline key (same non-injectivity as
+  // validateStateKey). Refuse fail-closed; Windows keeps normalizing below.
+  // DEFENSE-IN-DEPTH, reasoning-verified not interface-tested: on the COLLECTED
+  // (B) flow toRel collapses '\' before this validator ever runs, so this guards
+  // only a hand-crafted stored baseline record (also os.tmpdir()-writable). The
+  // collected flow's teeth live in the collectBaseline readdir throw (PIN-B); this
+  // reject is the fail-closed backstop for the crafted-record path.
+  if (process.platform !== 'win32' && key.includes('\\')) return null;
   const fwd = key.replace(/\\/g, '/');
   if (fwd.startsWith('/') || /^[A-Za-z]:/.test(fwd)) return null; // absolute
   if (fwd.split('/').includes('..')) return null; // traversal
