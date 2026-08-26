@@ -1994,14 +1994,17 @@ export class SterlingStore {
         | undefined;
       if (!row) throw new Error(`casTransitionMerge: no run '${runId}'`);
       // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
-      // body (board 4c3a0c37, Codex outside-family review): the top-of-loop
-      // guard closes the retry-spanning gap but not the intra-iteration race
-      // where a migration commits a new version + rewritten body between that
-      // guard's PRAGMA and this SELECT — the row just read would then be a
-      // NEW-schema body parsed through the OLD schema, dropping newly-added
-      // fields, and the body-CAS below would still succeed against that same
-      // freshly-read body. This second check catches a migration before/during
-      // the read; a migration AFTER it that rewrites the body loses the body-CAS.
+      // body (board 4c3a0c37): the top-of-loop guard closes the retry-spanning
+      // gap but not the intra-iteration race where a migration commits between
+      // that guard's PRAGMA and this SELECT — the row just read would then be a
+      // NEW-schema body parsed through the OLD schema. This second check catches
+      // a migration before/during the read (and is what pin group D exercises,
+      // where the injector lands a migration on THIS read while no write lock is
+      // held, so it commits and is caught here). The narrower window this guard
+      // did NOT cover — a SCHEMA-ONLY migration landing AFTER this check and
+      // before the UPDATE, which the body-CAS cannot see because it leaves this
+      // row's body unchanged — is now closed by the tx() wrapper on the UPDATE
+      // below (board 4c3a0c37, Codex outside-family review).
       this.assertLiveSchemaVersion('casTransitionMerge');
       if (row.machine_state !== observed) {
         throw new Error(
@@ -2011,12 +2014,32 @@ export class SterlingStore {
       const current = runRecordSchema.parse(JSON.parse(row.body)) as RunRecord;
       const next = runRecordSchema.parse(mutate(current)) as RunRecord;
       const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      const res = this.db
-        .prepare(
-          'UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?'
-        )
-        .run(next.machine_state, tail, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed, row.pending_exit);
-      if (res.changes === 1) return next;
+      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
+      // review). tx() takes BEGIN IMMEDIATE — serializing against any concurrent
+      // migration — and RE-ASSERTS the live schema version INSIDE that write lock
+      // before the UPDATE runs, so no migration can commit between the check and
+      // the write. This closes the schema-only-migration window a body-CAS alone
+      // cannot: a migration that bumps user_version WITHOUT rewriting this row
+      // would otherwise pass `body = row.body` and land a stale-schema write that
+      // drops newly-added run-schema fields. A drift throws /Live schema version
+      // drift/ from inside tx() and nothing is written; the machine_state
+      // precondition still fires inside the lock via the UPDATE's
+      // `AND machine_state = ?` predicate (a miss retries, and the fresh read on
+      // the next pass throws CAS rejected); a concurrent BODY change still misses
+      // `AND body = ?` and retries. The runs-body SELECT stays OUTSIDE this lock
+      // deliberately — moving it inside would make pin group D's cross-connection
+      // migration injector busy-fail against BEGIN IMMEDIATE instead of drifting.
+      let changes = 0;
+      this.tx(() => {
+        changes = Number(
+          this.db
+            .prepare(
+              'UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?'
+            )
+            .run(next.machine_state, tail, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed, row.pending_exit).changes
+        );
+      });
+      if (changes === 1) return next;
       // body or queue changed under us (a concurrent hook write / agent exit) —
       // retry against the fresh row; a machine_state change is caught above.
     }
@@ -2112,22 +2135,37 @@ export class SterlingStore {
       const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
       if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
       // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
-      // body (board 4c3a0c37, Codex outside-family review): closes the
-      // intra-iteration race where a migration commits a new version + rewritten
-      // body between the top-of-loop guard's PRAGMA and this SELECT, which would
-      // otherwise parse a NEW-schema body through the OLD schema (dropping
-      // newly-added fields) while the body-CAS below still succeeds against that
-      // same freshly-read body. A migration AFTER this check loses the body-CAS.
+      // body (board 4c3a0c37): catches a migration landing before/during this
+      // read (pin group D's injector fires here, while no write lock is held).
+      // The narrower window this guard did NOT cover — a SCHEMA-ONLY migration
+      // landing AFTER this check and before the UPDATE, invisible to the body-CAS
+      // because it leaves this row's body unchanged — is now closed by the tx()
+      // wrapper on the UPDATE below (board 4c3a0c37, Codex outside-family review).
       this.assertLiveSchemaVersion('updateRunOptimistic');
       const current = JSON.parse(row.body) as RunRecord;
       const next = runRecordSchema.parse(mutate(current));
       if (next.machine_state !== current.machine_state) {
         throw new Error('updateRunOptimistic: machine_state changes go through casTransition only (§5.2)');
       }
-      const res = this.db
-        .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
-        .run(JSON.stringify(next), new Date().toISOString(), runId, row.body);
-      if (res.changes === 1) return next;
+      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
+      // review). tx()'s BEGIN IMMEDIATE serializes against any concurrent
+      // migration and re-asserts the live schema version INSIDE the write lock
+      // before the UPDATE, so a schema-only migration cannot slip between the
+      // check and the write and land a field-dropping stale write past the
+      // body-CAS. A drift throws /Live schema version drift/ and nothing is
+      // written; a concurrent BODY change still misses `AND body = ?` and
+      // retries. The runs-body SELECT stays OUTSIDE this lock deliberately —
+      // moving it inside would make pin group D's cross-connection migration
+      // injector busy-fail against BEGIN IMMEDIATE instead of drifting.
+      let changes = 0;
+      this.tx(() => {
+        changes = Number(
+          this.db
+            .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
+            .run(JSON.stringify(next), new Date().toISOString(), runId, row.body).changes
+        );
+      });
+      if (changes === 1) return next;
     }
     throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
   }
