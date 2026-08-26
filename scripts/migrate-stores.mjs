@@ -7,7 +7,7 @@
 // failure style.
 //
 //   node scripts/migrate-stores.mjs --db <path-to-sterling.db>
-//   node scripts/migrate-stores.mjs --all-stores          (refuses — see below)
+//   node scripts/migrate-stores.mjs --all-stores [--roots <dir>[,<dir>...]]   (fleet sweep — see below)
 //
 // The CLI + JSON contract, and the legacy (v1) input shape, are pinned by
 // scripts/tests/migration-runner.test.mjs — THAT FILE IS THE ORACLE; this
@@ -83,15 +83,56 @@
 //     honestly. A surviving record with NO fts row therefore REFUSES (its text
 //     cannot be synthesized) rather than silently becoming unrankable.
 //
-// EXIT CODES: 0 success / already-migrated · 1 verification failed (nothing
-// bumped) · 2 refusal before work · 3 unimplemented mode.
+// EXIT CODES: --db: 0 success / already-migrated · 1 verification failed
+// (nothing bumped) · 2 refusal before work · 3 unimplemented mode.
+// --all-stores: 0 every enumerated store succeeded (migrated/already/missing
+// only) · 1 at least one store failed. STDOUT carries exactly one JSON-Lines
+// record per enumerated store (the --db JSON shape, plus store/origin); the
+// {total, migrated, already, failed, missing} summary and the advisory
+// close-your-sessions warning both go to STDERR, deliberately kept OUT of the
+// per-store stdout stream so a caller counting/parsing stdout lines never
+// off-by-ones on a summary shaped like just another store result.
+//
+// --ALL-STORES (fleet mode, decision migrate-stores-all-stores-advisory-fleet
+// -mode — INVERTS the earlier exit-3 refusal stub): enumerates every store on
+// the machine — every registered project's <repo>/.sterling/sterling.db
+// (from the project registry, ~/.sterling/registry.db or STERLING_REGISTRY_DB
+// — the SAME env override packages/store/src/registry.ts's registryPath()
+// honors), each such project's OWN configured domain mounts (read straight
+// from that project's .sterling/config.json — stack_tags + domain_paths
+// overrides, the same shape packages/store/src/mounted.ts's
+// resolveDomainMounts resolves, parsed by hand here since this file has no
+// workspace import — see "MIRRORED, NOT IMPORTED" above), and every
+// default-root ~/.sterling/domains/*/sterling.db (so an orphaned/renamed
+// domain nothing currently mounts still gets swept) — deduped by resolved
+// absolute path. Domain roots (source 3 only) resolve against THIS machine's
+// homedir() by default (Node's own os.homedir(), which already honors the
+// HOME env var on POSIX — it composes with STERLING_REGISTRY_DB for full
+// test isolation), or against `--roots <dir>[,<dir>...]` when given —
+// REPLACING the default root entirely, mirroring scripts/domain-doctor.mjs's
+// own --roots flag exactly. Project-config domain mounts (source 2) are
+// unaffected by --roots — they always resolve against each project's own
+// .sterling/config.json. Each store runs the EXISTING single-db flow via a
+// SELF-SPAWN of this exact script (never a refactor of the --db path, so that
+// path stays byte-identical and one store's crash/hang cannot take another
+// down), CONTINUING past per-store failures. ADVISORY posture, same as --db:
+// no live-writer detection is attempted (no PID/lock surface exists to check
+// it), so the close-your-sessions warning is printed once, up front.
 
-import { existsSync, openSync, readSync, closeSync, writeFileSync } from 'node:fs';
+import { existsSync, openSync, readSync, closeSync, writeFileSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // See "MIRRORED, NOT IMPORTED" above before changing either constant.
 const TARGET_SCHEMA_VERSION = 2;
 const TOOL = 'migrate-stores';
+// --all-stores self-spawns THIS exact file, once per enumerated store — see
+// the --ALL-STORES header note for why (byte-identical --db path, per-store
+// process isolation).
+const SELF_PATH = fileURLToPath(import.meta.url);
 
 // Verbatim from packages/store/src/index.ts's DDL (schema v2 identity tables).
 // The `records` v2 COLUMNS (lifecycle/freshness/version) are added by
@@ -129,9 +170,27 @@ function fail(msg, code = 2) {
   process.exit(code);
 }
 
+/**
+ * A value-taking flag's argument. REFUSES loudly (never silently accepts) a
+ * value that is missing or itself starts with '--' — without this, a
+ * malformed invocation like `--all-stores --invoked-by --all-stores` would
+ * silently forward the LITERAL STRING '--all-stores' as --invoked-by's
+ * value, and the --all-stores self-spawn's `hasFlag('all-stores')` check in
+ * the CHILD process re-enters fleet mode recursively (roster review finding,
+ * fixer-mode) — refusing here kills that recursion vector at its root,
+ * rather than trying to detect it downstream.
+ */
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? undefined : process.argv[i + 1];
+  if (i === -1) return undefined;
+  const value = process.argv[i + 1];
+  if (value === undefined || value.startsWith('--')) {
+    fail(
+      `--${name} requires a value, got ${value === undefined ? 'nothing (it was the last argument)' : `another flag ('${value}')`} — ` +
+        `a flag can never be the value of another flag.`
+    );
+  }
+  return value;
 }
 
 function hasFlag(name) {
@@ -575,26 +634,295 @@ function refuseVerification(manifestPath, manifest, reason, detail, backupPath) 
   process.exit(1);
 }
 
+/** Every array entry that is a non-empty string; anything else (missing
+ *  field, wrong shape, a malformed project config) is dropped rather than
+ *  thrown on — one project's bad config.json must never abort the sweep. */
+function safeStringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v) => typeof v === 'string' && v.length > 0);
+}
+
+/** Root(s) for the default-root domain-store scan (source 3) — mirrors
+ *  scripts/domain-doctor.mjs's own `--roots` flag EXACTLY: a single
+ *  `--roots <dir>[,<dir>...]` REPLACES the default `<homedir>/.sterling/
+ *  domains` root entirely (never appends to it), so a fixture-isolated test
+ *  never has to touch a real machine's domains. The registry stays
+ *  STERLING_REGISTRY_DB-overridable (source 1) and project-config domain
+ *  mounts (source 2) are UNAFFECTED by this flag — they resolve against each
+ *  project's own .sterling/config.json, which names its own paths.
+ *
+ *  `explicit: true` marks roots that came from the flag itself, so the
+ *  caller can apply the same honest split the registry already gets: a
+ *  DEFAULT root that is absent is benign (nothing to sweep), while a root
+ *  the caller NAMED via --roots and got wrong (a typo) must not silently
+ *  enumerate zero stores and exit 0 (roster review finding, fixer-mode). */
+function domainRoots() {
+  const given = arg('roots');
+  return { roots: given ? given.split(',') : [join(homedir(), '.sterling', 'domains')], explicit: !!given };
+}
+
+/**
+ * Enumerates every store the fleet sweep should cover (decision
+ * migrate-stores-all-stores-advisory-fleet-mode) — see the --ALL-STORES
+ * header note for the three sources and the dedup/homedir reasoning. Never
+ * throws: a malformed registry or project config is disclosed to stderr and
+ * skipped, never fatal to the sweep; an unreadable filesystem entry (a
+ * broken symlink, an EACCES directory) inside a domains root is likewise
+ * caught per-entry and returned in `unreadable` rather than propagating —
+ * one bad entry must never abort the whole enumeration (roster review fix,
+ * fixer-mode).
+ *
+ * Returns `{ candidates, unreadable }`: `candidates` in first-seen order,
+ * deduped by `resolve()`d absolute path — a project's own domain mount and
+ * the default-root scan commonly name the identical file and must migrate
+ * exactly once. `unreadable` is `{ origin, error, path }[]` — `path` is the
+ * best-effort store path when the entry name was known (a stat failure on a
+ * specific subdirectory), or `null` when the whole root's directory listing
+ * itself failed (nothing beneath it was ever named).
+ */
+function enumerateStores() {
+  const seen = new Map(); // resolved path -> origin (first sighting wins)
+  const unreadable = [];
+  const add = (path, origin) => {
+    const resolved = resolve(path);
+    if (!seen.has(resolved)) seen.set(resolved, origin);
+  };
+
+  // (1) + (2): every registered project (the registry stores no liveness —
+  // it is a record of /sterling:init'd projects, not an aliveness probe) +
+  // its OWN configured domain mounts.
+  //
+  // THE HONEST THREE-WAY SPLIT (roster review, fixer-mode): a registry that
+  // cannot be read is NOT the same outcome as a registry that legitimately
+  // never existed, and an EXPLICIT STERLING_REGISTRY_DB naming a path that
+  // is not there is a caller error, not silence:
+  //   (a) the DEFAULT path is absent -> benign, zero registered projects,
+  //       disclosed on stderr, never a failure;
+  //   (b) an EXPLICIT STERLING_REGISTRY_DB path is absent -> the caller
+  //       asserted a specific file exists; it does not, so this is an
+  //       enumeration error (counted, forces a non-zero exit);
+  //   (c) the file exists but cannot be opened/queried (corrupt, EACCES) ->
+  //       also an enumeration error. Without this, a sweep that silently
+  //       failed to read EVERY registered project could still print
+  //       failed:0 and exit 0 — a clean-looking report over a report that
+  //       covered nothing.
+  const registryExplicit = process.env.STERLING_REGISTRY_DB !== undefined;
+  const registryDbPath = process.env.STERLING_REGISTRY_DB ?? join(homedir(), '.sterling', 'registry.db');
+  if (!existsSync(registryDbPath)) {
+    if (registryExplicit) {
+      unreadable.push({
+        origin: `project registry (STERLING_REGISTRY_DB='${registryDbPath}')`,
+        error: 'no such file — an explicitly named registry path was given and must exist',
+        path: null,
+      });
+    } else {
+      console.error(
+        `${TOOL}: no project registry at '${registryDbPath}' — treating as zero registered projects (nothing has ` +
+          `been /sterling:init'd on this machine at this default location).`
+      );
+    }
+  } else {
+    let registry;
+    try {
+      registry = new DatabaseSync(registryDbPath, { readOnly: true });
+      const projects = registry.prepare('SELECT repo_path FROM projects').all();
+      for (const row of projects) {
+        const repoPath = row.repo_path;
+        add(join(repoPath, '.sterling', 'sterling.db'), `project '${repoPath}'`);
+        const configPath = join(repoPath, '.sterling', 'config.json');
+        // NO config.json at all is NOT an error — plenty of registered
+        // projects never customize domain mounts, and nothing requires the
+        // file to exist. A config that exists but fails to READ or PARSE is
+        // different: it is an ENUMERATION ERROR (same three-way honesty as
+        // the registry above), because that project's domain_paths overrides
+        // are silently unreachable — without this, a corrupt config could
+        // drop custom domain mounts from the sweep while the run still
+        // exited 0 (roster review finding, fixer-mode). The project's OWN
+        // store (already add()ed above) is unaffected either way: its
+        // enumeration never depended on this file.
+        if (!existsSync(configPath)) continue;
+        // ONE try/catch per project (not folded into the outer registry
+        // try) — a single project's bad config (unparseable JSON, OR
+        // structurally-invalid-but-valid JSON: stack_tags that isn't an
+        // array, a domain_paths entry that isn't a string and would throw
+        // inside resolve()) must disclose ONE skipped line naming THAT
+        // project and move on — it must never abort enumeration of every
+        // project after it in the registry (roster review finding,
+        // fixer-mode: this used to share the outer try, so one bad project
+        // silently dropped the rest of the sweep).
+        try {
+          const config = JSON.parse(readFileSync(configPath, 'utf8'));
+          if (config?.stack_tags !== undefined && !Array.isArray(config.stack_tags)) {
+            throw new Error(`'stack_tags' must be an array, got ${typeof config.stack_tags}`);
+          }
+          const domainPaths = config?.domain_paths && typeof config.domain_paths === 'object' ? config.domain_paths : {};
+          for (const tag of safeStringArray(config?.stack_tags)) {
+            const rawMount = domainPaths[tag];
+            if (rawMount !== undefined && typeof rawMount !== 'string') {
+              throw new Error(`domain_paths['${tag}'] must be a string, got ${typeof rawMount}`);
+            }
+            // A config.domain_paths override may be RELATIVE (a consumer
+            // project's own convenience convention); it must resolve against
+            // THAT PROJECT's own directory, never against this sweep's cwd —
+            // a relative override resolved from the Sterling clone's cwd
+            // would migrate an unrelated file (roster review finding,
+            // fixer-mode). An already-absolute override is unchanged by
+            // resolve() (its second argument is ignored).
+            const domainDbPath = rawMount ? resolve(repoPath, rawMount) : join(homedir(), '.sterling', 'domains', tag, 'sterling.db');
+            add(domainDbPath, `domain '${tag}' (mounted by project '${repoPath}')`);
+          }
+        } catch (e) {
+          unreadable.push({ origin: `project config '${configPath}' (project '${repoPath}')`, error: e.message, path: null });
+        }
+      }
+    } catch (e) {
+      unreadable.push({ origin: `project registry '${registryDbPath}'`, error: e.message, path: null });
+    } finally {
+      registry?.close();
+    }
+  }
+
+  // (3): every domain store under the resolved root(s) (--roots override, or
+  // the default <homedir>/.sterling/domains), mounted by a registered
+  // project's config or not. Both the directory listing itself and each
+  // entry's stat are fallible (permissions, a broken symlink) — caught
+  // per-call so one bad entry cannot abort the rest of the scan.
+  const { roots: rootsToScan, explicit: rootsExplicit } = domainRoots();
+  for (const domainsRoot of rootsToScan) {
+    if (!existsSync(domainsRoot)) {
+      if (rootsExplicit) {
+        unreadable.push({
+          origin: `--roots '${domainsRoot}'`,
+          error: 'no such directory — an explicitly named root was given via --roots and must exist',
+          path: null,
+        });
+      }
+      continue;
+    }
+    let names;
+    try {
+      names = readdirSync(domainsRoot).sort();
+    } catch (e) {
+      unreadable.push({ origin: `domain root '${domainsRoot}'`, error: e.message, path: null });
+      continue;
+    }
+    for (const name of names) {
+      const entryPath = join(domainsRoot, name);
+      let isDirectory;
+      try {
+        isDirectory = statSync(entryPath).isDirectory();
+      } catch (e) {
+        unreadable.push({ origin: `domain '${name}' (${domainsRoot} root)`, error: e.message, path: join(entryPath, 'sterling.db') });
+        continue;
+      }
+      if (!isDirectory) continue;
+      add(join(entryPath, 'sterling.db'), `domain '${name}' (${domainsRoot} root)`);
+    }
+  }
+
+  return { candidates: [...seen.entries()].map(([path, origin]) => ({ path, origin })), unreadable };
+}
+
+/**
+ * --all-stores (fleet mode, decision migrate-stores-all-stores-advisory-
+ * fleet-mode — inverts the earlier exit-3 refusal stub). See the file's
+ * --ALL-STORES header note for the full design; this is the driver: warn
+ * once, enumerate, self-spawn the --db flow per store, print one result line
+ * each plus a final summary, never abort the loop on a per-store failure.
+ */
+function runAllStores() {
+  if (hasFlag('elect-successor')) {
+    fail(
+      `--all-stores cannot be combined with --elect-successor: an election names a specific conflict inside ONE store's ` +
+        `legacy data, and applying it blindly across every enumerated store would either misfire on unrelated data or refuse ` +
+        `loudly as a stale_election everywhere else. Resolve a multi-successor conflict with a targeted ` +
+        `'--db <path> --elect-successor <oldId>=<winnerId>' run instead.`
+    );
+  }
+  const invokedBy = arg('invoked-by') ?? 'all-stores-sweep';
+
+  console.error(
+    `${TOOL}: --all-stores is an ADVISORY sweep, same posture every single --db run has always had — CLOSE EVERY SESSION ` +
+      `(Claude Code CLI, MCP server, TUI) holding any of these stores open before continuing. No live-writer detection is ` +
+      `attempted (no PID/lock surface exists to check it); a store migrated while a session holds it open leaves that ` +
+      `session refusing writes until it exits and relaunches.`
+  );
+
+  const { candidates, unreadable } = enumerateStores();
+  let migrated = 0;
+  let already = 0;
+  let failed = 0;
+  let missing = 0;
+
+  // An unreadable filesystem entry (EACCES, a broken symlink) is counted
+  // under FAILED, never missing: `missing` means "confirmed absent, nothing
+  // to do"; an entry that could not even be stat'd/listed is unactionable
+  // the same way a failed migration is — it needs a human to look, not a
+  // shrug. `skipped: true` (never `missing`, never a migration `ok:false`
+  // shaped like a --db refusal) keeps it visibly distinct from both.
+  for (const { origin, error, path } of unreadable) {
+    failed++;
+    // `db` mirrors the field name every --db-shaped success/failure line
+    // carries (== the field a caller keys result lines by), even though
+    // `path` may be null here (a whole-root readdir failure never named a
+    // specific file).
+    console.log(JSON.stringify({ ok: false, db: path, store: path, origin, skipped: true, error }));
+  }
+
+  for (const { path, origin } of candidates) {
+    if (!existsSync(path)) {
+      missing++;
+      console.log(JSON.stringify({ ok: true, db: path, store: path, origin, missing: true }));
+      continue;
+    }
+    const r = spawnSync(process.execPath, [SELF_PATH, '--db', path, '--invoked-by', invokedBy], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    const stdout = (r.stdout ?? '').trim();
+    let parsed = null;
+    if (stdout) {
+      try {
+        parsed = JSON.parse(stdout);
+      } catch {
+        parsed = null;
+      }
+    }
+    const succeeded = r.status === 0 && parsed?.ok === true;
+    const line = parsed
+      ? { ...parsed, store: path, origin, exit_code: r.status }
+      : {
+          ok: false,
+          store: path,
+          origin,
+          exit_code: r.status,
+          error: (r.stderr ?? '').trim() || stdout || `migrate-stores.mjs exited ${r.status} with no parseable output`,
+        };
+    console.log(JSON.stringify(line));
+    if (succeeded) {
+      if (parsed.already_migrated) already++;
+      else migrated++;
+    } else {
+      failed++;
+    }
+  }
+
+  // The summary goes to STDERR, deliberately — stdout carries exactly one
+  // JSON-Lines record per enumerated store (the machine-parseable stream a
+  // caller counts/greps), and a summary object shaped just like a per-store
+  // line would be indistinguishable from one on a naive '{'-leading-line
+  // scan, silently off-by-one-ing any consumer that counts stdout lines.
+  console.error(JSON.stringify({ total: candidates.length + unreadable.length, migrated, already, failed, missing }));
+  process.exit(failed === 0 ? 0 : 1);
+}
+
 function main() {
   if (hasFlag('all-stores')) {
-    // DESIGNED BUT NOT BUILT, deliberately loud (P5) rather than half-built:
-    // machine-level enumeration is unpinnable in a fixture (the pin file says
-    // so by name), and its two refusal preconditions have no discoverable
-    // mechanism today — Sterling has no server PID/lockfile surface at all, so
-    // "refuse on a live server" would be an invented check that reports safety
-    // it cannot deliver. Per-store --db runs are the supported path.
-    fail(
-      `--all-stores is NOT IMPLEMENTED. Machine-level enumeration (ProjectRegistry at ~/.sterling/registry.db + the domain ` +
-        `stores under ~/.sterling/domains/) is designed in [stable-identity-design-v2] section 6, but its refusal ` +
-        `preconditions are not buildable yet: there is no server-PID/lock surface to detect a LIVE MCP server or TUI ` +
-        `holding a store open, and a migration that cannot see a live writer must not claim it checked. Migrate one store ` +
-        `at a time with --db <path>, after closing every session that holds it.`,
-      3
-    );
+    return runAllStores();
   }
 
   const dbPath = arg('db');
-  if (!dbPath) return fail('--db <path-to-sterling.db> is required (or --all-stores, which is not implemented)');
+  if (!dbPath) return fail('--db <path-to-sterling.db> is required (or --all-stores, for a machine-wide sweep)');
   if (!existsSync(dbPath)) return fail(`no db file at '${dbPath}' — nothing was read, nothing was created`);
 
   // Syntax-checked before any db work; semantic validation (against the real
