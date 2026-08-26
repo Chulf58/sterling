@@ -5083,15 +5083,28 @@ function hasStructuralError(resp) {
   if (resp.status === "error" || resp.type === "error") return true;
   return false;
 }
+function extractFailurePayload(input) {
+  for (const key of ["tool_response", "tool_error", "error", "message"]) {
+    if (input && input[key] !== void 0 && input[key] !== null) return input[key];
+  }
+  return void 0;
+}
 try {
   const input = readStdin();
   const tool = input.tool_name;
   if (typeof tool !== "string" || !tool.startsWith("mcp__codex__")) allow();
-  const resp = input.tool_response;
-  const text = extractResultText(resp);
-  const structural = hasStructuralError(resp);
-  const authShapedShort = !structural && text.length > 0 && text.length < AUTH_TEXT_MAX && looksLikeAuthFailure(text);
-  if (!structural && !authShapedShort) allow();
+  const isFailureEvent = input.hook_event_name === "PostToolUseFailure";
+  let text;
+  if (isFailureEvent) {
+    const payload = extractFailurePayload(input);
+    text = extractResultText(payload !== void 0 ? payload : input);
+  } else {
+    const resp = input.tool_response;
+    text = extractResultText(resp);
+    const structural = hasStructuralError(resp);
+    const authShapedShort = !structural && text.length > 0 && text.length < AUTH_TEXT_MAX && looksLikeAuthFailure(text);
+    if (!structural && !authShapedShort) allow();
+  }
   const rawSanitized = sanitizeRawText(text);
   const classified = consultFailureMessage(rawSanitized);
   const block = [

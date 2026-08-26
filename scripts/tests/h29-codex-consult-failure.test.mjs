@@ -35,7 +35,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -478,3 +478,228 @@ test('AUTH-HEADER-FULL: an Authorization header value is redacted WHOLE, not jus
 // so both `assert.ok(!ctx.includes(secret), ...)` and
 // `assert.ok(!ctx.includes('realtoken'), ...)` go red — this is the exact
 // pre-fix leak shape (old regex left the token after `Authorization: Bearer`).
+
+// ---------------------------------------------------------------------------
+// 11. PostToolUseFailure — SECOND REGISTRATION, NO STRUCTURAL-ERROR GATE.
+// Oracle: research_finding aa5bf135 (posttooluse-skips-failed-calls-h29-seam-gap)
+// + the dispatch brief's spec given verbatim for this extension:
+//   PostToolUse fires only on tool SUCCESS, so h29 gains a SECOND registration
+//   on PostToolUseFailure (same matcher: mcp__codex__codex|mcp__codex__codex-reply).
+//   On PostToolUseFailure, h29 treats the call as failed WITHOUT the
+//   structural-error gate: ANY payload shape — object error, plain string
+//   (e.g. "Session not found for thread_id: ..."), or missing — produces the
+//   loud emission (stderr + hookSpecificOutput.additionalContext) carrying the
+//   raw error text; auth-marker text gets the auth-recovery hint, non-auth
+//   gets the transport-failure message. The PostToolUse path's existing
+//   conservative (gated) detection is UNCHANGED — tests 1-10 and AUTH-HEADER-
+//   FULL above already pin that path and are NOT duplicated here.
+//
+// Payload field: most fixtures below carry the error on `tool_response`,
+// mirroring the existing `postCodex()` helper and matching the finding's own
+// trace ("resp.type==='error' trips hasStructuralError" — `resp` reads
+// input.tool_response in the current detector) — not an invented field name.
+// 11d/11e pin the REST of the defensive extraction chain the reviewers found
+// unpinned (tool_response -> tool_error -> error -> message, and the
+// missing-everything fallback), so those two deliberately do NOT use
+// `tool_response`.
+//
+// STRUCTURAL vs NON-STRUCTURAL (reviewer correction, both converged): 11a and
+// 11c must be NON-structural fixtures — no isError/is_error, no type:'error',
+// no truthy `error` field — else they stay green through the OLD
+// hasStructuralError-gated path even if the new ungated PostToolUseFailure
+// branch is deleted outright, which is a hollow pin (measured: two
+// independent reviewers found this on the implementation). Only 11d's/11e's
+// fixtures are exempt from this constraint since they pin the extraction
+// CHAIN, not the gate-removal.
+//
+// Pins (e) "PostToolUse isError:true -> emits" is SKIPPED here: tests 1 and 2
+// above already pin exactly this (structural isError:true, auth- and
+// transport-shaped) and it is unchanged by this extension.
+// ---------------------------------------------------------------------------
+
+const postCodexFailure = (dir, toolResponse, tool_name = 'mcp__codex__codex', extra = {}) => ({
+  hook_event_name: 'PostToolUseFailure',
+  tool_name,
+  tool_input: { prompt: 'review this diff for correctness' },
+  tool_response: toolResponse,
+  cwd: dir,
+  ...extra,
+});
+
+// Builds a PostToolUseFailure input with the payload under an ARBITRARY
+// top-level field name (or none at all) — used by 11d/11e to pin the rest of
+// the defensive extraction chain and the whole-input fallback, independent of
+// the `tool_response`-specific helper above.
+const postCodexFailureRaw = (dir, fields = {}, tool_name = 'mcp__codex__codex') => ({
+  hook_event_name: 'PostToolUseFailure',
+  tool_name,
+  tool_input: { prompt: 'review this diff for correctness' },
+  cwd: dir,
+  ...fields,
+});
+
+test('11-control: PostToolUse clean success stays SILENT (re-asserts test 4 as the LOCAL control for the PostToolUseFailure pins below, per rubric: a suite green for the wrong reason must be visible)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const result = {
+      content: [{ type: 'text', text: 'Review complete: the diff looks correct, no issues found. LGTM.' }],
+      isError: false,
+    };
+    const r = runHook(postCodex(dir, result), dir);
+    assert.equal(r.code, 0);
+    assert.equal(advisoryOf(r.stdout), null, 'a clean PostToolUse success must stay silent — this control must hold even after the PostToolUseFailure registration is added, else 11a-11c would be green for the wrong reason (detection firing unconditionally on every event)');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for 11-control: implement the PostToolUseFailure fix by making the
+// shared detector fire unconditionally regardless of hook_event_name (e.g.
+// deleting the isError/event check instead of adding a parallel ungated path)
+// -> advisoryOf(r.stdout) becomes non-null on this clean-success fixture,
+// `assert.equal(..., null, ...)` goes red.
+
+test('11a: PostToolUseFailure with a NON-STRUCTURAL object payload (no isError/is_error, no type:\'error\', no error field; non-auth) fires the loud emission carrying the raw error text, exit 0 — proves the NEW ungated branch, not the old structural gate', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const result = {
+      status: 500,
+      message: 'upstream connection reset unexpectedly while contacting the model',
+    };
+    const r = runHook(postCodexFailure(dir, result), dir);
+    assert.equal(r.code, 0, 'an advisory hook never blocks the tool call, even on the failure event');
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'PostToolUseFailure with a non-structural object payload must emit — this fixture would NOT trip the old hasStructuralError gate (no isError/is_error/type:\'error\'/error field), so a green here can only come from the new ungated branch');
+    assert.ok(ctx.includes('upstream connection reset unexpectedly while contacting the model'), 'the raw error text must be carried into the advisory');
+    assert.doesNotMatch(ctx, RECOVERY_HINT_RE, 'a non-auth failure must get the transport-failure message, not the auth-recovery hint');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for 11a: delete the new ungated PostToolUseFailure branch entirely
+// and route this event through the OLD hasStructuralError-gated detector
+// instead -> this fixture is deliberately non-structural (no isError/is_error,
+// no type:'error', no error field), so the old gate never classifies it as a
+// failure, ctx stays null, `assert.ok(ctx, ...)` goes red. (This is the
+// correction for the reviewer-found hollow pin: the PRIOR fixture here carried
+// type:'error' + a truthy error field, which stayed green through the old
+// gate even with the new branch deleted.)
+
+test('11b: PostToolUseFailure with a PLAIN-STRING payload (measured shape: "Session not found for thread_id: ...") fires with the string present verbatim, exit 0', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const result = 'Session not found for thread_id: abc-123-fake-99887766';
+    const r = runHook(postCodexFailure(dir, result), dir);
+    assert.equal(r.code, 0);
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'a bare string payload on PostToolUseFailure must fire — no auth-shape requirement, unlike the PostToolUse string fallback in test 3');
+    assert.ok(ctx.includes(result), 'the plain-string payload must appear verbatim in the advisory (no auth marker to redact, no length floor on this event)');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for 11b: reuse the PostToolUse string-fallback logic (test 3's
+// path), which requires AUTH_SHAPED_RE to match before a bare string fires
+// -> this fixture contains no "401"/"unauthorized"/"token" text, so under
+// that reused fallback it never matches, ctx stays null, `assert.ok(ctx, ...)`
+// goes red.
+
+test('11c: PostToolUseFailure with a NON-STRUCTURAL auth-shaped payload (401 / token expired, no isError/type:\'error\'/error field) is auth-classified — the recovery hint fires, not the generic transport message', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const result = {
+      status: 401,
+      message: 'Authentication failed: 401 token expired for this session.',
+    };
+    const r = runHook(postCodexFailure(dir, result), dir);
+    assert.equal(r.code, 0);
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'an auth-shaped, non-structural PostToolUseFailure payload must emit — this fixture would NOT trip the old hasStructuralError gate either, so a green here can only come from the new ungated branch');
+    assert.match(ctx, AUTH_SHAPED_RE, 'the advisory names the auth-shaped failure');
+    assert.match(ctx, RECOVERY_HINT_RE, 'auth-marker text on PostToolUseFailure must still get the actionable recovery hint, distinguishing it from 11a\'s non-auth transport message');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for 11c (two independent mutations this fixture must catch):
+// (1) delete the new ungated PostToolUseFailure branch and route through the
+// OLD hasStructuralError-gated detector -> this fixture is deliberately
+// non-structural (no isError/is_error/type:'error'/error field), so the old
+// gate never classifies it as a failure, ctx stays null, `assert.ok(ctx, ...)`
+// goes red before classification is even reached.
+// (2) keep the new branch but drop its auth/non-auth classification (always
+// emit the generic transport-failure message regardless of content) ->
+// RECOVERY_HINT_RE no longer matches ctx, `assert.match(ctx, RECOVERY_HINT_RE,
+// ...)` goes red, while 11a's `assert.doesNotMatch` stays green for the wrong
+// reason alone — read together, this pair is what proves classification (not
+// mere presence/absence of emission) is load-bearing. (Correction: the PRIOR
+// fixture here carried type:'error' + a truthy error field, which stayed
+// green through the old gate even with the new branch deleted — mutation (1)
+// above is the reviewer-found fix.)
+
+test("11d: PostToolUseFailure with the payload under tool_error (not tool_response) fires with that text verbatim — the extraction chain is not hardcoded to tool_response", () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const text = 'codex-reply thread lookup failed: no matching session for this request';
+    const r = runHook(postCodexFailureRaw(dir, { tool_error: text }), dir);
+    assert.equal(r.code, 0);
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'a payload carried under tool_error (instead of tool_response) must still fire');
+    assert.ok(ctx.includes(text), 'the tool_error payload text must appear verbatim in the advisory');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for 11d: hardcode the extraction to read only input.tool_response
+// and never fall back to tool_error (or error) -> the hook finds nothing
+// under tool_response (undefined) for this fixture, so either ctx stays null
+// or a generic "missing payload" branch fires without this fixture's text ->
+// `assert.ok(ctx, ...)` or `assert.ok(ctx.includes(text), ...)` goes red.
+
+test('11e: PostToolUseFailure with NO payload field at all (no tool_response/tool_error/error) still emits — falls back to the whole hook input, non-empty raw text', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(postCodexFailureRaw(dir, {}), dir);
+    assert.equal(r.code, 0, 'a missing payload must never be treated as a block');
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'PostToolUseFailure with no payload field at all must still emit — "missing" is one of the three payload shapes the spec names');
+    assert.ok(ctx.trim().length > 0, 'the raw text carried must be non-empty even with nothing but the whole input to fall back on');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for 11e: require a non-empty tool_response/tool_error/error before
+// ever emitting (treat "nothing to classify" as silent, mirroring test 6c's
+// PostToolUse convention, instead of the spec's "or missing -> still fires")
+// -> ctx stays null, `assert.ok(ctx, ...)` goes red.
+
+test('11f: hooks.json registers h29-codex-consult-failure.mjs on PostToolUseFailure with the SAME matcher as its existing PostToolUse registration (mcp__codex__codex|mcp__codex__codex-reply)', () => {
+  const hooksJson = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8'));
+  const findByCommand = (e) => (e.hooks ?? []).find((h) => typeof h.command === 'string' && h.command.includes('h29-codex-consult-failure.mjs'));
+
+  const postEntries = hooksJson.hooks?.PostToolUse ?? [];
+  const existingEntry = postEntries.find(
+    (e) => findByCommand(e) && new RegExp(e.matcher).test('mcp__codex__codex') && new RegExp(e.matcher).test('mcp__codex__codex-reply')
+  );
+  assert.ok(existingEntry, 'sanity: the existing PostToolUse registration for h29 must still be present (regression floor)');
+
+  const failureEntries = hooksJson.hooks?.PostToolUseFailure ?? [];
+  const failureEntry = failureEntries.find(
+    (e) => findByCommand(e) && new RegExp(e.matcher).test('mcp__codex__codex') && new RegExp(e.matcher).test('mcp__codex__codex-reply')
+  );
+  assert.ok(failureEntry, 'hooks.json must register h29-codex-consult-failure.mjs on PostToolUseFailure covering mcp__codex__codex and mcp__codex__codex-reply');
+  assert.ok(!new RegExp(failureEntry.matcher).test('Bash'), 'the PostToolUseFailure matcher must be scoped to the codex tools, not a blanket match');
+  assert.equal(failureEntry.matcher, existingEntry.matcher, 'same matcher string on both registrations, per spec');
+});
+
+// SABOTAGE for 11f: add the PostToolUseFailure entry with a narrower/wrong
+// matcher (e.g. only "mcp__codex__codex", dropping the codex-reply
+// alternation) -> `new RegExp(failureEntry.matcher).test('mcp__codex__codex-reply')`
+// is false, `.find(...)` returns undefined, `assert.ok(failureEntry, ...)`
+// goes red; or omit the PostToolUseFailure registration entirely -> the same
+// assertion goes red directly.
