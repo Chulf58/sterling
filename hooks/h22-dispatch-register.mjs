@@ -4135,11 +4135,7 @@ var envelopeFields = {
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
-  stack_tags: external_exports.array(external_exports.string()),
-  // §3.2.6: machine-extracted candidates are flagged lower-trust; excluded from
-  // retrieval unless the caller opts in. Lives on the envelope because any
-  // extractable type (decision, anti-pattern, ...) can carry it.
-  derived_unconfirmed: external_exports.boolean().optional()
+  stack_tags: external_exports.array(external_exports.string())
 };
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {

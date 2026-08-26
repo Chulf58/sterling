@@ -310,7 +310,6 @@ export interface QueryOptions {
   stack_tags?: string[];
   file_keys?: string[];
   rank_terms?: string[];
-  include_unconfirmed?: boolean;
   cap?: number;
   match_all?: boolean;
   /** Filter by todo body source ('user' | 'system') BEFORE the cap (finding 38/43). */
@@ -401,6 +400,21 @@ export class SterlingStore {
    */
   private legacySchemaVersion: number | undefined;
 
+  /**
+   * PRAGMA user_version as of the moment this handle finished opening (board
+   * d5942fa0 gap (b) — the LIVE write guard, extending the open-time guard
+   * above to a store that stays open across a migration). undefined ONLY
+   * during the brief window inside the constructor itself: assertLiveSchemaVersion
+   * no-ops then, because the open-time guard already owns that window and the
+   * fresh-store stamp-forward transaction below would otherwise be comparing
+   * against a baseline it hasn't captured yet. Every public write re-reads
+   * PRAGMA user_version against this captured baseline immediately before
+   * mutating; a mismatch means a SECOND process (MCP server or TUI) migrated
+   * the file while this handle stayed open, and the write is refused with
+   * nothing written — matching the open-time guard's loud-failure style.
+   */
+  private openedSchemaVersion: number | undefined;
+
   constructor(path: string) {
     this.db = new DatabaseSync(path);
 
@@ -431,6 +445,7 @@ export class SterlingStore {
       ).n;
       if (objects > 0) {
         this.legacySchemaVersion = foundSchemaVersion;
+        this.openedSchemaVersion = foundSchemaVersion;
         return; // read-only: no journal_mode, no DDL, no stamp — nothing written
       }
     }
@@ -475,6 +490,12 @@ export class SterlingStore {
       this.db.close();
       throw e;
     }
+
+    // Capture the LIVE write guard's baseline now that the stamp-forward (if
+    // any) has committed — reading fresh rather than assuming
+    // SUPPORTED_SCHEMA_VERSION so this stays correct even if a future change
+    // stamps something else.
+    this.openedSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
   }
 
   journalMode(): string {
@@ -496,12 +517,40 @@ export class SterlingStore {
   }
 
   /**
-   * The refusal seam for a pre-migration store. Called at the top of every
-   * public write and, as a backstop, from tx() — reads stay allowed on purpose
-   * (AC3: read-only pre-migration).
+   * The LIVE write guard (board d5942fa0 gap (b), pin group B): re-reads
+   * PRAGMA user_version fresh and compares it against the baseline captured
+   * at open. A process that ALREADY HOLDS the store open when another process
+   * (MCP server or TUI) migrates the file underneath it would otherwise keep
+   * serving writes on a stale in-memory handle with no re-check until a full
+   * restart — this closes that gap. Reads are deliberately NOT re-checked
+   * (spec: read exemption) — only assertWritable's write callers reach this.
+   *
+   * No-ops while `openedSchemaVersion` is still undefined (mid-constructor):
+   * the open-time guard above already owns that narrow window, and the
+   * fresh-store stamp-forward transaction is itself a write that runs before
+   * the baseline can be captured.
+   */
+  private assertLiveSchemaVersion(operation: string): void {
+    if (this.openedSchemaVersion === undefined) return;
+    const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    if (current !== this.openedSchemaVersion) {
+      throw new Error(
+        `Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ` +
+          `${current} — another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every ` +
+          `other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`
+      );
+    }
+  }
+
+  /**
+   * The refusal seam for a pre-migration store, extended to the live write
+   * guard above. Called at the top of every public write and, as a backstop,
+   * from tx() — reads stay allowed on purpose (AC3: read-only pre-migration;
+   * live re-check exemption: pin group B).
    */
   private assertWritable(operation: string): void {
     this.assertV2Surface(operation);
+    this.assertLiveSchemaVersion(operation);
   }
 
   /**
@@ -941,7 +990,7 @@ export class SterlingStore {
       const res = this.db
         .prepare(
           `UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
-             updated_at = ?, derived_unconfirmed = ?, body = ? WHERE id = ? AND version = ?`
+             updated_at = ?, body = ? WHERE id = ? AND version = ?`
         )
         .run(
           nextVersion,
@@ -950,7 +999,6 @@ export class SterlingStore {
           freshness,
           supersededBy,
           (stored.updated_at as string) ?? now,
-          (stored.derived_unconfirmed as boolean | undefined) ? 1 : 0,
           JSON.stringify(stored),
           id,
           identity.version
@@ -1393,17 +1441,16 @@ export class SterlingStore {
   }
 
   /**
-   * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
-   * file-key join) shared by query() and count() — everything EXCEPT the rank
-   * (FTS), ordering, and cap. One definition so count() can never drift from
-   * what query() would actually return.
+   * The §3.4 base filter (status + type + stack-tag + file-key join) shared
+   * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
+   * cap. One definition so count() can never drift from what query() would
+   * actually return.
    */
   private baseFilter(opts: QueryOptions): { where: string[]; params: (string | number)[]; fileKeys: string[] } {
     const params: (string | number)[] = [];
     // != superseded, not = active: flagged_stale research findings are still
     // served — only as "stale — re-verify" (§3.2.4); the tool layer attaches the flag.
     const where: string[] = ["r.status != 'superseded'"];
-    if (!opts.include_unconfirmed) where.push('r.derived_unconfirmed = 0');
     if (opts.types?.length) {
       where.push(`r.type IN (${opts.types.map(() => '?').join(',')})`);
       params.push(...opts.types);
@@ -1934,10 +1981,31 @@ export class SterlingStore {
   casTransitionMerge(observed: MachineState, runId: string, mutate: (fresh: RunRecord) => RunRecord, attempts = 5): RunRecord {
     this.assertWritable('casTransitionMerge');
     for (let i = 0; i < attempts; i++) {
+      // Re-read the live schema version at the TOP of every retry iteration
+      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
+      // each attempt, so a migration by another process landing mid-retry could
+      // otherwise let this stale-schema handle read a newer body, parse it
+      // through the OLD schema, and rewrite it dropping newly-added fields. The
+      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
+      // window spanning the whole loop by throwing the SAME live-drift error.
+      this.assertLiveSchemaVersion('casTransitionMerge');
       const row = this.db.prepare('SELECT body, machine_state, pending_exit FROM runs WHERE id = ?').get(runId) as
         | { body: string; machine_state: string; pending_exit: string | null }
         | undefined;
       if (!row) throw new Error(`casTransitionMerge: no run '${runId}'`);
+      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
+      // body (board 4c3a0c37): the top-of-loop guard closes the retry-spanning
+      // gap but not the intra-iteration race where a migration commits between
+      // that guard's PRAGMA and this SELECT — the row just read would then be a
+      // NEW-schema body parsed through the OLD schema. This second check catches
+      // a migration before/during the read (and is what pin group D exercises,
+      // where the injector lands a migration on THIS read while no write lock is
+      // held, so it commits and is caught here). The narrower window this guard
+      // did NOT cover — a SCHEMA-ONLY migration landing AFTER this check and
+      // before the UPDATE, which the body-CAS cannot see because it leaves this
+      // row's body unchanged — is now closed by the tx() wrapper on the UPDATE
+      // below (board 4c3a0c37, Codex outside-family review).
+      this.assertLiveSchemaVersion('casTransitionMerge');
       if (row.machine_state !== observed) {
         throw new Error(
           `CAS rejected: run '${runId}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
@@ -1946,12 +2014,32 @@ export class SterlingStore {
       const current = runRecordSchema.parse(JSON.parse(row.body)) as RunRecord;
       const next = runRecordSchema.parse(mutate(current)) as RunRecord;
       const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      const res = this.db
-        .prepare(
-          'UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?'
-        )
-        .run(next.machine_state, tail, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed, row.pending_exit);
-      if (res.changes === 1) return next;
+      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
+      // review). tx() takes BEGIN IMMEDIATE — serializing against any concurrent
+      // migration — and RE-ASSERTS the live schema version INSIDE that write lock
+      // before the UPDATE runs, so no migration can commit between the check and
+      // the write. This closes the schema-only-migration window a body-CAS alone
+      // cannot: a migration that bumps user_version WITHOUT rewriting this row
+      // would otherwise pass `body = row.body` and land a stale-schema write that
+      // drops newly-added run-schema fields. A drift throws /Live schema version
+      // drift/ from inside tx() and nothing is written; the machine_state
+      // precondition still fires inside the lock via the UPDATE's
+      // `AND machine_state = ?` predicate (a miss retries, and the fresh read on
+      // the next pass throws CAS rejected); a concurrent BODY change still misses
+      // `AND body = ?` and retries. The runs-body SELECT stays OUTSIDE this lock
+      // deliberately — moving it inside would make pin group D's cross-connection
+      // migration injector busy-fail against BEGIN IMMEDIATE instead of drifting.
+      let changes = 0;
+      this.tx(() => {
+        changes = Number(
+          this.db
+            .prepare(
+              'UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?'
+            )
+            .run(next.machine_state, tail, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed, row.pending_exit).changes
+        );
+      });
+      if (changes === 1) return next;
       // body or queue changed under us (a concurrent hook write / agent exit) —
       // retry against the fresh row; a machine_state change is caught above.
     }
@@ -2002,9 +2090,14 @@ export class SterlingStore {
     if (!this.db.prepare('SELECT 1 FROM runs WHERE id = ?').get(runId)) {
       throw new Error(`writeHandoff: no run '${runId}'`);
     }
-    this.db
-      .prepare('INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
+    // Wrapped in tx() (board d5942fa0 pin group B / TOCTOU fix) so the write
+    // inherits the live schema-version recheck INSIDE the lock — the pre-lock
+    // assertWritable() above stays as a fast fail, tx() is the guarantee.
+    this.tx(() => {
+      this.db
+        .prepare('INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
+    });
     return handoff;
   }
 
@@ -2031,17 +2124,48 @@ export class SterlingStore {
   updateRunOptimistic(runId: string, mutate: (run: RunRecord) => RunRecord, attempts = 5): RunRecord {
     this.assertWritable('updateRunOptimistic');
     for (let i = 0; i < attempts; i++) {
+      // Re-read the live schema version at the TOP of every retry iteration
+      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
+      // each attempt, so a migration by another process landing mid-retry could
+      // otherwise let this stale-schema handle read a newer body, parse it
+      // through the OLD schema, and rewrite it dropping newly-added fields. The
+      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
+      // window spanning the whole loop by throwing the SAME live-drift error.
+      this.assertLiveSchemaVersion('updateRunOptimistic');
       const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
       if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
+      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
+      // body (board 4c3a0c37): catches a migration landing before/during this
+      // read (pin group D's injector fires here, while no write lock is held).
+      // The narrower window this guard did NOT cover — a SCHEMA-ONLY migration
+      // landing AFTER this check and before the UPDATE, invisible to the body-CAS
+      // because it leaves this row's body unchanged — is now closed by the tx()
+      // wrapper on the UPDATE below (board 4c3a0c37, Codex outside-family review).
+      this.assertLiveSchemaVersion('updateRunOptimistic');
       const current = JSON.parse(row.body) as RunRecord;
       const next = runRecordSchema.parse(mutate(current));
       if (next.machine_state !== current.machine_state) {
         throw new Error('updateRunOptimistic: machine_state changes go through casTransition only (§5.2)');
       }
-      const res = this.db
-        .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
-        .run(JSON.stringify(next), new Date().toISOString(), runId, row.body);
-      if (res.changes === 1) return next;
+      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
+      // review). tx()'s BEGIN IMMEDIATE serializes against any concurrent
+      // migration and re-asserts the live schema version INSIDE the write lock
+      // before the UPDATE, so a schema-only migration cannot slip between the
+      // check and the write and land a field-dropping stale write past the
+      // body-CAS. A drift throws /Live schema version drift/ and nothing is
+      // written; a concurrent BODY change still misses `AND body = ?` and
+      // retries. The runs-body SELECT stays OUTSIDE this lock deliberately —
+      // moving it inside would make pin group D's cross-connection migration
+      // injector busy-fail against BEGIN IMMEDIATE instead of drifting.
+      let changes = 0;
+      this.tx(() => {
+        changes = Number(
+          this.db
+            .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
+            .run(JSON.stringify(next), new Date().toISOString(), runId, row.body).changes
+        );
+      });
+      if (changes === 1) return next;
     }
     throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
   }
@@ -2106,9 +2230,14 @@ export class SterlingStore {
    */
   writeSelection(type: string, recordId: string, at: string): void {
     this.assertWritable('writeSelection');
-    this.db
-      .prepare('INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at')
-      .run(type, recordId, at);
+    // Wrapped in tx() (board d5942fa0 pin group B / TOCTOU fix) so the write
+    // inherits the live schema-version recheck INSIDE the lock — the pre-lock
+    // assertWritable() above stays as a fast fail, tx() is the guarantee.
+    this.tx(() => {
+      this.db
+        .prepare('INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at')
+        .run(type, recordId, at);
+    });
   }
 
   takeSelection(): { type: string; record_id: string; at: string } | undefined {
@@ -2246,20 +2375,27 @@ export class SterlingStore {
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
     this.assertWritable('recordCheckSkipped');
-    this.db
-      .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
-      .run(runId ?? null, check, reason, at);
-    // Run-scoped rows are disposed with the run (disposeRunRows). NULL-run rows
-    // (direct-mode knowledge_create/board_remove) have no disposal event, so cap
-    // them like queue_drain_log — else they accrete unbounded (audit finding
-    // 30/43, P4). Keep the 50 newest NULL-run rows as the audit tail.
-    if (!runId) {
+    // Wrapped in tx() (board d5942fa0 pin group B / TOCTOU fix) so the write
+    // inherits the live schema-version recheck INSIDE the lock — the pre-lock
+    // assertWritable() above stays as a fast fail, tx() is the guarantee. This
+    // also makes the insert + audit-cap prune below atomic, which they were not
+    // before (a small incidental improvement, not the reason for the change).
+    this.tx(() => {
       this.db
-        .prepare(
-          'DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)'
-        )
-        .run();
-    }
+        .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
+        .run(runId ?? null, check, reason, at);
+      // Run-scoped rows are disposed with the run (disposeRunRows). NULL-run rows
+      // (direct-mode knowledge_create/board_remove) have no disposal event, so cap
+      // them like queue_drain_log — else they accrete unbounded (audit finding
+      // 30/43, P4). Keep the 50 newest NULL-run rows as the audit tail.
+      if (!runId) {
+        this.db
+          .prepare(
+            'DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)'
+          )
+          .run();
+      }
+    });
   }
 
   listCheckSkipped(runId?: string): { run_id: string | null; check_name: string; reason: string; at: string }[] {
@@ -2373,8 +2509,8 @@ export class SterlingStore {
     const stored = SterlingStore.storableBody(record as unknown as Record<string, unknown>);
     this.db
       .prepare(
-        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, derived_unconfirmed, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -2388,7 +2524,6 @@ export class SterlingStore {
         record.created_at,
         record.updated_at,
         record.author,
-        record.derived_unconfirmed ? 1 : 0,
         JSON.stringify(stored)
       );
     for (const tag of new Set(record.stack_tags)) {
@@ -2445,7 +2580,19 @@ export class SterlingStore {
     // Backstop for the pre-migration read-only mode: every public write names
     // itself through assertWritable, and this catches anything that forgets to
     // ([stable-identity-design-v2]). Reads never open a transaction.
-    this.assertWritable('transaction');
+    //
+    // Split deliberately (reviewer TOCTOU finding on the live schema-version
+    // guard, board d5942fa0 pin group B): assertV2Surface is a property of the
+    // OPEN handle (legacySchemaVersion is captured once at construction and
+    // never changes for the life of a handle), so checking it here, before the
+    // lock, changes nothing. assertLiveSchemaVersion is NOT safe to check only
+    // here — re-reading PRAGMA user_version before BEGIN IMMEDIATE leaves a
+    // window where a migration can commit between this read and lock
+    // acquisition and be silently admitted. That check runs again inside the
+    // lock below, following the same re-read-inside-BEGIN-IMMEDIATE pattern the
+    // constructor's stamp-forward transaction already uses (~line 480) to close
+    // the identical race at open time.
+    this.assertV2Surface('transaction');
     if (this.txDepth > 0) {
       fn();
       return;
@@ -2460,6 +2607,12 @@ export class SterlingStore {
     this.db.exec('BEGIN IMMEDIATE');
     this.txDepth++;
     try {
+      // Live-version recheck INSIDE the write lock (closes the TOCTOU above):
+      // a migration that committed between a public write method's pre-lock
+      // assertWritable() call and this BEGIN IMMEDIATE would otherwise be
+      // silently admitted. Re-reading here, while the write lock is held,
+      // guarantees the version cannot move again before fn() writes.
+      this.assertLiveSchemaVersion('transaction');
       fn();
       this.db.exec('COMMIT');
     } catch (e) {

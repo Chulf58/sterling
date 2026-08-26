@@ -7,7 +7,7 @@
 // next session when the session that wrote them died without a terminal Stop. H1 must,
 // on SessionStart source 'startup' or 'clear', convert that residue: if no durable record
 // (decision / anti_pattern / note / feature_article / research_finding /
-// disconfirmed_hypothesis — including a derived_unconfirmed one) was created/updated at or
+// disconfirmed_hypothesis) was created/updated at or
 // after the EARLIEST timestamp across touches[].at and session-events[].at, mint exactly one
 // system todo (source 'system', system_reason 'capture_owed', text containing the phrase
 // 'session-boundary residue', file_keys = deduped touched paths capped at 20, and — when a
@@ -157,9 +157,6 @@ const cpEvent = (detail, at) => ({ kind: 'capture_pending', detail, at });
 
 function decisionAt(store, at) {
   return store.create({ ...envelope('decision', at), title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' });
-}
-function derivedUnconfirmedDecisionAt(store, at) {
-  return store.create({ ...envelope('decision', at), title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', derived_unconfirmed: true });
 }
 function antiPatternAt(store, at) {
   return store.create({
@@ -320,28 +317,6 @@ test('AC1b: every declared durable record TYPE pays the debt — decision, anti_
     } finally {
       cleanup();
     }
-  }
-});
-
-test('AC1b: a derived_unconfirmed record still counts as durable capture, even though it is hidden from default retrieval', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    writeTouches(dir, [{ path: 'src/a.mjs', at: T1 }]);
-    const hidden = derivedUnconfirmedDecisionAt(store, T1_PLUS);
-    // sanity: confirm this record really is hidden from default query, so a false
-    // pass here could not be explained by H1 merely finding it the normal way
-    assert.equal(store.query({ types: ['decision'], cap: 10 }).length, 0, 'fixture sanity: derived_unconfirmed is hidden from default query');
-    assert.equal(store.query({ types: ['decision'], include_unconfirmed: true, cap: 10 }).some((d) => d.id === hidden.id), true);
-
-    const r = h1(dir, 'startup');
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(captureOwedItems(store).length, 0, 'a derived_unconfirmed record still pays the residue debt');
-    assert.doesNotMatch(additionalContext(r) ?? '', RESIDUE_PHRASE);
-    // 1c: cleared in the satisfied case too — without this the test passes trivially
-    // against an H1 that lacks the behavior entirely.
-    assert.equal(regExists(dir, TOUCHES), false, 'touches register cleared in the satisfied case');
-  } finally {
-    cleanup();
   }
 });
 

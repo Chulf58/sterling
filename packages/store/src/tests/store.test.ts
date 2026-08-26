@@ -360,19 +360,6 @@ test('query source filter is applied BEFORE the cap — matching items are not l
   }
 });
 
-test('derived_unconfirmed is excluded by default, included on opt-in (§3.2.6)', () => {
-  const { dir, store } = tempStore();
-  try {
-    store.create(decision({ derived_unconfirmed: true, title: 'unconfirmed extraction' }));
-    store.create(decision({ title: 'confirmed' }));
-    assert.equal(store.query({ types: ['decision'] }).length, 1);
-    assert.equal(store.query({ types: ['decision'], include_unconfirmed: true }).length, 2);
-  } finally {
-    store.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('supersede: old retained + flagged, new active with supersedes link; version chain enforced (§3.1 c3)', () => {
   const { dir, store } = tempStore();
   try {

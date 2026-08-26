@@ -4122,11 +4122,7 @@ var envelopeFields = {
   version: external_exports.number().int().positive().optional(),
   links: external_exports.array(linkSchema),
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
-  stack_tags: external_exports.array(external_exports.string()),
-  // §3.2.6: machine-extracted candidates are flagged lower-trust; excluded from
-  // retrieval unless the caller opts in. Lives on the envelope because any
-  // extractable type (decision, anti-pattern, ...) can carry it.
-  derived_unconfirmed: external_exports.boolean().optional()
+  stack_tags: external_exports.array(external_exports.string())
 };
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {
@@ -5267,6 +5263,20 @@ var SterlingStore = class _SterlingStore {
    * undefined = a normal, writable store at the supported version.
    */
   legacySchemaVersion;
+  /**
+   * PRAGMA user_version as of the moment this handle finished opening (board
+   * d5942fa0 gap (b) — the LIVE write guard, extending the open-time guard
+   * above to a store that stays open across a migration). undefined ONLY
+   * during the brief window inside the constructor itself: assertLiveSchemaVersion
+   * no-ops then, because the open-time guard already owns that window and the
+   * fresh-store stamp-forward transaction below would otherwise be comparing
+   * against a baseline it hasn't captured yet. Every public write re-reads
+   * PRAGMA user_version against this captured baseline immediately before
+   * mutating; a mismatch means a SECOND process (MCP server or TUI) migrated
+   * the file while this handle stayed open, and the write is refused with
+   * nothing written — matching the open-time guard's loud-failure style.
+   */
+  openedSchemaVersion;
   constructor(path) {
     this.db = new DatabaseSync2(path);
     this.db.exec("PRAGMA busy_timeout=5000");
@@ -5279,6 +5289,7 @@ var SterlingStore = class _SterlingStore {
       const objects = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n;
       if (objects > 0) {
         this.legacySchemaVersion = foundSchemaVersion;
+        this.openedSchemaVersion = foundSchemaVersion;
         return;
       }
     }
@@ -5303,6 +5314,7 @@ var SterlingStore = class _SterlingStore {
       this.db.close();
       throw e;
     }
+    this.openedSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
   }
   journalMode() {
     return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
@@ -5320,12 +5332,36 @@ var SterlingStore = class _SterlingStore {
     }
   }
   /**
-   * The refusal seam for a pre-migration store. Called at the top of every
-   * public write and, as a backstop, from tx() — reads stay allowed on purpose
-   * (AC3: read-only pre-migration).
+   * The LIVE write guard (board d5942fa0 gap (b), pin group B): re-reads
+   * PRAGMA user_version fresh and compares it against the baseline captured
+   * at open. A process that ALREADY HOLDS the store open when another process
+   * (MCP server or TUI) migrates the file underneath it would otherwise keep
+   * serving writes on a stale in-memory handle with no re-check until a full
+   * restart — this closes that gap. Reads are deliberately NOT re-checked
+   * (spec: read exemption) — only assertWritable's write callers reach this.
+   *
+   * No-ops while `openedSchemaVersion` is still undefined (mid-constructor):
+   * the open-time guard above already owns that narrow window, and the
+   * fresh-store stamp-forward transaction is itself a write that runs before
+   * the baseline can be captured.
+   */
+  assertLiveSchemaVersion(operation) {
+    if (this.openedSchemaVersion === void 0)
+      return;
+    const current = this.db.prepare("PRAGMA user_version").get().user_version;
+    if (current !== this.openedSchemaVersion) {
+      throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
+    }
+  }
+  /**
+   * The refusal seam for a pre-migration store, extended to the live write
+   * guard above. Called at the top of every public write and, as a backstop,
+   * from tx() — reads stay allowed on purpose (AC3: read-only pre-migration;
+   * live re-check exemption: pin group B).
    */
   assertWritable(operation) {
     this.assertV2Surface(operation);
+    this.assertLiveSchemaVersion(operation);
   }
   /**
    * The DERIVED served status: the whole API-compatibility hinge of the v2
@@ -5674,7 +5710,7 @@ var SterlingStore = class _SterlingStore {
       const now = (/* @__PURE__ */ new Date()).toISOString();
       this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, identity.version, now, identity.body);
       const res = this.db.prepare(`UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
-             updated_at = ?, derived_unconfirmed = ?, body = ? WHERE id = ? AND version = ?`).run(nextVersion, _SterlingStore.derivedStatus(identity.lifecycle, freshness), identity.lifecycle, freshness, supersededBy, stored.updated_at ?? now, stored.derived_unconfirmed ? 1 : 0, JSON.stringify(stored), id, identity.version);
+             updated_at = ?, body = ? WHERE id = ? AND version = ?`).run(nextVersion, _SterlingStore.derivedStatus(identity.lifecycle, freshness), identity.lifecycle, freshness, supersededBy, stored.updated_at ?? now, JSON.stringify(stored), id, identity.version);
       if (res.changes === 0) {
         throw new Error(`${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) \u2014 re-read and retry`);
       }
@@ -5984,16 +6020,14 @@ var SterlingStore = class _SterlingStore {
     return { id: current.id, status: current.status, hops };
   }
   /**
-   * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
-   * file-key join) shared by query() and count() — everything EXCEPT the rank
-   * (FTS), ordering, and cap. One definition so count() can never drift from
-   * what query() would actually return.
+   * The §3.4 base filter (status + type + stack-tag + file-key join) shared
+   * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
+   * cap. One definition so count() can never drift from what query() would
+   * actually return.
    */
   baseFilter(opts) {
     const params = [];
     const where = ["r.status != 'superseded'"];
-    if (!opts.include_unconfirmed)
-      where.push("r.derived_unconfirmed = 0");
     if (opts.types?.length) {
       where.push(`r.type IN (${opts.types.map(() => "?").join(",")})`);
       params.push(...opts.types);
@@ -6386,17 +6420,22 @@ var SterlingStore = class _SterlingStore {
   casTransitionMerge(observed, runId, mutate, attempts = 5) {
     this.assertWritable("casTransitionMerge");
     for (let i = 0; i < attempts; i++) {
+      this.assertLiveSchemaVersion("casTransitionMerge");
       const row = this.db.prepare("SELECT body, machine_state, pending_exit FROM runs WHERE id = ?").get(runId);
       if (!row)
         throw new Error(`casTransitionMerge: no run '${runId}'`);
+      this.assertLiveSchemaVersion("casTransitionMerge");
       if (row.machine_state !== observed) {
         throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
       }
       const current = runRecordSchema.parse(JSON.parse(row.body));
       const next = runRecordSchema.parse(mutate(current));
       const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed, row.pending_exit);
-      if (res.changes === 1)
+      let changes = 0;
+      this.tx(() => {
+        changes = Number(this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed, row.pending_exit).changes);
+      });
+      if (changes === 1)
         return next;
     }
     throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
@@ -6436,7 +6475,9 @@ var SterlingStore = class _SterlingStore {
     if (!this.db.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
       throw new Error(`writeHandoff: no run '${runId}'`);
     }
-    this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
+    this.tx(() => {
+      this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
+    });
     return handoff;
   }
   readHandoffs(runId, filter = {}) {
@@ -6457,16 +6498,21 @@ var SterlingStore = class _SterlingStore {
   updateRunOptimistic(runId, mutate, attempts = 5) {
     this.assertWritable("updateRunOptimistic");
     for (let i = 0; i < attempts; i++) {
+      this.assertLiveSchemaVersion("updateRunOptimistic");
       const row = this.db.prepare("SELECT body FROM runs WHERE id = ?").get(runId);
       if (!row)
         throw new Error(`updateRunOptimistic: no run '${runId}'`);
+      this.assertLiveSchemaVersion("updateRunOptimistic");
       const current = JSON.parse(row.body);
       const next = runRecordSchema.parse(mutate(current));
       if (next.machine_state !== current.machine_state) {
         throw new Error("updateRunOptimistic: machine_state changes go through casTransition only (\xA75.2)");
       }
-      const res = this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body);
-      if (res.changes === 1)
+      let changes = 0;
+      this.tx(() => {
+        changes = Number(this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body).changes);
+      });
+      if (changes === 1)
         return next;
     }
     throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
@@ -6518,7 +6564,9 @@ var SterlingStore = class _SterlingStore {
    */
   writeSelection(type, recordId, at) {
     this.assertWritable("writeSelection");
-    this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
+    this.tx(() => {
+      this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
+    });
   }
   takeSelection() {
     let row;
@@ -6637,10 +6685,12 @@ var SterlingStore = class _SterlingStore {
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.assertWritable("recordCheckSkipped");
-    this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason, at);
-    if (!runId) {
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
-    }
+    this.tx(() => {
+      this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason, at);
+      if (!runId) {
+        this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
+      }
+    });
   }
   listCheckSkipped(runId) {
     return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
@@ -6734,8 +6784,8 @@ var SterlingStore = class _SterlingStore {
     const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
     const version = typeof meta.version === "number" ? meta.version : 1;
     const stored = _SterlingStore.storableBody(record);
-    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, derived_unconfirmed, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, record.derived_unconfirmed ? 1 : 0, JSON.stringify(stored));
+    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored));
     for (const tag of new Set(record.stack_tags)) {
       this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
     }
@@ -6765,7 +6815,7 @@ var SterlingStore = class _SterlingStore {
    */
   txDepth = 0;
   tx(fn) {
-    this.assertWritable("transaction");
+    this.assertV2Surface("transaction");
     if (this.txDepth > 0) {
       fn();
       return;
@@ -6773,6 +6823,7 @@ var SterlingStore = class _SterlingStore {
     this.db.exec("BEGIN IMMEDIATE");
     this.txDepth++;
     try {
+      this.assertLiveSchemaVersion("transaction");
       fn();
       this.db.exec("COMMIT");
     } catch (e) {

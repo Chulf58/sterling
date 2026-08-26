@@ -4,7 +4,8 @@
       {
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h28-return-contract.mjs\"" }
         ]
       }
     ],
@@ -97,6 +98,12 @@
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" },
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h23-output-axis.mjs\"" }
+        ]
+      },
+      {
+        "matcher": "mcp__codex__codex|mcp__codex__codex-reply",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h29-codex-consult-failure.mjs\"" }
         ]
       }
     ],
