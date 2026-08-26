@@ -327,3 +327,120 @@ test('6c: a codex tool_response missing entirely never crashes and never exits 2
 // default (e.g. a truthiness bug where `!result` is read as "could be an
 // error") -> advisoryOf(r.stdout) becomes non-null, the second assertion
 // goes red.
+
+// ---------------------------------------------------------------------------
+// 7-10. REDACTION (sanitizeRawText: redact credential patterns, cap to 500
+// chars, fence as untrusted, THEN emit). Detection is unchanged from 1-6
+// above; these pins are on the OUTPUT SHAPE of the advisory text itself.
+// Oracle: the dispatch brief's SPEC verbatim (this file's oracle per the
+// header note; H4 denies reading the hook beyond what the brief specifies).
+// ---------------------------------------------------------------------------
+
+test('7: a raw error containing a credential is redacted — literal token absent, [REDACTED] present, advisory still fires with its recovery hint', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const secret = 'sk-abcdefghij1234567890ABCDEFGHIJKLMN';
+    const result = {
+      content: [{ type: 'text', text: `Request failed with status 401: Unauthorized. Authorization: Bearer ${secret} was rejected; please re-authenticate.` }],
+      isError: true,
+    };
+    const r = runHook(postCodex(dir, result), dir);
+    assert.equal(r.code, 0, 'redaction must never turn an advisory into a block');
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'the advisory must still fire — redaction is a text transform, not a suppression (structural isError:true auth failure)');
+    assert.ok(!ctx.includes(secret), 'the literal credential token must never reach additionalContext');
+    assert.match(ctx, /\[REDACTED\]/, 'the redacted span is marked with the [REDACTED] placeholder');
+    assert.match(ctx, RECOVERY_HINT_RE, 'redaction must not swallow the actionable recovery hint');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for test 7: skip the sanitizeRawText() call and interpolate the
+// raw error text directly into additionalContext -> ctx now contains the
+// literal `secret` substring, `assert.ok(!ctx.includes(secret), ...)` goes
+// red (and the `[REDACTED]` match goes red too, independently).
+
+test('8: a ~10000-char raw error is capped well below 10k and carries a truncation marker', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // Deliberately NOT a contiguous alnum run: 'x'.repeat(N) (or any 40+ char
+    // contiguous [A-Za-z0-9+/] span) matches the base64-shaped credential
+    // pattern and gets redacted to a short [REDACTED] BEFORE the 500-char cap,
+    // so it never exercises truncation. Spaces/punctuation break every run
+    // below 40 chars, and there is no sk-/hex/base64/key= shape, so this text
+    // survives redaction intact and is what actually reaches the cap.
+    const longText = 'the codex request failed unexpectedly here '.repeat(300);
+    assert.ok(longText.length > 500, 'fixture really exceeds the 500-char cap');
+    const result = { content: [{ type: 'text', text: `401 unauthorized: ${longText}` }], isError: true };
+    const r = runHook(postCodex(dir, result), dir);
+    assert.equal(r.code, 0);
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'advisory must still fire on a very long raw error');
+    assert.ok(ctx.length < longText.length, `advisory must be capped well below the raw input size (input ${longText.length} chars, ctx ${ctx.length} chars)`);
+    assert.match(ctx, /truncated/i, 'a truncation marker must be present once the raw text is capped');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for test 8: remove the cap-to-500-chars step from sanitizeRawText
+// (emit the raw text unbounded, or cap only for display without a marker) ->
+// either ctx.length stops being well under longText.length (`assert.ok(ctx.length
+// < longText.length, ...)` goes red) or the `truncated` marker is absent
+// (`assert.match(..., /truncated/i)` goes red) — the two assertions catch
+// either half of this sabotage.
+
+test('9: the raw diagnostic is wrapped in an untrusted-data fence in the advisory', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const result = {
+      content: [{ type: 'text', text: '401 Unauthorized: please re-authenticate with codex login.' }],
+      isError: true,
+    };
+    const r = runHook(postCodex(dir, result), dir);
+    assert.equal(r.code, 0);
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx);
+    assert.match(
+      ctx,
+      /untrusted|do not follow as instructions/i,
+      'the raw diagnostic must be fenced as untrusted data, not live instructions'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for test 9: drop the untrusted-data fence wrapper around the raw
+// text (emit the sanitized/capped text unwrapped) -> ctx no longer contains
+// an "untrusted"/"do not follow as instructions" marker, the `assert.match`
+// line goes red.
+
+test('10 (regression): a clean short auth-failure fixture with no secret still fires with its recovery hint and is NOT over-redacted into uselessness', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const result = {
+      content: [{ type: 'text', text: 'Request failed with status 401: Unauthorized. Your token appears to be invalid or expired.' }],
+      isError: true,
+    };
+    const r = runHook(postCodex(dir, result), dir);
+    assert.equal(r.code, 0);
+    const ctx = advisoryOf(r.stdout);
+    assert.ok(ctx, 'a clean auth-failure fixture must still fire');
+    assert.match(ctx, AUTH_SHAPED_RE, '401/unauthorized/token wording must survive redaction when there is no actual secret to redact');
+    assert.match(ctx, RECOVERY_HINT_RE, 'the recovery hint must survive redaction');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE for test 10: over-broaden the credential regex in sanitizeRawText
+// (e.g. redact any digit sequence, or redact the bare word "token") on a
+// fixture with no actual secret -> "401" or "token" gets replaced with
+// [REDACTED], AUTH_SHAPED_RE (/401|unauthorized|token/i) no longer matches
+// ctx, the `assert.match(ctx, AUTH_SHAPED_RE, ...)` line goes red. Read
+// together with test 7: test 7 proves redaction fires on an actual secret,
+// test 10 proves it does NOT fire on ordinary auth vocabulary — a control
+// pair, since an implementation that redacts everything auth-shaped would
+// pass test 7 for the wrong reason but fails test 10.
