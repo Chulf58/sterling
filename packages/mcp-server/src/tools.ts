@@ -3185,6 +3185,29 @@ export class SterlingTools {
    * discharges (article_oversize) predates the split and carries neither a
    * matching feature_link nor a restriction to knowledgeUpdate's two lanes.
    */
+  /**
+   * Lanes a knowledge_update (in-place, non-split) `resolves` claim may close —
+   * board 4afbfa56, extending decision 68988832's original reconcile_needed/
+   * refresh_reference pair. The fulfilling-write discharge shape for these
+   * three ALREADY EXISTS (knowledge_update), so this is exactly the same
+   * mechanism, just a wider allowed set — not a new abstraction. The other
+   * five open lanes stay unwired here on purpose: capture_owed/article_missing/
+   * research_owed/concept_article_missing discharge via knowledge_create (no
+   * resolves parameter yet — separate gap); deletion_candidate via
+   * knowledge_retire (separate gap); promotion_review/file_parked are
+   * removal-only by design; restore_performed is keyed by file_keys, not
+   * feature_link, and needs its own design. USER-RULED 2026-08-25: only these
+   * three tranches were selected — knowledge_create and knowledge_retire were
+   * NOT.
+   */
+  private static readonly UPDATE_RESOLVABLE_LANES = new Set([
+    'reconcile_needed',
+    'refresh_reference',
+    'stale_research',
+    'wire_in_dormant',
+    'state_review',
+  ]);
+
   private validateResolveClaim(id: string, chain: Set<string>, options?: { splitMarker: string }): DurableRecord {
     // EXACT FULL ID ONLY — no slug rung, no prefix rung (USER-RULED RETRACTION
     // 2026-08-22, partly retracting decision
@@ -3244,10 +3267,10 @@ export class SterlingTools {
     const isSplit = options !== undefined;
     const laneAllowed = isSplit
       ? it.system_reason !== 'promotion_review'
-      : it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference';
+      : SterlingTools.UPDATE_RESOLVABLE_LANES.has(it.system_reason ?? '');
     if (!laneAllowed) {
       throw new Error(
-        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only reconcile_needed and refresh_reference items ` +
+        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only ${[...SterlingTools.UPDATE_RESOLVABLE_LANES].join(', ')} items ` +
           `close via resolves; every other lane, including promotion_review, closes only through its own mechanism. Nothing was written.`
       );
     }
@@ -3264,12 +3287,13 @@ export class SterlingTools {
   }
 
   /**
-   * Open reconcile_needed/refresh_reference debt still standing on `chain`
-   * after a write — one line per item (id + text prefix), never the whole
-   * item (decision 68988832). Called AFTER the write, so any item this same
-   * write's `resolves` claimed is already gone from maintenanceQuery and
-   * never appears here; empty when nothing is owed (P1 — a clean write stays
-   * clean).
+   * Open debt still standing on `chain` after a write, across every lane a
+   * knowledge_update `resolves` claim can close (UPDATE_RESOLVABLE_LANES) —
+   * one line per item (id + text prefix), never the whole item (decision
+   * 68988832, widened board 4afbfa56). Called AFTER the write, so any item
+   * this same write's `resolves` claimed is already gone from
+   * maintenanceQuery and never appears here; empty when nothing is owed (P1 —
+   * a clean write stays clean).
    */
   private openReconcileLaneWarnings(chain: Set<string>): string[] {
     const warnings: string[] = [];
@@ -3278,7 +3302,8 @@ export class SterlingTools {
     for (const item of items) {
       const it = item as unknown as { id: string; feature_link?: string; system_reason?: string; text?: string };
       if (
-        (it.system_reason === 'reconcile_needed' || it.system_reason === 'refresh_reference') &&
+        it.system_reason !== undefined &&
+        SterlingTools.UPDATE_RESOLVABLE_LANES.has(it.system_reason) &&
         it.feature_link !== undefined &&
         chain.has(it.feature_link)
       ) {
@@ -3290,7 +3315,7 @@ export class SterlingTools {
     // exhaustive (mirrors boardFiltered's scanTruncated disclosure).
     if (items.length >= sweepCap) {
       warnings.push(
-        `the open-reconcile-lane sweep hit its ${sweepCap}-item cap — more open reconcile_needed/refresh_reference debt may exist past this window; narrow with maintenance_query to confirm.`
+        `the open-reconcile-lane sweep hit its ${sweepCap}-item cap — more open ${[...SterlingTools.UPDATE_RESOLVABLE_LANES].join('/')} debt may exist past this window; narrow with maintenance_query to confirm.`
       );
     }
     return warnings;
