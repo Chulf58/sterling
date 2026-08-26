@@ -4169,7 +4169,14 @@ var decisionSchema = base.extend({
   // enum (codebase|platform|external). Instrument-staleness re-test machinery
   // is DEFERRED — see the decision's rejected alternatives.
   evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
-  measured_by: external_exports.string().min(1).optional()
+  measured_by: external_exports.string().min(1).optional(),
+  // Board 055cfb6a: whether this ruling is standing policy, scoped to one
+  // session, or a one-off instruction — a capture agent that must choose
+  // asks, one that need not can leave it unstated. Optional, no default: a
+  // one-off instruction was once captured as standing policy and rewrote
+  // the governing file three times; absent means unstated, and existing
+  // records round-trip unchanged.
+  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
 }).superRefine(refineSupersession);
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
@@ -4192,7 +4199,22 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  current_ac: external_exports.array(external_exports.object({
+    ac_id: external_exports.string().min(1),
+    text: external_exports.string().min(1),
+    verifiable_at: verifiableAt,
+    // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
+    // test CAN cover this, because <ruling>" — strict (extra members
+    // refused) so a stray field cannot smuggle unreviewed prose past the
+    // one place a reader checks for a real blocking ruling. Optional:
+    // absent means the AC is ordinarily testable; when present both
+    // members are required, since a reason with no ruling to point at is
+    // just an excuse.
+    untestable_because: external_exports.object({
+      reason: external_exports.string().min(1),
+      blocking_record_id: external_exports.string().uuid()
+    }).strict().optional()
+  })),
   // Concept-article marker (domain decision 7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -4221,7 +4243,11 @@ var featureArticleSchema = base.extend({
   })).optional(),
   version: external_exports.number().int().positive(),
   history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) }))
+  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) })),
+  // Board 6a8507f8: when an instrument-describing article's probe script was
+  // last actually RUN — distinct from updated_at (when the record was
+  // edited). Optional: most articles describe no probe at all.
+  last_executed: external_exports.string().datetime().optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {

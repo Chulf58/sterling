@@ -124,7 +124,7 @@ function assertDeny(r, { gate, construct }) {
     'denial must name the exact matched gate and the exact masking construct on its first line'
   );
   assert.match(r.stderr, /&&/, "denial must name the remedy — chaining with '&&' propagates a red exit");
-  assert.match(r.stderr, /7d88b237/, 'denial must cite board 7d88b237');
+  assert.match(r.stderr, /6cdd1b02/, 'denial cites decision 6cdd1b02');
 }
 
 function assertAllow(r) {
@@ -454,7 +454,7 @@ test('H24 DENY (review finding, board babf3a9e/7d88b237): "node scripts/run-gate
     assert.equal(r.code, 2, `expected deny (exit 2), got ${r.code}; stderr: ${r.stderr}`);
     assert.match(r.stderr, /run-gate/i, 'the denial names run-gate as the matched gate');
     assert.match(r.stderr, /;/, "the denial identifies ';' as the masking construct");
-    assert.match(r.stderr, /7d88b237/, 'denial cites board 7d88b237');
+    assert.match(r.stderr, /6cdd1b02/, 'denial cites decision 6cdd1b02');
   } finally {
     cleanup();
   }
@@ -472,7 +472,7 @@ test('H24 DENY (G4 review finding — path-agnostic matcher): a CONSUMER project
     // whatever path prefix sits in front of it on a consumer machine.
     assert.equal(r.code, 2, `expected deny (exit 2) regardless of the clone's absolute path, got ${r.code}; stderr: ${r.stderr}`);
     assert.match(r.stderr, /run-gate/i, 'the denial names run-gate as the matched gate even at a consumer-machine absolute path');
-    assert.match(r.stderr, /7d88b237/, 'denial cites board 7d88b237');
+    assert.match(r.stderr, /6cdd1b02/, 'denial cites decision 6cdd1b02');
   } finally {
     cleanup();
   }

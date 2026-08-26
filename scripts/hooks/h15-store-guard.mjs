@@ -509,6 +509,7 @@ if (!offending) allow();
 deny(
   'H15: shell write access to the Sterling store is denied — the store is read and written through the §10 MCP tool surface ONLY.\n' +
     `Denied fragment: ${offending}\n` +
+    'This is the closed-world store-write classifier: verbs not explicitly recognized as read-only are deliberately denied as potentially mutating (decision 0b4d3c8c) — the denial does not assert the command was proven to write.\n' +
     'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
     `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts).\n` +
     ".sterling/sterling.db is sealed to shell access for EVERY verb, reads included — DB access is the MCP tool surface's job, never raw shell.\n" +

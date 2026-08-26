@@ -2217,6 +2217,7 @@ try {
     if (violations.length) {
       parts.push(
         `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(', ')} — exit contract-violated, never route around. ` +
+          `This is the post-Bash restore-and-deny design (decisions 2422e76a, f404dfb4): the bytes were deliberately rolled back to their pre-call state before the denial, not lost work or an automatic reset. ` +
           `A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check — ` +
           `only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
       );
@@ -2268,7 +2269,7 @@ try {
           // exactly the misdirection the discriminator rule forbids.
           `PRE-EXISTING change(s), already dirty before this command (or inside a directory that was) and therefore NOT attributed to it and NOT reverted: ${preExisting.join(', ')}. ` +
             `Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside ` +
-            `(the conductor's own work, e.g. a mid-run bundle rebuild).` +
+            `(the conductor's own work, e.g. a mid-run bundle rebuild). This disposition — not attributed, not reverted — is governed by decision f76d7c5c.` +
             // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
             // landed, this blanket denial fires ONLY when there is no record to
             // compare against — so it must say which input it lacked, or the

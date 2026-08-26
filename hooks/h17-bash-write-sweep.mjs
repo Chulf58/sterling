@@ -4184,7 +4184,14 @@ var decisionSchema = base.extend({
   // enum (codebase|platform|external). Instrument-staleness re-test machinery
   // is DEFERRED — see the decision's rejected alternatives.
   evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
-  measured_by: external_exports.string().min(1).optional()
+  measured_by: external_exports.string().min(1).optional(),
+  // Board 055cfb6a: whether this ruling is standing policy, scoped to one
+  // session, or a one-off instruction — a capture agent that must choose
+  // asks, one that need not can leave it unstated. Optional, no default: a
+  // one-off instruction was once captured as standing policy and rewrote
+  // the governing file three times; absent means unstated, and existing
+  // records round-trip unchanged.
+  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
 }).superRefine(refineSupersession);
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
@@ -4207,7 +4214,22 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  current_ac: external_exports.array(external_exports.object({
+    ac_id: external_exports.string().min(1),
+    text: external_exports.string().min(1),
+    verifiable_at: verifiableAt,
+    // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
+    // test CAN cover this, because <ruling>" — strict (extra members
+    // refused) so a stray field cannot smuggle unreviewed prose past the
+    // one place a reader checks for a real blocking ruling. Optional:
+    // absent means the AC is ordinarily testable; when present both
+    // members are required, since a reason with no ruling to point at is
+    // just an excuse.
+    untestable_because: external_exports.object({
+      reason: external_exports.string().min(1),
+      blocking_record_id: external_exports.string().uuid()
+    }).strict().optional()
+  })),
   // Concept-article marker (domain decision 7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -4236,7 +4258,11 @@ var featureArticleSchema = base.extend({
   })).optional(),
   version: external_exports.number().int().positive(),
   history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) }))
+  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) })),
+  // Board 6a8507f8: when an instrument-describing article's probe script was
+  // last actually RUN — distinct from updated_at (when the record was
+  // edited). Optional: most articles describe no probe at all.
+  last_executed: external_exports.string().datetime().optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
@@ -8009,7 +8035,7 @@ try {
     }
     if (violations.length) {
       parts.push(
-        `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
+        `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. This is the post-Bash restore-and-deny design (decisions 2422e76a, f404dfb4): the bytes were deliberately rolled back to their pre-call state before the denial, not lost work or an automatic reset. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
       );
     }
     if (baselineShared && baselineViolations.length) {
@@ -8034,7 +8060,7 @@ try {
           // is unchanged and still correct — not attributed, not reverted —
           // but a denial that states a falsehood about the agent's own write is
           // exactly the misdirection the discriminator rule forbids.
-          `PRE-EXISTING change(s), already dirty before this command (or inside a directory that was) and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild).` + // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
+          `PRE-EXISTING change(s), already dirty before this command (or inside a directory that was) and therefore NOT attributed to it and NOT reverted: ${preExisting.join(", ")}. Nothing of yours was undone. The command is still denied because the enforcement surface cannot be verified while it is dirty from outside (the conductor's own work, e.g. a mid-run bundle rebuild). This disposition \u2014 not attributed, not reverted \u2014 is governed by decision f76d7c5c.` + // DEGRADED-LOUD (7021526c): since the per-call Pre-STATE record
           // landed, this blanket denial fires ONLY when there is no record to
           // compare against — so it must say which input it lacked, or the
           // degrade is silent and indistinguishable from the old behaviour.

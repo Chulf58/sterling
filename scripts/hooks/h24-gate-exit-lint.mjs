@@ -216,7 +216,7 @@ for (const { segment, sep } of scanTopLevel(command)) {
       `Command: ${command}\n` +
       `Never append ';' or '||' after a gate — a red suite must never read green. ` +
       `Run the gate as the last command, or chain with '&&' — a red exit propagates. ` +
-      `Board 7d88b237.`
+      `Decision 6cdd1b02-4d4f-4d7d-b9cd-2887265e7f90.`
   );
 }
 

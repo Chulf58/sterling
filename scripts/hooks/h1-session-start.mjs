@@ -861,6 +861,13 @@ if (drainable >= deepThreshold) {
       `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
       `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
   }
+  // The maintenance-item COUNT itself (in the systemMessage banner above) is a
+  // persistent visibility count by design: items close only at their
+  // lane-specific events (e.g. file_parked only at merge), so a stable count
+  // is not a failed drain — that attribution belongs here, on the surface
+  // that carries prose, not on the banner's pinned counts-only contract.
+  queueContext +=
+    ' This is a persistent visibility count by design — items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.';
 }
 
 // shared project registry (decision 8f9e6db2): touch THIS project's last_seen
