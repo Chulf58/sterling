@@ -9,7 +9,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve as resolvePath } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -184,19 +184,38 @@ export class UnsupportedSchemaVersionError extends Error {
  * the data would silently claim a migration that never ran (exactly what the S1
  * 0→1 auto-stamp did, which is why it was removed here).
  */
+/**
+ * POSIX single-quoted shell argument (Codex MEDIUM, 2026-08-26): a
+ * double-quoted path still lets $/backticks expand and breaks on an embedded
+ * double quote — single quotes suppress ALL expansion, which is what
+ * "copy-paste safe" actually requires. Standard close-quote/escaped-quote/
+ * reopen-quote form for a path that itself contains a single quote.
+ */
+function shellQuoteSingle(value: string): string {
+  return `'${value.split("'").join(`'\\''`)}'`;
+}
+
 export class SchemaMigrationRequiredError extends Error {
   readonly found: number;
   readonly supported: number;
-  constructor(found: number, supported: number, operation: string) {
+  /**
+   * The absolute path of the store file that needs migrating (measured
+   * defect, Salesforce consumer 2026-08-26): without this a hook surfacing
+   * the error showed only a bare bundle line number, and the user could not
+   * tell WHICH of several candidate stores on the machine to migrate.
+   */
+  readonly db_path: string;
+  constructor(found: number, supported: number, operation: string, dbPath: string) {
     super(
-      `Schema migration required: this store is at schema version ${found}, but this build requires version ${supported}. ` +
+      `Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. ` +
         `The store is open READ-ONLY — '${operation}' and every other write refuses until the stable-identity migration has run. ` +
-        `Run the stable-identity store migration (decision stable-identity-design-v2) against this store file; the migration runner ` +
-        `reports the exact command, takes a VACUUM INTO backup first, and bumps user_version last. Nothing was written.`
+        `Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner ` +
+        `takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`
     );
     this.name = 'SchemaMigrationRequiredError';
     this.found = found;
     this.supported = supported;
+    this.db_path = dbPath;
   }
 }
 
@@ -419,7 +438,18 @@ export class SterlingStore {
    */
   private openedSchemaVersion: number | undefined;
 
+  /**
+   * The absolute path of this store's database file, retained for
+   * SchemaMigrationRequiredError (measured defect, Salesforce consumer
+   * 2026-08-26): the constructor received the path but never kept it, so a
+   * migration refusal named only found/supported versions — a hook surfacing
+   * the error showed a bare bundle line number and the user could not tell
+   * WHICH store to migrate.
+   */
+  private readonly dbPath: string;
+
   constructor(path: string) {
+    this.dbPath = resolvePath(path);
     this.db = new DatabaseSync(path);
 
     // Schema-version guard — checked BEFORE journal_mode/foreign_keys/DDL land
@@ -516,7 +546,7 @@ export class SterlingStore {
    */
   private assertV2Surface(operation: string): void {
     if (this.legacySchemaVersion !== undefined) {
-      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation);
+      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation, this.dbPath);
     }
   }
 
