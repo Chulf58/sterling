@@ -236,6 +236,26 @@ export class MountedStores {
     return null;
   }
 
+  /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
+   *  lives with its SOURCE record (addLink routes by source), so a record's
+   *  inbound supersedes edges can sit in a DIFFERENT mounted store than the
+   *  target itself — every mount is scanned and the hits merged, same
+   *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
+   *  anti_pattern 1896c79b): a record promoted into a domain store leaves a
+   *  project-store tombstone behind, so the SAME source id can resolve out of
+   *  two different mounts — first-seen (project-first, this.all()'s own
+   *  ordering) wins, never a duplicate entry for one concept. */
+  inboundSupersedes(id: string): ReturnType<SterlingStore['inboundSupersedes']> {
+    const seen = new Set<string>();
+    const out: ReturnType<SterlingStore['inboundSupersedes']> = [];
+    for (const record of this.all().flatMap((s) => s.inboundSupersedes(id))) {
+      if (seen.has(record.id)) continue;
+      seen.add(record.id);
+      out.push(record);
+    }
+    return out;
+  }
+
   // -- record mutations: route to the store that HOLDS the record --------------
   // A record's scope decided where it lives at create time; a later change has to
   // land in that same store, so these route by where the id actually is — never

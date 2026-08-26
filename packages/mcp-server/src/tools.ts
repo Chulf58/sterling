@@ -2670,7 +2670,62 @@ export class SterlingTools {
       if (terminus) full = { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
     }
 
-    return this.projectFieldWindow(full as unknown as Record<string, unknown>, options);
+    // Additive INBOUND supersedes disclosure (board c6e3561f part (a)):
+    // records elsewhere holding a rel:'supersedes' link TARGETING this one.
+    // Independent of this record's own status/terminus above — the whole-
+    // record terminus block only ever fires for a record retired via
+    // supersede(); a clause-level/partial override recorded via
+    // knowledge_link never retires its target, so it stays invisible without
+    // this. Skipped on an archived-version read (options.version) — a pinned
+    // past snapshot is not the live relation graph — AND on a FIELD-WINDOW
+    // read (options.field): projectFieldWindow's windowed shape never carries
+    // this top-level key, so computing it there is pure waste (roster review
+    // F1). Omitted entirely (never an empty array) when nothing supersedes
+    // this record, per the "no empty-array noise" contract the rest of this
+    // read already follows.
+    let served: Record<string, unknown> = full as unknown as Record<string, unknown>;
+    if (options?.version === undefined && options?.field === undefined) {
+      const inbound = this.store
+        .inboundSupersedes(record.id)
+        .map((r) => SterlingTools.inboundSupersedesEntry(r));
+      if (inbound.length) {
+        served = { ...served, inbound_supersedes: inbound };
+      }
+    }
+
+    return this.projectFieldWindow(served, options);
+  }
+
+  /**
+   * One entry of knowledgeGet's `inbound_supersedes` array — {id} always,
+   * plus slug/title when cheaply available (same enrichment shape
+   * knowledgePreflight's `matches` already uses via axisRecordTitle).
+   *
+   * INCLUDE-WITH-STATUS, not exclusion (Codex converged finding, HIGH):
+   * a superseder recorded here can itself later be retired/superseded — B
+   * partially supersedes A, then B is retired in favor of C — and dropping B
+   * silently would recreate the exact invisibility this field exists to fix
+   * (A's clause reads live-and-fresh again). So `status` always rides the
+   * entry, and when the source itself is not active its own successor
+   * pointer (`superseded_by`, already server-derived at hydrate time —
+   * nothing extra to fetch) rides too, so the reader can follow the chain to
+   * the actual survivor. A source id that no longer resolves at all is
+   * dropped by the existing undefined filter in inboundSupersedes() —
+   * removal already deletes the edge rows, so that case does not reach here.
+   */
+  private static inboundSupersedesEntry(
+    record: DurableRecord
+  ): { id: string; slug?: string; title?: string; status: string; superseded_by?: string } {
+    const slug = (record as unknown as { slug?: string }).slug;
+    const title = SterlingTools.axisRecordTitle(record);
+    const supersededBy = (record as unknown as { superseded_by?: string | null }).superseded_by;
+    return {
+      id: record.id,
+      ...(slug ? { slug } : {}),
+      ...(title ? { title } : {}),
+      status: record.status,
+      ...(record.status !== 'active' && supersededBy ? { superseded_by: supersededBy } : {}),
+    };
   }
 
   /**

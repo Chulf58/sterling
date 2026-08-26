@@ -355,6 +355,10 @@ export type ToolStore = Pick<
   // record stays version-pinned; this is the only way the tool layer learns
   // where a superseded record's chain currently ends.
   | 'resolveTerminus'
+  // knowledge_get's INBOUND supersedes disclosure (board c6e3561f part (a)) —
+  // the additive/advisory counterpart of resolveTerminus for the partial/
+  // clause-supersession case; never drives status or terminus.
+  | 'inboundSupersedes'
   | 'supersede'
   // The generalized in-place write triad + its version reader (stable-identity
   // S3, the call sites promised by S2's note): knowledge_update/edit/append all
@@ -1438,6 +1442,30 @@ export class SterlingStore {
       hops += 1;
     }
     return { id: current.id, status: current.status, hops };
+  }
+
+  /**
+   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
+   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
+   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * it only ever has something to say about a record that was itself retired
+   * via supersede(). A record can also be named the target of a rel:'supersedes'
+   * link WITHOUT ever being retired — a clause-level or partial override
+   * recorded via knowledge_link — and that leaves no trace on the target's own
+   * status/terminus. This is the read-time counterpart that makes such edges
+   * visible from the target side. Purely additive/advisory: never mutates
+   * status, never feeds resolveTerminus, never touches the terminus block.
+   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
+   * mount, because an edge lives with its SOURCE record (addLink routes by
+   * source), which may sit in a different store than the target.
+   */
+  inboundSupersedes(id: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`
+      )
+      .all(id) as { source_id: string }[];
+    return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
   }
 
   /**
