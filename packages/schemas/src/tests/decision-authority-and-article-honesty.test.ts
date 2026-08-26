@@ -133,7 +133,7 @@ test('B1 (CONTROL, positive): current_ac[].untestable_because {reason, blocking_
       ac_id: 'AC1',
       text: 'export downloads a file',
       verifiable_at: 'final',
-      untestable_because: { reason: 'no harness can drive a real browser download — ruled out by decision 32691c41', blocking_record_id: blockingId },
+      untestable_because: { reason: 'no harness can drive a real browser download — ruled out by decision 2176748e-72f6-4cfc-a790-7fd67c7ee6aa', blocking_record_id: blockingId },
     },
   ]);
   let parsed: { current_ac: { untestable_because?: { reason: string; blocking_record_id: string } }[] } | undefined;
@@ -141,7 +141,7 @@ test('B1 (CONTROL, positive): current_ac[].untestable_because {reason, blocking_
     parsed = featureArticleSchema.parse(article) as unknown as typeof parsed;
   }, 'a current_ac item carrying a well-formed untestable_because must parse');
   assert.ok(parsed!.current_ac[0].untestable_because, 'untestable_because survives parsing');
-  assert.equal(parsed!.current_ac[0].untestable_because!.reason, 'no harness can drive a real browser download — ruled out by decision 32691c41');
+  assert.equal(parsed!.current_ac[0].untestable_because!.reason, 'no harness can drive a real browser download — ruled out by decision 2176748e-72f6-4cfc-a790-7fd67c7ee6aa');
   assert.equal(parsed!.current_ac[0].untestable_because!.blocking_record_id, blockingId);
 });
 
