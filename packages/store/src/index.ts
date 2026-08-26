@@ -310,7 +310,6 @@ export interface QueryOptions {
   stack_tags?: string[];
   file_keys?: string[];
   rank_terms?: string[];
-  include_unconfirmed?: boolean;
   cap?: number;
   match_all?: boolean;
   /** Filter by todo body source ('user' | 'system') BEFORE the cap (finding 38/43). */
@@ -991,7 +990,7 @@ export class SterlingStore {
       const res = this.db
         .prepare(
           `UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
-             updated_at = ?, derived_unconfirmed = ?, body = ? WHERE id = ? AND version = ?`
+             updated_at = ?, body = ? WHERE id = ? AND version = ?`
         )
         .run(
           nextVersion,
@@ -1000,7 +999,6 @@ export class SterlingStore {
           freshness,
           supersededBy,
           (stored.updated_at as string) ?? now,
-          (stored.derived_unconfirmed as boolean | undefined) ? 1 : 0,
           JSON.stringify(stored),
           id,
           identity.version
@@ -1443,17 +1441,16 @@ export class SterlingStore {
   }
 
   /**
-   * The §3.4 base filter (status + derived_unconfirmed + type + stack-tag +
-   * file-key join) shared by query() and count() — everything EXCEPT the rank
-   * (FTS), ordering, and cap. One definition so count() can never drift from
-   * what query() would actually return.
+   * The §3.4 base filter (status + type + stack-tag + file-key join) shared
+   * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
+   * cap. One definition so count() can never drift from what query() would
+   * actually return.
    */
   private baseFilter(opts: QueryOptions): { where: string[]; params: (string | number)[]; fileKeys: string[] } {
     const params: (string | number)[] = [];
     // != superseded, not = active: flagged_stale research findings are still
     // served — only as "stale — re-verify" (§3.2.4); the tool layer attaches the flag.
     const where: string[] = ["r.status != 'superseded'"];
-    if (!opts.include_unconfirmed) where.push('r.derived_unconfirmed = 0');
     if (opts.types?.length) {
       where.push(`r.type IN (${opts.types.map(() => '?').join(',')})`);
       params.push(...opts.types);
@@ -2474,8 +2471,8 @@ export class SterlingStore {
     const stored = SterlingStore.storableBody(record as unknown as Record<string, unknown>);
     this.db
       .prepare(
-        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, derived_unconfirmed, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -2489,7 +2486,6 @@ export class SterlingStore {
         record.created_at,
         record.updated_at,
         record.author,
-        record.derived_unconfirmed ? 1 : 0,
         JSON.stringify(stored)
       );
     for (const tag of new Set(record.stack_tags)) {

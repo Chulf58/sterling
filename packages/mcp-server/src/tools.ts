@@ -1142,9 +1142,7 @@ export class SterlingTools {
     const by_type: Record<string, { count: number; body_chars: number }> = {};
     const articles: { slug: string; body_chars: number }[] = [];
     for (const type of Object.keys(RECORD_TYPES)) {
-      // include_unconfirmed: an aggregate that silently omits derived-unconfirmed
-      // records would under-report a store it claims to size (review LOW, 2026-08-21).
-      const records = this.store.query({ types: [type], cap: 100000, include_unconfirmed: true }) as unknown as Record<string, unknown>[];
+      const records = this.store.query({ types: [type], cap: 100000 }) as unknown as Record<string, unknown>[];
       let chars = 0;
       for (const r of records) {
         const s = recordSizes(r);
