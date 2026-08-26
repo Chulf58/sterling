@@ -4296,7 +4296,7 @@ var researchFindingSchema = base.extend({
   slug: external_exports.string().min(1).optional(),
   question: external_exports.string().min(1),
   answer: external_exports.string().min(1),
-  source_urls: external_exports.array(external_exports.string()),
+  source_urls: external_exports.array(external_exports.string()).default([]),
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
@@ -7400,6 +7400,7 @@ function stampCouldAttest(recorded, current) {
 function validateStateKey(cwd2, key) {
   if (typeof key !== "string" || key.length === 0) return null;
   if (key.includes("\0")) return null;
+  if (process.platform !== "win32" && key.includes("\\")) return null;
   const fwd = key.replace(/\\/g, "/");
   if (fwd.startsWith("/") || /^[A-Za-z]:/.test(fwd)) return null;
   if (fwd.split("/").includes("..")) return null;
@@ -7506,6 +7507,11 @@ function collectBaseline(cwd2) {
       );
     }
     for (const de of readdirSync(absDir, { withFileTypes: true })) {
+      if (process.platform !== "win32" && de.name.includes("\\")) {
+        throw new Error(
+          `(B) baseline entry '${relDir ? relDir + "/" : ""}${de.name}' contains a backslash \u2014 refused on POSIX: '\\' is a legal filename byte here but collapses to '/' in the authorization key, so a distinct sibling would share one key and a restore could land on the wrong path; denied fail-closed, never normalized`
+        );
+      }
       const abs = join2(absDir, de.name);
       const rel = relDir ? `${relDir}/${de.name}` : de.name;
       if (de.isSymbolicLink()) {
@@ -7532,6 +7538,11 @@ function collectBaseline(cwd2) {
   if (claudeKind === "dir") {
     for (const de of readdirSync(join2(cwd2, ".claude"), { withFileTypes: true })) {
       const rel = ".claude/" + de.name;
+      if (process.platform !== "win32" && de.name.includes("\\") && de.name.startsWith("settings") && de.name.endsWith(".json")) {
+        throw new Error(
+          `(B) baseline settings entry '${rel}' contains a backslash \u2014 refused on POSIX: matchesGlob would normalize '\\'->'/' and silently skip this settings-shaped file from the baseline, leaving tampering on it invisible; denied fail-closed`
+        );
+      }
       if (!matchesGlob(rel, ".claude/settings*.json")) continue;
       if (!de.isFile()) {
         throw new Error(
@@ -7554,6 +7565,7 @@ function collectBaseline(cwd2) {
 }
 function validateBaselineKey(key) {
   if (typeof key !== "string" || key.length === 0) return null;
+  if (process.platform !== "win32" && key.includes("\\")) return null;
   const fwd = key.replace(/\\/g, "/");
   if (fwd.startsWith("/") || /^[A-Za-z]:/.test(fwd)) return null;
   if (fwd.split("/").includes("..")) return null;
