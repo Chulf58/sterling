@@ -171,7 +171,7 @@ export const researchFindingSchema = base
     slug: z.string().min(1).optional(),
     question: z.string().min(1),
     answer: z.string().min(1),
-    source_urls: z.array(z.string()),
+    source_urls: z.array(z.string()).default([]),
     source_date: isoDate,
     capture_date: isoDate,
     volatility_hint: z.enum(['fast', 'medium', 'stable']).optional(),
