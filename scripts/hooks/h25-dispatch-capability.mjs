@@ -245,8 +245,9 @@ function testAuthoringAdvisory(subagentType, prompt, cwd) {
   if (!text) return null;
   if (!hasVerbOrTddTrigger(text) && !hasPathTrigger(text, cwd)) return null;
   return (
-    `H25 TEST-AUTHORING ADVISORY — you are about to dispatch '${subagentType}', and the brief appears to instruct ` +
-      `test authoring. Test authoring belongs to the test-writer role (doer/checker separation); if this dispatch ` +
+    `H25 TEST-AUTHORING ADVISORY — this is the warn-only doer/checker role lint: you are about to dispatch ` +
+      `'${subagentType}', and the brief appears to instruct test authoring, inferred from verbs/paths in the prompt text — ` +
+      `not a claim that a test edit has occurred. Test authoring belongs to the test-writer role (doer/checker separation); if this dispatch ` +
       `proceeds and it edits a test path, H5 will deny that edit mid-work. This is a warning, not a denial — ` +
       `re-target the dispatch to test-writer, or state explicitly why this agent needs to touch tests.`
   );
@@ -334,7 +335,8 @@ try {
     `H25 DISPATCH CAPABILITY ADVISORY — you are about to dispatch '${subagentType}', and the brief mentions ` +
       `tool(s) its installed grant does not hold:\n${missingLines}\n` +
       `Agent '${subagentType}' actual grant (frontmatter tools:): ${toolsRaw}\n` +
-      `This is advisory only, never a block — a mention is not proof of a requirement (a prohibition or passing ` +
+      `This is the warn-only dispatch-capability preflight (decision dc6c1afb) — never a block, and it intentionally reports ` +
+      `ungranted mentions even though a mention is not proof of a requirement (a prohibition or passing ` +
       `context can read identically). Remedy: re-target the dispatch to an agent holding ${missing.join(', ')}, ` +
       `re-scope the brief so it is not needed, or state explicitly why the mention is not a requirement.`
   );

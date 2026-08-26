@@ -164,7 +164,8 @@ try {
   for (const x of shown) {
     const r = x.record;
     const kind = r.type === 'anti_pattern' ? 'HAZARD anti_pattern' : 'DECISION';
-    lines.push(`  → ${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}`);
+    const authorityMarker = r.authority ? `[${r.authority}] ` : '';
+    lines.push(`  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}`);
   }
   if (remainder > 0) lines.push(`  (+${remainder} more matched)`);
 

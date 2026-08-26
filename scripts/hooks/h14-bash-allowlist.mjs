@@ -125,7 +125,11 @@ try {
   // read-only search commands never need chaining OR redirection, so both are
   // denied outright here — one place, before any allow path is considered.
   if (/[;&|`\n<>]|\$\(/.test(command)) {
-    deny(`H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'`);
+    deny(
+      `H14: shell control operators (chaining or redirection) are not allowed in agent commands: '${command}'. ` +
+        `This is the single-command allowlist design: chaining/redirection are rejected BEFORE prefix matching, because an operator ` +
+        `can extend an otherwise-allowed command into one that is not.`
+    );
   }
 
   // A run-gate invocation joins the declared run_commands prefixes (decision

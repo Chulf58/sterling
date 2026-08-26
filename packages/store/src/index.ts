@@ -9,7 +9,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve as resolvePath } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -184,19 +184,38 @@ export class UnsupportedSchemaVersionError extends Error {
  * the data would silently claim a migration that never ran (exactly what the S1
  * 0→1 auto-stamp did, which is why it was removed here).
  */
+/**
+ * POSIX single-quoted shell argument (Codex MEDIUM, 2026-08-26): a
+ * double-quoted path still lets $/backticks expand and breaks on an embedded
+ * double quote — single quotes suppress ALL expansion, which is what
+ * "copy-paste safe" actually requires. Standard close-quote/escaped-quote/
+ * reopen-quote form for a path that itself contains a single quote.
+ */
+function shellQuoteSingle(value: string): string {
+  return `'${value.split("'").join(`'\\''`)}'`;
+}
+
 export class SchemaMigrationRequiredError extends Error {
   readonly found: number;
   readonly supported: number;
-  constructor(found: number, supported: number, operation: string) {
+  /**
+   * The absolute path of the store file that needs migrating (measured
+   * defect, Salesforce consumer 2026-08-26): without this a hook surfacing
+   * the error showed only a bare bundle line number, and the user could not
+   * tell WHICH of several candidate stores on the machine to migrate.
+   */
+  readonly db_path: string;
+  constructor(found: number, supported: number, operation: string, dbPath: string) {
     super(
-      `Schema migration required: this store is at schema version ${found}, but this build requires version ${supported}. ` +
+      `Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. ` +
         `The store is open READ-ONLY — '${operation}' and every other write refuses until the stable-identity migration has run. ` +
-        `Run the stable-identity store migration (decision stable-identity-design-v2) against this store file; the migration runner ` +
-        `reports the exact command, takes a VACUUM INTO backup first, and bumps user_version last. Nothing was written.`
+        `Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner ` +
+        `takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`
     );
     this.name = 'SchemaMigrationRequiredError';
     this.found = found;
     this.supported = supported;
+    this.db_path = dbPath;
   }
 }
 
@@ -355,6 +374,10 @@ export type ToolStore = Pick<
   // record stays version-pinned; this is the only way the tool layer learns
   // where a superseded record's chain currently ends.
   | 'resolveTerminus'
+  // knowledge_get's INBOUND supersedes disclosure (board c6e3561f part (a)) —
+  // the additive/advisory counterpart of resolveTerminus for the partial/
+  // clause-supersession case; never drives status or terminus.
+  | 'inboundSupersedes'
   | 'supersede'
   // The generalized in-place write triad + its version reader (stable-identity
   // S3, the call sites promised by S2's note): knowledge_update/edit/append all
@@ -415,7 +438,18 @@ export class SterlingStore {
    */
   private openedSchemaVersion: number | undefined;
 
+  /**
+   * The absolute path of this store's database file, retained for
+   * SchemaMigrationRequiredError (measured defect, Salesforce consumer
+   * 2026-08-26): the constructor received the path but never kept it, so a
+   * migration refusal named only found/supported versions — a hook surfacing
+   * the error showed a bare bundle line number and the user could not tell
+   * WHICH store to migrate.
+   */
+  private readonly dbPath: string;
+
   constructor(path: string) {
+    this.dbPath = resolvePath(path);
     this.db = new DatabaseSync(path);
 
     // Schema-version guard — checked BEFORE journal_mode/foreign_keys/DDL land
@@ -512,7 +546,7 @@ export class SterlingStore {
    */
   private assertV2Surface(operation: string): void {
     if (this.legacySchemaVersion !== undefined) {
-      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation);
+      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation, this.dbPath);
     }
   }
 
@@ -1438,6 +1472,30 @@ export class SterlingStore {
       hops += 1;
     }
     return { id: current.id, status: current.status, hops };
+  }
+
+  /**
+   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
+   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
+   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * it only ever has something to say about a record that was itself retired
+   * via supersede(). A record can also be named the target of a rel:'supersedes'
+   * link WITHOUT ever being retired — a clause-level or partial override
+   * recorded via knowledge_link — and that leaves no trace on the target's own
+   * status/terminus. This is the read-time counterpart that makes such edges
+   * visible from the target side. Purely additive/advisory: never mutates
+   * status, never feeds resolveTerminus, never touches the terminus block.
+   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
+   * mount, because an edge lives with its SOURCE record (addLink routes by
+   * source), which may sit in a different store than the target.
+   */
+  inboundSupersedes(id: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`
+      )
+      .all(id) as { source_id: string }[];
+    return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
   }
 
   /**

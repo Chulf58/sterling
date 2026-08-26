@@ -121,7 +121,8 @@ try {
       })
     );
     deny(
-      `H8: dispatch cap exceeded — '${agentType}' has been dispatched ${current}x this run (cap ${cap}). This run is looping; escalate to the human instead of spawning again (§5.1).`
+      `H8: dispatch cap exceeded — '${agentType}' has been dispatched ${current}x this run (cap ${cap}). This run is looping; escalate to the human instead of spawning again (§5.1). ` +
+        `This denial repeats by design for every further dispatch of that type in this run — it is the terminal per-run loop cap (§5.1), not a retryable hook failure.`
     );
   }
   withRetry(() => store.incrementDispatchCount(run.id, agentType));

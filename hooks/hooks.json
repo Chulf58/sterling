@@ -107,6 +107,14 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__codex__codex|mcp__codex__codex-reply",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h29-codex-consult-failure.mjs\"" }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

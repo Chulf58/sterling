@@ -137,6 +137,24 @@ function hasStructuralError(resp) {
   return false;
 }
 
+/**
+ * Best-effort failure payload for a PostToolUseFailure event, whose exact
+ * stdin shape is UNDOCUMENTED (research_finding aa5bf135 /
+ * posttooluse-skips-failed-calls-h29-seam-gap — the docs confirm the event
+ * exists but are silent on its field). Inspected in this order because
+ * `tool_response` is the shape PostToolUse already uses (some failure
+ * payloads may reuse it), then the more failure-specific `tool_error` /
+ * `error` / `message` names a protocol-level error is likely to carry.
+ * Returns undefined when none of the candidates are present so the caller
+ * can fall back to stringifying the whole input (nothing is ever swallowed).
+ */
+function extractFailurePayload(input) {
+  for (const key of ['tool_response', 'tool_error', 'error', 'message']) {
+    if (input && input[key] !== undefined && input[key] !== null) return input[key];
+  }
+  return undefined;
+}
+
 try {
   const input = readStdin();
 
@@ -145,12 +163,26 @@ try {
   const tool = input.tool_name;
   if (typeof tool !== 'string' || !tool.startsWith('mcp__codex__')) allow();
 
-  const resp = input.tool_response;
-  const text = extractResultText(resp);
+  const isFailureEvent = input.hook_event_name === 'PostToolUseFailure';
 
-  const structural = hasStructuralError(resp);
-  const authShapedShort = !structural && text.length > 0 && text.length < AUTH_TEXT_MAX && looksLikeAuthFailure(text);
-  if (!structural && !authShapedShort) allow(); // clean success — silent (P1)
+  let text;
+  if (isFailureEvent) {
+    // PostToolUseFailure means the tool call ALREADY failed at the protocol
+    // level — the conservative structural/short-auth gate below exists only
+    // to distinguish a genuine failure from a successful PostToolUse result
+    // that merely mentions "auth". That distinction is moot here: every
+    // payload shape (object, plain string, or missing entirely) counts as a
+    // failure, unconditionally (research_finding aa5bf135).
+    const payload = extractFailurePayload(input);
+    text = extractResultText(payload !== undefined ? payload : input);
+  } else {
+    const resp = input.tool_response;
+    text = extractResultText(resp);
+
+    const structural = hasStructuralError(resp);
+    const authShapedShort = !structural && text.length > 0 && text.length < AUTH_TEXT_MAX && looksLikeAuthFailure(text);
+    if (!structural && !authShapedShort) allow(); // clean success — silent (P1)
+  }
 
   // consultFailureMessage reuses looksLikeAuthFailure internally to pick the
   // auth-recovery hint vs the generic transport message, and ALWAYS carries the

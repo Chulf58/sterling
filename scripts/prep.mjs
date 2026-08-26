@@ -196,7 +196,7 @@ const reviewerLines = [
   '# Reviewer knowledge slice — anti-patterns & decisions keyed to this phase',
   '',
   ...(reviewerKnowledge.length
-    ? reviewerKnowledge.map((r) => `- ${r.type} — ${r.title} [${r.id}] — ${oneLiner(r)}`)
+    ? reviewerKnowledge.map((r) => `- ${r.type}${r.authority ? ` [${r.authority}]` : ''} — ${r.title} [${r.id}] — ${oneLiner(r)}`)
     : ['(no anti-pattern or decision records staged for this phase)']),
   '',
   '## Mandatory review items — each needs a disposition in your handoff',

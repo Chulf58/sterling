@@ -452,6 +452,12 @@ function pointerLine(store, kind, slug) {
   return `  → ${kind} [[${slug}]]: ${head}`;
 }
 
+/** Budget for the untestable_because reason clip, same class as
+ *  DECISION_REJECTED_CLIP: a beneath-the-headline annotation, not the primary
+ *  field — an unbounded reason would land uncapped in H19's injected payload
+ *  (S4b fixer pass). */
+export const UNTESTABLE_REASON_CLIP = 140;
+
 /** Render the delivery payload for one owning feature_article: its substance
  *  (what_it_does, intended_behavior, current ACs) plus one-hop POINTERS —
  *  slugs with one-liners, never full neighbor bodies (grill answer: article +
@@ -463,7 +469,17 @@ export function renderArticle(store, article, charCap) {
     `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
   ];
   if (article.current_ac?.length) {
-    lines.push(`ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => `${a.ac_id}: ${a.text}`).join(' | ')}`);
+    lines.push(
+      `ACCEPTANCE CRITERIA: ${article.current_ac
+        .map((a) => {
+          const u = a.untestable_because;
+          const suffix = u
+            ? ` [untestable: ${clip(u.reason, UNTESTABLE_REASON_CLIP)} — blocking ${String(u.blocking_record_id).slice(0, 8)}]`
+            : '';
+          return `${a.ac_id}: ${a.text}${suffix}`;
+        })
+        .join(' | ')}`
+    );
   }
   const relies = article.dependencies?.relies_on ?? [];
   const relied = article.dependencies?.relied_by ?? [];
@@ -609,7 +625,8 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
     `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
   ];
   for (const d of shown) {
-    lines.push(`  → ${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})`);
+    const authorityMarker = d.authority ? `[${d.authority}] ` : '';
+    lines.push(`  → ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
       .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
       .filter(Boolean)

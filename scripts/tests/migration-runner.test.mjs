@@ -139,7 +139,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -151,8 +151,9 @@ const NOW = '2026-08-22T12:00:00.000Z';
 
 let SterlingStore;
 let DatabaseSync;
+let ProjectRegistry;
 before(async () => {
-  ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ SterlingStore, ProjectRegistry } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
   ({ DatabaseSync } = await import('node:sqlite'));
 });
 
@@ -1083,4 +1084,672 @@ test('S4-P2 [board d055b150]: --invoked-by is recorded verbatim, including on a 
   const report = parseJson(r.stdout, 'runner stdout on refusal');
   const manifest = parseJson(readFileSync(report.manifest_path, 'utf8'), 'manifest');
   assert.equal(manifest.invocation.invoked_by, 'update-sweep', 'even a refused run is attributed to its caller');
+});
+
+// ===========================================================================
+// PIN GROUP M3 — `--all-stores` MACHINE-WIDE ENUMERATION
+// SPEC-ONLY: --all-stores currently exits 3 "not implemented" (per the
+// dispatch brief). Every test below must therefore go RED TODAY on its own
+// assertion (an exit-code mismatch against 3, or a JSON.parse on stdout that
+// is not the expected report shape) — never a bare crash — mirroring this
+// file's existing spec-only convention (see the header for S4).
+//
+// DESIGN SOURCE (decision stable-identity-design-v2, migration section):
+// "enumerate all stores via ProjectRegistry + domain stores" — this pin
+// group specifies that enumeration as three sources, unioned and deduped by
+// resolved absolute path:
+//   (i)   every REGISTERED project's own store: <repo_path>/.sterling/sterling.db
+//   (ii)  every registered project's OWN CONFIG domain mounts:
+//         <repo_path>/.sterling/config.json -> domain_paths: {name: path}
+//         (the same domain_paths shape scripts/domain-doctor.mjs's own
+//         sweep/resolveDomainMounts already reads — reused here, not
+//         invented; see scripts/tests/domain-doctor.test.mjs's lossScenario
+//         fixture for the exact shape)
+//   (iii) every <root>/<domain>/sterling.db under the DEFAULT-ROOT domains
+//         directory (or an override — see SEAM ASSUMPTIONS below)
+//
+// One JSON result line per UNIQUE physical store (same shape as a --db
+// invocation's own stdout: the success/already_migrated/failure shapes
+// documented at the top of this file); exit 0 iff every store is
+// ok/already_migrated, exit 1 if any store failed, and processing CONTINUES
+// past a per-store failure rather than aborting the whole run.
+//
+// SEAM ASSUMPTIONS (H4-blind; named per the dispatch brief's instruction,
+// since --all-stores has no prior test coverage in this file to reuse):
+//   - STERLING_REGISTRY_DB (env var): overrides the ProjectRegistry path.
+//     This is NOT invented here — it is the established, already-shipped
+//     test-isolation seam for packages/store's ProjectRegistry (decision
+//     8f9e6db2; reused verbatim by scripts/tests/init-ensure.test.mjs).
+//   - `--roots <dir>[,<dir>...]` (CLI flag): assumed to override the
+//     default-root domains directory scan for source (iii) above, mirroring
+//     scripts/domain-doctor.mjs's OWN `--roots` flag over the identical
+//     physical layout (`<root>/<domain>/sterling.db` — see
+//     scripts/tests/domain-doctor.test.mjs's `scan --roots` pin). Assumed to
+//     REPLACE the default root(s) entirely, not add to them — the same way
+//     domain-doctor's own --roots is exercised as a full override in its own
+//     tests.
+//   - HOME (env var): also overridden defensively in every test below, on
+//     top of --roots, so that IF the real implementation's default-root
+//     resolution does not fully honor --roots as a replacement, the
+//     homedir()-based default at least resolves to an empty, isolated
+//     directory rather than this machine's real ~/.sterling/domains.
+//
+// NAMED RISK, stated rather than hidden: if the real implementation does NOT
+// treat --roots as a full replacement (e.g. it ADDS to the default root, or
+// the WSL-mirror default path — documented on domain-doctor as
+// `/mnt/c/Users/<user>/.sterling/domains` — resolves independently of HOME),
+// a run of these tests on a machine that also has real registered projects
+// or real domain stores could enumerate — and, worse, MIGRATE — real data as
+// a side effect. This is inherent to spec-authoring blind to the
+// implementation (H4): the coder must verify --roots and STERLING_REGISTRY_DB
+// genuinely REPLACE their defaults before these pins are trusted to run
+// safely in CI on a machine carrying live Sterling projects.
+// ===========================================================================
+
+function runMigrateEnv(args, env) {
+  const r = spawnSync(process.execPath, [SCRIPT, ...args], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: { ...process.env, ...env },
+  });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+function makeRegistry(dir, entries) {
+  const dbPath = join(dir, 'registry.db');
+  const reg = new ProjectRegistry(dbPath);
+  try {
+    for (const e of entries) {
+      reg.register({
+        repo_path: e.repo_path,
+        name: e.name,
+        stack_tags: e.stack_tags ?? [],
+        toolchains: e.toolchains ?? ['node'],
+        sterling_version: '1.0.0',
+        at: NOW,
+      });
+    }
+  } finally {
+    reg.close();
+  }
+  return dbPath;
+}
+
+function buildSingleLegacyRecordFixture(path) {
+  const db = createLegacyDb(path);
+  const id = randomUUID();
+  try {
+    insertLegacyRecord(db, id, 'active', null, { title: 'Solo', statement: 'solo record zzzsolomarker' });
+    db.exec('PRAGMA user_version = 1');
+  } finally {
+    db.close();
+  }
+  return { id };
+}
+
+/** Splits stdout into whatever lines parse as JSON objects, silently
+ *  skipping non-JSON lines (a pre-work refusal for a single store is only
+ *  loosely text-pinned by this file's own convention — see S4-R1/R3 above —
+ *  so a failing store's line is not required to be strict JSON). */
+function parseJsonLines(text) {
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('{'))
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter((v) => v !== null);
+}
+
+function reEscape(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// --- CONTROL, placed FIRST: proves the counting mechanism is not
+// coincidentally capped/collapsed — two genuinely DIFFERENT store paths
+// under --roots both enumerate. Without this, S4-ALL-3's "exactly 2 results"
+// verdict would be equally explainable by an implementation that always
+// reports 2 regardless of what is actually distinct on disk. ---
+
+test('S4-ALL-3-CONTROL [--all-stores]: two DIFFERENT domain stores under --roots both enumerate (control for the dedupe pin below)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-control-'));
+  try {
+    const domainsRoot = join(dir, 'domains');
+    const dbA = join(domainsRoot, 'alpha', 'sterling.db');
+    const dbB = join(domainsRoot, 'beta', 'sterling.db');
+    mkdirSync(dirname(dbA), { recursive: true });
+    mkdirSync(dirname(dbB), { recursive: true });
+    new SterlingStore(dbA).close();
+    new SterlingStore(dbB).close();
+
+    const registryDb = makeRegistry(dir, []);
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.equal(code, 0, `two independent, already-v2 stores must be a clean run: ${stderr}`);
+
+    const results = parseJsonLines(stdout);
+    assert.equal(
+      results.length,
+      2,
+      'two genuinely DIFFERENT store paths must both be reported — proves counting keys on absolute PATH EQUALITY, not on a fixed/coincidental count'
+    );
+    assert.ok(results.some((r) => r.db === dbA), 'store A is reported');
+    assert.ok(results.some((r) => r.db === dbB), 'store B is reported');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-1 [--all-stores]: a registry project (legacy) + a default-root domain store (v2) are BOTH reported, the legacy one migrated, exit 0', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-'));
+  try {
+    const domainsRoot = join(dir, 'domains');
+    const domainDb = join(domainsRoot, 'mydomain', 'sterling.db');
+    mkdirSync(dirname(domainDb), { recursive: true });
+    const domainStore = new SterlingStore(domainDb);
+    domainStore.close();
+    assert.equal(rawUserVersion(domainDb), 2, 'precondition: the seeded domain store is already v2');
+
+    const projectDir = join(dir, 'proj1');
+    mkdirSync(join(projectDir, '.sterling'), { recursive: true });
+    const projectDb = join(projectDir, '.sterling', 'sterling.db');
+    buildSingleLegacyRecordFixture(projectDb);
+    assert.equal(rawUserVersion(projectDb), 1, 'precondition: the seeded project store is legacy (v1)');
+
+    const registryDb = makeRegistry(dir, [{ repo_path: projectDir, name: 'proj1' }]);
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.equal(code, 0, `both seeded stores are healthy — the whole run must exit 0: ${stderr}`);
+
+    const results = parseJsonLines(stdout);
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+
+    assert.ok(byDb[projectDb], 'the registry project store is reported');
+    assert.equal(byDb[projectDb].ok, true);
+    assert.equal(byDb[projectDb].already_migrated, false, 'the legacy store was actually migrated, not a no-op');
+    assert.equal(rawUserVersion(projectDb), 2, 'the legacy project store is bumped to v2 on disk — proves real work happened, not a fabricated success line');
+
+    assert.ok(byDb[domainDb], 'the default-root domain store is reported');
+    assert.equal(byDb[domainDb].ok, true);
+    assert.equal(byDb[domainDb].already_migrated, true, 'the v2 domain store is a clean no-op');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-2 [--all-stores]: one store fails (a corrupt/unreadable file) — the other store still migrates, exit 1, the failing path is named', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-fail-'));
+  try {
+    // Named "aaa-*" so it sorts/enumerates as a REGISTRY project — the
+    // brief's own enumeration order lists registry projects BEFORE
+    // default-root domain stores, so this exercises "continue past a
+    // failure that happens before the rest of the run", not a lucky order.
+    const projectDir = join(dir, 'aaa-corrupt');
+    mkdirSync(join(projectDir, '.sterling'), { recursive: true });
+    const corruptDb = join(projectDir, '.sterling', 'sterling.db');
+    writeFileSync(corruptDb, 'this is not a sqlite file at all');
+
+    const domainsRoot = join(dir, 'domains');
+    const healthyDb = join(domainsRoot, 'zzz-healthy', 'sterling.db');
+    mkdirSync(dirname(healthyDb), { recursive: true });
+    const healthyStore = new SterlingStore(healthyDb);
+    healthyStore.close();
+
+    const registryDb = makeRegistry(dir, [{ repo_path: projectDir, name: 'aaa-corrupt' }]);
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.equal(code, 1, 'one failed store must make the whole run exit 1, distinct from the all-ok exit-0 case');
+
+    const combined = stdout + stderr;
+    assert.match(combined, new RegExp(reEscape(corruptDb)), 'the failure names the exact path that could not be migrated');
+
+    const results = parseJsonLines(stdout);
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+    assert.ok(byDb[healthyDb], 'the healthy store, enumerated AFTER the failing one, is still reported — the run continues past the failure');
+    assert.equal(byDb[healthyDb].ok, true, 'the healthy store migrates cleanly despite the earlier failure');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-3 [--all-stores]: the same domain store reachable via a project config mount AND the default-root scan enumerates exactly once', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-dedupe-'));
+  try {
+    const domainsRoot = join(dir, 'domains');
+    const domainDb = join(domainsRoot, 'shared', 'sterling.db');
+    mkdirSync(dirname(domainDb), { recursive: true });
+    const domainStore = new SterlingStore(domainDb);
+    domainStore.close();
+
+    const projectDir = join(dir, 'proj1');
+    mkdirSync(join(projectDir, '.sterling'), { recursive: true });
+    const projectDb = join(projectDir, '.sterling', 'sterling.db');
+    const projectStore = new SterlingStore(projectDb);
+    projectStore.close();
+    // the SAME shape domain-doctor.mjs's own lossScenario fixture uses
+    // (scripts/tests/domain-doctor.test.mjs) — config.domain_paths mounting
+    // an explicit path onto a stack tag.
+    writeFileSync(
+      join(projectDir, '.sterling', 'config.json'),
+      JSON.stringify({ stack_tags: ['shared'], domain_paths: { shared: domainDb.replace(/\\/g, '/') } })
+    );
+
+    const registryDb = makeRegistry(dir, [{ repo_path: projectDir, name: 'proj1', stack_tags: ['shared'] }]);
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.equal(code, 0, `both physical stores are already v2 — the whole run must exit 0: ${stderr}`);
+
+    const results = parseJsonLines(stdout);
+    assert.ok(
+      results.some((r) => r.db === projectDb),
+      "the registry project's own store is present (control: the count below is not merely coincidental)"
+    );
+    const domainHits = results.filter((r) => r.db === domainDb);
+    assert.equal(domainHits.length, 1, 'the same absolute domain-store path, reachable via BOTH the project config mount and the default-root scan, is deduped to a single result line');
+    assert.equal(results.length, 2, 'exactly two PHYSICAL stores exist on disk (the project store + the one shared domain store) — no phantom third entry from the un-deduped mount');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// review fix (round-trip 2026-08-26): two mutation survivors found in this
+// PIN GROUP — neither the MISSING-store line shape nor the --all-stores /
+// --elect-successor CONFLICT was pinned anywhere above. Same file, same
+// S4-ALL idiom/isolation seams (STERLING_REGISTRY_DB, --roots, HOME).
+
+test("S4-ALL-4 [--all-stores]: an enumerated store path that does not exist on disk emits a missing:true line and is NOT counted as a failure — exit stays 0 when everything else succeeds", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-missing-'));
+  try {
+    // a registry project that is real (repo_path/.sterling/ exists) but was
+    // never store-inited — sterling.db itself is genuinely ABSENT, distinct
+    // from S4-ALL-2's CORRUPT (present-but-unreadable) file.
+    const projectDir = join(dir, 'never-inited');
+    mkdirSync(join(projectDir, '.sterling'), { recursive: true });
+    const missingDb = join(projectDir, '.sterling', 'sterling.db');
+    assert.equal(existsSync(missingDb), false, 'precondition: genuinely absent, not merely unreadable');
+
+    const domainsRoot = join(dir, 'domains');
+    const healthyDb = join(domainsRoot, 'healthy', 'sterling.db');
+    mkdirSync(dirname(healthyDb), { recursive: true });
+    new SterlingStore(healthyDb).close();
+
+    const registryDb = makeRegistry(dir, [{ repo_path: projectDir, name: 'never-inited' }]);
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    // Contrast with S4-ALL-2 (a genuine per-store failure DOES flip exit to
+    // 1): this is the control that not every enumeration hiccup is a
+    // failure — a store that was simply never created is a distinct, benign
+    // outcome from a store that exists and cannot be read/migrated.
+    assert.equal(code, 0, `a genuinely-absent enumerated store must not fail the run when every store that exists succeeds: ${stderr}`);
+
+    const results = parseJsonLines(stdout);
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+
+    assert.ok(byDb[missingDb], 'the missing store still gets its own result line — it is not silently dropped from enumeration');
+    assert.equal(byDb[missingDb].missing, true, 'the missing store line is marked missing:true');
+    assert.notEqual(byDb[missingDb].ok, false, 'a missing store must never be reported as a FAILURE (ok:false) — S4-ALL-2 already pins that real failures DO set ok:false/exit 1, so this line must read distinctly');
+
+    assert.ok(byDb[healthyDb], 'the healthy store is still reported');
+    assert.equal(byDb[healthyDb].ok, true, 'the healthy store migrates cleanly alongside the missing one');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-5 [--all-stores]: `--all-stores` combined with `--elect-successor` refuses immediately, naming the conflict, without touching any store', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-conflict-'));
+  try {
+    const domainsRoot = join(dir, 'domains');
+    const healthyDir = join(domainsRoot, 'healthy');
+    const healthyDb = join(healthyDir, 'sterling.db');
+    mkdirSync(healthyDir, { recursive: true });
+    new SterlingStore(healthyDb).close();
+    const hashBefore = fileHash(healthyDb);
+    const dirBefore = dirSnapshot(healthyDir);
+
+    const registryDb = makeRegistry(dir, []);
+    const bogusOld = randomUUID();
+    const bogusWinner = randomUUID();
+
+    const { code, stdout, stderr } = runMigrateEnv(
+      ['--all-stores', '--roots', domainsRoot, '--elect-successor', `${bogusOld}=${bogusWinner}`],
+      { STERLING_REGISTRY_DB: registryDb, HOME: join(dir, 'fake-home') }
+    );
+    assert.notEqual(
+      code,
+      0,
+      '--elect-successor names a single store\'s conflict to resolve — combined with --all-stores (which store would it apply to?) it is an incoherent combination and must refuse'
+    );
+
+    const combined = stdout + stderr;
+    assert.match(combined, /--all-stores/, 'the refusal names --all-stores as one half of the conflicting combination');
+    assert.match(combined, /--elect-successor/, 'the refusal names --elect-successor as the other half of the conflicting combination');
+
+    assert.equal(fileHash(healthyDb), hashBefore, 'the seeded store is byte-identical — the refusal happens before any store is even opened, let alone migrated');
+    assert.deepEqual(dirSnapshot(healthyDir), dirBefore, 'no backup/manifest litter is created for a run refused before any store is touched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// adjudicated post-fix pins round 2 (2026-08-26), same S4-ALL idiom/seams.
+
+function runMigrateFrom(args, env, cwd) {
+  const r = spawnSync(process.execPath, [SCRIPT, ...args], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    cwd,
+    env: { ...process.env, ...env },
+  });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+test("S4-ALL-6 [--all-stores]: a RELATIVE domain_paths mount (\"./rel/foo.db\") resolves against the PROJECT's repo_path, never the sweep's own cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-relmount-'));
+  try {
+    const projectDir = join(dir, 'proj-rel');
+    mkdirSync(join(projectDir, '.sterling'), { recursive: true });
+    const projectDb = join(projectDir, '.sterling', 'sterling.db');
+    new SterlingStore(projectDb).close();
+
+    const correctDb = join(projectDir, 'rel', 'foo.db');
+    mkdirSync(dirname(correctDb), { recursive: true });
+    new SterlingStore(correctDb).close();
+
+    writeFileSync(
+      join(projectDir, '.sterling', 'config.json'),
+      JSON.stringify({ stack_tags: ['foo'], domain_paths: { foo: './rel/foo.db' } })
+    );
+
+    const registryDb = makeRegistry(dir, [{ repo_path: projectDir, name: 'proj-rel', stack_tags: ['foo'] }]);
+
+    const domainsRoot = join(dir, 'domains');
+    mkdirSync(domainsRoot, { recursive: true }); // empty — default-root scan finds nothing extra
+
+    // Discriminator: spawn from a DIFFERENT cwd than the project. A buggy
+    // resolution of the relative mount against the SWEEP's own cwd (instead
+    // of the project's repo_path) would compute <spawnCwd>/rel/foo.db.
+    const spawnCwd = join(dir, 'elsewhere');
+    mkdirSync(spawnCwd, { recursive: true });
+    const wrongDb = join(spawnCwd, 'rel', 'foo.db');
+
+    const { code, stdout, stderr } = runMigrateFrom(
+      ['--all-stores', '--roots', domainsRoot],
+      { STERLING_REGISTRY_DB: registryDb, HOME: join(dir, 'fake-home') },
+      spawnCwd
+    );
+    assert.equal(code, 0, `every seeded store is already v2 — clean run: ${stderr}`);
+
+    const results = parseJsonLines(stdout);
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+    assert.ok(byDb[correctDb], "the relative mount resolves against the PROJECT's own repo_path — reported under <repoPath>/rel/foo.db");
+    assert.ok(!byDb[wrongDb], "the relative mount must NOT resolve against the sweep's own spawn cwd");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-7 [--all-stores]: a CORRUPT STERLING_REGISTRY_DB (non-SQLite garbage) exits nonzero naming the registry failure, while default-root stores still get their per-store lines (continuation)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-regcorrupt-'));
+  try {
+    const garbageRegistry = join(dir, 'registry.db');
+    writeFileSync(garbageRegistry, 'not a sqlite database at all');
+
+    const domainsRoot = join(dir, 'domains');
+    const healthyDb = join(domainsRoot, 'healthy', 'sterling.db');
+    mkdirSync(dirname(healthyDb), { recursive: true });
+    new SterlingStore(healthyDb).close();
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: garbageRegistry,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.notEqual(code, 0, 'a corrupt registry file must make the run exit nonzero');
+
+    const combined = stdout + stderr;
+    assert.match(combined, /registry/i, 'the failure names the registry as the source of the problem');
+
+    const results = parseJsonLines(stdout);
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+    assert.ok(byDb[healthyDb], 'default-root domain stores are still enumerated and reported despite the registry failure — continuation, not a full abort');
+    assert.equal(byDb[healthyDb].ok, true, 'the healthy default-root store still migrates cleanly');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-8 [--all-stores]: STERLING_REGISTRY_DB pointing at a NONEXISTENT path fails loudly, naming the exact path, exit nonzero', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-regmissing-'));
+  try {
+    const missingRegistry = join(dir, 'does-not-exist', 'registry.db');
+    assert.equal(existsSync(missingRegistry), false, 'precondition: genuinely absent');
+
+    const domainsRoot = join(dir, 'domains');
+    mkdirSync(domainsRoot, { recursive: true });
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: missingRegistry,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.notEqual(code, 0, 'an EXPLICITLY-named but nonexistent registry path is a hard, loud failure — never a silent empty-registry fallback (the caller asserted this exact path)');
+
+    const combined = stdout + stderr;
+    assert.match(combined, new RegExp(reEscape(missingRegistry)), 'the failure names the exact registry path that was given but does not exist');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// completeness-gap pin (2026-08-26): a code path the fixer just closed had
+// NO red-proof — a project whose config.json is corrupt must fail loudly for
+// THAT config specifically, without suppressing the project's own default
+// store from enumeration. Same S4-ALL idiom/seams.
+
+test("S4-ALL-9 [--all-stores]: a project with a CORRUPT config.json (unparseable) is skipped BY NAME — the project's own sterling.db still gets its own result line, sweep exits nonzero", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-corruptcfg-'));
+  try {
+    const projectDir = join(dir, 'proj-corrupt-cfg');
+    mkdirSync(join(projectDir, '.sterling'), { recursive: true });
+    const projectDb = join(projectDir, '.sterling', 'sterling.db');
+    new SterlingStore(projectDb).close(); // the project's OWN store is healthy/v2
+
+    const configPath = join(projectDir, '.sterling', 'config.json');
+    writeFileSync(configPath, '{ not valid json at all');
+
+    const domainsRoot = join(dir, 'domains');
+    mkdirSync(domainsRoot, { recursive: true }); // empty — no default-root stores to confuse the picture
+
+    const registryDb = makeRegistry(dir, [{ repo_path: projectDir, name: 'proj-corrupt-cfg' }]);
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.notEqual(code, 0, 'an unparseable project config is a genuine failure and must not be swallowed into a clean exit 0 (log-and-continue-uncounted sabotage)');
+
+    const combined = stdout + stderr;
+    assert.match(combined, new RegExp(reEscape(configPath)), 'the failure names the exact corrupt config path');
+
+    const results = parseJsonLines(stdout);
+    const skippedLine = results.find((r) => r.skipped === true && JSON.stringify(r).includes(configPath));
+    assert.ok(skippedLine, `a skipped:true line names the corrupt config path; results were: ${JSON.stringify(results)}`);
+
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+    assert.ok(
+      byDb[projectDb],
+      "the project's OWN default store (sterling.db) still gets its own result line — a corrupt DOMAIN-MOUNT config must not suppress the project's default store (skip-the-whole-project sabotage)"
+    );
+    assert.equal(byDb[projectDb].ok, true, "the project's own store is healthy and reports cleanly despite the sibling config failure");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Codex round-4 pins (2026-08-26), fixer landing in parallel. Same S4-ALL
+// idiom/seams.
+
+test('S4-ALL-10a [--all-stores]: an EXPLICIT --roots path that does not exist exits NONZERO, naming that root', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-rootmissing-'));
+  try {
+    const missingRoot = join(dir, 'does-not-exist-root');
+    assert.equal(existsSync(missingRoot), false, 'precondition: genuinely absent');
+
+    const registryDb = makeRegistry(dir, []); // no registered projects, no legacy anywhere
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', missingRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.notEqual(
+      code,
+      0,
+      'an EXPLICITLY-given but nonexistent --roots path is a hard, loud failure — the caller asserted this exact root (contrast: S4-ALL-10b below)'
+    );
+
+    const combined = stdout + stderr;
+    assert.match(combined, new RegExp(reEscape(missingRoot)), 'the failure names the exact --roots path that was given but does not exist');
+
+    const results = parseJsonLines(stdout);
+    const failureLine = results.find((r) => (r.skipped === true || r.ok === false) && JSON.stringify(r).includes(missingRoot));
+    assert.ok(failureLine, `a skipped:true/failure line names the missing --roots path; results were: ${JSON.stringify(results)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// CONTRAST ARM, same pin: an implicit/default domains root that is simply
+// absent (no --roots flag at all) is BENIGN, unlike S4-ALL-10a's EXPLICIT
+// assertion. Without this contrast, "a missing root fails" would be equally
+// explainable by "any absent root always fails" — which is not the intent;
+// only a caller-asserted, explicit root that turns out missing is an error.
+//
+// ELEVATED NAMED RISK for this specific arm (beyond the group's standing
+// header note): it deliberately omits --roots to exercise the runner's OWN
+// default-root resolution. HOME is overridden below as the only available
+// defense; if the real default resolution ALSO consults a path independent
+// of HOME (e.g. a hardcoded WSL-mirror fallback — the shape
+// scripts/domain-doctor.mjs's OWN default uses per its article:
+// homedir()/.sterling/domains PLUS /mnt/c/Users/<user>/.sterling/domains
+// under WSL), this arm could reach REAL domain stores on a machine that has
+// them — which describes this repo's own dev machine. VERIFY the
+// default-root resolution is fully HOME-scoped (or add a matching isolation
+// seam) before trusting this arm to run safely on a machine with live
+// Sterling projects.
+test('S4-ALL-10b [--all-stores] CONTRAST: no --roots flag at all, with a simply-absent default domains root, stays exit 0 (benign) — proves it is the EXPLICIT assertion that fails, not mere absence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-rootdefault-'));
+  try {
+    const registryDb = makeRegistry(dir, []); // no registered projects either — isolates this to the roots question alone
+    const fakeHome = join(dir, 'fake-home-never-created');
+    assert.equal(existsSync(fakeHome), false, 'precondition: the fake HOME (and therefore its default domains dir) does not exist');
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores'], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: fakeHome,
+    });
+    assert.equal(code, 0, `a simply-absent DEFAULT domains root (no --roots given) must be benign — zero domain stores found is not a failure: ${stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-11a [--all-stores]: a project config with stack_tags as a STRING (schema-invalid, not an array) still enumerates its own store ok, and a LATER-registered second project is unaffected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-badstacktags-'));
+  try {
+    const p1Dir = join(dir, 'proj1-badtags');
+    mkdirSync(join(p1Dir, '.sterling'), { recursive: true });
+    const p1Db = join(p1Dir, '.sterling', 'sterling.db');
+    new SterlingStore(p1Db).close();
+    writeFileSync(join(p1Dir, '.sterling', 'config.json'), JSON.stringify({ stack_tags: 'foo' })); // schema-invalid: string, not array
+
+    const p2Dir = join(dir, 'proj2-healthy');
+    mkdirSync(join(p2Dir, '.sterling'), { recursive: true });
+    const p2Db = join(p2Dir, '.sterling', 'sterling.db');
+    new SterlingStore(p2Db).close();
+
+    const domainsRoot = join(dir, 'domains');
+    mkdirSync(domainsRoot, { recursive: true }); // empty
+
+    const registryDb = makeRegistry(dir, [
+      { repo_path: p1Dir, name: 'proj1-badtags' },
+      { repo_path: p2Dir, name: 'proj2-healthy' },
+    ]);
+
+    const { stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+
+    const results = parseJsonLines(stdout);
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+
+    assert.ok(byDb[p1Db], `proj1's own store still gets a result line despite its malformed stack_tags: ${stderr}`);
+    assert.equal(byDb[p1Db].ok, true, "proj1's own store enumerates ok — a schema-invalid stack_tags value must not block the project's DEFAULT store");
+
+    assert.ok(byDb[p2Db], 'a LATER-registered second project is unaffected — proves per-project catch, not a whole-loop abort');
+    assert.equal(byDb[p2Db].ok, true, "proj2's store enumerates cleanly");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-ALL-11b [--all-stores]: a project config with a domain_paths value that is NOT a string (123, truthy) is skipped:true naming the project, counted as failed, and a LATER-registered second project is unaffected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'migrate-all-baddomainpath-'));
+  try {
+    const p1Dir = join(dir, 'proj1-badmount');
+    mkdirSync(join(p1Dir, '.sterling'), { recursive: true });
+    const p1Db = join(p1Dir, '.sterling', 'sterling.db');
+    new SterlingStore(p1Db).close();
+    writeFileSync(
+      join(p1Dir, '.sterling', 'config.json'),
+      JSON.stringify({ stack_tags: ['x'], domain_paths: { x: 123 } }) // schema-invalid: truthy non-string mount value
+    );
+
+    const p2Dir = join(dir, 'proj2-healthy');
+    mkdirSync(join(p2Dir, '.sterling'), { recursive: true });
+    const p2Db = join(p2Dir, '.sterling', 'sterling.db');
+    new SterlingStore(p2Db).close();
+
+    const domainsRoot = join(dir, 'domains');
+    mkdirSync(domainsRoot, { recursive: true });
+
+    const registryDb = makeRegistry(dir, [
+      { repo_path: p1Dir, name: 'proj1-badmount' },
+      { repo_path: p2Dir, name: 'proj2-healthy' },
+    ]);
+
+    const { code, stdout, stderr } = runMigrateEnv(['--all-stores', '--roots', domainsRoot], {
+      STERLING_REGISTRY_DB: registryDb,
+      HOME: join(dir, 'fake-home'),
+    });
+    assert.notEqual(code, 0, 'a schema-invalid domain_paths value is a genuine failure that must be counted, not swallowed');
+
+    const results = parseJsonLines(stdout);
+    const skippedLine = results.find((r) => r.skipped === true && JSON.stringify(r).includes(p1Dir));
+    assert.ok(skippedLine, `a skipped:true line names the project with the invalid domain_paths value; results were: ${JSON.stringify(results)}`);
+
+    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+    assert.ok(byDb[p2Db], `a LATER-registered second project is unaffected — per-project catch, not a whole-loop abort: ${stderr}`);
+    assert.equal(byDb[p2Db].ok, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

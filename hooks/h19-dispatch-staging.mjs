@@ -4166,7 +4166,14 @@ var decisionSchema = base.extend({
   // enum (codebase|platform|external). Instrument-staleness re-test machinery
   // is DEFERRED — see the decision's rejected alternatives.
   evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
-  measured_by: external_exports.string().min(1).optional()
+  measured_by: external_exports.string().min(1).optional(),
+  // Board 055cfb6a: whether this ruling is standing policy, scoped to one
+  // session, or a one-off instruction — a capture agent that must choose
+  // asks, one that need not can leave it unstated. Optional, no default: a
+  // one-off instruction was once captured as standing policy and rewrote
+  // the governing file three times; absent means unstated, and existing
+  // records round-trip unchanged.
+  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
 }).superRefine(refineSupersession);
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
@@ -4189,7 +4196,22 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  current_ac: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  current_ac: external_exports.array(external_exports.object({
+    ac_id: external_exports.string().min(1),
+    text: external_exports.string().min(1),
+    verifiable_at: verifiableAt,
+    // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
+    // test CAN cover this, because <ruling>" — strict (extra members
+    // refused) so a stray field cannot smuggle unreviewed prose past the
+    // one place a reader checks for a real blocking ruling. Optional:
+    // absent means the AC is ordinarily testable; when present both
+    // members are required, since a reason with no ruling to point at is
+    // just an excuse.
+    untestable_because: external_exports.object({
+      reason: external_exports.string().min(1),
+      blocking_record_id: external_exports.string().uuid()
+    }).strict().optional()
+  })),
   // Concept-article marker (domain decision 7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -4218,7 +4240,11 @@ var featureArticleSchema = base.extend({
   })).optional(),
   version: external_exports.number().int().positive(),
   history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) }))
+  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) })),
+  // Board 6a8507f8: when an instrument-describing article's probe script was
+  // last actually RUN — distinct from updated_at (when the record was
+  // edited). Optional: most articles describe no probe at all.
+  last_executed: external_exports.string().datetime().optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
@@ -4508,7 +4534,9 @@ var RECORD_TYPES = {
     fileKeys: (r) => r.file_keys ?? [],
     // slug leads for the same reason it does on feature_article: it is the
     // handle that survives supersession (board 1e639f32); the title states the ruling.
-    digest: { slug: "plain", title: "plain" }
+    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
+    // shows scope alongside the ruling, not only on knowledge_get.
+    digest: { slug: "plain", title: "plain", authority: "plain" }
   },
   anti_pattern: {
     schema: antiPatternSchema,
@@ -5108,7 +5136,7 @@ var runtimeMarkerSchema = external_exports.object({
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
@@ -5478,14 +5506,25 @@ var UnsupportedSchemaVersionError = class extends Error {
     this.supported = supported;
   }
 };
+function shellQuoteSingle(value) {
+  return `'${value.split("'").join(`'\\''`)}'`;
+}
 var SchemaMigrationRequiredError = class extends Error {
   found;
   supported;
-  constructor(found, supported, operation) {
-    super(`Schema migration required: this store is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run the stable-identity store migration (decision stable-identity-design-v2) against this store file; the migration runner reports the exact command, takes a VACUUM INTO backup first, and bumps user_version last. Nothing was written.`);
+  /**
+   * The absolute path of the store file that needs migrating (measured
+   * defect, Salesforce consumer 2026-08-26): without this a hook surfacing
+   * the error showed only a bare bundle line number, and the user could not
+   * tell WHICH of several candidate stores on the machine to migrate.
+   */
+  db_path;
+  constructor(found, supported, operation, dbPath) {
+    super(`Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
     this.name = "SchemaMigrationRequiredError";
     this.found = found;
     this.supported = supported;
+    this.db_path = dbPath;
   }
 };
 var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
@@ -5530,7 +5569,17 @@ var SterlingStore = class _SterlingStore {
    * nothing written — matching the open-time guard's loud-failure style.
    */
   openedSchemaVersion;
+  /**
+   * The absolute path of this store's database file, retained for
+   * SchemaMigrationRequiredError (measured defect, Salesforce consumer
+   * 2026-08-26): the constructor received the path but never kept it, so a
+   * migration refusal named only found/supported versions — a hook surfacing
+   * the error showed a bare bundle line number and the user could not tell
+   * WHICH store to migrate.
+   */
+  dbPath;
   constructor(path) {
+    this.dbPath = resolvePath(path);
     this.db = new DatabaseSync2(path);
     this.db.exec("PRAGMA busy_timeout=5000");
     const foundSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
@@ -5581,7 +5630,7 @@ var SterlingStore = class _SterlingStore {
    */
   assertV2Surface(operation) {
     if (this.legacySchemaVersion !== void 0) {
-      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation);
+      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation, this.dbPath);
     }
   }
   /**
@@ -6271,6 +6320,25 @@ var SterlingStore = class _SterlingStore {
       hops += 1;
     }
     return { id: current.id, status: current.status, hops };
+  }
+  /**
+   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
+   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
+   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * it only ever has something to say about a record that was itself retired
+   * via supersede(). A record can also be named the target of a rel:'supersedes'
+   * link WITHOUT ever being retired — a clause-level or partial override
+   * recorded via knowledge_link — and that leaves no trace on the target's own
+   * status/terminus. This is the read-time counterpart that makes such edges
+   * visible from the target side. Purely additive/advisory: never mutates
+   * status, never feeds resolveTerminus, never touches the terminus block.
+   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
+   * mount, because an edge lives with its SOURCE record (addLink routes by
+   * source), which may sit in a different store than the target.
+   */
+  inboundSupersedes(id) {
+    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`).all(id);
+    return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
   }
   /**
    * The §3.4 base filter (status + type + stack-tag + file-key join) shared
@@ -7242,6 +7310,7 @@ function pointerLine(store, kind, slug) {
   }
   return `  \u2192 ${kind} [[${slug}]]: ${head}`;
 }
+var UNTESTABLE_REASON_CLIP = 140;
 function renderArticle(store, article, charCap) {
   const lines = [
     `\u25B8 article '${article.slug}' (${article.state}${article.concept_family ? `, concept family '${article.concept_family}'` : ""})`,
@@ -7249,7 +7318,13 @@ function renderArticle(store, article, charCap) {
     `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
   ];
   if (article.current_ac?.length) {
-    lines.push(`ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => `${a.ac_id}: ${a.text}`).join(" | ")}`);
+    lines.push(
+      `ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => {
+        const u = a.untestable_because;
+        const suffix = u ? ` [untestable: ${clip(u.reason, UNTESTABLE_REASON_CLIP)} \u2014 blocking ${String(u.blocking_record_id).slice(0, 8)}]` : "";
+        return `${a.ac_id}: ${a.text}${suffix}`;
+      }).join(" | ")}`
+    );
   }
   const relies = article.dependencies?.relies_on ?? [];
   const relied = article.dependencies?.relied_by ?? [];
@@ -7293,7 +7368,8 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
     `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
-    lines.push(`  \u2192 ${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
+    const authorityMarker = d.authority ? `[${d.authority}] ` : "";
+    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }

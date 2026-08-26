@@ -58,7 +58,9 @@ function buildResourceAdvisory(contested) {
   const holderList = [...new Set(contested.map((c) => `${c.agentType}:${c.agentId}`))].join(', ');
   return (
     `H26 RESOURCE OVERLAP ADVISORY — this dispatch's brief claims exclusive resource(s) ${resourceList}, ` +
-    `already held by live in-flight dispatch(es): ${holderList}. This is warn-only, never a block. Remedy: ` +
+    `already held by live in-flight dispatch(es): ${holderList}. This is warn-only, never a block (decision ` +
+    `6de73875-75b5-4182-8c1c-ca4841c993fa). It may repeat on further dispatches while the holding dispatch stays ` +
+    `live, since the prompt extraction only approximates territory. Remedy: ` +
     `coordinate with the holder before proceeding, or drop the resource claim.`
   );
 }
@@ -219,8 +221,9 @@ try {
   finish(
     `H26 DISPATCH OVERLAP ADVISORY — this dispatch's brief names file(s) that overlap a LIVE in-flight ` +
       `dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is ` +
-      `warn-only, never a block — the prompt extraction only approximates write territory, and this hook ` +
-      `compares only dispatches already present in the live register when this PreToolUse fires. Remedy: ` +
+      `warn-only, never a block (decision 6de73875-75b5-4182-8c1c-ca4841c993fa) — the prompt extraction only approximates write territory, and this hook ` +
+      `compares only dispatches already present in the live register when this PreToolUse fires. It may repeat ` +
+      `on further dispatches while the holding dispatch stays live, for the same reason. Remedy: ` +
       `keep lanes file-disjoint — await the in-flight agent, or re-scope this dispatch's territory so it does ` +
       `not overlap.`
   );

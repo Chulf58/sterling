@@ -751,6 +751,55 @@ test('P2 AC4: toCard bodies are never a single unbroken line for ANY multi-field
   }
 });
 
+// ---------------------------------------------------------------------------
+// S4b rendering markers (e): POST-FIX viewmodel contract. An article whose
+// current_ac has NO untestable_because on any AC renders byte-identical to
+// before (no "Acceptance criteria:" section at all); an article with >=1
+// marked AC gains the section, the marked AC carrying the untestable
+// annotation; a decision with authority shows "[authority]" on its detail
+// line, absent shows none. Most RED against the pre-fix TUI (the section is
+// currently ungated) — the fixer lands renderArticleBody/toCard(decision) in
+// parallel.
+// ---------------------------------------------------------------------------
+
+test('S4b (e): toCard(feature_article) with no untestable_because ACs stays byte-identical — no "Acceptance criteria:" section at all', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist');
+  const card = vm.toCard!(featureArticleRec());
+  assert.doesNotMatch(card.body, /Acceptance criteria:/i, 'no marked AC anywhere → no new section, body unchanged from before');
+});
+
+test('S4b (e): an article with >=1 AC carrying untestable_because gains an "Acceptance criteria:" section naming the reason and blocking id8', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist');
+  const blockingId = randomUUID();
+  const rec = featureArticleRec({
+    current_ac: [
+      { ac_id: 'AC1', text: 'export downloads a file', verifiable_at: 'final' },
+      {
+        ac_id: 'AC2',
+        text: 'export cannot be automated in CI',
+        verifiable_at: 'final',
+        untestable_because: { reason: 'no harness can drive a real browser download', blocking_record_id: blockingId },
+      },
+    ],
+  });
+  const card = vm.toCard!(rec);
+  assert.match(card.body, /Acceptance criteria \(untestable\):/i, 'the section header appears once >=1 AC is marked, naming that the list is untestable-only');
+  const id8 = blockingId.slice(0, 8);
+  assert.match(
+    card.body,
+    new RegExp(`AC2:.*export cannot be automated in CI.*\\[untestable: no harness can drive a real browser download — blocking ${id8}\\]`),
+    'the marked AC carries the untestable annotation; AC1 (unmarked) needs no such suffix'
+  );
+});
+
+test('S4b (e): toCard(decision) with authority shows "[authority]" in the detail line; absent shows none', () => {
+  assert.strictEqual(typeof vm.toCard, 'function', 'viewmodel.toCard must exist');
+  const withAuth = vm.toCard!(decisionRec({ authority: 'one_off' }));
+  assert.match(withAuth.detail, /\[one_off\]/, 'authority renders as a bracketed segment on the detail line');
+  const without = vm.toCard!(decisionRec());
+  assert.doesNotMatch(without.detail, /\[(standing|session_scoped|one_off)\]/, 'no authority → no bracketed segment at all');
+});
+
 test('P2 AC3: knowledgeCountBySource — per-source COUNT(*), project FIRST then domains; EMPTY sources dropped; counts exact (no body fetch)', () => {
   const { stores, cleanup } = mountedFixture(['node']);
   try {

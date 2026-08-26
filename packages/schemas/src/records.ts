@@ -37,6 +37,13 @@ export const decisionSchema = base
     // is DEFERRED — see the decision's rejected alternatives.
     evidence_basis: z.enum(['measured', 'inferred']).optional(),
     measured_by: z.string().min(1).optional(),
+    // Board 055cfb6a: whether this ruling is standing policy, scoped to one
+    // session, or a one-off instruction — a capture agent that must choose
+    // asks, one that need not can leave it unstated. Optional, no default: a
+    // one-off instruction was once captured as standing policy and rewrote
+    // the governing file three times; absent means unstated, and existing
+    // records round-trip unchanged.
+    authority: z.enum(['standing', 'session_scoped', 'one_off']).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -63,7 +70,27 @@ export const featureArticleSchema = base
     // git merge/checkout that only resets mtimes no longer raises false
     // reconcile_needed items (decision 65222971 → its baseline successor).
     file_baselines: z.record(z.string(), z.string()).optional(),
-    current_ac: z.array(z.object({ ac_id: z.string().min(1), text: z.string().min(1), verifiable_at: verifiableAt })),
+    current_ac: z.array(
+      z.object({
+        ac_id: z.string().min(1),
+        text: z.string().min(1),
+        verifiable_at: verifiableAt,
+        // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
+        // test CAN cover this, because <ruling>" — strict (extra members
+        // refused) so a stray field cannot smuggle unreviewed prose past the
+        // one place a reader checks for a real blocking ruling. Optional:
+        // absent means the AC is ordinarily testable; when present both
+        // members are required, since a reason with no ruling to point at is
+        // just an excuse.
+        untestable_because: z
+          .object({
+            reason: z.string().min(1),
+            blocking_record_id: z.string().uuid(),
+          })
+          .strict()
+          .optional(),
+      })
+    ),
     // Concept-article marker (domain decision 7208729b, concept-article-layer
     // standard): set ONLY on concept articles — one per recurring domain concept
     // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -97,6 +124,10 @@ export const featureArticleSchema = base
     version: z.number().int().positive(),
     history: z.array(z.object({ date: z.string().datetime(), event: z.string().min(1), target_id: z.string().uuid().optional() })),
     live_test_refs: z.array(z.object({ ac_id: z.string().min(1), test_paths: z.array(repoPath) })),
+    // Board 6a8507f8: when an instrument-describing article's probe script was
+    // last actually RUN — distinct from updated_at (when the record was
+    // edited). Optional: most articles describe no probe at all.
+    last_executed: z.string().datetime().optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
@@ -551,7 +582,9 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
     // slug leads for the same reason it does on feature_article: it is the
     // handle that survives supersession (board 1e639f32); the title states the ruling.
-    digest: { slug: 'plain', title: 'plain' },
+    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
+    // shows scope alongside the ruling, not only on knowledge_get.
+    digest: { slug: 'plain', title: 'plain', authority: 'plain' },
   },
   anti_pattern: {
     schema: antiPatternSchema,

@@ -80,6 +80,8 @@ try {
   const declared = config.toolchains.flatMap((tc) => (tc.test_globs ?? []).map((g) => `${g} (${tc.adapter})`));
   deny(
     `H18: '${rel}' matches NO declared test glob — the test-writer writes ONLY test files (§9.1). ` +
+      `This is the test-writer output wall: doer/checker isolation deliberately restricts this role to declared test globs (§6 H18); ` +
+      `source, fixtures and config return to coder/conductor. ` +
       `Compared against: ${declared.length ? declared.join(', ') : '(none — every declared toolchain has an empty test_globs)'}. ` +
       `If this IS meant to be a test, its path or extension does not match any of those — author it at a path that does. ` +
       `If it is genuinely source, docs or config, that belongs to the coder/conductor: exit contract-violated naming the file.`
