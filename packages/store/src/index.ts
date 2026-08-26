@@ -1996,6 +1996,16 @@ export class SterlingStore {
         | { body: string; machine_state: string; pending_exit: string | null }
         | undefined;
       if (!row) throw new Error(`casTransitionMerge: no run '${runId}'`);
+      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
+      // body (board 4c3a0c37, Codex outside-family review): the top-of-loop
+      // guard closes the retry-spanning gap but not the intra-iteration race
+      // where a migration commits a new version + rewritten body between that
+      // guard's PRAGMA and this SELECT — the row just read would then be a
+      // NEW-schema body parsed through the OLD schema, dropping newly-added
+      // fields, and the body-CAS below would still succeed against that same
+      // freshly-read body. This second check catches a migration before/during
+      // the read; a migration AFTER it that rewrites the body loses the body-CAS.
+      this.assertLiveSchemaVersion('casTransitionMerge');
       if (row.machine_state !== observed) {
         throw new Error(
           `CAS rejected: run '${runId}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
@@ -2104,6 +2114,14 @@ export class SterlingStore {
       this.assertLiveSchemaVersion('updateRunOptimistic');
       const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
       if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
+      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
+      // body (board 4c3a0c37, Codex outside-family review): closes the
+      // intra-iteration race where a migration commits a new version + rewritten
+      // body between the top-of-loop guard's PRAGMA and this SELECT, which would
+      // otherwise parse a NEW-schema body through the OLD schema (dropping
+      // newly-added fields) while the body-CAS below still succeeds against that
+      // same freshly-read body. A migration AFTER this check loses the body-CAS.
+      this.assertLiveSchemaVersion('updateRunOptimistic');
       const current = JSON.parse(row.body) as RunRecord;
       const next = runRecordSchema.parse(mutate(current));
       if (next.machine_state !== current.machine_state) {
