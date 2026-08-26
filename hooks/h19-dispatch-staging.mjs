@@ -7173,6 +7173,18 @@ var SterlingStore = class _SterlingStore {
     });
     return result;
   }
+  /**
+   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
+   * withTransaction above): on a plain SterlingStore there is only ONE
+   * physical store, so routing by scope is a no-op — this is a straight alias
+   * for withTransaction, kept as its own method so SterlingStore and
+   * MountedStores satisfy the same ToolStore surface and the tool layer never
+   * has to know whether domains are mounted. MountedStores overrides this to
+   * actually route by scope and to guard against cross-mount nesting.
+   */
+  withTransactionForScope(_scope, fn) {
+    return this.withTransaction(fn);
+  }
 };
 
 // scripts/hooks/lib/common.mjs
@@ -7311,10 +7323,22 @@ function pointerLine(store, kind, slug) {
   return `  \u2192 ${kind} [[${slug}]]: ${head}`;
 }
 var UNTESTABLE_REASON_CLIP = 140;
+var ARTICLE_BODY_FLOOR = 4096;
+var ARTICLE_DIGEST_EXCERPT = 1200;
+var ARTICLE_SLUG_CLIP = 256;
 function renderArticle(store, article, charCap) {
+  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})`;
+  const body = String(article.what_it_does ?? "");
+  if (body.length > ARTICLE_BODY_FLOOR) {
+    return [
+      header,
+      `WHAT IT DOES (digested \u2014 full body is ${body.length} chars, withheld to fit the reader's view): ${clip(body, ARTICLE_DIGEST_EXCERPT)}`,
+      `\u25B8 FULL RECORD (intended_behavior, acceptance criteria, one-hop dependencies withheld): knowledge_get ${article.id} \u2014 windowed: knowledge_get ${article.id} field:"what_it_does" offset:0 length:4000, then page by offset.`
+    ].join("\n");
+  }
   const lines = [
-    `\u25B8 article '${article.slug}' (${article.state}${article.concept_family ? `, concept family '${article.concept_family}'` : ""})`,
-    `WHAT IT DOES: ${clip(article.what_it_does, charCap)}`,
+    header,
+    `WHAT IT DOES: ${clip(body, charCap)}`,
     `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
   ];
   if (article.current_ac?.length) {

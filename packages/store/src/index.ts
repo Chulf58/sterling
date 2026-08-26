@@ -410,6 +410,12 @@ export type ToolStore = Pick<
   // needs one atomic boundary spanning several store calls (decision
   // compaction-tooling-windowed-read-plus-split) — see withTransaction above.
   | 'withTransaction'
+  // Per-mount transaction boundary (board d47a9e2d): knowledge_extract's
+  // domain-scoped create+update+links must commit atomically on the ONE
+  // mount that owns the source record. On plain SterlingStore (one physical
+  // store) this is just an alias for withTransaction; MountedStores routes it
+  // to the store holding `scope` and rejects cross-mount nesting.
+  | 'withTransactionForScope'
 >;
 
 export class SterlingStore {
@@ -2702,5 +2708,18 @@ export class SterlingStore {
       result = fn();
     });
     return result;
+  }
+
+  /**
+   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
+   * withTransaction above): on a plain SterlingStore there is only ONE
+   * physical store, so routing by scope is a no-op — this is a straight alias
+   * for withTransaction, kept as its own method so SterlingStore and
+   * MountedStores satisfy the same ToolStore surface and the tool layer never
+   * has to know whether domains are mounted. MountedStores overrides this to
+   * actually route by scope and to guard against cross-mount nesting.
+   */
+  withTransactionForScope<T>(_scope: string, fn: () => T): T {
+    return this.withTransaction(fn);
   }
 }

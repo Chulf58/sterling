@@ -1098,6 +1098,72 @@ test('articlesBySlug resolves an exact slug deterministically — a slug that lo
   }
 });
 
+// ---------------------------------------------------------------------------
+// withTransactionForScope on a PLAIN SterlingStore (single physical store) —
+// a straight alias for withTransaction(fn); scope is accepted but never
+// routed/validated, since there is only one store to route to (board
+// d47a9e2d, per-mount transaction routing for domain-scoped knowledge_extract).
+// Written from the board item's spec text only — no implementation source
+// (index.ts) was read.
+// ---------------------------------------------------------------------------
+
+test('withTransactionForScope on a plain SterlingStore: a straight alias for withTransaction — the callback runs and its writes land', () => {
+  const { dir, store } = tempStore();
+  try {
+    let recId!: string;
+    (store as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('project', () => {
+      recId = store.create(decision()).id;
+    });
+    // SABOTAGE: withTransactionForScope silently no-ops instead of
+    // delegating to withTransaction (never calls fn at all) -> recId stays
+    // undefined and store.get throws/returns undefined, this goes red.
+    assert.ok(store.get(recId), 'the write performed inside the callback landed (baseline: the alias actually runs fn)');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('withTransactionForScope on a plain SterlingStore: an ARBITRARY/domain-shaped scope string is accepted identically — never validated against a mount table that does not exist here', () => {
+  const { dir, store } = tempStore();
+  try {
+    let recId!: string;
+    // 'domain:anything' names no real mount on a plain SterlingStore — the
+    // alias must not reject it, since there is nothing to route to.
+    (store as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:anything', () => {
+      recId = store.create(decision()).id;
+    });
+    // SABOTAGE: import MountedStores' "unmounted domain" refusal logic into
+    // the plain-store alias too -> this call would throw instead of
+    // succeeding, and this assertion is never reached.
+    assert.ok(store.get(recId), 'a domain-shaped scope string on a plain SterlingStore is accepted — it is a straight alias, not scope-validated routing');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('withTransactionForScope on a plain SterlingStore: a throw inside fn rolls back — the alias is a REAL transaction, not a bare fn() call', () => {
+  const { dir, store } = tempStore();
+  try {
+    let recId: string | undefined;
+    assert.throws(() => {
+      (store as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('project', () => {
+        recId = store.create(decision()).id;
+        throw new Error('boom - force rollback via the alias');
+      });
+    }, /boom - force rollback via the alias/);
+    // SABOTAGE: implement the alias as `withTransactionForScope = (_scope,
+    // fn) => fn()` with no real delegation to withTransaction's BEGIN/COMMIT
+    // -> the create() commits immediately regardless of the later throw,
+    // and this assertion goes red.
+    assert.equal(store.get(recId!), undefined, 'the create performed before the throw was rolled back — proves delegation to the REAL withTransaction, not a bare fn() call');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('articlesBySlug serves the live head only, newest first — superseded versions never', () => {
   const { dir, store } = tempStore();
   try {

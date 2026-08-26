@@ -219,7 +219,30 @@ export interface KnowledgePreflightResult {
   answerability: 'ungoverned' | 'verify_targets' | 'insufficient';
   reason?: 'too_little_vocabulary';
   terms: string[];
-  matches: { id: string; type: string; title: string; matched_on: string[]; central: string[] }[];
+  matches: {
+    id: string;
+    type: string;
+    title: string;
+    matched_on: string[];
+    central: string[];
+    /** board c6e3561f disclosure-carry: records elsewhere holding a
+     *  rel:'supersedes' edge onto this match — same shape knowledge_get and
+     *  knowledge_query-full surface, OMITTED when there are none. */
+    inbound_supersedes?: InboundSupersedesEntry[];
+  }[];
+}
+
+/** One entry of the additive `inbound_supersedes` disclosure — {id} always,
+ *  slug/title when cheaply available, `status` pinned, and `superseded_by`
+ *  present only when the holder is itself not active (board c6e3561f). Shared
+ *  by knowledge_get, knowledge_query-full and knowledge_preflight so the shape
+ *  is declared once (see SterlingTools.inboundSupersedesEntry). */
+export interface InboundSupersedesEntry {
+  id: string;
+  slug?: string;
+  title?: string;
+  status: string;
+  superseded_by?: string;
 }
 
 /**
@@ -404,10 +427,22 @@ export class SterlingTools {
     this.repoRoot = deps.repoRoot;
   }
 
-  /** §16.1.9: unbuilt checks emit check_skipped where they would have run — never silent success. */
-  private skip(check: string, runId: string | undefined): SkippedCheck {
+  /**
+   * §16.1.9: unbuilt checks emit check_skipped where they would have run — never
+   * silent success. `persist` (default true) writes the audit row immediately;
+   * pass false to DEFER persistence — the caller then gets the SkippedCheck back
+   * (via the result's check_skipped) and is responsible for recording the audit
+   * row itself. The only deferring caller is knowledge_extract on a domain-scoped
+   * source: its txn opens on the DOMAIN mount, but recordCheckSkipped always
+   * routes to the PROJECT mount (MountedStores.recordCheckSkipped), so an
+   * in-transaction audit write would commit independently of the domain BEGIN and
+   * survive a rolled-back extract. Deferring lets extract persist the audit rows
+   * only AFTER the mount transaction commits, keeping a rollback trace-free while
+   * staying never-silent on success.
+   */
+  private skip(check: string, runId: string | undefined, persist = true): SkippedCheck {
     const skipped = { check, reason: 'not_built' };
-    this.store.recordCheckSkipped(check, skipped.reason, runId, this.now());
+    if (persist) this.store.recordCheckSkipped(check, skipped.reason, runId, this.now());
     return skipped;
   }
 
@@ -1160,7 +1195,13 @@ export class SterlingTools {
     };
   }
 
-  knowledgeCreate(type: string, fields: Record<string, unknown>): CreateResult {
+  knowledgeCreate(type: string, fields: Record<string, unknown>, opts?: { deferCheckSkipped?: boolean }): CreateResult {
+    // deferCheckSkipped (default false): when true, the check_skipped audit rows
+    // are NOT persisted here — they are still returned on the result so the
+    // caller records them itself. Only knowledge_extract sets this, and only so a
+    // domain-mount transaction's audit rows land post-commit (see `skip`). Every
+    // other caller omits it, so their behaviour is byte-identical.
+    const persistSkips = opts?.deferCheckSkipped !== true;
     this.refuseServerOwnedFields(fields, 'knowledge_create');
     const ts = this.now();
     // The envelope is SERVER-OWNED: strip these keys from caller fields before
@@ -1249,7 +1290,7 @@ export class SterlingTools {
           );
         }
       }
-      skipped.push(this.skip('noise-gate', this.activeRunId()));
+      skipped.push(this.skip('noise-gate', this.activeRunId(), persistSkips));
     } else if (type === 'feature_article') {
       // SLUG COLLISION IS REFUSED LOUD (board 56c8a509). Two records under one
       // slug is worse than one wrong record, because retrieval serves BOTH and
@@ -1278,11 +1319,11 @@ export class SterlingTools {
           );
         }
       }
-      skipped.push(this.skip('dedup-merge', this.activeRunId()));
+      skipped.push(this.skip('dedup-merge', this.activeRunId(), persistSkips));
     } else {
       // dedup guarding is defined for anti_patterns and feature_article slugs;
       // other types skip loudly
-      skipped.push(this.skip('dedup-merge', this.activeRunId()));
+      skipped.push(this.skip('dedup-merge', this.activeRunId(), persistSkips));
     }
 
     // STABLE HANDLES (board 1e639f32): decision / anti_pattern / research_finding
@@ -2325,15 +2366,22 @@ export class SterlingTools {
     if (terms.length < AXIS_MIN_HITS) {
       return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matches: [] };
     }
-    const matches = this.axisCandidateMatches(text, terms).map(({ record, hits }) => ({
-      id: record.id,
-      type: record.type,
-      // research_finding carries no title — its question IS the identity;
-      // an article's slug beats its long title as the handle.
-      title: SterlingTools.axisRecordTitle(record),
-      matched_on: hits,
-      central: recordCentralityHits(record, text),
-    }));
+    const matches = this.axisCandidateMatches(text, terms).map(({ record, hits }) => {
+      // board c6e3561f disclosure-carry: a matched record carries the same
+      // inbound-supersedes disclosure as knowledge_get / knowledge_query-full,
+      // omitted when nothing supersedes it.
+      const inbound = this.inboundSupersedesFor(record.id);
+      return {
+        id: record.id,
+        type: record.type,
+        // research_finding carries no title — its question IS the identity;
+        // an article's slug beats its long title as the handle.
+        title: SterlingTools.axisRecordTitle(record),
+        matched_on: hits,
+        central: recordCentralityHits(record, text),
+        ...(inbound.length ? { inbound_supersedes: inbound } : {}),
+      };
+    });
     return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
   }
 
@@ -2477,7 +2525,19 @@ export class SterlingTools {
     const links = (rest.links ?? []) as { rel: string; target_id: string }[];
     const semantic = links.filter((l) => l.rel !== 'supersedes');
     const supersedesCount = links.length - semantic.length;
-    return { ...rest, links: semantic, ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}) };
+    // board c6e3561f disclosure-carry: the FULL projection carries the same
+    // inbound-supersedes disclosure knowledge_get does (records elsewhere
+    // holding a rel:'supersedes' edge onto this one). DIGEST deliberately does
+    // NOT — digestRecord is a separate path that never reaches here, keeping
+    // the per-record reverse-edge lookup off the landscape projection (perf).
+    // Omitted when empty, matching the omit-when-empty contract.
+    const inbound = this.inboundSupersedesFor(record.id);
+    return {
+      ...rest,
+      links: semantic,
+      ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}),
+      ...(inbound.length ? { inbound_supersedes: inbound } : {}),
+    };
   }
 
   /** The citation format the repo actually writes: 8-char id prefixes. */
@@ -2685,9 +2745,7 @@ export class SterlingTools {
     // read already follows.
     let served: Record<string, unknown> = full as unknown as Record<string, unknown>;
     if (options?.version === undefined && options?.field === undefined) {
-      const inbound = this.store
-        .inboundSupersedes(record.id)
-        .map((r) => SterlingTools.inboundSupersedesEntry(r));
+      const inbound = this.inboundSupersedesFor(record.id);
       if (inbound.length) {
         served = { ...served, inbound_supersedes: inbound };
       }
@@ -2713,9 +2771,7 @@ export class SterlingTools {
    * dropped by the existing undefined filter in inboundSupersedes() —
    * removal already deletes the edge rows, so that case does not reach here.
    */
-  private static inboundSupersedesEntry(
-    record: DurableRecord
-  ): { id: string; slug?: string; title?: string; status: string; superseded_by?: string } {
+  private static inboundSupersedesEntry(record: DurableRecord): InboundSupersedesEntry {
     const slug = (record as unknown as { slug?: string }).slug;
     const title = SterlingTools.axisRecordTitle(record);
     const supersededBy = (record as unknown as { superseded_by?: string | null }).superseded_by;
@@ -2726,6 +2782,20 @@ export class SterlingTools {
       status: record.status,
       ...(record.status !== 'active' && supersededBy ? { superseded_by: supersededBy } : {}),
     };
+  }
+
+  /**
+   * The single inbound-supersedes computation shared by every read surface
+   * that carries the disclosure (knowledge_get part (a); knowledge_query-full
+   * and knowledge_preflight, board c6e3561f): store.inboundSupersedes fans the
+   * reverse edge across mounts, each holder is hydrated to the pinned
+   * {id, slug?, title?, status, superseded_by?} entry shape. Returns [] when
+   * nothing supersedes the record — every caller spreads it conditionally so
+   * the key is OMITTED (never present-and-empty), matching the omit-when-empty
+   * contract the rest of the read surface follows.
+   */
+  private inboundSupersedesFor(id: string): InboundSupersedesEntry[] {
+    return this.store.inboundSupersedes(id).map((r) => SterlingTools.inboundSupersedesEntry(r));
   }
 
   /**
@@ -3954,16 +4024,19 @@ export class SterlingTools {
       );
     }
 
-    // FIXER-MODE (converging review finding, domain atomicity): MountedStores'
-    // withTransaction targets the PROJECT store only (see mounted.ts) — a
-    // domain-scoped source's create + source-trim + both addLinks would route
-    // to the domain store and commit OUTSIDE this method's transaction, so a
-    // late failure could orphan partial state. No existing ToolStore/MountedStores
-    // API reaches the per-mount store instance without new plumbing, so a
-    // domain-scoped source is refused loudly rather than accepted unsafely.
-    if (original.scope !== 'project') {
+    // PER-MOUNT TRANSACTION ROUTING (board d47a9e2d): a domain-scoped source's
+    // create + source-trim + both addLinks now commit atomically on the ONE
+    // mount that owns the source, via store.withTransactionForScope(original.scope, ...)
+    // below — see mounted.ts's storeFor/withTransactionForScope. The one
+    // remaining hazard is `resolves`: maintenance todos are always
+    // project-local (mounted.ts, §3.3), and extract removes each claimed item
+    // INSIDE the transaction (below) — a domain-scoped transaction cannot
+    // atomically delete a project-store row, so a non-empty `resolves` is
+    // refused loudly for a domain-scoped source rather than silently split
+    // across two connections.
+    if (original.scope !== 'project' && resolves && resolves.length > 0) {
       throw new Error(
-        `knowledge_extract: source '${original.id}' is domain-scoped (${original.scope}) — extract currently supports project-scoped sources only; domain source refused pending per-mount transaction routing. Nothing was written.`
+        `knowledge_extract: source '${original.id}' is domain-scoped (${original.scope}) and 'resolves' names ${resolves.length} item(s) — maintenance todos are project-local, so a domain-scoped extract's transaction cannot atomically close them. Retry without resolves, or close those items separately. Nothing was written.`
       );
     }
 
@@ -4050,15 +4123,49 @@ export class SterlingTools {
 
     let newId!: string;
     let sourceVersion!: number;
-    // ONE transaction (mirrors knowledgeSplit): create the new record, trim the
-    // source, write BOTH provenance edges, drain resolves — any failure rolls the
-    // whole thing back byte-for-byte.
-    this.store.withTransaction(() => {
+    let deferredSkips: SkippedCheck[] = [];
+    // FIXER-MODE (converging review finding, project-scope regression): only a
+    // DOMAIN-scoped source needs the defer-then-flush dance below — its
+    // transaction opens on the domain mount, while recordCheckSkipped always
+    // routes to the PROJECT mount (see the comment above), so an inline audit
+    // write there would commit independently of the domain BEGIN. A
+    // project-scoped source's transaction already IS the project mount, so
+    // its audit row was atomic inline before board d47a9e2d and stays that way
+    // here — deferring it would instead turn a committed project extract into
+    // a window where a post-commit flush failure errors after the records are
+    // already durable. original.scope is 'project' or 'domain:<name>' (see the
+    // PER-MOUNT TRANSACTION ROUTING comment above / the !== 'project' checks
+    // elsewhere in this method), so the same test used there decides here.
+    const isDomainScope = original.scope !== 'project';
+    // ONE transaction on the source's OWNING mount (board d47a9e2d): create the
+    // new record, trim the source, write BOTH provenance edges, drain resolves.
+    // The knowledge RECORDS and their provenance links commit atomically on the
+    // owning mount — any failure inside this body rolls all of them back. What
+    // does NOT belong inside is the check_skipped AUDIT ROW: recordCheckSkipped
+    // always routes to the PROJECT mount (MountedStores.recordCheckSkipped), so
+    // for a domain-scoped source it would commit independently of this domain
+    // BEGIN and survive a rollback. So knowledgeCreate DEFERS its skips here and
+    // they are persisted AFTER a successful commit below — a rolled-back extract
+    // therefore leaves NO audit row, a committed one still records them (P5). Note
+    // the SEAM (deliberately narrow, not the atomicity guarantee the records get):
+    // an audit-row write that itself failed after a successful record commit would
+    // lose the audit row, not corrupt the records. original.scope is the SOLE
+    // routing input here (id/alias/slug/prefix resolution above already ran across
+    // every mount; once `original` is resolved, only its own scope decides where
+    // this transaction opens).
+    this.store.withTransactionForScope(original.scope, () => {
       // scope inherited from the source (Q5); an explicit new_record.fields.scope
       // that DIFFERS from the source's scope was already refused above, so the
       // spread here can only ever carry the same scope back (or none at all) —
       // it can no longer override it.
-      const created = this.knowledgeCreate(newType, { scope: original.scope, ...new_record.fields });
+      const created = this.knowledgeCreate(newType, { scope: original.scope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
+      // created.check_skipped is populated either way (knowledgeCreate always
+      // returns what it skipped) — but for a project-scoped source it was
+      // ALREADY persisted inline above (deferCheckSkipped: false), so only a
+      // domain-scoped source's skips are collected here for the post-commit
+      // flush; collecting them unconditionally would double-write the audit
+      // row for project scope.
+      deferredSkips = isDomainScope ? (created.check_skipped ?? []) : [];
       newId = created.record.id;
       const updateBody: Record<string, unknown> = { [field]: splicedValue };
       if (typeHasHistory) {
@@ -4081,6 +4188,13 @@ export class SterlingTools {
       // transaction so a claim only lands alongside an extract that landed.
       for (const claim of resolveClaims) this.store.remove(claim.id, ts);
     });
+
+    // Post-commit: persist the deferred check_skipped audit rows now that the
+    // mount transaction has committed (see the deferCheckSkipped rationale above).
+    // Same (check, reason, runId, at) shape the in-line skip() would have used.
+    for (const s of deferredSkips) {
+      this.store.recordCheckSkipped(s.check, s.reason, this.activeRunId(), this.now());
+    }
 
     return {
       extracted: find,

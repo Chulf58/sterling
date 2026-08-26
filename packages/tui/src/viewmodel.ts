@@ -64,7 +64,40 @@ interface ReferenceMaterialRec {
   summary: string; source_date: string; capture_date: string;
 }
 
+/** board c6e3561f disclosure-carry: one inbound-superseder entry as surfaced by
+ *  knowledge_get / knowledge_query-full / knowledge_preflight — records
+ *  elsewhere holding a rel:'supersedes' edge onto this one. */
+interface InboundSupersedesEntryView {
+  id: string;
+  slug?: string;
+  title?: string;
+  status: string;
+  superseded_by?: string;
+}
+
+/** Gated body section for the `inbound_supersedes` disclosure — matches the
+ *  marked-AC section pattern in toCard: absent or empty → '' (no section), so a
+ *  record with no inbound superseders renders byte-identical to before. The
+ *  field is COMPUTED upstream (the tool read surface); a raw store record that
+ *  never carries it simply renders no section. */
+function inboundSupersedesSection(rec: unknown): string {
+  const entries = (rec as { inbound_supersedes?: InboundSupersedesEntryView[] }).inbound_supersedes;
+  if (!entries || entries.length === 0) return '';
+  const lines = entries.map((e) => {
+    const handle = e.slug ?? e.id.slice(0, 8);
+    const via = e.superseded_by ? ` → ${String(e.superseded_by).slice(0, 8)}` : '';
+    return `  - ${handle}${e.title ? `: ${e.title}` : ''} [${e.status}${via}]`;
+  });
+  return `\n\nSuperseded by (inbound):\n${lines.join('\n')}`;
+}
+
 export function toCard(rec: unknown): Card {
+  const card = baseCard(rec);
+  const section = inboundSupersedesSection(rec);
+  return section ? { ...card, body: card.body + section } : card;
+}
+
+function baseCard(rec: unknown): Card {
   const r = rec as { id: string; type: string };
   switch (r.type) {
     case 'feature_article': {

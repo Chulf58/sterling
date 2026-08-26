@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync,
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent } from '../lib/update.mjs';
+import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, stampRemediationScriptsIfMissing } from '../lib/update.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
@@ -878,3 +878,369 @@ test('the migration sweep attributes itself: migrate-stores.mjs is invoked with 
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+// ── 4. remediation-script stamp (board 1b3c7bf3) ────────────────────────────
+//
+// SPEC-ONLY (update.mjs's implementation was NOT read to author these): mirrors
+// stampConsumerRoleIfAbsent's shape exactly (same read-modify-write, same
+// loud-but-nonfatal posture, same log-driven assertions), applied instead to
+// store_guard.allow_scripts via appendMissingRemediation from
+// scripts/lib/store-remediation.mjs. Called in runUpdate BEFORE the
+// store-migration loop.
+
+test('stampRemediationScriptsIfMissing: adds exactly the missing scripts, preserving existing allow_scripts entries/order and other config fields', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ backup_path: '/tmp/backups', store_guard: { allow_scripts: ['scripts/some-other-script.mjs', 'scripts/migrate-stores.mjs'] } }, null, 2)
+    );
+
+    const lines = [];
+    stampRemediationScriptsIfMissing(dir, (l) => lines.push(l));
+
+    const written = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.deepEqual(
+      written.store_guard.allow_scripts,
+      ['scripts/some-other-script.mjs', 'scripts/migrate-stores.mjs', 'scripts/migration-preflight.mjs'],
+      'only the missing script is appended; the existing entries and their order survive'
+    );
+    assert.equal(written.backup_path, '/tmp/backups', 'other fields survive the read-modify-write');
+    assert.ok(lines.some((l) => l.includes('scripts/migration-preflight.mjs')), 'the added script is disclosed via log');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: regenerate store_guard.allow_scripts from REMEDIATION_SCRIPTS
+// instead of appending onto the recorded array — 'scripts/some-other-script.mjs'
+// vanishes from `written`, the first deepEqual goes red.
+// SABOTAGE (silent): perform the append but never call log() with the added
+// script's name — the `lines.some(...)` disclosure assertion goes red.
+
+test('stampRemediationScriptsIfMissing: idempotent no-op (distinct log line, byte-unchanged) when both are already present', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: ['scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'] } }, null, 2));
+    const before = readFileSync(configPath, 'utf8');
+
+    const lines = [];
+    stampRemediationScriptsIfMissing(dir, (l) => lines.push(l));
+
+    assert.equal(readFileSync(configPath, 'utf8'), before, 'no rewrite when nothing is missing');
+    assert.ok(lines.length > 0, 'a distinct no-op log line is still emitted (loud, not silent)');
+    assert.ok(!lines.some((l) => /\badded\b/i.test(l)), 'the no-op log line is distinguishable from the added-something case — it never claims an addition');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: always emit the same "added: migration-preflight.mjs,
+// migrate-stores.mjs" log line regardless of whether anything was actually
+// appended — the `!lines.some(/\badded\b/i...)` assertion goes red because the
+// no-op case would read identically to the real-addition case.
+// SABOTAGE (rewrite): write the file back even when appendMissingRemediation
+// reports nothing added (e.g. an unconditional writeFileSync) — the
+// byte-unchanged assertion goes red (JSON.stringify re-serialization changes
+// key order/whitespace even when the logical content is the same).
+
+test('stampRemediationScriptsIfMissing: an unwritable config warns loudly but does not throw', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: [] } }));
+    chmodSync(configPath, 0o444);
+    chmodSync(join(dir, '.sterling'), 0o555);
+
+    const lines = [];
+    assert.doesNotThrow(() => stampRemediationScriptsIfMissing(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => l.includes('FAILED') && l.includes('nonfatal')), 'the failure is loud, non-fatal (matches stampConsumerRoleIfAbsent\'s convention)');
+  } finally {
+    chmodSync(join(dir, '.sterling'), 0o755);
+    chmodSync(join(dir, '.sterling', 'config.json'), 0o644);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: let the write's thrown error propagate uncaught instead of
+// catching and logging it — assert.doesNotThrow goes red.
+
+test('stampRemediationScriptsIfMissing: no .sterling/config.json prints a skip note, does not throw', () => {
+  const dir = scratchCwd();
+  try {
+    const lines = [];
+    assert.doesNotThrow(() => stampRemediationScriptsIfMissing(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => l.includes('SKIPPED')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: attempt readFileSync unconditionally without checking existsSync
+// first — this throws ENOENT uncaught (if uncaught) rather than logging a
+// SKIPPED note, going red on doesNotThrow or on the SKIPPED assertion.
+
+test('stampRemediationScriptsIfMissing: scoped to its own cwd parameter — a call targeting dirA never writes dirB (the primitive itself takes no ambient sibling reach; that is layered on top by runUpdate, pinned below)', () => {
+  const dirA = scratchCwd();
+  const dirB = scratchCwd();
+  try {
+    for (const d of [dirA, dirB]) {
+      mkdirSync(join(d, '.sterling'), { recursive: true });
+      writeFileSync(join(d, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: [] } }));
+    }
+    const beforeB = readFileSync(join(dirB, '.sterling', 'config.json'), 'utf8');
+
+    stampRemediationScriptsIfMissing(dirA, () => {});
+
+    assert.equal(readFileSync(join(dirB, '.sterling', 'config.json'), 'utf8'), beforeB, 'a call scoped to dirA never writes a different directory\'s config');
+    const writtenA = JSON.parse(readFileSync(join(dirA, '.sterling', 'config.json'), 'utf8'));
+    assert.deepEqual(writtenA.store_guard.allow_scripts, ['scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs']);
+  } finally {
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: resolve the config path from some ambient/global location instead
+// of the passed-in cwd parameter — dirB's untouched assertion goes red (or
+// dirA's own write silently fails because it wrote somewhere else).
+
+// ── 5. sibling-project reach (board 1b3c7bf3 round 2) ───────────────────────
+//
+// SPEC-ONLY (update.mjs's implementation was NOT read to author these): the
+// PRIMITIVE above stays scoped to one cwd — the new behavior is a per-project
+// SWEEP inside runUpdate's existing registered-projects loop that calls it (or
+// an equivalent stampSiblingRemediation wrapper) once per registered sibling,
+// disclosing each with a `remediation-script reach [<name>]` log line,
+// loud-but-nonfatal. This supersedes the old assumption (the test above, prior
+// to this round) that a sibling's config was categorically untouched by
+// /sterling:update — it never was untouched at the runUpdate level; no test
+// had exercised that level at all until now.
+
+test('runUpdate: the project fan-out additively merges remediation scripts into EACH registered sibling\'s config, disclosed per-project; existing entries/order preserved; an already-current sibling is a no-op', async () => {
+  const cwd = scratchCwd();
+  const projA = scratchCwd(); // frozen: missing migrate-stores.mjs only
+  const projB = scratchCwd(); // already has both, non-canonical order — must be a no-op
+  try {
+    mkdirSync(join(projA, '.sterling'), { recursive: true });
+    writeFileSync(
+      join(projA, '.sterling', 'config.json'),
+      JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'] } }, null, 2)
+    );
+    mkdirSync(join(projB, '.sterling'), { recursive: true });
+    writeFileSync(
+      join(projB, '.sterling', 'config.json'),
+      JSON.stringify({ store_guard: { allow_scripts: ['scripts/migrate-stores.mjs', 'scripts/migration-preflight.mjs'] } }, null, 2)
+    );
+    const beforeB = readFileSync(join(projB, '.sterling', 'config.json'), 'utf8');
+
+    const { exec } = fakeExec({ behind: 1 });
+    const lines = [];
+    const report = await runUpdate({
+      cwd,
+      exec,
+      log: (l) => lines.push(l),
+      projects: [{ name: 'Alpha', repo_path: projA }, { name: 'Beta', repo_path: projB }],
+      opts: {},
+    });
+
+    assert.equal(report.exit, 0, JSON.stringify(report));
+
+    const afterA = JSON.parse(readFileSync(join(projA, '.sterling', 'config.json'), 'utf8'));
+    assert.deepEqual(
+      afterA.store_guard.allow_scripts,
+      ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'],
+      'the sibling gains exactly the missing script; existing entries and their order survive'
+    );
+
+    assert.equal(readFileSync(join(projB, '.sterling', 'config.json'), 'utf8'), beforeB, 'a sibling that already has both scripts is a no-op — byte-unchanged');
+
+    assert.ok(lines.some((l) => l.includes('remediation-script reach [Alpha]')), 'the sweep discloses itself per-project by name (Alpha)');
+    assert.ok(lines.some((l) => l.includes('remediation-script reach [Beta]')), 'the sweep discloses itself per-project by name even for a no-op (Beta)');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(projA, { recursive: true, force: true });
+    rmSync(projB, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: drop the stampSiblingRemediation call (or the loop that invokes it
+// per registered project) from runUpdate's project fan-out — projA's config
+// stays exactly as recorded, the first deepEqual (afterA.store_guard.allow_scripts)
+// goes red, and neither 'remediation-script reach [...]' log line appears.
+
+test('runUpdate: an already-current update (no --force) still sweeps remediation scripts for the clone AND its registered siblings before the early "already current" return', async () => {
+  const dir = scratchCwd();
+  const sibling = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs'] } }));
+    mkdirSync(join(sibling, '.sterling'), { recursive: true });
+    writeFileSync(join(sibling, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: [] } }));
+
+    const { exec, calls } = fakeExec({ behind: 0 });
+    const report = await runUpdate({
+      cwd: dir,
+      exec,
+      log: () => {},
+      projects: [{ name: 'Sib', repo_path: sibling }],
+      opts: {},
+    });
+
+    assert.equal(report.exit, 0, JSON.stringify(report));
+    assert.equal(calls.filter((c) => c.startsWith('npm')).length, 0, 'still a true no-op — no build/test ran even though the config was mutated');
+    assert.equal(calls.filter((c) => c.includes('merge')).length, 0, 'no fast-forward — genuinely already current');
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0, 'the ordinary per-project sync-agents fan-out still does not run on a no-op — only the remediation sweep is special-cased onto this path');
+
+    const cloneAfter = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    assert.deepEqual(
+      cloneAfter.store_guard.allow_scripts,
+      ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'],
+      'the clone still gains the missing remediation scripts even though the update itself is a no-op'
+    );
+
+    const sibAfter = JSON.parse(readFileSync(join(sibling, '.sterling', 'config.json'), 'utf8'));
+    assert.deepEqual(
+      sibAfter.store_guard.allow_scripts,
+      ['scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'],
+      'the registered sibling also gains both scripts on a no-op update'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(sibling, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: move the stampRemediationScriptsIfMissing/stampSiblingRemediation
+// sweep to AFTER the early 'already current' return — that code becomes
+// unreachable on this path, so both config files stay exactly as recorded and
+// both deepEqual assertions (cloneAfter / sibAfter) go red.
+
+// Round 2 follow-up fix — a throwing project-registry resolver on the no-op
+// path must be caught, not left to reject runUpdate or half-apply the sweep.
+// Injection mirrors the established lazy-loader convention in this suite
+// ('the project list is resolved lazily AFTER the build' above uses
+// `projects: async () => {...}`); here the same slot is given a resolver that
+// throws instead of resolving, on the already-current (behind:0) path.
+test('runUpdate: on the already-current no-op path, a throwing project-registry resolver is caught — remediation still succeeds, sibling sweep is skipped, no unhandled throw', async () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs'] } }));
+
+    const { exec } = fakeExec({ behind: 0 });
+    const lines = [];
+    const throwingProjects = async () => {
+      throw new Error('registry unavailable: ENOENT');
+    };
+
+    let report;
+    await assert.doesNotReject(async () => {
+      report = await runUpdate({ cwd: dir, exec, log: (l) => lines.push(l), projects: throwingProjects, opts: {} });
+    }, 'runUpdate must not reject even when the project-registry resolver throws on the already-current no-op path');
+
+    assert.equal(report.exit, 0, JSON.stringify(report));
+    assert.ok(
+      lines.some((l) => /registry unavailable/i.test(l) || /sibling remediation skipped/i.test(l)),
+      'a nonfatal warning names the registry failure and/or that the sibling sweep was skipped'
+    );
+
+    const cloneAfter = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    assert.deepEqual(
+      cloneAfter.store_guard.allow_scripts,
+      ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'],
+      'the clone config is still remediated even though the sibling registry resolution failed — no half-applied state'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: remove the try/catch around the no-op-path registry resolution
+// (let a throw from resolving `projects` propagate uncaught) — runUpdate's
+// returned promise rejects instead of resolving, so assert.doesNotReject goes
+// red; if instead the throw were swallowed WITHOUT the clone remediation
+// having already run, the final deepEqual on cloneAfter would go red too
+// (whichever ran first, the try/catch must not skip the clone's own sweep).
+
+// The two wrong-shape cases below moved here from init-ensure.test.mjs: init
+// gates on parseConfig at load (init.mjs:88) and REFUSES a schema-invalid
+// config outright, so the wrong-shape merge branch is unreachable through
+// init. update.mjs:268-279 reads the RAW json with no schema validation, so
+// the guard is actually live on THIS path — this is where it is pinned.
+test('stampRemediationScriptsIfMissing: a WRONG-SHAPED store_guard (not an object) logs a warning naming store_guard, is nonfatal, and is left byte-identical — never replaced', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ store_guard: 'x' }, null, 2)); // wrong shape entirely
+    const before = readFileSync(configPath, 'utf8');
+
+    const lines = [];
+    assert.doesNotThrow(() => stampRemediationScriptsIfMissing(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => /store_guard/i.test(l)), 'a warning names store_guard');
+    assert.equal(readFileSync(configPath, 'utf8'), before, 'the malformed field is left exactly as recorded — never replaced, never coerced into an array/object');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: skip the typeof/shape guard and attempt the merge unconditionally
+// (e.g. `store_guard.allow_scripts = store_guard.allow_scripts || []`) against
+// a non-object store_guard — this throws uncaught (assert.doesNotThrow goes
+// red) instead of the loud-skip-and-continue the spec requires.
+
+test('stampRemediationScriptsIfMissing: a WRONG-SHAPED allow_scripts (a string, not an array) logs a warning naming allow_scripts, is nonfatal, and is left exactly as recorded — never character-spread into an array', () => {
+  const dir = scratchCwd();
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const configPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: 'scripts/some-admin-script.mjs' } }, null, 2)); // string, not array
+    const before = readFileSync(configPath, 'utf8');
+
+    const lines = [];
+    assert.doesNotThrow(() => stampRemediationScriptsIfMissing(dir, (l) => lines.push(l)));
+    assert.ok(lines.some((l) => /allow_scripts/i.test(l)), 'a warning names allow_scripts');
+    assert.equal(readFileSync(configPath, 'utf8'), before, 'the malformed field is left exactly as recorded — never coerced into an array, never replaced');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: treat a string allow_scripts as a single-element array (e.g.
+// `[...allowScripts]` on a string spreads its CHARACTERS) and append the
+// missing scripts onto that — the byte-identical assertion goes red (the file
+// would be rewritten with a corrupted allow_scripts).
+
+test('runUpdate stamps the remediation scripts BEFORE the first store-migration step (ordering)', async () => {
+  const cwd = scratchCwd();
+  try {
+    mkdirSync(join(cwd, '.sterling'), { recursive: true });
+    const configPath = join(cwd, '.sterling', 'config.json');
+    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs'] } }));
+    const storePath = join(cwd, '.sterling', 'sterling.db');
+    legacyStoreAt(storePath);
+
+    const events = [];
+    const { exec: rawExec } = fakeExec({ behind: 1 });
+    const exec = (cmd, args) => {
+      events.push({ t: 'exec', line: `${cmd} ${args.join(' ')}` });
+      return rawExec(cmd, args);
+    };
+    const log = (l) => events.push({ t: 'log', line: l });
+
+    const report = await runUpdate({ cwd, exec, log, projects: [], opts: {} });
+    assert.equal(report.exit, 0, JSON.stringify(report));
+
+    const firstRemediationLog = events.findIndex((e) => e.t === 'log' && (e.line.includes('scripts/migration-preflight.mjs') || e.line.includes('scripts/migrate-stores.mjs')));
+    const firstMigrationStep = events.findIndex((e) => e.t === 'exec' && e.line.includes('migrate-stores.mjs') && e.line.includes(storePath));
+    assert.ok(firstRemediationLog !== -1, 'the remediation stamp discloses the added scripts by name via log');
+    assert.ok(firstMigrationStep !== -1, 'a store-migration step ran against the legacy store');
+    assert.ok(firstRemediationLog < firstMigrationStep, 'the remediation stamp log line precedes the first migration step call');
+
+    const written = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.deepEqual(written.store_guard.allow_scripts, ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: move the stampRemediationScriptsIfMissing call to AFTER the
+// store-migration loop inside runUpdate — firstRemediationLog would land
+// after firstMigrationStep (or the config would still be missing the
+// remediation scripts by the time migrate-stores.mjs runs), and the ordering
+// assertion (or the final deepEqual) goes red.

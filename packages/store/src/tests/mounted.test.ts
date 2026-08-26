@@ -405,6 +405,157 @@ test('addLink: an existing identical cross-store edge dedups — source returned
 
 // ------------------- reviewer knowledge loop v2 (run r-d630, phase 1 — AC1) -------------------
 
+// ------------------- per-mount transaction routing (board d47a9e2d) -------------------
+// MountedStores.withTransactionForScope(scope, fn) routes an open transaction to the
+// PHYSICAL store owning `scope`, via the existing storeFor(scope) routing already used
+// by create/get/etc. A nested call to a DIFFERENT mount is rejected loudly; a nested
+// call to the SAME mount joins via that store's own txDepth. Written from the board
+// item's spec text only — no implementation source (mounted.ts, index.ts) was read.
+
+test('withTransactionForScope: a domain-scoped transaction writes land in the OWNING domain mount, not the project store', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    let recId!: string;
+    (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:alpha', () => {
+      recId = stores.create(ref('domain:alpha')).id;
+    });
+    // SABOTAGE: withTransactionForScope always opens on the project store
+    // regardless of scope -> irrelevant to create()'s own routing alone, but
+    // paired with the rollback pin below this proves the wrapper actually
+    // opened on the alpha store specifically.
+    assert.ok(stores.querySource('alpha', { cap: 10 }).some((r) => r.id === recId), 'the write performed inside the domain-scoped transaction is visible in that domain mount');
+    assert.equal(stores.project.get(recId), undefined, 'the domain-scoped write never lands in the project store');
+  } finally {
+    cleanup();
+  }
+});
+
+test('withTransactionForScope: a throw inside fn rolls back on the OWNING domain store — a real transaction, not a routing no-op', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    let recId: string | undefined;
+    assert.throws(() => {
+      (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:alpha', () => {
+        recId = stores.create(ref('domain:alpha')).id;
+        throw new Error('boom - force rollback');
+      });
+    }, /boom - force rollback/);
+    // SABOTAGE: implement withTransactionForScope as a bare routing-only
+    // wrapper (`(_scope, fn) => fn()`, no real BEGIN/COMMIT on the domain
+    // store) -> create()'s single-statement write would still commit on its
+    // own regardless of the later throw, and this assertion goes red.
+    assert.equal(stores.querySource('alpha', { cap: 10 }).some((r) => r.id === recId), false, 'the create performed inside the throwing callback was rolled back on the domain store');
+  } finally {
+    cleanup();
+  }
+});
+
+test('withTransactionForScope: project scope routes to the project store', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    let recId!: string;
+    (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('project', () => {
+      recId = stores.create(dec('proj-scoped-tx')).id;
+    });
+    // SABOTAGE: 'project' falls through to some default/no-op path instead
+    // of the actual project store -> stores.project.get would be undefined.
+    assert.ok(stores.project.get(recId), 'a project-scope transaction writes land in the project store');
+  } finally {
+    cleanup();
+  }
+});
+
+test('withTransactionForScope: an unmounted domain scope is rejected loudly BEFORE any transaction opens — fn never runs, nothing written anywhere', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    let fnRan = false;
+    assert.throws(() => {
+      (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:ghost', () => {
+        fnRan = true;
+      });
+    }, /unmounted domain/);
+    // SABOTAGE: open a transaction on some fallback store (e.g. the project
+    // store) before checking the scope resolves to a real mount -> fn would
+    // run (fnRan true) even though the scope never routes anywhere.
+    assert.equal(fnRan, false, 'fn never executes — the refusal fires from storeFor before any transaction opens, same message as the existing write-routing refusal');
+  } finally {
+    cleanup();
+  }
+});
+
+test("withTransactionForScope: a NESTED call targeting the SAME mount joins (works) via that store's own txDepth", () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    let outerId!: string;
+    let innerId!: string;
+    let threw: unknown = null;
+    try {
+      (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:alpha', () => {
+        outerId = stores.create(ref('domain:alpha')).id;
+        (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:alpha', () => {
+          innerId = stores.create({ ...ref('domain:alpha'), location: 'docs/y.md' }).id;
+        });
+      });
+    } catch (err) {
+      threw = err;
+    }
+    // SABOTAGE: reject EVERY nested call regardless of same-vs-different
+    // mount (an over-strict guard that never checks which mount is already
+    // open) -> threw is non-null and this assertion goes red.
+    assert.equal(threw, null, `a same-mount nested call must join, not throw (got: ${String(threw)})`);
+    const alphaRecs = stores.querySource('alpha', { cap: 10 });
+    assert.ok(alphaRecs.some((r) => r.id === outerId) && alphaRecs.some((r) => r.id === innerId), 'both the outer write and the joined nested write persisted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('withTransactionForScope: a NESTED call targeting a DIFFERENT mount is rejected loudly, and the whole outer transaction rolls back', () => {
+  const { stores, cleanup } = harness(['alpha', 'beta']);
+  try {
+    let outerId: string | undefined;
+    let threw: unknown = null;
+    try {
+      (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:alpha', () => {
+        outerId = stores.create(ref('domain:alpha')).id;
+        (stores as unknown as { withTransactionForScope: (scope: string, fn: () => void) => void }).withTransactionForScope('domain:beta', () => {
+          stores.create(ref('domain:beta'));
+        });
+      });
+    } catch (err) {
+      threw = err;
+    }
+    // SABOTAGE: allow a nested call to silently open a second, independent
+    // transaction on the different mount instead of rejecting it -> threw
+    // stays null and this assertion goes red.
+    assert.ok(threw, 'a nested cross-mount call must throw loudly, never silently open a second transaction');
+    // SABOTAGE: catch-and-swallow the cross-mount error inside
+    // withTransactionForScope itself, letting the outer transaction commit
+    // anyway -> the outer write would still persist and this goes red.
+    // (Inference from the throw-rolls-back contract pinned directly above in
+    // this file — an exception propagating out of fn aborts that fn's own
+    // transaction; this is the same contract, one level up.)
+    assert.equal(stores.querySource('alpha', { cap: 10 }).some((r) => r.id === outerId), false, "the outer transaction's own write rolled back too — the cross-mount rejection propagates and aborts the whole outer transaction");
+  } finally {
+    cleanup();
+  }
+});
+
+test('withTransaction (pre-existing, project-only) still works unchanged — regression guard against withTransactionForScope replacing it', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    let recId!: string;
+    (stores as unknown as { withTransaction: (fn: () => void) => void }).withTransaction(() => {
+      recId = stores.create(dec('legacy-withTransaction')).id;
+    });
+    // SABOTAGE: remove/rename the old withTransaction method while adding
+    // withTransactionForScope -> TypeError instead of reaching this line.
+    assert.ok(stores.project.get(recId), 'the pre-existing project-only withTransaction still works and still writes to the project store (used unchanged by knowledgeSplit)');
+  } finally {
+    cleanup();
+  }
+});
+
 test('MountedStores forwards setRunReviewMandatory to the project store; loud on missing run (AC1)', () => {
   const { stores, cleanup } = harness([]);
   try {

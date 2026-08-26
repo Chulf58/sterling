@@ -1178,23 +1178,89 @@ test('attestation source: extracting FROM an attestation record is refused, refe
 });
 
 // ===========================================================================
-// Invariant 10 — DOMAIN SOURCE. Extracting FROM a domain-scoped source is
-// refused loudly, naming the domain scope. The file's default harness()
-// wraps a plain project-only SterlingStore and genuinely CANNOT mint a
-// domain-scoped record — domainHarness() (declared above, mirroring
-// domain-routing.test.ts's own precedent) is what makes this reachable, not
-// faked.
+// Invariant 10 — DOMAIN SOURCE (REVISED per board d47a9e2d — per-mount
+// transaction routing). Extracting FROM a domain-scoped source is now
+// ACCEPTED: create + source-update + links all commit ATOMICALLY on the
+// OWNING domain mount via MountedStores.withTransactionForScope. A
+// domain-scoped source carrying a non-empty `resolves` is still refused
+// loudly — project-local maintenance todos cannot close atomically inside a
+// domain transaction. The file's default harness() wraps a plain
+// project-only SterlingStore and genuinely CANNOT mint a domain-scoped
+// record — domainHarness() (declared above, mirroring domain-routing.test.ts's
+// own precedent) is what makes this reachable, not faked. Written from the
+// board item's spec text only — no implementation source (tools.ts,
+// mounted.ts) was read.
 // ===========================================================================
 
-test('domain source: extracting FROM a domain-scoped source record is refused loudly, naming the domain scope; nothing written', () => {
-  const { tools, cleanup } = domainHarness();
+test('domain source: extracting FROM a domain-scoped source now succeeds — create + source-update + links commit atomically on the owning domain mount', () => {
+  const { store, tools, cleanup } = domainHarness();
   try {
-    const find = 'the domain-owned clause that must never be extracted from here';
+    const find = 'the domain-owned clause that is now extractable in place';
     const created = tools.knowledgeCreate('reference_material', domainRefFields(find)) as unknown as { record: Loose };
     const source = created.record;
     assert.equal(source.scope, 'domain:genesys', 'sanity: the source really landed domain-scoped');
+    const before_count = decisionCount(tools);
+    const beforeDomainDecisions = store.querySource('genesys', { types: ['decision'] }).length;
+
+    const raw = runExtract(tools, {
+      id: source.id,
+      field: 'summary',
+      find,
+      new_record: { type: 'decision', fields: decisionNewRecordFields() },
+    });
+    // SABOTAGE: reinstate the v1 domain-source bar (refuse before any write)
+    // -> this call throws instead of returning a receipt, `raw` unreached.
+    assert.ok(raw, 'a domain-scoped source is no longer refused — extract now completes');
+
+    const after = tools.knowledgeGet(source.id as string) as unknown as Loose;
+    // SABOTAGE: accept the call but leave the field untouched (e.g. only
+    // create the new record, skipping the source-update leg of the write)
+    // -> this equality goes red.
+    assert.equal(after.summary, (source.summary as string).replace(find, ''), 'the domain source field is updated in place, same contract as a project source');
+    assert.equal(after.status, 'active', 'the domain source stays active');
+
+    // discover the new record's id via the source's own 'cites' edge, same
+    // discovery discipline invariant 1 uses for the project path — never by
+    // guessing the receipt's undocumented internal id field.
+    const { relKey, targetKey } = linksFieldShape(tools, 'reference_material');
+    const afterLinks = (after.links ?? []) as Loose[];
+    const citesEdge = afterLinks.find((l) => l[relKey] === 'cites');
+    // SABOTAGE: skip the links write for a domain source (treat it as a
+    // special case doing only create+update) -> undefined, this goes red.
+    assert.ok(citesEdge, "the domain source's own links carry a 'cites' edge — atomicity covers all three writes, not just the field update");
+    const newId = citesEdge![targetKey] as string;
+
+    // the new record must land on the SAME (domain) mount, atomically with
+    // the source update — never silently created in the project store.
+    // SABOTAGE: route new_record's create() through the project store
+    // instead of the owning domain mount -> newId is absent from this list
+    // and both assertions below go red.
+    const afterDomainDecisions = store.querySource('genesys', { types: ['decision'] });
+    assert.equal(afterDomainDecisions.length, beforeDomainDecisions + 1, 'exactly one new decision landed in the DOMAIN mount (atomic with the source update)');
+    assert.ok(afterDomainDecisions.some((r) => (r as unknown as { id: string }).id === newId), 'the record found in the domain mount is the SAME one the cites edge names');
+    assert.equal(decisionCount(tools), before_count + 1, 'the cross-store total also grows by exactly one');
+  } finally {
+    cleanup();
+  }
+});
+
+test("domain source + resolves: a non-empty resolves on a domain-scoped source is refused loudly — project-local maintenance items cannot close atomically inside a domain transaction; nothing written", () => {
+  const { store, tools, cleanup } = domainHarness();
+  try {
+    const find = 'the domain-owned clause guarded against resolves';
+    const created = tools.knowledgeCreate('reference_material', domainRefFields(find)) as unknown as { record: Loose };
+    const source = created.record;
     const before = tools.knowledgeGet(source.id as string) as unknown as Loose;
     const before_count = decisionCount(tools);
+    // A LEGITIMATE, existing maintenance item — the control: this proves the
+    // refusal fires because the SOURCE is domain-scoped, not merely because
+    // the named item is itself bogus (the same confound invariant 3's
+    // resolves-bogus test isolates for the project path).
+    const item = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed',
+      text: 'a genuine, resolvable reconcile item — refused only because the source is domain-scoped',
+      file_keys: [],
+    });
 
     assert.throws(
       () =>
@@ -1203,15 +1269,21 @@ test('domain source: extracting FROM a domain-scoped source record is refused lo
           field: 'summary',
           find,
           new_record: { type: 'decision', fields: decisionNewRecordFields() },
+          resolves: [item.record.id],
         }),
-      /domain:genesys|domain/i,
-      // SABOTAGE: apply extract's ordinary project-source update-in-place
-      // path to a domain-scoped source too (skip the domain-source bar
-      // entirely) -> "Missing expected exception".
-      'extracting from a domain-scoped source must be refused loudly, naming the domain scope'
+      /domain|atomic|project.local/i,
+      // SABOTAGE: allow resolves to drain on a domain source too (drop the
+      // domain+resolves bar while keeping the general domain-acceptance
+      // change) -> "Missing expected exception".
+      'a domain-scoped source with a non-empty resolves must still be refused loudly, even when the named item is itself perfectly valid'
     );
     assert.deepEqual(tools.knowledgeGet(source.id as string), before, 'domain source byte-identical after the refused extract');
     assert.equal(decisionCount(tools), before_count, 'no orphan new decision record created');
+    assert.equal(store.querySource('genesys', { types: ['decision'] }).length, 0, 'no orphan new record landed in the domain mount either');
+    const open = tools.maintenanceQuery({ cap: 1000 });
+    // SABOTAGE: drain the named item anyway even though the whole call must
+    // be refused -> the item would be missing from the open queue below.
+    assert.ok(open.some((t) => (t as unknown as Loose).id === item.record.id), 'the named item stays open — the whole call was refused before any drain');
   } finally {
     cleanup();
   }
@@ -1253,6 +1325,173 @@ test('history TRUE-branch: extracting from a feature_article source appends EXAC
     // SABOTAGE: append a generic/unrelated history entry disconnected from
     // this extract (e.g. a blank/boilerplate stub) -> this assertion goes red.
     assert.match(JSON.stringify(added), /extract/i, "the appended entry's own text references the extraction (not a generic/unrelated stub)");
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// Invariant 12 — d47a9e2d ATOMICITY FIX regression pins. The fix is ALREADY
+// IN THE TREE (packages/mcp-server/src/tools.ts): for a domain-scoped
+// knowledge_extract, the create + source-update + links commit atomically on
+// the OWNING domain mount (pinned above, invariant 10), and the PROJECT-LOCAL
+// check_skipped audit row(s) (emitted by the new record's own knowledgeCreate
+// leg — see server.test.ts's 'check_skipped' pin) are now persisted only
+// AFTER that domain transaction commits. PRE-FIX, those rows were written to
+// the project store DURING the domain transaction, so a rollback of the
+// domain write still left a 'dedup-merge'/'noise-gate' skip row behind in the
+// project store — a real cross-store atomicity leak. These two tests are
+// REGRESSION PINS on that already-shipped fix, run against the store surface
+// directly (SterlingStore.listCheckSkipped, confirmed via
+// packages/store/src/tests/runs.test.ts's own '§16.1.9' pin — the only
+// queryable surface the store exposes for this state; the receipt's
+// check_skipped array is NOT used here because it reports what the CALLER
+// was told, not what the PROJECT STORE actually persisted, which is exactly
+// the distinction the pre-fix leak hid). Written from the board d47a9e2d spec
+// text only — no implementation source (tools.ts) was read.
+//
+// EXPECTED SHAPE AGAINST THE CURRENT (FIXED) TREE: both tests PASS today —
+// these are regression pins on shipped behavior, not TDD-red pins on
+// unbuilt behavior. Each assertion below names the one-line SABOTAGE that
+// must turn it red if the fix were reverted or partially undone.
+//
+// ORDERING: the CONTROL (success path) runs FIRST. It is the control for the
+// late-failure pin that follows: it proves check_skipped recording for a
+// domain-scoped extract is not globally dead, so an unchanged row-count on
+// the failure path is evidence of the atomicity fix specifically — not
+// evidence that check_skipped recording never fires at all, which would make
+// the failure pin's assertion (c) pass vacuously.
+// ===========================================================================
+
+test('d47a9e2d atomicity fix — CONTROL: a successful domain-scoped extract still records its check_skipped in the project store, deferred to after commit (never-silent-success preserved)', () => {
+  const { store, tools, cleanup } = domainHarness();
+  try {
+    const find = 'the domain-owned clause whose extraction still owes a check_skipped record';
+    const created = tools.knowledgeCreate('reference_material', domainRefFields(find)) as unknown as { record: Loose };
+    const source = created.record;
+    assert.equal(source.scope, 'domain:genesys', 'sanity: the source is domain-scoped');
+
+    const projectStore = store.project as unknown as { listCheckSkipped: (runId?: string) => { check_name: string }[] };
+    // Snapshot the full BEFORE list (not just its length) — the source
+    // fixture's own knowledgeCreate call already persisted its own
+    // 'dedup-merge' row, so the DELTA (computed below via slice), not
+    // "does dedup-merge appear anywhere in the whole after-list", is what
+    // isolates THIS extract's contribution and keeps the pin from passing
+    // vacuously off a pre-existing row.
+    const beforeSkipped = projectStore.listCheckSkipped();
+
+    const raw = runExtract(tools, {
+      id: source.id,
+      field: 'summary',
+      find,
+      new_record: { type: 'decision', fields: decisionNewRecordFields() },
+    });
+    assert.ok(raw, 'sanity: the extract itself still succeeds');
+
+    const afterSkipped = projectStore.listCheckSkipped();
+    const newSkipped = afterSkipped.slice(beforeSkipped.length);
+    // SABOTAGE: delete the post-commit recordCheckSkipped flush entirely
+    // (rather than merely moving it to after commit) -> no row ever lands,
+    // this assertion goes red — never-silent-success would be defeated.
+    assert.ok(
+      newSkipped.length > 0,
+      'a successful domain-scoped extract still persists at least one NEW check_skipped row to the PROJECT store (beyond whatever the fixture setup already recorded) — deferred to after commit, never dropped'
+    );
+    // SABOTAGE: flush the WRONG check name, or flush a stale/empty list
+    // captured before the create leg ran -> this assertion goes red.
+    assert.ok(
+      newSkipped.some((c) => c.check_name === 'dedup-merge'),
+      "the new record's own dedup-merge check_skipped (emitted by its knowledgeCreate leg) is among the NEWLY persisted rows — checked against the delta so a pre-existing dedup-merge row from the fixture's own source creation can't satisfy this vacuously"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('d47a9e2d atomicity fix: a late failure (addLink, AFTER knowledgeCreate) inside a domain-scoped extract rolls back the domain write AND leaves no check_skipped row in the project store', () => {
+  const { store, tools, cleanup } = domainHarness();
+  try {
+    const find = 'the domain-owned clause whose late-failing extraction must leave no trace anywhere';
+    const created = tools.knowledgeCreate('reference_material', domainRefFields(find)) as unknown as { record: Loose };
+    const source = created.record;
+    const before = tools.knowledgeGet(source.id as string) as unknown as Loose;
+    const before_count = decisionCount(tools);
+    const beforeDomainDecisions = store.querySource('genesys', { types: ['decision'] }).length;
+    const projectStore = store.project as unknown as { listCheckSkipped: (runId?: string) => { check_name: string }[] };
+    const beforeSkipped = projectStore.listCheckSkipped().length;
+
+    // Inject a failure AFTER knowledgeCreate can possibly have run: addLink
+    // is only ever invoked with the NEW record's own id (see invariant 1/10's
+    // own discovery idiom, linksFieldShape/citesEdge), so a throw here can
+    // only fire once the create leg has already executed inside this same
+    // domain transaction — never before it. Same real store.addLink surface
+    // used throughout this file and mounted.test.ts's own
+    // withTransactionForScope rollback precedent (a genuine throw inside the
+    // transaction callback, not a faked refusal).
+    const realAddLink = store.addLink.bind(store);
+    (store as unknown as { addLink: (...a: unknown[]) => unknown }).addLink = () => {
+      throw new Error('injected late-failure: addLink boom (d47a9e2d regression probe)');
+    };
+    try {
+      assert.throws(
+        () =>
+          runExtract(tools, {
+            id: source.id,
+            field: 'summary',
+            find,
+            new_record: { type: 'decision', fields: decisionNewRecordFields() },
+          }),
+        /injected late-failure/,
+        // CONTROL, not the verdict: proves the failure genuinely fired
+        // from inside the transaction (after id resolution/validation), not
+        // from some unrelated upfront refusal that would make (a)/(b)/(c)
+        // below pass vacuously. SABOTAGE: swallow the injected error and
+        // succeed anyway -> "Missing expected exception".
+        'CONTROL: the injected addLink failure propagates out of knowledgeExtract unaltered — the failure really fired inside the transaction'
+      );
+    } finally {
+      (store as unknown as { addLink: (...a: unknown[]) => unknown }).addLink = realAddLink as unknown as (...a: unknown[]) => unknown;
+    }
+
+    // (a) the new record does not exist anywhere — domain transaction rolled back.
+    // SABOTAGE: commit the domain transaction regardless of the later addLink
+    // throw (e.g. catch-and-ignore around only the addLink leg) -> either
+    // count below moves and this assertion goes red.
+    assert.equal(decisionCount(tools), before_count, 'no new decision exists anywhere in the cross-store total after the rolled-back attempt');
+    assert.equal(
+      store.querySource('genesys', { types: ['decision'] }).length,
+      beforeDomainDecisions,
+      'no orphan new decision landed in the domain mount either'
+    );
+
+    // (b) the source record is unchanged.
+    // SABOTAGE: apply the source field edit in a SEPARATE transaction from
+    // the addLink leg (split the write instead of one BEGIN IMMEDIATE) ->
+    // the field/version would have moved even though the call threw, and
+    // this deepEqual goes red.
+    assert.deepEqual(
+      tools.knowledgeGet(source.id as string),
+      before,
+      'the domain source is byte-identical after the rolled-back attempt — no partial field edit survived'
+    );
+
+    // (c) NO check_skipped row was persisted to the PROJECT store as a result
+    // of THIS failed attempt. Observed via the closest queryable surface the
+    // store exposes for this state: SterlingStore.listCheckSkipped's row
+    // count on the PROJECT store specifically (store.project), asserted as
+    // an exact delta rather than a looser "some new row" check, since that
+    // is the precise pre-fix defect: a 'dedup-merge' row landing in the
+    // project store DURING the domain transaction, surviving its rollback.
+    // SABOTAGE: revert to persisting check_skipped inside the transaction
+    // (call recordCheckSkipped eagerly per-write instead of collecting and
+    // flushing once after the domain transaction commits) -> this assertion
+    // goes red — a 'dedup-merge' row appears despite the rollback.
+    const afterSkipped = projectStore.listCheckSkipped();
+    assert.equal(
+      afterSkipped.length,
+      beforeSkipped,
+      'no check_skipped row was persisted to the project store as a result of the failed attempt'
+    );
   } finally {
     cleanup();
   }
