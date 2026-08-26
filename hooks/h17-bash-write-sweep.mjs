@@ -6,8 +6,27 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h17-bash-write-sweep.mjs
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync3, rmSync, mkdirSync as mkdirSync2, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, statSync, realpathSync, constants as FS } from "node:fs";
-import { join as join2, dirname as dirname3, relative, resolve as resolve2, sep } from "node:path";
+import {
+  writeFileSync,
+  existsSync as existsSync3,
+  rmSync,
+  rmdirSync,
+  mkdirSync as mkdirSync2,
+  readdirSync,
+  opendirSync,
+  openSync,
+  readSync,
+  writeSync,
+  ftruncateSync,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  statSync,
+  statfsSync,
+  realpathSync,
+  constants as FS
+} from "node:fs";
+import { join as join2, resolve as resolve2, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -7060,16 +7079,26 @@ var NO_RUN = "no-run";
 var PROCFS_FD_DIR = process.env.STERLING_H17_PROCFS_FD_DIR || "/proc/self/fd";
 var IS_WIN32 = process.platform === "win32";
 var UNATTESTABLE_SYMLINK = "symlink-target";
+var PROC_SUPER_MAGIC = 0x9fa0n;
 function secureIoUnavailableReason(probeDir) {
   if (IS_WIN32) return null;
   if (!existsSync3(PROCFS_FD_DIR)) return "secure I/O unavailable: /proc/self/fd absent";
+  let vfs;
+  try {
+    vfs = statfsSync(PROCFS_FD_DIR, { bigint: true });
+  } catch (e) {
+    return `secure I/O unavailable: '${PROCFS_FD_DIR}' could not be statfs'd to confirm it is procfs (${e && e.code || e && e.message || e})`;
+  }
+  if (vfs.type !== PROC_SUPER_MAGIC) {
+    return `secure I/O unavailable: '${PROCFS_FD_DIR}' is not on procfs (filesystem magic 0x${vfs.type.toString(16)}, expected 0x${PROC_SUPER_MAGIC.toString(16)}) \u2014 only the kernel's procfs maps ARBITRARY descriptor numbers, and an ordinary directory of numeric-named entries cannot, however many of them it pre-seeds`;
+  }
   let fd = null;
   try {
     fd = openRootAnchorDir(probeDir);
     const anchored = `${PROCFS_FD_DIR}/${fd}`;
-    const entry = lstatSync(anchored);
-    const through = statSync(anchored);
-    const direct = fstatSync(fd);
+    const entry = lstatSync(anchored, { bigint: true });
+    const through = statSync(anchored, { bigint: true });
+    const direct = fstatSync(fd, { bigint: true });
     closeSync(fd);
     fd = null;
     if (!entry.isSymbolicLink()) {
@@ -7095,9 +7124,6 @@ function openPinnedDir(path) {
 }
 function openRootAnchorDir(path) {
   return openSync(path, FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NONBLOCK);
-}
-function anchoredPath(fd, name) {
-  return `${PROCFS_FD_DIR}/${fd}/${name}`;
 }
 function assertResolvableComponent(component, rel, what) {
   if (component === "" || component === "." || component === ".." || component.includes("\0") || component.includes("/")) {
@@ -7131,6 +7157,198 @@ function openLeafNoFollow(abs, extraFlags = 0) {
     closePinned(fd, e);
     throw e;
   }
+}
+var rootAnchorFd = null;
+var rootAnchorDir = null;
+var rootAnchorCwd = null;
+function repoRootDir(cwd2) {
+  if (IS_WIN32) return cwd2;
+  if (rootAnchorDir === null) {
+    rootAnchorCwd = cwd2;
+    rootAnchorFd = openRootAnchorDir(cwd2);
+    rootAnchorDir = `${PROCFS_FD_DIR}/${rootAnchorFd}`;
+    return rootAnchorDir;
+  }
+  if (cwd2 !== rootAnchorCwd) {
+    throw new Error(
+      `refusing to resolve '${cwd2}' through the root anchor pinned for '${rootAnchorCwd}': this process holds ONE repo-root descriptor and a second root would silently resolve against the first, which is a wrong-namespace resolution no descriptor pin can detect. A hook invocation has exactly one root; two means the caller is not the hook, and it must open its own anchor rather than inherit this one.`
+    );
+  }
+  return rootAnchorDir;
+}
+function withPinnedDir(dirPath, fn) {
+  if (IS_WIN32) return fn(dirPath);
+  let fd = null;
+  let primary;
+  try {
+    fd = openPinnedDir(dirPath);
+    return fn(`${PROCFS_FD_DIR}/${fd}`);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(fd, primary);
+  }
+}
+function withPinnedParent(cwd2, rel, what, opts, fn) {
+  const createParents = !!(opts && opts.createParents);
+  const segments = rel.replace(/\/+$/, "").split("/");
+  for (const s2 of segments) assertResolvableComponent(s2, rel, what);
+  const leaf = segments[segments.length - 1];
+  const step = (dirHandle, i, soFar) => {
+    if (i === segments.length - 1) return fn(dirHandle, leaf);
+    const name = segments[i];
+    const nextRel = soFar ? `${soFar}/${name}` : name;
+    const anchored = `${dirHandle}/${name}`;
+    let kind = lstatKind(anchored);
+    if (kind === "absent") {
+      if (!createParents) return fn(null, leaf);
+      try {
+        mkdirSync2(anchored);
+      } catch (e) {
+        if (!e || e.code !== "EEXIST") throw e;
+      }
+      kind = lstatKind(anchored);
+    }
+    if (kind !== "dir") {
+      throw new Error(
+        `${what} path component '${nextRel}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+      );
+    }
+    return withPinnedDir(anchored, (childHandle) => step(childHandle, i + 1, nextRel));
+  };
+  return step(repoRootDir(cwd2), 0, "");
+}
+function classifyLeafAt(parentHandle, leaf) {
+  const anchored = `${parentHandle}/${leaf}`;
+  if (IS_WIN32) {
+    let st;
+    try {
+      st = lstatSync(anchored);
+    } catch (e) {
+      if (e && e.code === "ENOENT") return { kind: "absent", fd: null, st: null, anchored };
+      throw e;
+    }
+    if (st.isSymbolicLink()) return { kind: "symlink", fd: null, st, anchored };
+    if (st.isDirectory()) return { kind: "dir", fd: null, st, anchored };
+    if (st.isFile()) return { kind: "file", fd: null, st, anchored };
+    return { kind: "other", fd: null, st, anchored };
+  }
+  let fd;
+  try {
+    fd = openSync(anchored, FS.O_RDONLY | FS.O_NONBLOCK | FS.O_NOFOLLOW);
+  } catch (e) {
+    const code = e && e.code;
+    if (code === "ENOENT") return { kind: "absent", fd: null, st: null, anchored };
+    if (code === "ELOOP") return { kind: "symlink", fd: null, st: null, anchored };
+    if (code === "ENXIO" || code === "ENODEV" || code === "EOPNOTSUPP") return { kind: "other", fd: null, st: null, anchored };
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    const kind = st.isFile() ? "file" : st.isDirectory() ? "dir" : "other";
+    return { kind, fd, st, anchored };
+  } catch (e) {
+    closePinned(fd, e);
+    throw e;
+  }
+}
+function dirHandleOf(h) {
+  return IS_WIN32 ? h.anchored : `${PROCFS_FD_DIR}/${h.fd}`;
+}
+function lstatKindUnder(cwd2, rel, what = "path classification") {
+  return withPinnedParent(cwd2, rel, what, {}, (parentHandle, leaf) => parentHandle === null ? "absent" : lstatKind(`${parentHandle}/${leaf}`));
+}
+function writeRegularAt(parentHandle, leaf, buf, rel) {
+  const anchored = `${parentHandle}/${leaf}`;
+  if (IS_WIN32) {
+    const kind = lstatKind(anchored);
+    if (kind !== "file" && kind !== "absent") {
+      throw new Error(
+        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink or other non-regular entry is never written through by a restore`
+      );
+    }
+  }
+  let fd = null;
+  let creating = false;
+  try {
+    fd = openSync(anchored, FS.O_WRONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
+  } catch (e) {
+    const code = e && e.code;
+    if (code === "ENOENT") {
+      creating = true;
+      fd = openSync(anchored, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 438);
+    } else if (code === "ELOOP") {
+      throw new Error(
+        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: symlink) \u2014 a symlink or other non-regular entry is never written through by a restore`
+      );
+    } else {
+      throw e;
+    }
+  }
+  let primary;
+  try {
+    if (!creating) {
+      const st = fstatSync(fd);
+      if (!st.isFile()) {
+        throw new Error(
+          `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (fstat type on the OPEN descriptor) \u2014 a symlink, directory or other non-regular entry is never written through by a restore, and nothing has been truncated`
+        );
+      }
+      ftruncateSync(fd, 0);
+    }
+    let written = 0;
+    while (written < buf.length) written += writeSync(fd, buf, written, buf.length - written, null);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(fd, primary);
+  }
+}
+function removeFileAt(parentHandle, leaf, rel) {
+  const anchored = `${parentHandle}/${leaf}`;
+  const kind = lstatKind(anchored);
+  if (kind !== "file" && kind !== "absent") {
+    throw new Error(
+      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink, directory or other non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
+    );
+  }
+  rmSync(anchored, { force: true });
+}
+function removeTreeAt(parentHandle, leaf, rel, depth = 0) {
+  WALK_BUDGET.chargeDepth(depth, rel);
+  const anchored = `${parentHandle}/${leaf}`;
+  const kind = lstatKind(anchored);
+  if (kind === "absent") return;
+  if (kind !== "dir") {
+    rmSync(anchored, { force: true });
+    return;
+  }
+  withPinnedDir(anchored, (dirHandle) => {
+    const names = [];
+    const dir = opendirSync(dirHandle);
+    let primary;
+    try {
+      for (; ; ) {
+        const de = dir.readSync();
+        if (de === null) break;
+        WALK_BUDGET.chargeNode(rel);
+        names.push(de.name);
+      }
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      try {
+        dir.closeSync();
+      } catch (closeErr) {
+        if (!primary) throw closeErr;
+      }
+    }
+    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1);
+  });
+  rmdirSync(anchored);
 }
 var HASH_CHUNK_BYTES = 64 * 1024;
 var MAX_WALK_NODES = 1e4;
@@ -7174,10 +7392,24 @@ function sha256OfFileStreamed(abs) {
   const fd = openLeafNoFollow(abs);
   let primary;
   try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) {
-      throw new Error(`'${abs}' is not a regular file (fstat) \u2014 refusing to stream-hash it; only a regular file's bytes are hashable`);
+    return sha256OfOpenFd(fd, abs);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeErr) {
+      if (!primary) throw closeErr;
     }
+  }
+}
+function sha256OfOpenFd(fd, label) {
+  const st = fstatSync(fd);
+  if (!st.isFile()) {
+    throw new Error(`'${label}' is not a regular file (fstat) \u2014 refusing to stream-hash it; only a regular file's bytes are hashable`);
+  }
+  {
     const expectedSize = st.size;
     const hash = createHash("sha256");
     const buf = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
@@ -7192,10 +7424,20 @@ function sha256OfFileStreamed(abs) {
     const st2 = fstatSync(fd);
     if (total !== expectedSize || st2.size !== expectedSize || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
       throw new Error(
-        `'${abs}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) \u2014 refusing a torn hash; a file mutating mid-hash is itself a violation signal`
+        `'${label}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) \u2014 refusing a torn hash; a file mutating mid-hash is itself a violation signal`
       );
     }
     return hash.digest("hex");
+  }
+}
+function readBoundedFile(abs, maxBytes, what) {
+  return readBoundedBuffer(abs, maxBytes, what).toString("utf8");
+}
+function readBoundedBuffer(abs, maxBytes, what) {
+  const fd = openLeafNoFollow(abs);
+  let primary;
+  try {
+    return readBoundedFromFd(fd, maxBytes, what, abs);
   } catch (e) {
     primary = e;
     throw e;
@@ -7207,10 +7449,8 @@ function sha256OfFileStreamed(abs) {
     }
   }
 }
-function readBoundedFile(abs, maxBytes, what) {
-  const fd = openLeafNoFollow(abs);
-  let primary;
-  try {
+function readBoundedFromFd(fd, maxBytes, what, abs) {
+  {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error(`${what} '${abs}' is not a regular file (fstat) \u2014 refusing to read it`);
     if (st.size > maxBytes) {
@@ -7232,16 +7472,7 @@ function readBoundedFile(abs, maxBytes, what) {
     if (st2.size !== st.size || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
       throw new Error(`${what} '${abs}' changed while being read (size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) \u2014 refusing to trust a record mutated under the gate`);
     }
-    return buf.subarray(0, total).toString("utf8");
-  } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    try {
-      closeSync(fd);
-    } catch (closeErr) {
-      if (!primary) throw closeErr;
-    }
+    return buf.subarray(0, total);
   }
 }
 function readBoundedJsonFile(abs, maxBytes, what) {
@@ -7321,49 +7552,80 @@ function indexEntriesFor(cwd2, rels) {
   return map;
 }
 function pathState(cwd2, rel, idx, budget = WALK_BUDGET, depth = 0) {
-  if (depth === 0) assertRealAncestors(cwd2, rel, `(A) state snapshot of '${rel}'`);
-  const abs = join2(cwd2, rel);
+  return withPinnedParent(cwd2, rel, `(A) state snapshot of '${rel}'`, {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return { exists: false, index: idx.get(rel) ?? null };
+    return pathStateAt(parentHandle, leaf, rel, idx, budget, depth);
+  });
+}
+function pathStateAt(parentHandle, leaf, rel, idx, budget, depth) {
   const index = idx.get(rel) ?? null;
-  let st;
+  const h = classifyLeafAt(parentHandle, leaf);
+  let primary;
   try {
-    st = lstatSync(abs);
-  } catch (e) {
-    if (e && e.code === "ENOENT") return { exists: false, index };
-    throw e;
-  }
-  const mode = st.mode & 4095;
-  if (st.isSymbolicLink()) return { exists: true, type: "symlink", mode, index, unattestable: UNATTESTABLE_SYMLINK };
-  if (st.isFile()) return { exists: true, type: "file", mode, index, sha256: sha256OfFileStreamed(abs) };
-  if (st.isDirectory()) {
-    budget.chargeDepth(depth, rel);
-    const children = /* @__PURE__ */ Object.create(null);
-    const dir = opendirSync(abs);
-    let primary;
-    try {
-      for (; ; ) {
-        const de = dir.readSync();
-        if (de === null) break;
-        budget.chargeNode(rel);
-        const childRel = `${rel}/${de.name}`;
-        children[childRel] = pathState(cwd2, childRel, idx, budget, depth + 1);
-      }
-    } catch (e) {
-      primary = e;
-      throw e;
-    } finally {
-      try {
-        dir.closeSync();
-      } catch (closeErr) {
-        if (!primary) throw closeErr;
-      }
+    if (h.kind === "absent") return { exists: false, index };
+    if (h.kind === "symlink") {
+      return { exists: true, type: "symlink", mode: symlinkModeAt(h), index, unattestable: UNATTESTABLE_SYMLINK };
     }
-    return { exists: true, type: "dir", mode, index, children };
+    if (h.kind !== "file" && h.kind !== "dir") {
+      throw new Error(`unsupported file type at '${rel}' \u2014 cannot snapshot its state, so this command's writes are unverifiable`);
+    }
+    const mode = h.st.mode & 4095;
+    if (h.kind === "file") return { exists: true, type: "file", mode, index, sha256: hashClassifiedLeaf(h, rel) };
+    if (h.kind === "dir") {
+      budget.chargeDepth(depth, rel);
+      const children = /* @__PURE__ */ Object.create(null);
+      const dirHandle = dirHandleOf(h);
+      const dir = opendirSync(dirHandle);
+      let dirPrimary;
+      try {
+        for (; ; ) {
+          const de = dir.readSync();
+          if (de === null) break;
+          budget.chargeNode(rel);
+          const childRel = `${rel}/${de.name}`;
+          children[childRel] = pathStateAt(dirHandle, de.name, childRel, idx, budget, depth + 1);
+        }
+      } catch (e) {
+        dirPrimary = e;
+        throw e;
+      } finally {
+        try {
+          dir.closeSync();
+        } catch (closeErr) {
+          if (!dirPrimary) throw closeErr;
+        }
+      }
+      return { exists: true, type: "dir", mode, index, children };
+    }
+    throw new Error(`unsupported file type at '${rel}' \u2014 cannot snapshot its state, so this command's writes are unverifiable`);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(h.fd, primary);
   }
-  throw new Error(`unsupported file type at '${rel}' \u2014 cannot snapshot its state, so this command's writes are unverifiable`);
+}
+function symlinkModeAt(h) {
+  if (h.st) return h.st.mode & 4095;
+  try {
+    return lstatSync(h.anchored).mode & 4095;
+  } catch {
+    return 511;
+  }
+}
+function hashClassifiedLeaf(h, label) {
+  if (h.fd !== null) return sha256OfOpenFd(h.fd, label);
+  return sha256OfFileStreamed(h.anchored);
 }
 function walkBudgetExceededState(cwd2, rel, idx, err) {
-  const st = lstatSync(join2(cwd2, rel));
-  if (!st.isDirectory()) throw err;
+  const st = withPinnedParent(
+    cwd2,
+    rel,
+    `(A) budget-exceeded snapshot of '${rel}'`,
+    {},
+    (parentHandle, leaf) => parentHandle === null ? null : lstatSync(`${parentHandle}/${leaf}`)
+  );
+  if (!st || !st.isDirectory()) throw err;
   return {
     exists: true,
     type: "dir",
@@ -7534,71 +7796,57 @@ function lstatKind(abs) {
   }
 }
 function isDirectoryAt(cwd2, rel) {
-  return lstatKind(join2(cwd2, rel)) === "dir";
+  return lstatKindUnder(cwd2, rel, `(A) directory classification of '${rel}'`) === "dir";
 }
 function readStamp(cwd2) {
-  const stampPath = join2(cwd2, ".sterling", "transient", "enforcement-stamp.json");
-  const kind = lstatKind(stampPath);
-  if (kind !== "file") return { present: kind !== "absent", entries: null };
-  const stamp = readBoundedJsonFile(stampPath, MAX_STAMP_BYTES, "enforcement stamp");
-  return { present: true, entries: Array.isArray(stamp) ? stamp : null };
+  return withPinnedParent(
+    cwd2,
+    ".sterling/transient/enforcement-stamp.json",
+    "enforcement stamp",
+    {},
+    (parentHandle, leaf) => parentHandle === null ? { present: false, entries: null } : readStampAt(parentHandle, leaf)
+  );
 }
-function sha256OfRegularFile(abs) {
-  if (lstatKind(abs) !== "file") return null;
-  return sha256OfFileStreamed(abs);
-}
-function toRel(cwd2, abs) {
-  return relative(cwd2, abs).replace(/\\/g, "/");
-}
-function classifyPathComponents(cwd2, rel, what = "(B) baseline") {
-  const segments = rel.split("/");
-  if (IS_WIN32) return classifyPathComponentsByPath(cwd2, rel, segments, what);
-  let parentFd = null;
+function readStampAt(parentHandle, leaf) {
+  const stampPath = `${parentHandle}/${leaf}`;
+  const h = classifyLeafAt(parentHandle, leaf);
   let primary;
   try {
-    parentFd = openRootAnchorDir(cwd2);
-    let soFar = "";
-    for (let i = 0; i < segments.length; i++) {
-      assertResolvableComponent(segments[i], rel, what);
-      soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
-      const anchored = anchoredPath(parentFd, segments[i]);
-      const kind = lstatKind(anchored);
-      if (kind === "absent") return "absent";
-      if (i === segments.length - 1) return kind;
-      if (kind !== "dir") {
-        throw new Error(
-          `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
-        );
-      }
-      const nextFd = openPinnedDir(anchored);
-      const prev = parentFd;
-      parentFd = nextFd;
-      closePinned(prev, void 0);
-    }
-    return "absent";
+    if (h.kind !== "file") return { present: h.kind !== "absent", entries: null };
+    return readStampFromFd(h, stampPath);
   } catch (e) {
     primary = e;
     throw e;
   } finally {
-    closePinned(parentFd, primary);
+    closePinned(h.fd, primary);
   }
 }
-function classifyPathComponentsByPath(cwd2, rel, segments, what) {
-  let abs = cwd2;
-  let soFar = "";
-  for (let i = 0; i < segments.length; i++) {
-    abs = join2(abs, segments[i]);
-    soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
-    const kind = lstatKind(abs);
-    if (kind === "absent") return "absent";
-    if (i === segments.length - 1) return kind;
-    if (kind !== "dir") {
-      throw new Error(
-        `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
-      );
+function readStampFromFd(h, stampPath) {
+  const stamp = JSON.parse(readClassifiedBytes(h, MAX_STAMP_BYTES, "enforcement stamp", stampPath).toString("utf8"));
+  return { present: true, entries: Array.isArray(stamp) ? stamp : null };
+}
+function readClassifiedBytes(h, maxBytes, what, label) {
+  if (h.fd !== null) return readBoundedFromFd(h.fd, maxBytes, what, label);
+  return readBoundedBuffer(h.anchored, maxBytes, what);
+}
+function sha256OfRegularFile(cwd2, rel, what = `stamp attestation of '${rel}'`) {
+  return withPinnedParent(cwd2, rel, what, {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return null;
+    const h = classifyLeafAt(parentHandle, leaf);
+    let primary;
+    try {
+      if (h.kind !== "file") return null;
+      return hashClassifiedLeaf(h, rel);
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      closePinned(h.fd, primary);
     }
-  }
-  return "absent";
+  });
+}
+function classifyPathComponents(cwd2, rel, what = "(B) baseline") {
+  return withPinnedParent(cwd2, rel, what, {}, (parentHandle, leaf) => parentHandle === null ? "absent" : lstatKind(`${parentHandle}/${leaf}`));
 }
 function assertRealAncestors(cwd2, rel, what) {
   const segments = rel.replace(/\/+$/, "").split("/");
@@ -7614,21 +7862,22 @@ function assertRealAncestors(cwd2, rel, what) {
 }
 function collectBaseline(cwd2) {
   const map = {};
-  const walkDir = (absDir, relDir) => {
-    const kind = lstatKind(absDir);
-    if (kind === "absent") return;
-    if (kind !== "dir") {
-      throw new Error(
-        `(B) baseline path '${relDir}' is not a directory (lstat kind: ${kind}) \u2014 refusing to read through it; a symlink or other non-regular entry standing in for a (B) directory is denied on sight, never followed`
-      );
+  const walkDir = (dirHandle, relDir) => {
+    if (IS_WIN32) {
+      const kind = lstatKind(dirHandle);
+      if (kind === "absent") return;
+      if (kind !== "dir") {
+        throw new Error(
+          `(B) baseline path '${relDir}' is not a directory (lstat kind: ${kind}) \u2014 refusing to read through it; a symlink or other non-regular entry standing in for a (B) directory is denied on sight, never followed`
+        );
+      }
     }
-    for (const de of readdirSync(absDir, { withFileTypes: true })) {
+    for (const de of readdirSync(dirHandle, { withFileTypes: true })) {
       if (process.platform !== "win32" && de.name.includes("\\")) {
         throw new Error(
           `(B) baseline entry '${relDir ? relDir + "/" : ""}${de.name}' contains a backslash \u2014 refused on POSIX: '\\' is a legal filename byte here but collapses to '/' in the authorization key, so a distinct sibling would share one key and a restore could land on the wrong path; denied fail-closed, never normalized`
         );
       }
-      const abs = join2(absDir, de.name);
       const rel = relDir ? `${relDir}/${de.name}` : de.name;
       if (de.isSymbolicLink()) {
         throw new Error(
@@ -7636,23 +7885,24 @@ function collectBaseline(cwd2) {
         );
       }
       if (de.isDirectory()) {
-        walkDir(abs, rel);
+        withPinnedDir(`${dirHandle}/${de.name}`, (childHandle) => walkDir(childHandle, rel));
       } else if (de.isFile()) {
-        map[toRel(cwd2, abs)] = readFileSync2(abs).toString("base64");
+        map[rel] = readBaselineBytesAt(dirHandle, de.name, rel);
       } else {
         throw new Error(`(B) baseline path '${rel}' is not a regular file or directory (unsupported type) \u2014 refusing to read it`);
       }
     }
   };
-  const agentsKind = classifyPathComponents(cwd2, ".claude/agents");
-  if (agentsKind === "dir") {
-    walkDir(join2(cwd2, ".claude", "agents"), ".claude/agents");
-  } else if (agentsKind !== "absent") {
-    throw new Error(`'.claude/agents' is not a directory (lstat kind: ${agentsKind}) \u2014 refusing to read/walk through it; denied on sight, never followed`);
-  }
-  const claudeKind = classifyPathComponents(cwd2, ".claude");
-  if (claudeKind === "dir") {
-    for (const de of readdirSync(join2(cwd2, ".claude"), { withFileTypes: true })) {
+  withClassifiedDir(cwd2, ".claude/agents", (kind, dirHandle) => {
+    if (kind === "dir") walkDir(dirHandle, ".claude/agents");
+    else if (kind !== "absent") throw new Error(`'.claude/agents' is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk through it; denied on sight, never followed`);
+  });
+  withClassifiedDir(cwd2, ".claude", (claudeKind, claudeHandle) => {
+    if (claudeKind !== "dir") {
+      if (claudeKind !== "absent") throw new Error(`'.claude' is not a directory (lstat kind: ${claudeKind}) \u2014 refusing to read the (B) baseline surface through it`);
+      return;
+    }
+    for (const de of readdirSync(claudeHandle, { withFileTypes: true })) {
       const rel = ".claude/" + de.name;
       if (process.platform !== "win32" && de.name.includes("\\") && de.name.startsWith("settings") && de.name.endsWith(".json")) {
         throw new Error(
@@ -7665,19 +7915,60 @@ function collectBaseline(cwd2) {
           `(B) baseline path '${rel}' is not a regular file (lstat kind: ${de.isSymbolicLink() ? "symlink" : "other"}) \u2014 refusing to read through it; denied on sight, never followed`
         );
       }
-      map[rel] = readFileSync2(join2(cwd2, rel)).toString("base64");
+      map[rel] = readBaselineBytesAt(claudeHandle, de.name, rel);
     }
-  } else if (claudeKind !== "absent") {
-    throw new Error(`'.claude' is not a directory (lstat kind: ${claudeKind}) \u2014 refusing to read the (B) baseline surface through it`);
-  }
+  });
   const cfgRel = ".sterling/config.json";
-  const cfgKind = classifyPathComponents(cwd2, cfgRel);
-  if (cfgKind === "file") {
-    map[cfgRel] = readFileSync2(join2(cwd2, cfgRel)).toString("base64");
-  } else if (cfgKind !== "absent") {
-    throw new Error(`(B) baseline path '${cfgRel}' is not a regular file (lstat kind: ${cfgKind}) \u2014 refusing to read through it; denied on sight, never followed`);
-  }
+  withPinnedParent(cwd2, cfgRel, "(B) baseline", {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return;
+    const h = classifyLeafAt(parentHandle, leaf);
+    let primary;
+    try {
+      if (h.kind === "absent") return;
+      if (h.kind !== "file") {
+        throw new Error(`(B) baseline path '${cfgRel}' is not a regular file (lstat kind: ${h.kind}) \u2014 refusing to read through it; denied on sight, never followed`);
+      }
+      map[cfgRel] = readClassifiedBytes(h, Number.POSITIVE_INFINITY, `(B) baseline path '${cfgRel}'`, h.anchored).toString("base64");
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      closePinned(h.fd, primary);
+    }
+  });
   return map;
+}
+function readBaselineBytesAt(parentHandle, leaf, rel) {
+  const h = classifyLeafAt(parentHandle, leaf);
+  let primary;
+  try {
+    if (h.kind !== "file") {
+      throw new Error(
+        `(B) baseline path '${rel}' is not a regular file (kind: ${h.kind}) \u2014 refusing to read it; a symlink or other non-regular entry standing where the baseline walk saw a file is denied on sight, never followed`
+      );
+    }
+    return readClassifiedBytes(h, Number.POSITIVE_INFINITY, `(B) baseline path '${rel}'`, h.anchored).toString("base64");
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(h.fd, primary);
+  }
+}
+function withClassifiedDir(cwd2, rel, fn) {
+  return withPinnedParent(cwd2, rel, "(B) baseline", {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return fn("absent", null);
+    const h = classifyLeafAt(parentHandle, leaf);
+    let primary;
+    try {
+      return fn(h.kind, h.kind === "dir" ? dirHandleOf(h) : null);
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      closePinned(h.fd, primary);
+    }
+  });
 }
 function validateBaselineKey(key) {
   if (typeof key !== "string" || key.length === 0) return null;
@@ -7689,27 +7980,15 @@ function validateBaselineKey(key) {
   return fwd;
 }
 function writeUnder(cwd2, rel, content) {
-  const abs = join2(cwd2, rel);
-  assertRealAncestors(cwd2, rel, `(B) baseline restore of '${rel}'`);
-  const kind = lstatKind(abs);
-  if (kind !== "file" && kind !== "absent") {
-    throw new Error(
-      `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink or other non-regular entry is never written through by a restore`
-    );
-  }
-  mkdirSync2(dirname3(abs), { recursive: true });
-  writeFileSync(abs, Buffer.from(content, "base64"));
+  withPinnedParent(cwd2, rel, `(B) baseline restore of '${rel}'`, { createParents: true }, (parentHandle, leaf) => {
+    writeRegularAt(parentHandle, leaf, Buffer.from(content, "base64"), rel);
+  });
 }
 function removeUnder(cwd2, rel) {
-  assertRealAncestors(cwd2, rel, `(B) baseline removal of '${rel}'`);
-  const abs = join2(cwd2, rel);
-  const kind = lstatKind(abs);
-  if (kind !== "file" && kind !== "absent") {
-    throw new Error(
-      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink, directory or other non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
-    );
-  }
-  rmSync(abs, { force: true });
+  withPinnedParent(cwd2, rel, `(B) baseline removal of '${rel}'`, {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return;
+    removeFileAt(parentHandle, leaf, rel);
+  });
 }
 function parsePorcelainZ(out) {
   const tokens = out.split("\0");
@@ -7736,13 +8015,12 @@ function verifyStampAttestation(cwd2, preExistingRels) {
     for (const rel of preExistingRels) {
       const entry = byPath.get(rel);
       if (!entry) return { attested: false, stampPresent: true, failedPath: rel };
-      const abs = join2(cwd2, rel);
       if (entry.deleted === true) {
-        if (lstatKind(abs) !== "absent") return { attested: false, stampPresent: true, failedPath: rel };
+        if (lstatKindUnder(cwd2, rel, `stamp attestation of '${rel}'`) !== "absent") return { attested: false, stampPresent: true, failedPath: rel };
         continue;
       }
       if (typeof entry.sha256 !== "string") return { attested: false, stampPresent: true, failedPath: rel };
-      const current = sha256OfRegularFile(abs);
+      const current = sha256OfRegularFile(cwd2, rel);
       if (current === null) return { attested: false, stampPresent: true, failedPath: rel };
       if (current !== entry.sha256) return { attested: false, stampPresent: true, failedPath: rel };
     }
@@ -7757,12 +8035,11 @@ function stampAttestsCurrentBytes(cwd2, rel) {
     if (!entries) return false;
     const entry = entries.find((e) => e && e.path === rel);
     if (!entry) return false;
-    const abs = join2(cwd2, rel);
-    const kind = lstatKind(abs);
+    const kind = lstatKindUnder(cwd2, rel, `stamp attestation of '${rel}'`);
     if (kind === "absent") return entry.deleted === true;
     if (kind !== "file") return false;
     if (typeof entry.sha256 !== "string") return false;
-    const current = sha256OfRegularFile(abs);
+    const current = sha256OfRegularFile(cwd2, rel);
     return current !== null && current === entry.sha256;
   } catch {
     return false;
@@ -7771,9 +8048,9 @@ function stampAttestsCurrentBytes(cwd2, rel) {
 function stampAttestsDirectory(cwd2, relDir) {
   try {
     const files = [];
-    const walk = (rel, depth) => {
+    const walk = (dirHandle, rel, depth) => {
       WALK_BUDGET.chargeDepth(depth, rel);
-      const dir = opendirSync(join2(cwd2, rel));
+      const dir = opendirSync(dirHandle);
       let primary;
       try {
         for (; ; ) {
@@ -7781,7 +8058,7 @@ function stampAttestsDirectory(cwd2, relDir) {
           if (de === null) break;
           WALK_BUDGET.chargeNode(rel);
           const childRel = `${rel}/${de.name}`;
-          if (de.isDirectory()) walk(childRel, depth + 1);
+          if (de.isDirectory()) withPinnedDir(`${dirHandle}/${de.name}`, (childHandle) => walk(childHandle, childRel, depth + 1));
           else if (de.isFile()) files.push(childRel);
           else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
         }
@@ -7796,7 +8073,10 @@ function stampAttestsDirectory(cwd2, relDir) {
         }
       }
     };
-    walk(relDir, 0);
+    withClassifiedDir(cwd2, relDir, (kind, dirHandle) => {
+      if (kind !== "dir") throw new Error(`'${relDir}' is not a directory (kind: ${kind}) \u2014 it attests nothing`);
+      walk(dirHandle, relDir, 0);
+    });
     if (!files.length) return false;
     return files.every((f) => stampAttestsCurrentBytes(cwd2, f));
   } catch {
@@ -7848,13 +8128,16 @@ function mintRestorePerformed(cwd2, paths, agentId) {
 }
 function restoreTracked(cwd2, relRaw) {
   const rel = relRaw.replace(/\/+$/, "");
-  assertRealAncestors(cwd2, rel, `(A) tracked restore of '${rel}'`);
   const inHead = spawnSync("git", ["-C", cwd2, "cat-file", "-e", "HEAD:" + rel], { encoding: "utf8" }).status === 0;
   if (inHead) {
+    assertRealAncestors(cwd2, rel, `(A) tracked restore of '${rel}'`);
     const r = spawnSync("git", ["-C", cwd2, "checkout", "HEAD", "--", rel], { encoding: "utf8" });
     if (r.error || r.status !== 0) throw new Error(`checkout HEAD -- ${rel} failed: ${r.stderr || r.error}`);
   } else {
-    rmSync(join2(cwd2, rel), { recursive: true, force: true });
+    withPinnedParent(cwd2, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
+      if (parentHandle === null) return;
+      removeTreeAt(parentHandle, leaf, rel);
+    });
   }
 }
 var input;

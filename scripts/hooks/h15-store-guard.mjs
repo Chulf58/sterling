@@ -75,8 +75,73 @@ import { join } from 'node:path';
 import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 import { parseConfig } from '@sterling/schemas';
 
-const input = readStdin();
-if (!input.cwd || !existsSync(join(input.cwd, '.sterling'))) allow(); // not a Sterling project — no ceremony (P1)
+// THE INPUT BOUNDARY IS ITSELF A GATE — same F5 class as the preprocessing
+// wrap below (board 01afa03e; the fix H17 already carries for its own
+// readStdin). readStdin() reads fd 0 and JSON.parses it, both unguarded:
+// called bare at the top level, a truncated or non-JSON stdin threw OUT of the
+// hook, Node exited 1, and exit 1 is the platform's NON-BLOCKING code — the
+// runner reads it as ALLOW and the command runs unexamined. A gate that cannot
+// read its own input has verified NOTHING and must fail CLOSED (P5).
+//
+// EXPLICITLY ACCEPTED AVAILABILITY TRADEOFF (outside-family review 2026-08-26,
+// conductor-accepted): H15 is GLOBALLY registered, so this denial reaches the
+// conductor's own Bash too. A persistent runner/input fault therefore blocks
+// the repair commands as well, and the session can wedge until restart. That
+// is accepted deliberately — under broken infrastructure the alternative is a
+// store guard that silently passes every command it never read — but it is an
+// availability cost, not a free win, and it is recorded here rather than
+// discovered later.
+//
+// AND THE COST IS WIDER THAN "THIS PROJECT" (roster review 2026-08-27): this
+// catch sits ABOVE the `if (!inSterlingProject) allow()` branch below, because
+// the project is unknowable before the input parses. So a broken runner denies
+// Bash in EVERY project on the machine, not only Sterling ones. That ordering
+// is forced — the probe needs `input.cwd` — but the blast radius is the whole
+// machine, and stating it as "the conductor's own Bash" would understate it.
+//
+// AUDIENCE IS UNKNOWABLE ON THIS PATH, which is why the wording carries BOTH
+// resolutions: the field that names the audience (`agent_id`) rides in the very
+// input that failed to parse. `agentId: undefined` selects the repair-facing
+// instruction (correct for the conductor, who has no one above to escalate to)
+// and the detail states the agent-facing half explicitly, so a spawned agent is
+// never told to "let the conductor fix it" when it may BE the conductor reading.
+let input;
+try {
+  input = readStdin();
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      'H15',
+      `[stdin] hook input could not be read or parsed (${(e && e.message) || e}) — a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). ` +
+        `An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the command would be ALLOWED unexamined). ` +
+        `IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself — exit \`blocked\`, citing this message VERBATIM. Otherwise:`,
+      { agentId: undefined }
+    )
+  );
+}
+
+// The project probe is INSIDE the boundary too (outside-family review finding,
+// same F5 class as the wraps above and below). `join()` throws a TypeError on a
+// non-string cwd — parsed JSON carrying `cwd: ["/x"]` survives readStdin's
+// normalization unchanged and reaches here — and that throw would exit non-2,
+// allowing the command unexamined. Ordinary platform input always carries a
+// string cwd, so this is an invariant repair rather than a demonstrated
+// command-controlled bypass: the rule this file's own roster sweep established
+// is that EVERY statement before the deny decision sits inside the boundary,
+// and the hook that established it must not be the one violating it.
+let inSterlingProject;
+try {
+  inSterlingProject = Boolean(input.cwd) && existsSync(join(input.cwd, '.sterling'));
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      'H15',
+      `[cwd] the hook input's cwd could not be resolved to a project path (${(e && e.message) || e}); the gate fails closed rather than risk a silent void.`,
+      { agentId: input.agent_id }
+    )
+  );
+}
+if (!inSterlingProject) allow(); // not a Sterling project — no ceremony (P1)
 
 const command = String(input.tool_input?.command ?? '');
 
@@ -105,7 +170,31 @@ const DB_MENTION_RE = /sterling\.db/i;
 // false "no mention anywhere" here would silently void every check below
 // (adversarial regression 3 / FIX C). unquotedText is a hoisted function
 // declaration, safe to call ahead of its textual definition.
-if (!STORE_MENTION_RE.test(command) && !STORE_MENTION_RE.test(unquotedText(command))) allow(); // no store path anywhere in the command — irrelevant
+//
+// PREPROCESSING IS INSIDE THE FAIL-CLOSED BOUNDARY (board 01afa03e, the F5
+// class anti_pattern e13f0fb5). unquotedText compiles a RegExp built from the
+// command's own heredoc DELIMITER, and a throw there exits non-2 — which the
+// hook runner reads as ALLOW, voiding this blocking gate entirely. REPRODUCED
+// 2026-08-26 against HEAD: `rm -rf .st''erling <<AAA…(70k A's)…` threw
+// "Regular expression too large" out of the hook (exit 1, command ALLOWED) —
+// the metachar escaping upstream makes the pattern VALID but not SMALL, and
+// V8 raises the size error when the pattern is COMPILED by .match(), not when
+// it is constructed. The wrap is deliberately around the whole mention test,
+// not just the call: the boundary must cover every statement between process
+// start and the deny decision, never only the config/store read.
+let mentionsStore;
+try {
+  mentionsStore = STORE_MENTION_RE.test(command) || STORE_MENTION_RE.test(unquotedText(command));
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      'H15',
+      `Internal error while preprocessing the command text for the store-mention check (${(e && e.message) || e}); the gate fails closed rather than risk a silent void.`,
+      { agentId: input.agent_id }
+    )
+  );
+}
+if (!mentionsStore) allow(); // no store path anywhere in the command — irrelevant
 
 // a malformed config must fail CLOSED on the protected branch — an uncaught
 // throw exits non-2, which the platform treats as non-blocking (a voided gate)

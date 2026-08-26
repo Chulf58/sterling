@@ -208,7 +208,20 @@ try {
     // not belong to the sibling it names. Only attribution:'block' entries
     // (a provable single type-matching source block) still warn.
     if (e.attribution !== 'block') continue;
-    const matched = e.files.filter((f) => candidateSet.has(f));
+    // TERRITORY CLAIMED, NOT TERRITORY EXAMINED (board c56862a9,
+    // research_finding 289cd172). H22's `files` is multiplexed — review
+    // receipts, residue probes and H10's deferral all need every path the
+    // brief MENTIONED, including the ones it forbade — so H22 keeps writing
+    // that breadth and adds `claimed_files`, the same paths minus those named
+    // only inside a prohibition ("DO NOT TOUCH: <path>"). An overlap warning
+    // is about WRITE territory, so it reads the claimed subset: warning a new
+    // lane off a path its neighbour was explicitly told NOT to touch is the
+    // measured false positive (seven in one session), and it punished exactly
+    // the briefs that named their do-not-touch lists most carefully.
+    // A pre-field entry has no `claimed_files` and falls back to `files` —
+    // today's behavior, never a silently empty lane.
+    const entryFiles = Array.isArray(e.claimed_files) ? e.claimed_files : e.files;
+    const matched = entryFiles.filter((f) => candidateSet.has(f));
     if (matched.length) {
       overlaps.push({ agentType: e.agent_type ?? 'agent', agentId: e.agent_id, files: matched });
       matched.forEach((f) => overlapPaths.add(f));

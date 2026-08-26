@@ -60,6 +60,7 @@ import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { lastDispatchBlocks, extractPathCandidates } from './lib/dispatch-prompt.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
+import { hasUnsuppressedMatch, escapeRe } from './lib/dispatch-advisory.mjs';
 
 // SPEC B: .sterling/config.json's top-level `exclusive_resources: string[]`
 // (absent/malformed -> none, soft posture — this hook never gates on config).
@@ -166,6 +167,66 @@ function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
 }
 
+// TERRITORY EXAMINED vs TERRITORY CLAIMED — the write-side half of the
+// negation guard (board c56862a9, research_finding 289cd172
+// h26-registers-do-not-touch-paths-as-held-territory).
+//
+// THE MEASURED DEFECT WAS AN ASYMMETRY, NOT AN ABSENCE. H26 already suppresses
+// a prohibition-clause path on READ (h26-dispatch-overlap.mjs, the same
+// hasUnsuppressedMatch call with checkSubjectVerb:false), but H22 wrote the
+// register with a BARE extractPathCandidates — so a brief's "DO NOT TOUCH:
+// <path> (another lane owns it)" was STORED as territory this dispatch holds,
+// and the next dispatch that legitimately owned that path was warned against a
+// lane that would never write it. Seven measured false positives in one
+// session, every one from a do-not-touch brief line: the more careful the
+// brief, the more false warnings — exactly inverted incentives.
+//
+// WHY THIS IS AN ADDITIONAL FIELD AND NOT A FILTER ON `files`. `files` is
+// MULTIPLEXED across four consumers and means TERRITORY EXAMINED, not only
+// territory claimed: durable review receipts (promoted at Stop below, read by
+// scripts/commit-reviewed.mjs where an EMPTY files[] is the STRONGEST
+// unverifiable-territory signal), the kill-signature residue probe, and H10's
+// capture-duty deferral. Filtering `files` in place would make the reviewer
+// brief "do not modify X, only review it" promote a receipt naming NO files —
+// trading four cosmetic warn-only false positives for a silent degradation of
+// merge-gate review evidence. So `files` is left byte-identical and the
+// negation-aware subset is written BESIDE it as `claimed_files`, which H26
+// (write territory) prefers; every other consumer keeps reading `files`.
+//
+// ALWAYS WRITTEN, EVEN EMPTY — deliberately unlike `exclusive_resources` (which
+// is absent when unclaimed). Absence here MEANS "legacy entry, written before
+// this field existed", and H26 falls back to `files` for those; an omitted
+// empty array would read as legacy and resurrect the very false positive.
+//
+// SUPPRESSION IS PER BLOCK: a path negated in one block's prompt but claimed in
+// a sibling's is claimed. (Under attribution:'block' there is only one block.)
+//
+// DISCLOSED MISS (accepted, under-warning direction, board c56862a9 item 2):
+// no polarity reset exists — neither "but", "instead", nor a comma ends a
+// prohibition clause — so "Do not edit tests/x.test.mjs, instead implement the
+// fix in src/auth.mjs" loses src/auth.mjs from claimed_files too. That costs a
+// MISSED overlap warning, which is the direction this advisory family already
+// accepts over crying wolf (P1, parallel-lanes "bounded under-warning"), and
+// `files` still records it for the receipt/residue/H10 consumers.
+function claimedFromBlocks(blocks) {
+  return [
+    ...new Set(
+      blocks.flatMap((b) =>
+        extractPathCandidates(b.prompt).filter((raw) =>
+          // The SAME call the read side makes (h26-dispatch-overlap.mjs): one
+          // shared detector, never a second divergent heuristic — that
+          // divergence WAS the defect. checkSubjectVerb:false because
+          // "implement the feature in <path>" is a legitimate territory
+          // declaration for a FILE candidate (that guard is for H25's tool
+          // mentions). Matched against the RAW extracted substring, which
+          // PATH_CANDIDATE_RE guarantees appears literally in the prompt.
+          hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(raw)), { checkSubjectVerb: false })
+        )
+      )
+    ),
+  ];
+}
+
 // Tiny shared-convention lock guarding the review-ledger read-modify-write
 // (duplicated here and in scripts/commit-reviewed.mjs — hooks stay
 // dependency-light, so this is ~15 lines copied rather than a shared import;
@@ -267,6 +328,7 @@ try {
   if (event === 'SubagentStart') {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
     const candidates = candidatesFromBlocks(matchedBlocks);
+    const claimedCandidates = claimedFromBlocks(matchedBlocks);
     // THE EXTRACTOR'S PERMISSIVENESS COSTS MORE HERE THAN IN H19. There a false
     // candidate cost one store query that found nothing; here it enters the
     // register, so it SUPPRESSES a real duty and holds H10's releases
@@ -278,14 +340,20 @@ try {
     // segments exclude '.', so '.sterling/transient/x.json' in prompt prose
     // arrives dot-stripped as 'sterling/transient/x.json' and would otherwise
     // walk straight past the .sterling/ guard.
-    const files = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
-      (r) =>
-        r !== '.git' &&
-        !r.startsWith('.git/') &&
-        !r.startsWith('.sterling/') &&
-        !r.startsWith('sterling/') &&
-        !r.startsWith('git/')
-    );
+    const toRegisterPaths = (cands) =>
+      [...new Set(cands.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
+        (r) =>
+          r !== '.git' &&
+          !r.startsWith('.git/') &&
+          !r.startsWith('.sterling/') &&
+          !r.startsWith('sterling/') &&
+          !r.startsWith('git/')
+      );
+    const files = toRegisterPaths(candidates);
+    // The negation-aware subset (see claimedFromBlocks above) goes through the
+    // IDENTICAL normalization and exclusion filter — one expression, so
+    // `claimed_files` can never drift into a different path shape than `files`.
+    const claimedFiles = toRegisterPaths(claimedCandidates);
     // SPEC B (1)/(2): exclusive non-file resource claim, scanned from the SAME
     // matched blocks' prompt text the file attribution above came from — the
     // shared negation-aware scanner means a negated mention ("No
@@ -338,6 +406,9 @@ try {
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
       files,
+      // Always present, even empty — its ABSENCE is the legacy-entry signal
+      // H26 falls back on (see claimedFromBlocks above).
+      claimed_files: claimedFiles,
       at: new Date().toISOString(),
       attribution,
     };

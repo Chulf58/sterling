@@ -5270,7 +5270,8 @@ try {
   for (const e of live) {
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
     if (e.attribution !== "block") continue;
-    const matched = e.files.filter((f) => candidateSet.has(f));
+    const entryFiles = Array.isArray(e.claimed_files) ? e.claimed_files : e.files;
+    const matched = entryFiles.filter((f) => candidateSet.has(f));
     if (matched.length) {
       overlaps.push({ agentType: e.agent_type ?? "agent", agentId: e.agent_id, files: matched });
       matched.forEach((f) => overlapPaths.add(f));

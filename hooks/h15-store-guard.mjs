@@ -5069,12 +5069,47 @@ function loadConfig(cwd) {
 }
 
 // scripts/hooks/h15-store-guard.mjs
-var input = readStdin();
-if (!input.cwd || !existsSync2(join2(input.cwd, ".sterling"))) allow();
+var input;
+try {
+  input = readStdin();
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      "H15",
+      `[stdin] hook input could not be read or parsed (${e && e.message || e}) \u2014 a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the command would be ALLOWED unexamined). IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself \u2014 exit \`blocked\`, citing this message VERBATIM. Otherwise:`,
+      { agentId: void 0 }
+    )
+  );
+}
+var inSterlingProject;
+try {
+  inSterlingProject = Boolean(input.cwd) && existsSync2(join2(input.cwd, ".sterling"));
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      "H15",
+      `[cwd] the hook input's cwd could not be resolved to a project path (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
+      { agentId: input.agent_id }
+    )
+  );
+}
+if (!inSterlingProject) allow();
 var command = String(input.tool_input?.command ?? "");
 var STORE_MENTION_RE = /\.sterling(?![\w.-])|sterling\.db/i;
 var DB_MENTION_RE = /sterling\.db/i;
-if (!STORE_MENTION_RE.test(command) && !STORE_MENTION_RE.test(unquotedText(command))) allow();
+var mentionsStore;
+try {
+  mentionsStore = STORE_MENTION_RE.test(command) || STORE_MENTION_RE.test(unquotedText(command));
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      "H15",
+      `Internal error while preprocessing the command text for the store-mention check (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
+      { agentId: input.agent_id }
+    )
+  );
+}
+if (!mentionsStore) allow();
 var allowScripts;
 try {
   allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;

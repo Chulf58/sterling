@@ -90,7 +90,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore, resolveDomainMounts } from '@sterling/store';
-import { parseConfig } from '@sterling/schemas';
+import { parseConfig, validateRecord } from '@sterling/schemas';
 import { buildResolver } from './lib/citations.mjs';
 
 function fail(msg, code = 2) {
@@ -471,6 +471,45 @@ function deepEqual(a, b, depth = 0) {
   return false;
 }
 
+/** Every key path present in `before` that is ABSENT from `after` — the LOSS
+ *  half of a round-trip comparison, and deliberately only that half (board
+ *  bd3f0acf; the reasoning lives at the call site in migrate()). Reports dotted
+ *  paths with array indices — 'files[0].note', 'dependencies.relies_on[2]' —
+ *  because a bare field name at depth tells an operator nothing about which
+ *  record part is about to be dropped.
+ *
+ *  Presence, never value: a key whose VALUE changed is a normalization the
+ *  schema boundary performs on purpose (repoPath), not damage, and flagging it
+ *  would refuse good records. A key that is GONE is unrecoverable.
+ *
+ *  A source array LONGER than its parsed counterpart counts as loss too, so a
+ *  dropped element cannot hide behind index-wise walking. DEPTH-BOUNDED by the
+ *  same MAX_BODY_COMPARE_DEPTH as deepEqual, for the same reason: the `before`
+ *  side is raw pre-validation JSON out of a foreign store, so nothing upstream
+ *  capped its nesting, and an unbounded walk would turn a corrupt body into an
+ *  exit-1 stack trace instead of the promised refusal. */
+function droppedKeyPaths(before, after, path = '', depth = 0, out = []) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`its nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record body`);
+  }
+  if (before === null || typeof before !== 'object') return out;
+  if (Array.isArray(before)) {
+    if (!Array.isArray(after)) return out;
+    for (let i = 0; i < before.length; i++) {
+      if (i >= after.length) out.push(`${path}[${i}]`);
+      else droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+    }
+    return out;
+  }
+  if (after === null || typeof after !== 'object' || Array.isArray(after)) return out;
+  for (const key of Object.keys(before)) {
+    const here = path ? `${path}.${key}` : key;
+    if (!Object.prototype.hasOwnProperty.call(after, key)) out.push(here);
+    else droppedKeyPaths(before[key], after[key], here, depth + 1, out);
+  }
+  return out;
+}
+
 /** migrate --from <store.db> --to <store.db> [--apply]: copy every record the
  *  destination does not hold, preserving the envelope (ids, clocks, scope: this
  *  heals ONE logical store split across two physical files by a context flip;
@@ -488,7 +527,15 @@ function deepEqual(a, b, depth = 0) {
  *  `adopt` is a read-only probe with no apply path (board 44434103), so today
  *  those refusals have no operable route past them — stated plainly in the
  *  messages rather than pointing at a mode that cannot write (decision
- *  [migrate-relations-containment-narrows-migrate-to-unlinked-stores]). */
+ *  [migrate-relations-containment-narrows-migrate-to-unlinked-stores]).
+ *
+ *  THE SAME CONTAINMENT ARGUMENT RUNS AT FIELD LEVEL (board bd3f0acf): the
+ *  validated path is a zod .parse(), which STRIPS keys the schema does not
+ *  define AT EVERY NESTING LEVEL, so a body carrying a legacy or hand-added
+ *  field — top-level or buried inside files[]/current_ac[]/history[] — would
+ *  cross with that field silently removed. Refused too, before any write: the
+ *  guard below simulates the parse and asks whether any key path the source
+ *  holds fails to survive it. */
 function migrate() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
@@ -619,9 +666,94 @@ function migrate() {
         `conflicting record(s) by hand, then re-run. Nothing was written.`
     );
   }
+  // FIELD-LEVEL CONTAINMENT (board bd3f0acf). The three guards above ask what
+  // the source holds OUTSIDE the records table; this one asks what a single
+  // record BODY holds outside its own schema. dest.create() validates through
+  // validateRecord -> zod .parse(), and a zod object STRIPS unknown keys AT
+  // EVERY LEVEL — so a record carrying a legacy or hand-added field copies
+  // "successfully", prints MIGRATED, exits 0, and the destination silently
+  // lacks that field. No refusal, no warning, no trace: permanent knowledge
+  // loss inside the one tool whose whole charter is not losing knowledge.
+  //
+  // WHY A ROUND-TRIP AND NOT A FIELD ENUMERATION. The first cut of this guard
+  // called unknownFieldsIn(), which filters Object.keys(candidate) — TOP LEVEL
+  // ONLY (packages/schemas/src/records.ts). zod strips at every nesting level,
+  // so `files: [{ path, role, note: 'legacy' }]` carried no unknown TOP-level
+  // key, sailed past that guard, and lost `note` exactly as before. Simulating
+  // the parse instead needs no schema-walking of our own and is depth-complete
+  // by construction: whatever create() would keep, keeps itself.
+  //
+  // AND WHY A ONE-DIRECTIONAL KEY-CONTAINMENT COMPARE, NOT deepEqual. A full
+  // round-trip equality check FALSE-DENIES on a live store, because parsing
+  // legitimately CHANGES a body in three ways that are not loss:
+  //   * DEFAULTS ADD keys — research_finding.source_urls .default([]),
+  //     anti_pattern.basis and reference_material.basis .default('codebase');
+  //     a legacy body predating a default gains it on parse.
+  //   * repoPath REWRITES values — every file_keys[] entry and files[].path
+  //     goes through normalizeRepoPath (packages/schemas/src/paths.ts), so
+  //     'docs\spec.md' and './docs/spec.md' come back normalized. That is the
+  //     path invariant doing its job, not damage.
+  //   * reference_material NORMALIZES a kind:'doc' location the same way.
+  // Refusing on any of those would block a perfectly good record — the worst
+  // outcome available here, since a false-denying doctor is worse than the gap
+  // it closes. So the comparison asks only the LOSS question: is every key
+  // path present in the source still present after the parse? Added keys and
+  // rewritten values are invisible to it; a DROPPED key at any depth is not.
+  // Value-level loss is not a mechanism that exists — repoPath is the only
+  // value transform and it is a normalization, and there is no z.coerce
+  // anywhere in the registry — so key presence is the honest granularity.
+  //
+  // storableBody() is deliberately NOT applied to the round-trip: it only
+  // DELETES status/superseded_by, and deleting them could only ever manufacture
+  // a false loss (a hand-built source body that does carry them would be
+  // reported as losing them). It is also TS-private; not needing it keeps this
+  // script off a private surface.
+  //
+  // SCOPED TO THE RECORDS ACTUALLY BEING COPIED, never the whole source: a
+  // record the destination already holds is never passed to create(), so it has
+  // nothing to lose here, and refusing on it would be an over-refusal on an
+  // otherwise-clean migrate. Runs BEFORE the plan is printed, so the dry-run
+  // and --apply give the same verdict (the AC21 rule — a dry run that reports
+  // clean and an --apply that then refuses is the worse failure).
+  //
+  // A RECORD THE VALIDATOR REJECTS IS NOT THIS GUARD'S BUSINESS: an
+  // unregistered type or a schema-invalid body throws here, and is SKIPPED so
+  // the existing copy-loop path still reports it as `REFUSED:` with exit 3
+  // (AC3). Nothing is lost silently either way.
+  const strays = [];
+  for (const r of missing) {
+    let roundTrip;
+    try {
+      // normalizeIdentityEnvelope is the PUBLIC half of the store's own
+      // resolveIdentity, and is required before validateRecord: a stored v2
+      // body has status/superseded_by stripped into columns, while the schemas
+      // registry still declares both as required envelope fields, so parsing a
+      // raw stored body without it would throw on every single record.
+      roundTrip = validateRecord(SterlingStore.normalizeIdentityEnvelope(r));
+    } catch {
+      continue;
+    }
+    const lost = droppedKeyPaths(r, roundTrip);
+    if (lost.length) strays.push(`${r.id} (${r.type}): ${lost.join(', ')}`);
+  }
+  if (strays.length) {
+    fail(
+      `refusing: ${strays.length} source record(s) to be copied would LOSE field(s) on the way in (${strays.join('; ')}) — the ` +
+        `validated create path parses every record through its zod schema, which STRIPS keys the schema does not define at ` +
+        `EVERY level, so each field listed above would be dropped while the copy reported success and exited 0. That is ` +
+        `silent, permanent knowledge loss, which is the one outcome this tool exists to prevent. Register the field on the ` +
+        `record type, or remove it from the source record deliberately, then re-run. Nothing was written.`
+    );
+  }
   console.log(`migrate ${from} → ${to}: ${rows.length} source record(s), skipped ${rows.length - missing.length} already present, ${missing.length} to copy`);
   console.log(`  schema: source v${fromProbe.version} (${fromProbe.source}), destination v${toProbe.version} (${toProbe.source})`);
-  for (const r of missing) console.log(`  copy: ${r.id} (${r.type}, ${r.status}, ${r.created_at})`);
+  // `status` is COLUMN-RESIDENT, never in a v2 body (storableBody strips it),
+  // so reading it off the parsed body printed a literal `undefined` for every
+  // planned copy. src.columnState is where the survey already put it.
+  for (const r of missing) {
+    const state = src.columnState.get(r.id);
+    console.log(`  copy: ${r.id} (${r.type}, ${state?.status ?? r.status ?? 'unknown'}, ${r.created_at})`);
+  }
   if (!apply) {
     console.log('DRY-RUN: nothing written — re-run with --apply to migrate');
     return;

@@ -101,11 +101,45 @@
 // denied rather than reported "unchanged" on the strength of a racy read.
 // (3) The component walk (classifyPathComponents) resolves each component
 // through a PINNED PARENT DESCRIPTOR on Linux and the byte-read primitives open
-// their leaf O_NOFOLLOW / identity-verified. S2 (descriptor-pinned write+delete),
-// S3 (git read-blob restore), S4 ((B) detect-and-deny) and S5 (Pre-snapshot
-// atomicity) are the remaining slices and are NOT in this file yet.
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, opendirSync, openSync, readSync, closeSync, fstatSync, lstatSync, statSync, realpathSync, constants as FS } from 'node:fs';
-import { join, dirname, relative, resolve, sep } from 'node:path';
+// their leaf O_NOFOLLOW / identity-verified.
+// v3.9 SLICE 2 of the same redesign — DESCRIPTOR-PINNED WRITE/DELETE/READ
+// PRIMITIVES, closing residuals 1 and 3 of decision dfe70090. (1) The parent
+// DESCRIPTOR IS HELD ACROSS classify→read/hash/write/delete: `withPinnedParent`
+// is the one walk every secure operation shares, a leaf is classified BY BEING
+// OPENED and hashed from that same descriptor, directory recursion descends
+// through the descriptor it just classified, and the write/delete/recursive-
+// delete primitives operate through the held parent — so nothing re-resolves by
+// pathname mid-operation (residual 3). (2) The procfs preflight AUTHENTICATES
+// THE FILESYSTEM with statfs PROC_SUPER_MAGIC before its fd round-trip, and
+// compares dev/ino as bigint: a decoy directory pre-seeded with numeric symlinks
+// can emulate any fd number a probe samples, but it cannot forge a kernel
+// filesystem magic (residual 1). (3) Residual 2 — repo-root authentication — is
+// OUT OF THE THREAT MODEL and closed by disclosure, not mechanism (decision
+// h17-repo-root-authentication-is-out-of-scope). S3 (git read-blob restore),
+// S4 ((B) detect-and-deny) and S5 (Pre-snapshot atomicity) are the remaining
+// slices and are NOT in this file yet; restoreTracked's in-HEAD `git checkout`
+// arm is the one primitive still resolved by pathname, and it is S3's to close.
+import {
+  writeFileSync,
+  existsSync,
+  rmSync,
+  rmdirSync,
+  mkdirSync,
+  readdirSync,
+  opendirSync,
+  openSync,
+  readSync,
+  writeSync,
+  ftruncateSync,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  statSync,
+  statfsSync,
+  realpathSync,
+  constants as FS,
+} from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -139,6 +173,21 @@ const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 //     the LEAF is identity-verified with lstat/fstat {bigint:true} dev/ino/type
 //     equality across the open. An adversary racing path resolution itself can
 //     evade that; the residual is disclosed, not silently closed.
+//
+// THE PROTECTION BOUNDARY STARTS AT THE WORKSPACE ROOT — NAMED, NOT ASSUMED
+// (decision h17-repo-root-authentication-is-out-of-scope, ruling on residual 2
+// of dfe70090). H17 assumes the workspace root selected by the hook runner is
+// the trusted namespace anchor. It prevents (Linux) or detects (Windows)
+// redirection BELOW that root, but it does not authenticate root identity
+// ACROSS hook processes: a per-process descriptor authenticates only its own
+// invocation, and persisting the root's dev/ino into the temp records would
+// authenticate nothing, because those records are themselves agent-writable.
+// An actor able to rename or replace the workspace root, its .git, or the
+// parent namespace is OUTSIDE H17's protection boundary — such an actor can
+// equally replace the store, the config and the enforcement surface, so there
+// is nothing left for this hook to protect. Closing it would need a trusted
+// runner-provided handle, which does not exist; the honest disposition is this
+// disclosure, not a sixth mechanism that looks like a guarantee.
 //
 // RULING C — /proc/self/fd ABSENT IS A HARD DENY, NEVER AN AUTO-DEGRADE. The
 // whole Linux arm is built on procfs being mounted; a hardened container may
@@ -196,16 +245,53 @@ const UNATTESTABLE_SYMLINK = 'symlink-target';
 // whatever it is called; anything else is unavailable and hard-denies.
 // `probeDir` is the repo root — the same trust anchor the component walk starts
 // from — so the preflight exercises the real path, not a synthetic one.
+//
+// SLICE 2 REPAIR — AUTHENTICATE THE FILESYSTEM, NOT ONE ENTRY (residual 1 of
+// decision dfe70090, external-model finding adopted by the conductor). The
+// round-trip below proves that ONE numeric entry resolves to the object its
+// descriptor holds. It does NOT prove the anchor dynamically maps ARBITRARY fd
+// numbers, and NO finite set of numeric-entry probes can: a decoy directory
+// pre-seeded with numeric symlinks over a plausible fd range emulates every
+// number the probe samples, passes, and then fails to resolve the CHILD fds the
+// component walk opens later — `<decoy>/<childFd>/<name>` resolves wrong or
+// absent, every component classifies 'absent', and the whole mechanism degrades
+// to ALLOW. That is exactly the silent auto-degrade Ruling C rejected by name.
+// The closure is to authenticate the FILESYSTEM instead of counting entries:
+// `statfs` reports the mounted filesystem's magic, and PROC_SUPER_MAGIC
+// (0x9fa0) is a KERNEL fact no unprivileged directory of decoy symlinks can
+// forge — arbitrary-fd mapping is a property of procfs semantics, not of any
+// entry we could sample. The two checks are complementary and BOTH are needed:
+// the magic establishes "this is procfs" (so fd mapping is dynamic), the
+// round-trip establishes "this particular procfs location is an FD DIRECTORY"
+// and not some other procfs node that would also carry the magic.
+// /proc/thread-self/fd still passes both, so the anti-hardcode pin holds.
+// BIGINT dev/ino (same repair): number-valued fs.Stats truncate a 64-bit file
+// id, and a truncated ino makes the identity comparison unsound on exotic
+// filesystems — the same reason openLeafNoFollow's win32 arm is bigint.
+const PROC_SUPER_MAGIC = 0x9fa0n;
+
 function secureIoUnavailableReason(probeDir) {
   if (IS_WIN32) return null; // the detect-and-abort arm needs no procfs (2a69a8d7)
   if (!existsSync(PROCFS_FD_DIR)) return 'secure I/O unavailable: /proc/self/fd absent';
+  let vfs;
+  try {
+    vfs = statfsSync(PROCFS_FD_DIR, { bigint: true });
+  } catch (e) {
+    return `secure I/O unavailable: '${PROCFS_FD_DIR}' could not be statfs'd to confirm it is procfs (${(e && e.code) || (e && e.message) || e})`;
+  }
+  if (vfs.type !== PROC_SUPER_MAGIC) {
+    return (
+      `secure I/O unavailable: '${PROCFS_FD_DIR}' is not on procfs (filesystem magic 0x${vfs.type.toString(16)}, expected 0x${PROC_SUPER_MAGIC.toString(16)}) — ` +
+      `only the kernel's procfs maps ARBITRARY descriptor numbers, and an ordinary directory of numeric-named entries cannot, however many of them it pre-seeds`
+    );
+  }
   let fd = null;
   try {
     fd = openRootAnchorDir(probeDir);
     const anchored = `${PROCFS_FD_DIR}/${fd}`;
-    const entry = lstatSync(anchored); // the fd entry ITSELF, unfollowed
-    const through = statSync(anchored); // ... and what it resolves to
-    const direct = fstatSync(fd); // ... versus what the descriptor actually holds
+    const entry = lstatSync(anchored, { bigint: true }); // the fd entry ITSELF, unfollowed
+    const through = statSync(anchored, { bigint: true }); // ... and what it resolves to
+    const direct = fstatSync(fd, { bigint: true }); // ... versus what the descriptor actually holds
     closeSync(fd);
     fd = null;
     if (!entry.isSymbolicLink()) {
@@ -261,18 +347,29 @@ function openPinnedDir(path) {
 // descriptor is held, every component BELOW it is still resolved through the
 // anchor with O_NOFOLLOW, so the prevention guarantee is unchanged: following
 // the root link once, at the start, cannot re-aim anything inside the repo.
+//
+// WHAT THIS ANCHOR IS NOT — the named limit (decision
+// h17-repo-root-authentication-is-out-of-scope, residual 2 of dfe70090). "Trust
+// anchor" is an ASSUMPTION this hook inherits from its runner, not a property it
+// verifies: H17 assumes the workspace root selected by the hook runner is the
+// trusted namespace anchor, prevents or detects redirection below that root, and
+// does NOT authenticate root identity across hook processes. An actor able to
+// rename or replace the workspace root, its .git, or the parent namespace is
+// outside H17's protection boundary. That is a ruled scope boundary — see the
+// platform-envelope block at the top of this layer for why authenticating it
+// cross-process is unsound rather than merely unbuilt.
 // Still O_DIRECTORY, so a root symlink pointing at a NON-directory fails
 // (ENOTDIR) rather than being accepted; still O_NONBLOCK, same reason as above.
 function openRootAnchorDir(path) {
   return openSync(path, FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NONBLOCK);
 }
 
-// The path that resolves `name` RELATIVE TO the pinned directory descriptor
-// `fd` — Node's stand-in for openat/fstatat, and the reason the Linux arm is
-// prevention rather than detection.
-function anchoredPath(fd, name) {
-  return `${PROCFS_FD_DIR}/${fd}/${name}`;
-}
+// (`anchoredPath(fd, name)` used to live here — the path that resolves `name`
+// RELATIVE TO a pinned descriptor, Node's stand-in for openat/fstatat. Slice 2
+// made every caller hold a pinned directory HANDLE (`/proc/self/fd/<fd>` on
+// Linux, the plain directory path on win32) rather than a bare fd, so the
+// composition is `${handle}/${name}` at the one place it is needed and the
+// helper had no callers left.)
 
 // A component name safe to resolve through an anchor. '', '.' and '..' would
 // each re-aim the walk at a directory the anchor was chosen to exclude (the
@@ -330,6 +427,391 @@ function openLeafNoFollow(abs, extraFlags = 0) {
     closePinned(fd, e);
     throw e;
   }
+}
+
+// ---------------------------------------------------------------------------
+// SLICE 2 — DESCRIPTOR-PINNED WRITE / DELETE / READ PRIMITIVES (decision
+// 532a4383's build plan, closing residual 3 of dfe70090).
+//
+// WHAT SLICE 1 LEFT OPEN. Slice 1 made CLASSIFICATION descriptor-pinned, then
+// dropped every descriptor before the operation it had authorized: the walk
+// released its pins and the lstat/hash/write/delete that followed RE-RESOLVED
+// `cwd/rel` from the root by pathname. An ancestor swapped after a successful
+// classification was then followed by the operation — the classify→use window
+// this whole redesign exists to close, one call frame wide instead of one hook
+// invocation wide. S2's contract is the fix, and it is exactly one sentence:
+// THE PARENT DESCRIPTOR IS HELD ACROSS classify→read/hash/write/delete, so
+// nothing re-resolves by pathname mid-operation.
+//
+// THE SHAPE — a pinned directory expressed as a PATH STRING. `withPinnedParent`
+// walks a repo-relative path component by component, holding each confirmed
+// directory open, and hands the callback the PARENT's pinned handle plus the
+// bare LEAF NAME. On Linux the handle is `/proc/self/fd/<fd>` for a descriptor
+// this process holds, so `<handle>/<leaf>` is Node's stand-in for openat: the
+// prefix cannot be re-aimed by any swap, because it is a descriptor, not a name.
+// On native Windows the handle is the plain absolute directory path — Node
+// cannot hold a directory descriptor there, so this is the SAME disclosed
+// detection-only arm 2a69a8d7 already accepted for the leaf (lstat/fstat bigint
+// identity across the open), applied unchanged. One code path, two guarantees,
+// stated rather than blurred.
+//
+// WHY /proc/self/fd/<fd>/<name> IS ALLOWED TO CARRY MUTATIONS. Node exposes no
+// openat/unlinkat/renameat and invariant 4 forbids a native addon (already
+// refused twice for this file). Ruling C ALREADY makes functional procfs a hard
+// requirement on Linux — the hook denies every agent Bash without it — so
+// resolving mkdir/unlink/rmdir/open through the anchor adds no new dependency;
+// it spends a requirement that is already paid for.
+//
+// NAMED RESIDUALS THIS LAYER DOES NOT CLOSE, disclosed rather than buried:
+//   * mkdir / unlink / rmdir REMAIN NAME OPERATIONS. They cannot follow an
+//     ancestor and cannot follow a symlink (the parent is a descriptor, the leaf
+//     is unlinked as a NAME and never dereferenced), but a racer can still
+//     exchange WHICH ENTRY lives under that leaf name between the classification
+//     and the mutation. The blast radius is bounded to the pinned parent
+//     directory — never outside the repo — but it is not zero.
+//   * A RECURSIVE DELETE PINS EVERY DIRECTORY IT DESCENDS, so it can never be
+//     re-aimed out of the tree; but if a racer RENAMES that directory elsewhere
+//     mid-delete, the pinned descriptor still names the same directory OBJECT
+//     and the delete proceeds against it. Descriptor identity is preserved;
+//     namespace containment is not. Denying untracked-directory restoration
+//     outright would close it, at the cost of a real capability — that is a
+//     conductor decision, not one this layer takes.
+//   * There is NO renameat, so there is no atomic replace: `writeRegularAt`
+//     truncates and rewrites in place. A crash mid-write leaves a partial file
+//     (loud on the next hash), never a file redirected elsewhere.
+//   * restoreTracked's in-HEAD arm still shells out to `git checkout HEAD --
+//     <rel>`, which resolves the path itself, outside every descriptor this
+//     layer holds. That is S3's read-blob rewrite (Ruling A) and stays open here.
+//   * THE CLASSIFY→USE PAIR IS CLOSED FOR READS, AND ONLY FOR READS — stated
+//     precisely because the loose version of this claim ("the lstat/open pair is
+//     gone") was WRONG when first written and a review caught it. Every path that
+//     READS bytes now classifies BY OPENING and reads from that same descriptor:
+//     the (A) state hash, the (B) baseline bytes, the enforcement stamp. What is
+//     NOT closed is the pair on the MUTATING side — `removeFileAt` and
+//     `removeTreeAt` lstat the leaf and then unlink the NAME, and `writeUnder`'s
+//     ancestor walk lstats each component before pinning it. Those are the same
+//     bounded exposure the first bullet describes and cannot be closed without
+//     unlinkat/renameat, which Node does not expose.
+//   * A DIRENT IS A PRE-FILTER, NEVER THE VERDICT. The (B) walk still reads
+//     Dirent kinds to decide what to descend or read, but every decision is
+//     RE-ESTABLISHED by the open that follows (O_NOFOLLOW + fstat), so a stale or
+//     raced Dirent can only cost a denial, never a wrong read.
+// ---------------------------------------------------------------------------
+
+// THE ONE ROOT ANCHOR PER INVOCATION. Slice 1 reopened `cwd` inside every
+// classifier and closed it again before the operation; each reopen was a fresh
+// pathname resolution of the root and a fresh chance to land on a different
+// object. One process, one anchor: opened lazily on first use, retained for the
+// life of the hook (a hook invocation is short and single-purpose, so there is
+// no fd to reclaim), and never closed — so the `/proc/self/fd/<fd>` prefix
+// embedded in every anchored path can never be invalidated by a close, nor
+// re-pointed by fd-number reuse.
+// THE CACHE IS KEYED BY cwd, AND A MISMATCH THROWS RATHER THAN RESOLVING
+// (review finding C). One hook invocation only ever has one root, so the key can
+// never differ in production — which is exactly why an unkeyed cache was easy to
+// write and impossible to notice. Its failure mode is the one this whole slice
+// exists to prevent: a second caller passing a DIFFERENT root would silently
+// resolve every path against the FIRST one, i.e. a wrong-namespace resolution
+// that no descriptor pin can catch, because the descriptor is faithfully pinned
+// to the wrong repository. Fail LOUD instead of returning a stale anchor: a
+// caller that genuinely needs two roots must say so and get a second anchor,
+// never inherit one by accident.
+let rootAnchorFd = null;
+let rootAnchorDir = null;
+let rootAnchorCwd = null;
+
+function repoRootDir(cwd) {
+  if (IS_WIN32) return cwd; // no directory descriptors on win32 (2a69a8d7)
+  if (rootAnchorDir === null) {
+    rootAnchorCwd = cwd;
+    rootAnchorFd = openRootAnchorDir(cwd);
+    rootAnchorDir = `${PROCFS_FD_DIR}/${rootAnchorFd}`;
+    return rootAnchorDir;
+  }
+  if (cwd !== rootAnchorCwd) {
+    throw new Error(
+      `refusing to resolve '${cwd}' through the root anchor pinned for '${rootAnchorCwd}': this process holds ONE repo-root descriptor and a second root ` +
+        `would silently resolve against the first, which is a wrong-namespace resolution no descriptor pin can detect. A hook invocation has exactly one root; ` +
+        `two means the caller is not the hook, and it must open its own anchor rather than inherit this one.`
+    );
+  }
+  return rootAnchorDir;
+}
+
+// Hold `dirPath` open as a pinned directory for the duration of `fn`, and hand
+// `fn` the pinned handle. O_NOFOLLOW is the race-closer: a component swapped for
+// a symlink between its classification and this open FAILS (ELOOP) rather than
+// opening the link's target — the swap becomes a deny, never a redirect.
+function withPinnedDir(dirPath, fn) {
+  if (IS_WIN32) return fn(dirPath); // DISCLOSED win32 arm: path-addressed, detection not prevention
+  let fd = null;
+  let primary;
+  try {
+    fd = openPinnedDir(dirPath);
+    return fn(`${PROCFS_FD_DIR}/${fd}`);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(fd, primary);
+  }
+}
+
+// THE PRIMITIVE EVERY SECURE OPERATION IS BUILT FROM. Walks `rel`'s ancestors
+// from the retained root anchor, pinning each confirmed directory, and calls
+// `fn(parentHandle, leaf)` WHILE THE PARENT IS STILL PINNED — which is the whole
+// point: the callback's operation resolves through a descriptor this process
+// holds, not through a path string the OS re-walks.
+// `opts.createParents` creates a missing ancestor ONE COMPONENT AT A TIME
+// through the pinned parent, then re-pins it — never `mkdirSync(dirname,
+// {recursive:true})`, which resolves and traverses the whole string and so
+// creates directories THROUGH a linked ancestor.
+// A MISSING ancestor without `createParents` is not a violation: `fn` is called
+// with a NULL handle, meaning "nothing to resolve" — the same disposition the
+// Slice 1 component walk expressed as its 'absent' return.
+function withPinnedParent(cwd, rel, what, opts, fn) {
+  const createParents = !!(opts && opts.createParents);
+  const segments = rel.replace(/\/+$/, '').split('/');
+  for (const s of segments) assertResolvableComponent(s, rel, what);
+  const leaf = segments[segments.length - 1];
+  const step = (dirHandle, i, soFar) => {
+    if (i === segments.length - 1) return fn(dirHandle, leaf);
+    const name = segments[i];
+    const nextRel = soFar ? `${soFar}/${name}` : name;
+    const anchored = `${dirHandle}/${name}`;
+    // lstat THROUGH the pinned parent, never openSync: an lstat cannot block, so
+    // a fifo/socket/device component is classified ('other') instead of hanging
+    // the hook, and only a component confirmed a real directory is ever opened.
+    let kind = lstatKind(anchored);
+    if (kind === 'absent') {
+      if (!createParents) return fn(null, leaf);
+      try {
+        mkdirSync(anchored); // ONE component, through the pinned parent
+      } catch (e) {
+        if (!e || e.code !== 'EEXIST') throw e; // a racing create is fine; re-classify below
+      }
+      kind = lstatKind(anchored);
+    }
+    if (kind !== 'dir') {
+      throw new Error(
+        `${what} path component '${nextRel}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
+          `through it; a symlink or other non-regular ancestor is denied on sight, never followed`
+      );
+    }
+    return withPinnedDir(anchored, (childHandle) => step(childHandle, i + 1, nextRel));
+  };
+  return step(repoRootDir(cwd), 0, '');
+}
+
+// CLASSIFY A LEAF BY OPENING IT, not by lstat-then-open (Linux). The lstat/open
+// pair is itself a classify→use window: an lstat says "regular file", a racer
+// swaps in a DIFFERENT regular file, and the open that follows reads bytes the
+// classification never saw. Opening FIRST and deciding from the descriptor's own
+// fstat removes the window entirely — whatever the fd holds is what gets read,
+// and O_NOFOLLOW means the fd can never be a symlink's target.
+// O_NONBLOCK for the reason sha256OfFileStreamed already documents: a fifo or
+// device swapped in under the gate would BLOCK in open() itself, and a blocked
+// hook is timeout-killed into a non-2 (fail-OPEN) exit. With O_NONBLOCK the open
+// returns and the fstat rejects the type — the same trade this file already
+// settled ("a prior lstat cannot substitute — it leaves the swap race").
+// ELOOP is the symlink verdict (Ruling B: unattestable, never read through);
+// ENXIO/ENODEV/EOPNOTSUPP are types the open itself refuses, classified 'other'
+// exactly as an lstat would have classified them.
+// NATIVE WINDOWS keeps the lstat arm: libuv ignores O_NOFOLLOW there and Node
+// cannot open a directory as a descriptor at all, so the disclosed
+// detection-not-prevention envelope (2a69a8d7) applies unchanged.
+// The returned `fd` (Linux, file or directory) is the CALLER's to close.
+function classifyLeafAt(parentHandle, leaf) {
+  const anchored = `${parentHandle}/${leaf}`;
+  if (IS_WIN32) {
+    let st;
+    try {
+      st = lstatSync(anchored);
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return { kind: 'absent', fd: null, st: null, anchored };
+      throw e;
+    }
+    if (st.isSymbolicLink()) return { kind: 'symlink', fd: null, st, anchored };
+    if (st.isDirectory()) return { kind: 'dir', fd: null, st, anchored };
+    if (st.isFile()) return { kind: 'file', fd: null, st, anchored };
+    return { kind: 'other', fd: null, st, anchored };
+  }
+  let fd;
+  try {
+    fd = openSync(anchored, FS.O_RDONLY | FS.O_NONBLOCK | FS.O_NOFOLLOW);
+  } catch (e) {
+    const code = e && e.code;
+    if (code === 'ENOENT') return { kind: 'absent', fd: null, st: null, anchored };
+    if (code === 'ELOOP') return { kind: 'symlink', fd: null, st: null, anchored };
+    if (code === 'ENXIO' || code === 'ENODEV' || code === 'EOPNOTSUPP') return { kind: 'other', fd: null, st: null, anchored };
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    const kind = st.isFile() ? 'file' : st.isDirectory() ? 'dir' : 'other';
+    return { kind, fd, st, anchored };
+  } catch (e) {
+    closePinned(fd, e);
+    throw e;
+  }
+}
+
+// The pinned handle for a directory we have ALREADY classified and still hold.
+// On Linux this is the very descriptor `classifyLeafAt` opened — no reopen, so
+// not even a one-instruction window between the classification and the walk.
+function dirHandleOf(h) {
+  return IS_WIN32 ? h.anchored : `${PROCFS_FD_DIR}/${h.fd}`;
+}
+
+// A leaf's own lstat kind, resolved through its PINNED parent. Replaces
+// `lstatKind(join(cwd, rel))`, which re-walked the whole string from the root
+// and so could be re-aimed by an ancestor swap. A missing ancestor is 'absent'
+// (nothing to classify); a non-directory ancestor THROWS into the caller's
+// fail-closed catch, which is the settled disposition for ancestor ambiguity.
+function lstatKindUnder(cwd, rel, what = 'path classification') {
+  return withPinnedParent(cwd, rel, what, {}, (parentHandle, leaf) => (parentHandle === null ? 'absent' : lstatKind(`${parentHandle}/${leaf}`)));
+}
+
+// WRITE a regular file through a PINNED parent. Two arms, and the ORDER inside
+// the existing-entry arm is load-bearing:
+//   * EXISTING: open O_WRONLY|O_NOFOLLOW|O_NONBLOCK, fstat to prove the
+//     descriptor is a REGULAR FILE, and only THEN ftruncate + write. O_TRUNC on
+//     the open would mutate the object BEFORE its type was known — a guard that
+//     destroys first and validates second has already done the damage it was
+//     meant to refuse.
+//   * ABSENT: O_CREAT|O_EXCL, so a racer who plants an entry between the ENOENT
+//     and the create loses the race loudly (EEXIST) instead of having the write
+//     land on whatever they planted.
+// O_NOFOLLOW means a symlink standing at the leaf fails the open (ELOOP) rather
+// than being written through; on win32, where libuv ignores it, the leaf is
+// lstat-screened first — the disclosed detection arm (2a69a8d7).
+function writeRegularAt(parentHandle, leaf, buf, rel) {
+  const anchored = `${parentHandle}/${leaf}`;
+  if (IS_WIN32) {
+    const kind = lstatKind(anchored);
+    if (kind !== 'file' && kind !== 'absent') {
+      throw new Error(
+        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) — a symlink or other ` +
+          `non-regular entry is never written through by a restore`
+      );
+    }
+  }
+  let fd = null;
+  let creating = false;
+  try {
+    fd = openSync(anchored, FS.O_WRONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
+  } catch (e) {
+    const code = e && e.code;
+    if (code === 'ENOENT') {
+      creating = true;
+      fd = openSync(anchored, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o666);
+    } else if (code === 'ELOOP') {
+      throw new Error(
+        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: symlink) — a symlink or other ` +
+          `non-regular entry is never written through by a restore`
+      );
+    } else {
+      throw e;
+    }
+  }
+  let primary;
+  try {
+    if (!creating) {
+      const st = fstatSync(fd);
+      if (!st.isFile()) {
+        throw new Error(
+          `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (fstat type on the OPEN descriptor) — a symlink, ` +
+            `directory or other non-regular entry is never written through by a restore, and nothing has been truncated`
+        );
+      }
+      ftruncateSync(fd, 0); // AFTER the type check, never via O_TRUNC on the open
+    }
+    let written = 0;
+    while (written < buf.length) written += writeSync(fd, buf, written, buf.length - written, null);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(fd, primary);
+  }
+}
+
+// UNLINK a regular file through a PINNED parent. `rmSync` without `recursive`
+// is an unlink of the NAME: it never dereferences a symlink standing there, and
+// with the parent pinned it can never be aimed outside that directory. The kind
+// check keeps the settled (B) disposition — a leaf that is no longer a regular
+// file is a TYPE AMBIGUITY and denies WITHOUT being touched.
+function removeFileAt(parentHandle, leaf, rel) {
+  const anchored = `${parentHandle}/${leaf}`;
+  const kind = lstatKind(anchored);
+  if (kind !== 'file' && kind !== 'absent') {
+    throw new Error(
+      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) — a symlink, directory or other ` +
+        `non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
+    );
+  }
+  rmSync(anchored, { force: true });
+}
+
+// RECURSIVE DELETE, one pinned directory at a time — the replacement for
+// `rmSync(join(cwd, rel), {recursive:true})`, which resolved the WHOLE path
+// string before it started deleting and so could be re-aimed at a tree outside
+// the repository by a single swapped ancestor. Every directory is pinned before
+// its entries are enumerated, and every child is removed through ITS pinned
+// parent, so the recursion can never leave the subtree it was handed.
+// Non-directories (including symlinks) are unlinked as NAMES — a planted link is
+// removed, never followed. Budgeted for the same reason every other walk here
+// is: unbounded recursion that overflows the stack kills the process, and a
+// killed guard exits non-2, which the platform reads as ALLOW.
+function removeTreeAt(parentHandle, leaf, rel, depth = 0) {
+  WALK_BUDGET.chargeDepth(depth, rel);
+  const anchored = `${parentHandle}/${leaf}`;
+  const kind = lstatKind(anchored);
+  if (kind === 'absent') return;
+  if (kind !== 'dir') {
+    rmSync(anchored, { force: true });
+    return;
+  }
+  withPinnedDir(anchored, (dirHandle) => {
+    // INCREMENTAL, NOT MATERIALIZING (board 55fcccac clause 3, review finding A):
+    // readdirSync builds the WHOLE listing — every Dirent — before the first
+    // chargeNode could fire, so a very large flat directory kills the process
+    // before its own bound is ever consulted, and a killed guard exits non-2,
+    // which the platform reads as ALLOW. opendirSync/readSync charges as each
+    // entry arrives, which is what lets the budget stop this walk MID-DIRECTORY.
+    // TWO PHASES ON PURPOSE, and the second reason is independent of the budget:
+    // unlinking entries from a directory WHILE a readdir stream is open over it
+    // has unspecified behaviour for entries not yet returned, so a delete-as-you-
+    // iterate loop can silently SKIP siblings and leave the rmdir below failing
+    // ENOTEMPTY. Names are collected under the budget (so the collection itself
+    // can never grow past MAX_WALK_NODES), the handle is closed, and only then
+    // does anything get removed.
+    const names = [];
+    const dir = opendirSync(dirHandle);
+    let primary;
+    try {
+      for (;;) {
+        const de = dir.readSync();
+        if (de === null) break;
+        WALK_BUDGET.chargeNode(rel);
+        names.push(de.name);
+      }
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      try {
+        dir.closeSync();
+      } catch (closeErr) {
+        // Codex F5: a swallowed close error leaks the handle toward an EMFILE
+        // fail-open. Propagate only when no primary exception is already driving
+        // the verdict (a tripped budget).
+        if (!primary) throw closeErr;
+      }
+    }
+    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1);
+  });
+  rmdirSync(anchored);
 }
 
 // ---------------------------------------------------------------------------
@@ -458,10 +940,33 @@ function sha256OfFileStreamed(abs) {
   const fd = openLeafNoFollow(abs); // SLICE 1: no-follow (Linux) / identity-verified (win32)
   let primary;
   try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) {
-      throw new Error(`'${abs}' is not a regular file (fstat) — refusing to stream-hash it; only a regular file's bytes are hashable`);
+    return sha256OfOpenFd(fd, abs);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeErr) {
+      // A leaked descriptor marches toward EMFILE, and an EMFILE mid-check is
+      // itself a non-2 fail-open (Codex F5). Swallow the close error ONLY while
+      // a primary exception is already driving a deny; with no primary pending,
+      // the leaked fd IS the failure and must propagate to the fail-closed catch.
+      if (!primary) throw closeErr;
     }
+  }
+}
+
+// SLICE 2: the hashing core, addressed by an ALREADY-OPEN DESCRIPTOR rather than
+// a path. This is what lets a caller that has just CLASSIFIED a leaf hash the
+// very object it classified — no second resolution, so no window between the
+// two. The descriptor stays the caller's to close.
+function sha256OfOpenFd(fd, label) {
+  const st = fstatSync(fd);
+  if (!st.isFile()) {
+    throw new Error(`'${label}' is not a regular file (fstat) — refusing to stream-hash it; only a regular file's bytes are hashable`);
+  }
+  {
     const expectedSize = st.size;
     const hash = createHash('sha256');
     const buf = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
@@ -476,23 +981,10 @@ function sha256OfFileStreamed(abs) {
     const st2 = fstatSync(fd);
     if (total !== expectedSize || st2.size !== expectedSize || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
       throw new Error(
-        `'${abs}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) — refusing a torn hash; a file mutating mid-hash is itself a violation signal`
+        `'${label}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) — refusing a torn hash; a file mutating mid-hash is itself a violation signal`
       );
     }
     return hash.digest('hex');
-  } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    try {
-      closeSync(fd);
-    } catch (closeErr) {
-      // A leaked descriptor marches toward EMFILE, and an EMFILE mid-check is
-      // itself a non-2 fail-open (Codex F5). Swallow the close error ONLY while
-      // a primary exception is already driving a deny; with no primary pending,
-      // the leaked fd IS the failure and must propagate to the fail-closed catch.
-      if (!primary) throw closeErr;
-    }
   }
 }
 
@@ -517,9 +1009,39 @@ function sha256OfFileStreamed(abs) {
 // look like an unauthorized addition and get REMOVED. Requiring total === size
 // AND an unchanged re-fstat rejects a truncation as loudly as a growth.
 function readBoundedFile(abs, maxBytes, what) {
+  return readBoundedBuffer(abs, maxBytes, what).toString('utf8');
+}
+
+// The same read, returning RAW BYTES. The (B) content baseline stores base64 of
+// the raw bytes (never a decoded utf8 string — two different invalid-UTF-8
+// sequences decode to the same U+FFFD, which is lossy exactly where tampering
+// hides), so it needs the buffer, not the string. `maxBytes` may be Infinity for
+// a surface whose size bound is enforced elsewhere.
+function readBoundedBuffer(abs, maxBytes, what) {
   const fd = openLeafNoFollow(abs); // SLICE 1: no-follow (Linux) / identity-verified (win32)
   let primary;
   try {
+    return readBoundedFromFd(fd, maxBytes, what, abs);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeErr) {
+      // Codex F5: propagate a close failure only when no primary exception is
+      // already driving a deny — a leaked fd marches toward an EMFILE fail-open.
+      if (!primary) throw closeErr;
+    }
+  }
+}
+
+// SLICE 2 (review finding B): the bounded read addressed by an ALREADY-OPEN
+// DESCRIPTOR. This is what lets a caller that has just CLASSIFIED a leaf read the
+// very object it classified, instead of reopening the same NAME and hoping the
+// two resolutions agree. The descriptor stays the caller's to close.
+function readBoundedFromFd(fd, maxBytes, what, abs) {
+  {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error(`${what} '${abs}' is not a regular file (fstat) — refusing to read it`);
     if (st.size > maxBytes) {
@@ -541,18 +1063,7 @@ function readBoundedFile(abs, maxBytes, what) {
     if (st2.size !== st.size || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
       throw new Error(`${what} '${abs}' changed while being read (size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) — refusing to trust a record mutated under the gate`);
     }
-    return buf.subarray(0, total).toString('utf8');
-  } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    try {
-      closeSync(fd);
-    } catch (closeErr) {
-      // Codex F5: propagate a close failure only when no primary exception is
-      // already driving a deny — a leaked fd marches toward an EMFILE fail-open.
-      if (!primary) throw closeErr;
-    }
+    return buf.subarray(0, total);
   }
 }
 
@@ -752,99 +1263,146 @@ function indexEntriesFor(cwd, rels) {
 // DIRECTORY term is walked INCREMENTALLY against a cumulative structural budget
 // (`budget`, `depth`), because a collapsed untracked directory is an
 // attacker-or-accident-controlled amount of WORK that streaming cannot bound.
+// SLICE 2 (residual 3 of dfe70090) — THE DESCRIPTOR IS HELD FROM CLASSIFY TO
+// HASH. Slice 1 classified the ancestor chain with pinned descriptors and then
+// RELEASED them, after which the lstat and the stream-hash each re-resolved
+// `cwd/rel` from the root by pathname: an ancestor swapped after a successful
+// classification was followed by BOTH, and the guard reported "unchanged" about
+// a file it had never read. The recursion had the same shape one level down
+// (children reopened as `cwd/childRel`), plus a leaf regular-file swap race
+// between the lstat and the open. All three are closed here:
+//   * the ANCESTOR chain is pinned by `withPinnedParent` and STAYS pinned for
+//     the whole of the state snapshot, so nothing below it can be re-aimed;
+//   * the LEAF is classified BY OPENING IT (`classifyLeafAt`) and hashed from
+//     THAT SAME DESCRIPTOR, so there is no second resolution to race;
+//   * each CHILD is resolved through the descriptor its parent directory is
+//     already held open on — no `cwd/childRel` reconstruction anywhere.
 function pathState(cwd, rel, idx, budget = WALK_BUDGET, depth = 0) {
-  // THE ANCESTOR CHAIN IS CLASSIFIED BEFORE THE STATE IS TAKEN (repair of an
-  // outside-family review finding). Everything below is PATH-ADDRESSED: the
-  // lstat, and the stream-hash that follows it, both resolve `cwd/rel` from the
-  // root again, so O_NOFOLLOW at the LEAF says nothing about the ANCESTORS. An
-  // enforcement path whose ancestor directory is replaced by a symlink to an
-  // out-of-repo decoy therefore lstat'd as an ordinary regular file and hashed
-  // to whatever the decoy held: present a byte-identical decoy and the guard
-  // reports "unchanged" about a file it has never read. Ruling B's "never read
-  // through a symlink" (532a4383) covers an ancestor exactly as it covers a
-  // leaf, so classify the chain first — descriptor-pinned on Linux — and let a
-  // non-directory ancestor THROW into the caller's fail-closed catch (deny at
-  // Post; deny at Pre, where a symlinked ancestor over an enforcement path is a
-  // pre-existing environment defect, the same disposition the (B) walk has
-  // always given it).
-  // DEPTH 0 ONLY, and that is sufficient rather than lazy: the recursion's own
-  // children are classified by their own lstat one level down (a symlinked child
-  // becomes an `unattestable` state, never followed), so the chain that needs
-  // proving is the one ABOVE the path git reported — and classifying it once per
-  // reported path keeps this off the per-entry hot path.
-  // NAMED RESIDUAL, not closed here: classification and the byte read are still
-  // two separate path resolutions, so the INTRA-CALL window between them remains
-  // open. Closing it needs the descriptor-pinned read primitives of S2, not this
-  // slice; what this closes is the Pre→Post instantiation of the same invariant.
-  if (depth === 0) assertRealAncestors(cwd, rel, `(A) state snapshot of '${rel}'`);
-  const abs = join(cwd, rel);
+  return withPinnedParent(cwd, rel, `(A) state snapshot of '${rel}'`, {}, (parentHandle, leaf) => {
+    // A missing ancestor means the path itself cannot exist — absence, which is
+    // explicitly NOT a violation (the same disposition Slice 1's 'absent' had).
+    if (parentHandle === null) return { exists: false, index: idx.get(rel) ?? null };
+    return pathStateAt(parentHandle, leaf, rel, idx, budget, depth);
+  });
+}
+
+function pathStateAt(parentHandle, leaf, rel, idx, budget, depth) {
   const index = idx.get(rel) ?? null;
-  let st;
+  const h = classifyLeafAt(parentHandle, leaf);
+  let primary;
   try {
-    st = lstatSync(abs);
-  } catch (e) {
-    if (e && e.code === 'ENOENT') return { exists: false, index };
-    throw e; // any OTHER lstat error is unverifiable -> AC9 fail-closed
-  }
-  const mode = st.mode & 0o7777; // PERMISSION bits only; the type is its own term
-  // RULING B (decision 532a4383, h17-baseline-integrity-redesign-rulings-abcd):
-  // A SYMLINK'S STATE IS UNATTESTABLE. The old term here was `target:
-  // readlinkSync(abs)` — a value this hook cannot securely obtain: pinning a
-  // symlink ITSELF (to read its target without following it) needs
-  // O_PATH|O_NOFOLLOW + readlinkat, which pure Node does not expose and which a
-  // native addon would only buy at the cost of the dependency-light-hooks
-  // invariant (invariant 4, already refused once by 2a69a8d7). A path-addressed
-  // readlink races the very swap this layer exists to stop, so the value it
-  // returns is evidence of nothing. The honest disposition is fail-closed:
-  // record that the state was UNKNOWABLE, never a target to compare. `sameState`
-  // and `stampCouldAttest` treat this exactly as `walk_budget_exceeded` is
-  // treated — NEVER equal, NEVER attestable — so a symlink is denied on the (A)
-  // state surface even when it demonstrably did not move, rather than reported
-  // "unchanged" on the strength of a racy read.
-  if (st.isSymbolicLink()) return { exists: true, type: 'symlink', mode, index, unattestable: UNATTESTABLE_SYMLINK };
-  if (st.isFile()) return { exists: true, type: 'file', mode, index, sha256: sha256OfFileStreamed(abs) };
-  if (st.isDirectory()) {
-    // An untracked directory reaches the sweep as its COLLAPSED path (`?? dir/`),
-    // so comparing the directory alone would let a write to a file inside it pass
-    // as unchanged. Recurse: every child is a state of its own. NULL-PROTOTYPE:
-    // a child literally named `__proto__` must be an ordinary key here, never a
-    // prototype write (the same hazard review finding 4(b) names on the record's
-    // own lookup).
-    budget.chargeDepth(depth, rel);
-    const children = Object.create(null);
-    // opendirSync + readSync, NOT readdirSync (board 55fcccac clause 3): the
-    // materializing form builds the entire listing — every Dirent of a
-    // million-entry flat directory — before the first budget charge could fire,
-    // so the process dies before its own bound is consulted. The incremental
-    // form charges as each entry arrives, which is what lets the budget stop a
-    // walk MID-DIRECTORY. The handle is closed in `finally`, including on the
-    // budget throw, so a tripped budget leaks no descriptor.
-    const dir = opendirSync(abs);
-    let primary;
-    try {
-      for (;;) {
-        const de = dir.readSync();
-        if (de === null) break;
-        budget.chargeNode(rel);
-        const childRel = `${rel}/${de.name}`;
-        children[childRel] = pathState(cwd, childRel, idx, budget, depth + 1);
-      }
-    } catch (e) {
-      primary = e;
-      throw e;
-    } finally {
-      try {
-        dir.closeSync();
-      } catch (closeErr) {
-        // Codex F5: a swallowed close error leaks the dir handle toward an
-        // EMFILE fail-open. Propagate it ONLY when no primary exception (a
-        // tripped budget, an unattestable entry) is already driving the verdict.
-        if (!primary) throw closeErr;
-      }
+    if (h.kind === 'absent') return { exists: false, index };
+    // RULING B (decision 532a4383, h17-baseline-integrity-redesign-rulings-abcd):
+    // A SYMLINK'S STATE IS UNATTESTABLE. The old term here was `target:
+    // readlinkSync(abs)` — a value this hook cannot securely obtain: pinning a
+    // symlink ITSELF (to read its target without following it) needs
+    // O_PATH|O_NOFOLLOW + readlinkat, which pure Node does not expose and which a
+    // native addon would only buy at the cost of the dependency-light-hooks
+    // invariant (invariant 4, already refused once by 2a69a8d7). A path-addressed
+    // readlink races the very swap this layer exists to stop, so the value it
+    // returns is evidence of nothing. The honest disposition is fail-closed:
+    // record that the state was UNKNOWABLE, never a target to compare. `sameState`
+    // and `stampCouldAttest` treat this exactly as `walk_budget_exceeded` is
+    // treated — NEVER equal, NEVER attestable — so a symlink is denied on the (A)
+    // state surface even when it demonstrably did not move, rather than reported
+    // "unchanged" on the strength of a racy read.
+    // The MODE comes from a follow-up lstat on Linux, because O_NOFOLLOW gives
+    // ELOOP rather than a descriptor for a link. That read is resolved through
+    // the SAME pinned parent (so it can never leave this directory) and its value
+    // cannot change a verdict: an unattestable state is never equal and never
+    // attestable, whatever mode it carries. It is recorded only so the record's
+    // shape stays uniform.
+    if (h.kind === 'symlink') {
+      return { exists: true, type: 'symlink', mode: symlinkModeAt(h), index, unattestable: UNATTESTABLE_SYMLINK };
     }
-    return { exists: true, type: 'dir', mode, index, children };
+    // BEFORE the mode read, not after: a fifo/socket/device leaf may have been
+    // refused by the OPEN itself (ENXIO and friends), in which case there is no
+    // stat to read mode from. Reading it first would turn this deliberate,
+    // message-bearing refusal into a TypeError — still a deny, but one that says
+    // nothing about what was wrong.
+    if (h.kind !== 'file' && h.kind !== 'dir') {
+      throw new Error(`unsupported file type at '${rel}' — cannot snapshot its state, so this command's writes are unverifiable`);
+    }
+    const mode = h.st.mode & 0o7777; // PERMISSION bits only; the type is its own term
+    if (h.kind === 'file') return { exists: true, type: 'file', mode, index, sha256: hashClassifiedLeaf(h, rel) };
+    if (h.kind === 'dir') {
+      // An untracked directory reaches the sweep as its COLLAPSED path (`?? dir/`),
+      // so comparing the directory alone would let a write to a file inside it pass
+      // as unchanged. Recurse: every child is a state of its own. NULL-PROTOTYPE:
+      // a child literally named `__proto__` must be an ordinary key here, never a
+      // prototype write (the same hazard review finding 4(b) names on the record's
+      // own lookup).
+      budget.chargeDepth(depth, rel);
+      const children = Object.create(null);
+      // THE DIRECTORY WE ALREADY HOLD is what gets walked — `dirHandleOf` returns
+      // the descriptor `classifyLeafAt` just opened, so there is not even a
+      // one-instruction window between classifying this directory and enumerating
+      // it, and every child below resolves through that descriptor.
+      const dirHandle = dirHandleOf(h);
+      // opendirSync + readSync, NOT readdirSync (board 55fcccac clause 3): the
+      // materializing form builds the entire listing — every Dirent of a
+      // million-entry flat directory — before the first budget charge could fire,
+      // so the process dies before its own bound is consulted. The incremental
+      // form charges as each entry arrives, which is what lets the budget stop a
+      // walk MID-DIRECTORY. The handle is closed in `finally`, including on the
+      // budget throw, so a tripped budget leaks no descriptor.
+      const dir = opendirSync(dirHandle);
+      let dirPrimary;
+      try {
+        for (;;) {
+          const de = dir.readSync();
+          if (de === null) break;
+          budget.chargeNode(rel);
+          const childRel = `${rel}/${de.name}`;
+          children[childRel] = pathStateAt(dirHandle, de.name, childRel, idx, budget, depth + 1);
+        }
+      } catch (e) {
+        dirPrimary = e;
+        throw e;
+      } finally {
+        try {
+          dir.closeSync();
+        } catch (closeErr) {
+          // Codex F5: a swallowed close error leaks the dir handle toward an
+          // EMFILE fail-open. Propagate it ONLY when no primary exception (a
+          // tripped budget, an unattestable entry) is already driving the verdict.
+          if (!dirPrimary) throw closeErr;
+        }
+      }
+      return { exists: true, type: 'dir', mode, index, children };
+    }
+    // Unreachable — the kind guard above already refused everything else. Kept
+    // as a fail-closed backstop rather than a fall-through returning undefined.
+    throw new Error(`unsupported file type at '${rel}' — cannot snapshot its state, so this command's writes are unverifiable`);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(h.fd, primary);
   }
-  throw new Error(`unsupported file type at '${rel}' — cannot snapshot its state, so this command's writes are unverifiable`);
+}
+
+// The mode bits of a leaf already classified as a SYMLINK. On win32 the lstat
+// that classified it is already in hand; on Linux O_NOFOLLOW refused to open it,
+// so one lstat through the pinned parent supplies the bits. Never a readlink
+// (Ruling B), and never a value any verdict depends on.
+function symlinkModeAt(h) {
+  if (h.st) return h.st.mode & 0o7777;
+  try {
+    return lstatSync(h.anchored).mode & 0o7777;
+  } catch {
+    return 0o777; // it raced away between the failed open and here; the state is unattestable either way
+  }
+}
+
+// Hash a leaf THROUGH THE DESCRIPTOR IT WAS CLASSIFIED BY. On Linux that
+// descriptor is the object itself, so classify→hash is one resolution, not two.
+// On win32 there is no such descriptor (the leaf was classified by lstat), so
+// the hash goes through `openLeafNoFollow`'s identity-verified open — detection,
+// not prevention, the disclosed envelope of 2a69a8d7.
+function hashClassifiedLeaf(h, label) {
+  if (h.fd !== null) return sha256OfOpenFd(h.fd, label);
+  return sha256OfFileStreamed(h.anchored);
 }
 
 // The state PRE records for a directory whose walk tripped a structural budget
@@ -862,8 +1420,12 @@ function pathState(cwd, rel, idx, budget = WALK_BUDGET, depth = 0) {
 // directory branch recurses), but that is re-checked rather than assumed — if
 // it is not one now, the original budget error is rethrown unchanged.
 function walkBudgetExceededState(cwd, rel, idx, err) {
-  const st = lstatSync(join(cwd, rel));
-  if (!st.isDirectory()) throw err;
+  // SLICE 2: resolved through the pinned parent like every other classification
+  // here, so the re-check cannot itself be aimed by an ancestor swap.
+  const st = withPinnedParent(cwd, rel, `(A) budget-exceeded snapshot of '${rel}'`, {}, (parentHandle, leaf) =>
+    parentHandle === null ? null : lstatSync(`${parentHandle}/${leaf}`)
+  );
+  if (!st || !st.isDirectory()) throw err;
   return {
     exists: true,
     type: 'dir',
@@ -1193,8 +1755,11 @@ function lstatKind(abs) {
 // LSTAT, not stat (review finding 3): a symlink is NEVER a directory for this
 // purpose, so a link pointing at a directory can never route the stamp consult
 // into a recursive walk outside the repo.
+// SLICE 2: resolved through the pinned parent, so a linked ancestor can no
+// longer re-aim the question at a directory outside the repo (it throws into the
+// caller's fail-closed catch instead).
 function isDirectoryAt(cwd, rel) {
-  return lstatKind(join(cwd, rel)) === 'dir';
+  return lstatKindUnder(cwd, rel, `(A) directory classification of '${rel}'`) === 'dir';
 }
 
 // The stamp's entries, as { present, entries }. `entries` is null whenever the
@@ -1204,10 +1769,38 @@ function isDirectoryAt(cwd, rel) {
 // consult at bytes outside the repo). `present` keeps the existing message
 // distinction between "no stamp at all" and "a stamp that attests nothing".
 // A parse error propagates to the caller's fail-closed catch, unchanged.
+// SLICE 2: the stamp's own ancestors ('.sterling', 'transient') are now pinned
+// across the classify→read, so a '.sterling' swapped for a symlink cannot route
+// the consult at a stamp outside the repo — it throws, and every caller treats a
+// throw as attesting NOTHING.
 function readStamp(cwd) {
-  const stampPath = join(cwd, '.sterling', 'transient', 'enforcement-stamp.json');
-  const kind = lstatKind(stampPath);
-  if (kind !== 'file') return { present: kind !== 'absent', entries: null };
+  return withPinnedParent(cwd, '.sterling/transient/enforcement-stamp.json', 'enforcement stamp', {}, (parentHandle, leaf) =>
+    parentHandle === null ? { present: false, entries: null } : readStampAt(parentHandle, leaf)
+  );
+}
+
+// SLICE 2 (review finding B): CLASSIFIED BY THE OPEN, not by an lstat followed
+// by a reopen of the same name. The pair this replaces left a window in which a
+// racer could swap one regular file for another between the classification and
+// the read, so bytes were attested that had never been classified. Now the
+// descriptor that answered "is this a regular file?" is the descriptor the JSON
+// is read from.
+function readStampAt(parentHandle, leaf) {
+  const stampPath = `${parentHandle}/${leaf}`;
+  const h = classifyLeafAt(parentHandle, leaf);
+  let primary;
+  try {
+    if (h.kind !== 'file') return { present: h.kind !== 'absent', entries: null };
+    return readStampFromFd(h, stampPath);
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(h.fd, primary);
+  }
+}
+
+function readStampFromFd(h, stampPath) {
   // BOUNDED (board 55fcccac clause 4): the stamp lives in gitignored
   // .sterling/transient/, which no gate protects, so an oversize file there
   // could OOM the readFileSync+JSON.parse this replaces — killing the guard
@@ -1217,8 +1810,18 @@ function readStamp(cwd) {
   // an unreadable stamp fail closed exactly WHERE IT MATTERS and nowhere else:
   // "no attestation available" only bites on a path that needs attestation, so
   // a garbage stamp for a window with nothing to attest changes no verdict.
-  const stamp = readBoundedJsonFile(stampPath, MAX_STAMP_BYTES, 'enforcement stamp');
+  const stamp = JSON.parse(readClassifiedBytes(h, MAX_STAMP_BYTES, 'enforcement stamp', stampPath).toString('utf8'));
   return { present: true, entries: Array.isArray(stamp) ? stamp : null };
+}
+
+// Read a leaf's bytes THROUGH THE DESCRIPTOR IT WAS CLASSIFIED BY. On Linux that
+// descriptor is the object itself, so classify→read is one resolution, not two.
+// On win32 there is no such descriptor (the leaf was classified by lstat), so the
+// read goes through `openLeafNoFollow`'s identity-verified open — detection, not
+// prevention, the disclosed envelope of 2a69a8d7. Mirrors `hashClassifiedLeaf`.
+function readClassifiedBytes(h, maxBytes, what, label) {
+  if (h.fd !== null) return readBoundedFromFd(h.fd, maxBytes, what, label);
+  return readBoundedBuffer(h.anchored, maxBytes, what);
 }
 
 // One path's CURRENT bytes hashed for a stamp comparison — only ever for a
@@ -1230,14 +1833,32 @@ function readStamp(cwd) {
 // STREAMED (board 55fcccac clause 1): constant memory, no size cap — a stamped
 // enforcement file of any size is hashable without the guard's heap tracking
 // it.
-function sha256OfRegularFile(abs) {
-  if (lstatKind(abs) !== 'file') return null;
-  return sha256OfFileStreamed(abs);
+// SLICE 2: addressed by (cwd, rel) and resolved through a PINNED parent, and the
+// classification is the OPEN itself — so the bytes hashed are the bytes of the
+// object that was classified, not of whatever a racer put under the name
+// afterwards. Returns null for anything that is not a regular file.
+function sha256OfRegularFile(cwd, rel, what = `stamp attestation of '${rel}'`) {
+  return withPinnedParent(cwd, rel, what, {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return null;
+    const h = classifyLeafAt(parentHandle, leaf);
+    let primary;
+    try {
+      if (h.kind !== 'file') return null;
+      return hashClassifiedLeaf(h, rel);
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      closePinned(h.fd, primary);
+    }
+  });
 }
 
-function toRel(cwd, abs) {
-  return relative(cwd, abs).replace(/\\/g, '/');
-}
+// (`toRel(cwd, abs)` used to live here. It existed because collectBaseline built
+// ABSOLUTE child paths and then derived the (B) record's key back from them.
+// Slice 2's walk carries the repo-relative path down the recursion directly —
+// there is no absolute path to convert back, and one fewer place where a '\'
+// could collapse into the key.)
 
 // Classify EVERY path COMPONENT of a (B)-relative path, from the repo root
 // down, by lstat — before any read, walk, or write touches it (board 8b53dc84,
@@ -1274,76 +1895,17 @@ function toRel(cwd, abs) {
 // descriptor IS. On NATIVE WINDOWS the walk stays path-addressed exactly as
 // before (Node cannot hold a directory descriptor there; Fork 2 of f2bc631f,
 // option (b)) — a DISCLOSED weaker ancestor guarantee, not a silent one.
+// SLICE 2 folded this onto `withPinnedParent`, the ONE walk every secure
+// operation now shares. Two things changed and nothing else did: the root anchor
+// is the invocation's single retained descriptor rather than a fresh open-and-
+// close per classifier (each reopen was another pathname resolution of the root),
+// and the native-Windows arm — formerly a duplicated path-addressed loop — is
+// now the same walk with a path-shaped handle. The win32 guarantee is unchanged
+// and still disclosed: detection at the leaf, best-effort above it, because pure
+// Node on Windows offers no descriptor to pin against a racing ancestor swap
+// (2a69a8d7).
 function classifyPathComponents(cwd, rel, what = '(B) baseline') {
-  const segments = rel.split('/');
-  if (IS_WIN32) return classifyPathComponentsByPath(cwd, rel, segments, what);
-  let parentFd = null;
-  let primary;
-  try {
-    // The repo root is the TRUST ANCHOR, never itself classified — and it is
-    // opened FOLLOWING (openRootAnchorDir), because a symlinked project root is
-    // an ordinary arrangement and no-following it denies every agent Bash. See
-    // openRootAnchorDir for why that does not weaken Ruling B by a hair.
-    parentFd = openRootAnchorDir(cwd);
-    let soFar = '';
-    for (let i = 0; i < segments.length; i++) {
-      assertResolvableComponent(segments[i], rel, what);
-      soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
-      const anchored = anchoredPath(parentFd, segments[i]);
-      // lstat THROUGH the anchor, never openSync: an lstat cannot block, so a
-      // fifo/socket/device component is classified ('other') instead of hanging
-      // the hook, and only a component confirmed to be a real directory is ever
-      // opened below.
-      const kind = lstatKind(anchored);
-      if (kind === 'absent') return 'absent'; // nothing further to resolve — not a violation
-      if (i === segments.length - 1) return kind;
-      if (kind !== 'dir') {
-        throw new Error(
-          `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
-            `through it; a symlink or other non-regular ancestor is denied on sight, never followed`
-        );
-      }
-      // Pin the confirmed directory, then drop the previous anchor. O_NOFOLLOW
-      // is the race-closer: if the component was swapped for a symlink between
-      // the lstat above and this open, the open FAILS (ELOOP) instead of
-      // opening the link's target — the swap becomes a deny, never a redirect.
-      const nextFd = openPinnedDir(anchored);
-      const prev = parentFd;
-      parentFd = nextFd;
-      closePinned(prev, undefined);
-    }
-    return 'absent'; // unreachable — rel is always non-empty
-  } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    closePinned(parentFd, primary);
-  }
-}
-
-// The NATIVE WINDOWS arm: today's path-addressed lstat walk, unchanged, kept in
-// its own function so the two platforms' guarantees are legible side by side
-// rather than interleaved. DISCLOSED RESIDUAL (2a69a8d7): this is detection at
-// the leaf and best-effort above it — an adversary swapping an ancestor between
-// two components' lstats re-aims the remainder, and pure Node on Windows offers
-// no descriptor to pin against it.
-function classifyPathComponentsByPath(cwd, rel, segments, what) {
-  let abs = cwd;
-  let soFar = '';
-  for (let i = 0; i < segments.length; i++) {
-    abs = join(abs, segments[i]);
-    soFar = soFar ? `${soFar}/${segments[i]}` : segments[i];
-    const kind = lstatKind(abs);
-    if (kind === 'absent') return 'absent'; // nothing further to resolve — not a violation
-    if (i === segments.length - 1) return kind;
-    if (kind !== 'dir') {
-      throw new Error(
-        `${what} path component '${soFar}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
-          `through it; a symlink or other non-regular ancestor is denied on sight, never followed`
-      );
-    }
-  }
-  return 'absent'; // unreachable — rel is always non-empty
+  return withPinnedParent(cwd, rel, what, {}, (parentHandle, leaf) => (parentHandle === null ? 'absent' : lstatKind(`${parentHandle}/${leaf}`)));
 }
 
 // THE ANCESTOR GUARD EVERY WRITE, CREATE, DELETE AND RESTORE PRIMITIVE TAKES
@@ -1362,11 +1924,18 @@ function classifyPathComponentsByPath(cwd, rel, segments, what) {
 // restoring): removing the write from the ambiguous case entirely rather than
 // trying to make it safe. SLICE 1 (532a4383) hardened the CLASSIFICATION this
 // calls — on Linux the component walk is descriptor-anchored, so the ancestor
-// chain can no longer be re-aimed DURING the walk. It STILL RACES with the
-// primitive that FOLLOWS it: the write/delete/restore primitives are addressed
-// by path, so classify-then-write is not atomic. Closing that is S2/S3 of the
-// same decision (descriptor-pinned write/delete, git read-blob restore), not
-// this slice.
+// chain can no longer be re-aimed DURING the walk.
+//
+// SLICE 2 RETIRED MOST OF THIS FUNCTION'S CALLERS, and that is the point: a
+// classify-then-act pair is not atomic however good the classification is, so
+// the (B) write, the (B) delete, the (A) state snapshot and the untracked-restore
+// delete all moved onto `withPinnedParent`, which keeps the parent descriptor
+// HELD while the operation runs. ONE caller remains — restoreTracked's in-HEAD
+// arm, which shells out to `git checkout HEAD -- <rel>`: git resolves the path
+// itself, in another process, outside every descriptor this hook can hold, so
+// classification is the only guard available there. That is a NAMED, OPEN
+// residual and it is S3's to close (Ruling A: resolve the blob and materialize
+// it through the pinned write primitive instead of invoking checkout).
 // Returns the IMMEDIATE PARENT's own kind ('dir' when it is already there,
 // 'absent' when the primitive may create it fresh — nothing to follow yet);
 // throws on anything else, and on the first non-directory component above it.
@@ -1406,25 +1975,33 @@ function assertRealAncestors(cwd, rel, what) {
 // depth. Bytes are stored as base64 of the RAW file bytes (never a decoded
 // utf8 string): two different invalid-UTF-8 sequences can decode to the same
 // U+FFFD text, so a string snapshot is lossy exactly where tampering hides.
+// SLICE 2: every level of this walk now runs against a PINNED DIRECTORY
+// DESCRIPTOR. The Slice 1 shape classified a root, released it, and then
+// re-resolved `join(cwd, ...)` for the readdir and again for each file's
+// readFileSync — three separate pathname resolutions of a chain that had been
+// verified once. The recursion reached its children the same way. Now the
+// classification hands the walk the descriptor it classified (`dirHandleOf`),
+// every child directory is pinned with O_NOFOLLOW before it is listed, and every
+// file's bytes are read through the pinned parent. The belt-and-suspenders
+// per-recursion re-lstat that Slice 1 added to SHRINK that window is gone with
+// the window itself — on Linux there is nothing left to re-check, because the
+// descriptor IS the directory; on win32 (no descriptors, disclosed detection-only
+// arm) the re-lstat is kept exactly as it was.
 function collectBaseline(cwd) {
   const map = {};
-  const walkDir = (absDir, relDir) => {
-    // Belt-and-suspenders per-recursion recheck (Codex delta re-review):
-    // callers classify `absDir` via classifyPathComponents before the FIRST
-    // call, but every RECURSIVE call already trusts the parent's own Dirent
-    // classification (`de.isDirectory()`) alone. Re-lstat `absDir` itself
-    // here too — narrows the TOCTOU window between that Dirent read and this
-    // readdirSync, even though closing it fully is the boarded, out-of-scope
-    // item (6c1e0890): this recheck cannot eliminate a race, only shrink it.
-    const kind = lstatKind(absDir);
-    if (kind === 'absent') return; // raced away between classification and here — nothing to snapshot, not a violation
-    if (kind !== 'dir') {
-      throw new Error(
-        `(B) baseline path '${relDir}' is not a directory (lstat kind: ${kind}) — refusing to read through it; a symlink or other non-regular ` +
-          `entry standing in for a (B) directory is denied on sight, never followed`
-      );
+  const walkDir = (dirHandle, relDir) => {
+    if (IS_WIN32) {
+      // WIN32 ONLY: the handle is a path, so the Slice 1 narrowing still applies.
+      const kind = lstatKind(dirHandle);
+      if (kind === 'absent') return; // raced away between classification and here — nothing to snapshot, not a violation
+      if (kind !== 'dir') {
+        throw new Error(
+          `(B) baseline path '${relDir}' is not a directory (lstat kind: ${kind}) — refusing to read through it; a symlink or other non-regular ` +
+            `entry standing in for a (B) directory is denied on sight, never followed`
+        );
+      }
     }
-    for (const de of readdirSync(absDir, { withFileTypes: true })) {
+    for (const de of readdirSync(dirHandle, { withFileTypes: true })) {
       // POSIX non-injectivity guard (files AND directories), BEFORE join/rel/
       // recursion: a literal backslash in de.name is a legal POSIX filename byte
       // but collapses to '/' when toRel keys the (B) content map below, so
@@ -1438,7 +2015,6 @@ function collectBaseline(cwd) {
           `(B) baseline entry '${relDir ? relDir + '/' : ''}${de.name}' contains a backslash — refused on POSIX: '\\' is a legal filename byte here but collapses to '/' in the authorization key, so a distinct sibling would share one key and a restore could land on the wrong path; denied fail-closed, never normalized`
         );
       }
-      const abs = join(absDir, de.name);
       const rel = relDir ? `${relDir}/${de.name}` : de.name;
       if (de.isSymbolicLink()) {
         throw new Error(
@@ -1446,9 +2022,11 @@ function collectBaseline(cwd) {
         );
       }
       if (de.isDirectory()) {
-        walkDir(abs, rel);
+        // Pinned with O_NOFOLLOW: a child swapped for a symlink between this
+        // Dirent and the open FAILS (ELOOP) rather than being descended into.
+        withPinnedDir(`${dirHandle}/${de.name}`, (childHandle) => walkDir(childHandle, rel));
       } else if (de.isFile()) {
-        map[toRel(cwd, abs)] = readFileSync(abs).toString('base64');
+        map[rel] = readBaselineBytesAt(dirHandle, de.name, rel);
       } else {
         throw new Error(`(B) baseline path '${rel}' is not a regular file or directory (unsupported type) — refusing to read it`);
       }
@@ -1458,19 +2036,22 @@ function collectBaseline(cwd) {
   // .claude/agents/** (recursive) — '.claude' AND '.claude/agents' are BOTH
   // classified, component by component, BEFORE any readdirSync ever touches
   // either of them (round-2 finding (b): walking 'agents' before classifying
-  // '.claude' let an out-of-repo traversal happen before the denial).
-  const agentsKind = classifyPathComponents(cwd, '.claude/agents');
-  if (agentsKind === 'dir') {
-    walkDir(join(cwd, '.claude', 'agents'), '.claude/agents');
-  } else if (agentsKind !== 'absent') {
-    throw new Error(`'.claude/agents' is not a directory (lstat kind: ${agentsKind}) — refusing to read/walk through it; denied on sight, never followed`);
-  }
+  // '.claude' let an out-of-repo traversal happen before the denial). SLICE 2:
+  // the classification now HANDS the walk the descriptor it classified, instead
+  // of naming a path for the walk to resolve again.
+  withClassifiedDir(cwd, '.claude/agents', (kind, dirHandle) => {
+    if (kind === 'dir') walkDir(dirHandle, '.claude/agents');
+    else if (kind !== 'absent') throw new Error(`'.claude/agents' is not a directory (lstat kind: ${kind}) — refusing to read/walk through it; denied on sight, never followed`);
+  });
 
   // .claude/settings*.json (top level only) — '.claude' classified before it
   // is listed.
-  const claudeKind = classifyPathComponents(cwd, '.claude');
-  if (claudeKind === 'dir') {
-    for (const de of readdirSync(join(cwd, '.claude'), { withFileTypes: true })) {
+  withClassifiedDir(cwd, '.claude', (claudeKind, claudeHandle) => {
+    if (claudeKind !== 'dir') {
+      if (claudeKind !== 'absent') throw new Error(`'.claude' is not a directory (lstat kind: ${claudeKind}) — refusing to read the (B) baseline surface through it`);
+      return;
+    }
+    for (const de of readdirSync(claudeHandle, { withFileTypes: true })) {
       const rel = '.claude/' + de.name;
       // matchesGlob normalizes '\'->'/' internally, so a POSIX settings-shaped
       // name carrying a backslash (`settings\evil.json`) would be rewritten to
@@ -1496,24 +2077,93 @@ function collectBaseline(cwd) {
             `denied on sight, never followed`
         );
       }
-      map[rel] = readFileSync(join(cwd, rel)).toString('base64');
+      map[rel] = readBaselineBytesAt(claudeHandle, de.name, rel);
     }
-  } else if (claudeKind !== 'absent') {
-    throw new Error(`'.claude' is not a directory (lstat kind: ${claudeKind}) — refusing to read the (B) baseline surface through it`);
-  }
+  });
 
   // .sterling/config.json — every component ('.sterling' AND 'config.json')
   // classified before the file is read (round-2 finding (a): a '.sterling'
   // symlink to an outside directory previously resolved straight through to
   // whatever 'config.json' sat there).
   const cfgRel = '.sterling/config.json';
-  const cfgKind = classifyPathComponents(cwd, cfgRel);
-  if (cfgKind === 'file') {
-    map[cfgRel] = readFileSync(join(cwd, cfgRel)).toString('base64');
-  } else if (cfgKind !== 'absent') {
-    throw new Error(`(B) baseline path '${cfgRel}' is not a regular file (lstat kind: ${cfgKind}) — refusing to read through it; denied on sight, never followed`);
-  }
+  withPinnedParent(cwd, cfgRel, '(B) baseline', {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return; // '.sterling' absent — nothing to snapshot
+    // SLICE 2 (review finding B): classify by OPENING, then read from that same
+    // descriptor — the lstat-then-reopen pair this replaces left a window in
+    // which one regular file could be exchanged for another under the name.
+    const h = classifyLeafAt(parentHandle, leaf);
+    let primary;
+    try {
+      if (h.kind === 'absent') return;
+      if (h.kind !== 'file') {
+        throw new Error(`(B) baseline path '${cfgRel}' is not a regular file (lstat kind: ${h.kind}) — refusing to read through it; denied on sight, never followed`);
+      }
+      map[cfgRel] = readClassifiedBytes(h, Number.POSITIVE_INFINITY, `(B) baseline path '${cfgRel}'`, h.anchored).toString('base64');
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      closePinned(h.fd, primary);
+    }
+  });
   return map;
+}
+
+// Read one (B) file's RAW bytes through its PINNED parent, base64-encoded for
+// the record. Replaces `readFileSync(join(cwd, rel))`, which re-resolved the
+// whole chain the classification had just verified. `openLeafNoFollow` inside
+// the bounded reader refuses a symlink at the leaf (ELOOP on Linux; identity
+// verification on win32) and the exact-size / re-fstat discipline refuses a file
+// swapped or truncated under the gate.
+// NO SIZE CAP HERE, deliberately: the aggregate (B) record is already bounded
+// where that bound belongs (Pre refuses to write an over-budget baseline, and
+// Post refuses to read one), and a per-file cap invented here could only add a
+// new false-deny class to a surface that never had one.
+// SLICE 2 (review finding B): CLASSIFIED BY THE OPEN. The Dirent that got us
+// here reflects the entry's kind at the moment the directory was READ, and the
+// read that follows is a second resolution of the same NAME — so a racer could
+// swap one regular file for another in between and have bytes recorded into the
+// baseline that were never classified. The open IS the classification now: the
+// descriptor that proves "regular file" is the descriptor the bytes come from.
+// The kind check is therefore authoritative rather than advisory, and the Dirent
+// is only a cheap pre-filter.
+function readBaselineBytesAt(parentHandle, leaf, rel) {
+  const h = classifyLeafAt(parentHandle, leaf);
+  let primary;
+  try {
+    if (h.kind !== 'file') {
+      throw new Error(
+        `(B) baseline path '${rel}' is not a regular file (kind: ${h.kind}) — refusing to read it; a symlink or other non-regular entry standing where ` +
+          `the baseline walk saw a file is denied on sight, never followed`
+      );
+    }
+    return readClassifiedBytes(h, Number.POSITIVE_INFINITY, `(B) baseline path '${rel}'`, h.anchored).toString('base64');
+  } catch (e) {
+    primary = e;
+    throw e;
+  } finally {
+    closePinned(h.fd, primary);
+  }
+}
+
+// Classify a (B) SURFACE ROOT and hand its walk the descriptor that
+// classification opened — never a path for the walk to resolve again. The
+// callback receives (kind, dirHandle); `dirHandle` is null for anything that is
+// not a directory.
+function withClassifiedDir(cwd, rel, fn) {
+  return withPinnedParent(cwd, rel, '(B) baseline', {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return fn('absent', null);
+    const h = classifyLeafAt(parentHandle, leaf);
+    let primary;
+    try {
+      return fn(h.kind, h.kind === 'dir' ? dirHandleOf(h) : null);
+    } catch (e) {
+      primary = e;
+      throw e;
+    } finally {
+      closePinned(h.fd, primary);
+    }
+  });
 }
 
 // Validate a baseline key: repo-relative POSIX + matches a (B) glob; reject
@@ -1550,27 +2200,19 @@ function validateBaselineKey(key) {
 // evaded, so it is never trusted to be safe only because an earlier scan said
 // so. `content` is base64 of the raw bytes to restore (collectBaseline's own
 // encoding), decoded back to a Buffer so the write is byte-exact.
+// SLICE 2: the classification and the WRITE now share one held parent
+// descriptor. Slice 1's shape classified the chain, dropped every descriptor,
+// then let `mkdirSync(dirname(abs), {recursive:true})` and `writeFileSync(abs)`
+// each re-resolve the whole string — so an ancestor swapped in that gap was
+// created through and written through by primitives that had been authorized
+// against a different chain. `withPinnedParent` holds the parent open for the
+// whole operation, creates any missing ancestor ONE COMPONENT AT A TIME through
+// that pin (never a recursive mkdir, which walks the string), and hands
+// `writeRegularAt` a parent that cannot be re-aimed.
 function writeUnder(cwd, rel, content) {
-  const abs = join(cwd, rel);
-  // Every ancestor directory must be real (never a symlink) BEFORE mkdirSync
-  // or writeFileSync touches any of them — see assertRealAncestors, which
-  // throws on the first non-directory component and whose return value here is
-  // the immediate parent's own kind ('dir' already there, or 'absent' so
-  // mkdirSync creates it fresh — safe, nothing to follow yet).
-  assertRealAncestors(cwd, rel, `(B) baseline restore of '${rel}'`);
-  // The FINAL component's own kind — by the ancestor check above, every
-  // component of `abs` up to but not including this final segment is already
-  // confirmed a real directory, so this lstat cannot be fooled by an
-  // intermediate symlink either.
-  const kind = lstatKind(abs);
-  if (kind !== 'file' && kind !== 'absent') {
-    throw new Error(
-      `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) — a symlink or other ` +
-        `non-regular entry is never written through by a restore`
-    );
-  }
-  mkdirSync(dirname(abs), { recursive: true });
-  writeFileSync(abs, Buffer.from(content, 'base64'));
+  withPinnedParent(cwd, rel, `(B) baseline restore of '${rel}'`, { createParents: true }, (parentHandle, leaf) => {
+    writeRegularAt(parentHandle, leaf, Buffer.from(content, 'base64'), rel);
+  });
 }
 
 // The (B) sweep's DELETE primitive (board 128fedb7 site 2) — a delete aimed the
@@ -1588,17 +2230,18 @@ function writeUnder(cwd, rel, content) {
 //   * the final component must be a regular file (or already absent): a (B)
 //     entry that turned into a symlink/directory since the walk is a TYPE
 //     AMBIGUITY, and the settled disposition is deny WITHOUT touching it.
+// SLICE 2: same change as writeUnder — the kind check and the unlink share one
+// held parent descriptor, so the delete cannot be re-aimed by an ancestor
+// swapped after the classification. (Named residual, unchanged by this slice:
+// the unlink is still a NAME operation inside that pinned directory, so a racer
+// can exchange WHICH entry sits under the leaf name between the check and the
+// unlink. The blast radius is bounded to this directory and the link itself is
+// never dereferenced — Node exposes no unlinkat to close the last inch.)
 function removeUnder(cwd, rel) {
-  assertRealAncestors(cwd, rel, `(B) baseline removal of '${rel}'`);
-  const abs = join(cwd, rel);
-  const kind = lstatKind(abs);
-  if (kind !== 'file' && kind !== 'absent') {
-    throw new Error(
-      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) — a symlink, directory or other ` +
-        `non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
-    );
-  }
-  rmSync(abs, { force: true });
+  withPinnedParent(cwd, rel, `(B) baseline removal of '${rel}'`, {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return; // ancestor absent → nothing to remove
+    removeFileAt(parentHandle, leaf, rel);
+  });
 }
 
 // Parse `git status --porcelain -z`: NUL-separated entries `XY <path>`; a
@@ -1644,20 +2287,20 @@ function verifyStampAttestation(cwd, preExistingRels) {
     for (const rel of preExistingRels) {
       const entry = byPath.get(rel);
       if (!entry) return { attested: false, stampPresent: true, failedPath: rel };
-      const abs = join(cwd, rel);
       // FIX L1 (upgrade-polish, 2026-08-21): a stamped DELETION attests iff the
       // path is STILL absent — the path reappearing is not the attested state,
       // so no exemption (fail-closed, no partial credit). LSTAT-guarded (review
       // finding 3): a dangling symlink is present, not absent, so it can never
-      // pass as an attested deletion.
+      // pass as an attested deletion. SLICE 2: resolved through the pinned
+      // parent, so a linked ancestor cannot answer the question from outside.
       if (entry.deleted === true) {
-        if (lstatKind(abs) !== 'absent') return { attested: false, stampPresent: true, failedPath: rel };
+        if (lstatKindUnder(cwd, rel, `stamp attestation of '${rel}'`) !== 'absent') return { attested: false, stampPresent: true, failedPath: rel };
         continue;
       }
       if (typeof entry.sha256 !== 'string') return { attested: false, stampPresent: true, failedPath: rel };
       // Only a REGULAR FILE can be hashed for attestation — never a symlink
       // (whose bytes may live outside the repo), a directory, or a device.
-      const current = sha256OfRegularFile(abs);
+      const current = sha256OfRegularFile(cwd, rel);
       if (current === null) return { attested: false, stampPresent: true, failedPath: rel };
       if (current !== entry.sha256) return { attested: false, stampPresent: true, failedPath: rel };
     }
@@ -1681,12 +2324,12 @@ function stampAttestsCurrentBytes(cwd, rel) {
     if (!entries) return false;
     const entry = entries.find((e) => e && e.path === rel);
     if (!entry) return false;
-    const abs = join(cwd, rel);
     // Review fix 5: a stamped DELETION (enforcement-stamp.mjs writes
     // {path, deleted:true} for a dirty path with no bytes) attests iff the
     // path is STILL absent — mirrors verifyStampAttestation's deleted arm.
     // Without this, an attested in-window deletion was silently resurrected.
-    const kind = lstatKind(abs);
+    // SLICE 2: resolved through the pinned parent, like the hash below it.
+    const kind = lstatKindUnder(cwd, rel, `stamp attestation of '${rel}'`);
     if (kind === 'absent') return entry.deleted === true;
     // Review finding 3: a path that is not a REGULAR FILE is UNATTESTED, full
     // stop. The old existsSync/readFileSync pair FOLLOWED a link, so a stamped
@@ -1695,7 +2338,7 @@ function stampAttestsCurrentBytes(cwd, rel) {
     // content from outside the repo that no sweep covers.
     if (kind !== 'file') return false;
     if (typeof entry.sha256 !== 'string') return false;
-    const current = sha256OfRegularFile(abs);
+    const current = sha256OfRegularFile(cwd, rel);
     return current !== null && current === entry.sha256;
   } catch {
     return false;
@@ -1718,9 +2361,16 @@ function stampAttestsDirectory(cwd, relDir) {
     // into the catch below and the directory simply attests NOTHING — the
     // fail-closed answer this function already gives for every other walk
     // failure (the caller then restores and denies).
-    const walk = (rel, depth) => {
+    // SLICE 2: the enumeration walks PINNED directory descriptors instead of
+    // re-resolving `join(cwd, rel)` at every level — a linked ancestor can no
+    // longer route this walk out of the repository between one level and the
+    // next. (The per-file hash below is a SEPARATE pinned resolution per path;
+    // that is a deliberate boundary, not an oversight — each hash re-walks from
+    // the root under its own pin, and a swap between the two can only ever make
+    // this consult attest LESS, never more, since every failure is fail-closed.)
+    const walk = (dirHandle, rel, depth) => {
       WALK_BUDGET.chargeDepth(depth, rel);
-      const dir = opendirSync(join(cwd, rel));
+      const dir = opendirSync(dirHandle);
       let primary;
       try {
         for (;;) {
@@ -1734,7 +2384,7 @@ function stampAttestsDirectory(cwd, relDir) {
           // and no child's bytes are ever hashed through a link. Anything that is
           // neither a real directory nor a regular file aborts the walk into the
           // catch below (fail-closed: the directory attests nothing).
-          if (de.isDirectory()) walk(childRel, depth + 1);
+          if (de.isDirectory()) withPinnedDir(`${dirHandle}/${de.name}`, (childHandle) => walk(childHandle, childRel, depth + 1));
           else if (de.isFile()) files.push(childRel);
           else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
         }
@@ -1753,7 +2403,10 @@ function stampAttestsDirectory(cwd, relDir) {
         }
       }
     };
-    walk(relDir, 0);
+    withClassifiedDir(cwd, relDir, (kind, dirHandle) => {
+      if (kind !== 'dir') throw new Error(`'${relDir}' is not a directory (kind: ${kind}) — it attests nothing`);
+      walk(dirHandle, relDir, 0);
+    });
     if (!files.length) return false;
     return files.every((f) => stampAttestsCurrentBytes(cwd, f));
   } catch {
@@ -1831,15 +2484,28 @@ function mintRestorePerformed(cwd, paths, agentId) {
 // removes the LINK, never its target — refusing there would leave an
 // attacker-planted link live at an enforcement path, which is strictly worse
 // than removing it.
+// SLICE 2 SPLIT THE TWO ARMS, because only one of them can be pinned:
+//   * NOT-IN-HEAD (delete) moved onto `removeTreeAt`, which pins every directory
+//     it descends. The `rmSync(join(cwd, rel), {recursive:true})` it replaces
+//     resolved the WHOLE string before deleting anything, so one swapped
+//     ancestor aimed a recursive delete at a tree outside the repository.
+//   * IN-HEAD (checkout) STILL RESOLVES BY PATHNAME and keeps the classify-then-
+//     act guard, because `git checkout` does its own resolution in another
+//     process where no descriptor of ours reaches. NAMED, OPEN RESIDUAL — it is
+//     S3's to close (Ruling A: read the blob and materialize it through the
+//     pinned write primitive instead of invoking checkout at all).
 function restoreTracked(cwd, relRaw) {
   const rel = relRaw.replace(/\/+$/, ''); // untracked dir collapses to `?? dir/`
-  assertRealAncestors(cwd, rel, `(A) tracked restore of '${rel}'`);
   const inHead = spawnSync('git', ['-C', cwd, 'cat-file', '-e', 'HEAD:' + rel], { encoding: 'utf8' }).status === 0;
   if (inHead) {
+    assertRealAncestors(cwd, rel, `(A) tracked restore of '${rel}'`);
     const r = spawnSync('git', ['-C', cwd, 'checkout', 'HEAD', '--', rel], { encoding: 'utf8' });
     if (r.error || r.status !== 0) throw new Error(`checkout HEAD -- ${rel} failed: ${r.stderr || r.error}`);
   } else {
-    rmSync(join(cwd, rel), { recursive: true, force: true });
+    withPinnedParent(cwd, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
+      if (parentHandle === null) return; // ancestor absent → nothing to remove
+      removeTreeAt(parentHandle, leaf, rel);
+    });
   }
 }
 

@@ -5306,6 +5306,26 @@ function attributeBlocks(transcriptPath, agentType) {
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
 }
+function claimedFromBlocks(blocks) {
+  return [
+    ...new Set(
+      blocks.flatMap(
+        (b) => extractPathCandidates(b.prompt).filter(
+          (raw) => (
+            // The SAME call the read side makes (h26-dispatch-overlap.mjs): one
+            // shared detector, never a second divergent heuristic — that
+            // divergence WAS the defect. checkSubjectVerb:false because
+            // "implement the feature in <path>" is a legitimate territory
+            // declaration for a FILE candidate (that guard is for H25's tool
+            // mentions). Matched against the RAW extracted substring, which
+            // PATH_CANDIDATE_RE guarantees appears literally in the prompt.
+            hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(raw)), { checkSubjectVerb: false })
+          )
+        )
+      )
+    )
+  ];
+}
 function withLedgerLock(sterlingDir, run) {
   const lockPath = join2(sterlingDir, "review-ledger.lock");
   let acquired = false;
@@ -5361,9 +5381,12 @@ try {
   if (event === "SubagentStart") {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
     const candidates = candidatesFromBlocks(matchedBlocks);
-    const files = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
+    const claimedCandidates = claimedFromBlocks(matchedBlocks);
+    const toRegisterPaths = (cands) => [...new Set(cands.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
       (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
     );
+    const files = toRegisterPaths(candidates);
+    const claimedFiles = toRegisterPaths(claimedCandidates);
     const configuredResources = loadExclusiveResourceNames(input.cwd);
     const claimed = attribution === "block" && configuredResources.length ? claimedResources(matchedBlocks.map((b) => b.prompt).join("\n"), configuredResources) : [];
     const notices = [];
@@ -5383,6 +5406,9 @@ try {
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
       files,
+      // Always present, even empty — its ABSENCE is the legacy-entry signal
+      // H26 falls back on (see claimedFromBlocks above).
+      claimed_files: claimedFiles,
       at: (/* @__PURE__ */ new Date()).toISOString(),
       attribution
     };
