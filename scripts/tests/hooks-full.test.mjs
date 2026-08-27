@@ -1091,7 +1091,17 @@ test('H15 store guard: shell references to the store are denied naming the §10 
 
     const nodeWrite = run(`node -e "import('.../store/dist/index.js').then(s => new s.SterlingStore('.sterling/sterling.db'))"`);
     assert.equal(nodeWrite.code, 2, 'ad-hoc node script against the store is denied');
-    assert.match(nodeWrite.stderr, /§10 MCP tool surface/);
+    // This command names '.sterling/sterling.db', which matches the DB-seal's raw
+    // command-text matcher (sterling\.db) — it takes the DB seal's OWN dedicated
+    // disclosure message, not the generic store-guard phrasing this assertion used
+    // to expect ('§10 MCP tool surface'). Per decision fd9e96e0
+    // (h15-db-seal-residual-discharged-by-disclosure, board 3edfb9fd), the DB seal
+    // is a raw command-text matcher whose residual is discharged by DISCLOSURE —
+    // naming the matched substring and its offset — not by narrowing the matcher.
+    // The old expectation was stale (pre-dates the dedicated wording); re-aimed at
+    // the discriminator the DB-seal path actually produces.
+    assert.match(nodeWrite.stderr, /MCP tool surface/, 'the DB-seal denial still teaches the right path (MCP tool surface)');
+    assert.match(nodeWrite.stderr, /Matched substring: .+ at offset \d+ in the command text\./, 'the DB-seal denial discloses the matched substring and its offset (fd9e96e0)');
     assert.doesNotMatch(nodeWrite.stderr, /maintenance_enqueue/, 'the retired wire tool is no longer taught (decision 6269b714)');
     assert.match(nodeWrite.stderr, /board_remove/, 'the deny message teaches the live write surface');
     assert.match(nodeWrite.stderr, /RESTART THE SESSION/);

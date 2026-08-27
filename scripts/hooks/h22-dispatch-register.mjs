@@ -60,7 +60,7 @@ import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { lastDispatchBlocks, extractPathCandidates } from './lib/dispatch-prompt.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
-import { hasUnsuppressedMatch, escapeRe } from './lib/dispatch-advisory.mjs';
+import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates } from './lib/dispatch-advisory.mjs';
 
 // SPEC B: .sterling/config.json's top-level `exclusive_resources: string[]`
 // (absent/malformed -> none, soft posture — this hook never gates on config).
@@ -227,6 +227,39 @@ function claimedFromBlocks(blocks) {
   ];
 }
 
+// GLOB LITERAL-PREFIX CLAIMS (board a63b226d) — the sibling of
+// claimedFromBlocks above, for the SEPARATE blind spot research_finding
+// 289cd172 flagged: a brief writing territory as a literal-prefix "**" glob
+// ("YOUR FILES: scripts/hooks/**") registered NOTHING via bare
+// extractPathCandidates (PATH_CANDIDATE_RE requires a literal '.', which no
+// glob token carries). ONE SHARED DETECTOR for suppression, same as above
+// (board a63b226d point 3) — a glob named only inside a prohibition
+// ("DO NOT TOUCH: scripts/hooks/**") must not register as held, checked
+// against the RAW glob token (`${prefix}**`), which is what literally
+// appears in the prompt (extractGlobPrefixCandidates strips the trailing
+// '**' from its return value; hasUnsuppressedMatch needs it back to find
+// the literal substring).
+//
+// WRITTEN TO ITS OWN FIELD, NOT FOLDED INTO claimed_files — see the
+// GLOB_PREFIX_RE comment in lib/dispatch-advisory.mjs for why: claimed_files
+// is a flat FILE-path list compared by exact string equality by its one
+// reader (H26), and repoRel/normalizeRepoPath legitimately strips a
+// trailing '/', so a trailing-slash marker could not survive the same
+// toRegisterPaths() normalization every candidate here already goes
+// through. A dedicated field means claimed_files keeps its existing shape,
+// semantics and every existing consumer byte-identical.
+function globPrefixesFromBlocks(blocks) {
+  return [
+    ...new Set(
+      blocks.flatMap((b) =>
+        extractGlobPrefixCandidates(b.prompt).filter((prefix) =>
+          hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false })
+        )
+      )
+    ),
+  ];
+}
+
 // Tiny shared-convention lock guarding the review-ledger read-modify-write
 // (duplicated here and in scripts/commit-reviewed.mjs — hooks stay
 // dependency-light, so this is ~15 lines copied rather than a shared import;
@@ -329,6 +362,7 @@ try {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
     const candidates = candidatesFromBlocks(matchedBlocks);
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
+    const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
     // THE EXTRACTOR'S PERMISSIVENESS COSTS MORE HERE THAN IN H19. There a false
     // candidate cost one store query that found nothing; here it enters the
     // register, so it SUPPRESSES a real duty and holds H10's releases
@@ -354,6 +388,16 @@ try {
     // IDENTICAL normalization and exclusion filter — one expression, so
     // `claimed_files` can never drift into a different path shape than `files`.
     const claimedFiles = toRegisterPaths(claimedCandidates);
+    // Glob-prefix claims (see globPrefixesFromBlocks above) — SAME
+    // toRegisterPaths normalization, which is exactly why they cannot share
+    // claimed_files's shape: normalizeRepoPath strips a trailing '/'
+    // (join(split('/').filter(seg => seg !== '')) drops the empty trailing
+    // segment), so "packages/mcp-server/" comes out as "packages/mcp-server"
+    // — indistinguishable from a FILE path with no extension by string shape
+    // alone. Keeping this in its own field is what lets h26 apply prefix
+    // (startsWith) matching ONLY here, never accidentally against
+    // claimed_files/files.
+    const claimedGlobPrefixes = toRegisterPaths(globPrefixCandidates);
     // SPEC B (1)/(2): exclusive non-file resource claim, scanned from the SAME
     // matched blocks' prompt text the file attribution above came from — the
     // shared negation-aware scanner means a negated mention ("No
@@ -409,6 +453,11 @@ try {
       // Always present, even empty — its ABSENCE is the legacy-entry signal
       // H26 falls back on (see claimedFromBlocks above).
       claimed_files: claimedFiles,
+      // Same always-present-even-empty posture, same reason: an absent field
+      // means a pre-migration entry (H26 treats it as "no prefix claims",
+      // not "unknown" — safe, since the pre-existing exact-match comparison
+      // on claimed_files/files is completely unaffected either way).
+      claimed_glob_prefixes: claimedGlobPrefixes,
       at: new Date().toISOString(),
       attribution,
     };

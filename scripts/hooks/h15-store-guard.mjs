@@ -137,7 +137,16 @@ try {
     environmentDefectDenial(
       'H15',
       `[cwd] the hook input's cwd could not be resolved to a project path (${(e && e.message) || e}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input.agent_id }
+      // OPTIONAL CHAIN, not decoration: a fail-closed HANDLER that can itself
+      // throw exits non-2 and voids the gate (the F5 class this file exists to
+      // avoid). MEASURED 2026-08-27: no reachable input lands here with a
+      // non-object `input` — stdin `null` throws inside readStdin's own
+      // `projectRoot(input.cwd)` and is caught above, and a primitive/array
+      // input yields `undefined` cwd, which takes the not-a-Sterling-project
+      // allow branch without ever throwing. So this is belt-and-braces on an
+      // unreachable path, kept because the cost is one character and the
+      // failure mode it forecloses is a silently voided blocking gate.
+      { agentId: input?.agent_id }
     )
   );
 }
@@ -190,7 +199,7 @@ try {
     environmentDefectDenial(
       'H15',
       `Internal error while preprocessing the command text for the store-mention check (${(e && e.message) || e}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input.agent_id }
+      { agentId: input?.agent_id } // same handler-cannot-throw rule as the [cwd] catch above
     )
   );
 }
@@ -204,7 +213,7 @@ try {
 } catch (e) {
   deny(
     environmentDefectDenial('H15', `Store access denied — .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {
-      agentId: input.agent_id,
+      agentId: input?.agent_id, // same handler-cannot-throw rule as the [cwd] catch above
     })
   );
 }
@@ -643,6 +652,58 @@ function redirectsIntoStore(str) {
   return false;
 }
 
+// EXEMPTION ELIGIBILITY (board 98889ecd). Anchoring the allowlist to the
+// fragment's EXECUTABLE argument fixed WHICH fragments are exempted; this
+// fixes HOW MUCH of an exempted fragment is granted. A sanctioned executable
+// used to grant the WHOLE fragment, so its command substitutions and
+// redirections were never classified — and the attacker never needs control of
+// the sanctioned script: `$(...)`, backticks and `<(...)`/`>(...)` execute in
+// the SHELL before, or independently of, the sanctioned program, and a
+// redirect can damage the store using the launcher's own output.
+//
+// So the exemption is retained ONLY for a RIDER-FREE sanctioned invocation.
+// Deliberately CONSERVATIVE and deliberately COARSE: any command/process
+// substitution syntax at all disqualifies the fragment, even a read-only one
+// the plain classifier would allow, because `classifyFragment` returns a
+// fragment-wide verdict with NO provenance saying which text produced a
+// finding — per-finding provenance is the mini-shell-parser that decision
+// 2c3e3136 parked twice. This only ever NARROWS an exemption (it removes allow
+// surface, never adds deny surface), so it does not reopen ccc44a8e's terminal
+// classify-by-static-text ruling.
+//
+// FALSE-DENY note: no checked-in invocation in scripts/ or skills/ combines an
+// allowlisted launcher with substitution syntax or a store-directed redirect;
+// every configured launcher shape (including the direct
+// `--db .sterling/sterling.db` forms of the migration-preflight /
+// migrate-stores remediation floor, decision bc0f81e3) stays allowed. Refine
+// this ONLY from a real incident — the workaround for a newly-denied shape is
+// to compute the substitution in a SEPARATE fragment.
+//
+// ACCEPTED NEW DENIAL, NAMED (outside review 2026-08-27, MEASURED not assumed):
+// the test reads the RAW fragment, so a backtick or `$(` inside QUOTED DATA
+// counts as a rider. The shape that bites is the repo's own commit path,
+// `node scripts/commit-reviewed.mjs -m "…"` (commands/merge.md:13), when the
+// message contains BOTH a backtick/`$(` AND a store mention — e.g.
+// -m "fix(h15): narrow `allow_scripts` for .sterling/config.json" now denies.
+// Measured scope, which is narrower than it first looks: a backtick message
+// with NO store mention still ALLOWS (the mentionsStore early-out above never
+// reaches this code), a store mention with NO backtick still ALLOWS, and bare
+// parentheses are not riders. Single-quoting the message does NOT help — the
+// test is on raw text. Workaround: drop the backticks, or omit the store path.
+//
+// THE OBVIOUS REMEDY IS UNSOUND AND WAS REJECTED ON MEASUREMENT: testing
+// `unquotedText(fragment)` instead of the raw fragment. unquotedText DROPS the
+// CONTENTS of quoted spans (see its definition below), but bash EXPANDS `$(…)`
+// and backticks inside DOUBLE quotes — so that swap re-ALLOWS the exfiltration
+// this check exists to stop. Measured against the frozen rider pins: RID-2
+// (`"$(cat .sterling/sterling.db)"`), RID-3 and RID-4 all flipped deny -> ALLOW.
+// A sound refinement would have to distinguish single-quoted and backslash-
+// escaped (inert) from double-quoted (expanding) text, which is the shell-
+// tokenizer decision 2c3e3136 parked twice. Left as accepted friction.
+function sanctionedFragmentHasShellRider(fragment) {
+  return redirectsIntoStore(fragment) || /(?:\$\(|`|[<>]\()/.test(fragment);
+}
+
 // Classify a single fragment: { write: boolean, fragment }. A fragment that
 // never mentions the store is irrelevant (write: false) regardless of verb.
 function classifyFragment(fragment) {
@@ -694,7 +755,13 @@ try {
     // denies, naming the rm fragment). And ANCHORED to the fragment's
     // EXECUTABLE argument — mere presence of the name in the fragment's text
     // is never sufficient; see fragmentRunsSanctionedScript above.
-    if (fragmentRunsSanctionedScript(frag, allowScripts)) continue;
+    // And granted only when the sanctioned invocation is RIDER-FREE: a
+    // substitution or store-directed redirect riding along is shell work the
+    // sanctioned executable never sanctions (see
+    // sanctionedFragmentHasShellRider above) — such a fragment falls through
+    // to ordinary classification instead of being waved past.
+    const sanctioned = fragmentRunsSanctionedScript(frag, allowScripts);
+    if (sanctioned && !sanctionedFragmentHasShellRider(frag)) continue;
     const result = classifyFragment(frag);
     if (result.write) {
       offending = result.fragment;
@@ -711,7 +778,7 @@ try {
     environmentDefectDenial(
       'H15',
       `Internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input.agent_id }
+      { agentId: input?.agent_id } // same handler-cannot-throw rule as the [cwd] catch above
     )
   );
 }

@@ -301,27 +301,45 @@ test('spend-warnings P7: an unparseable `at` ("n/a") and a missing `at` key trip
 });
 
 // ---------------------------------------------------------------------------
-// P8: the never-a-refusal wall, exercised with every advisory class firing
-// simultaneously.
+// P8: the never-a-refusal wall. RE-CUT BY RULING, not by accident (board
+// 51d93c34 requirement 2 — file-scoped stamping). The old P8 stamped a receipt
+// naming 'src/elsewhere.mjs' onto a commit staging 'src/feature.mjs', which is
+// precisely the false attestation the new ruling removes; it must not be
+// "repaired" back to that expectation.
+// THE CLASS LIST CHANGED FOR A REASON: DO-NOT-OVERLAP is now reachable ONLY in
+// the no-receipt-matches fallback, and DEFERRED only when some receipt DOES
+// match, so the two are structurally mutually exclusive and can never fire in
+// one run. P3 (unchanged) keeps the overlap-advisory arm; file-scoping S5 keeps
+// the fallback arm. What P8 still owns is its real subject: no combination of
+// advisories may refuse a commit.
 // ---------------------------------------------------------------------------
 
-test('spend-warnings P8: every advisory class firing at once still never refuses — exit is not 1, ledger fully empties, one trailer per entry', { skip: GIT_SKIP }, () => {
+test('spend-warnings P8: every simultaneously-reachable advisory class firing at once still never refuses — exit is not 1, each stamped entry gets one trailer, and the file-scope-deferred entry survives', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     stageChange(dir, 'src/feature.mjs');
+    const deferred = { agent_type: 'reviewer-b', files: ['src/elsewhere.mjs'], at: isoAgo(120_000) };
     writeLedger(dir, [
       { agent_type: 'reviewer-a', files: ['src/feature.mjs'], at: isoAgo(60_000) },
-      { agent_type: 'reviewer-b', files: ['src/elsewhere.mjs'], at: isoAgo(120_000) },
-      { agent_type: 'reviewer-c', files: ['src/feature.mjs'], at: isoAgo(30 * 3_600_000) },
-      { agent_type: 'reviewer-d', files: ['src/feature.mjs'], at: 'n/a' },
+      deferred,                                                                        // DEFERRED (file scope)
+      { agent_type: 'reviewer-c', files: ['src/feature.mjs'], at: isoAgo(30 * 3_600_000) }, // STALE RECEIPT
+      { agent_type: 'reviewer-d', files: ['src/feature.mjs'], at: 'n/a' },              // AGE UNVERIFIABLE
+      { agent_type: 'reviewer-e', files: [], at: isoAgo(90_000) },                      // RECORDS NO FILES
     ]);
 
     const r = runCommitReviewed(dir, ['-m', 'spend P8']);
     assert.notEqual(r.code, 1, `no combination of advisories may refuse the commit — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
     assert.equal(r.code, 0, `the wall is a full success, not merely a non-1 exit — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
 
-    assert.deepEqual(readLedger(dir), [], 'the ledger is emptied regardless of how many advisories fired');
-    assert.equal(readTrailerValues(dir).length, 4, 'every entry still gets exactly one trailer, none filtered out by an advisory');
+    assert.match(r.stderr, /MULTI-SPEND — 4 review receipts/, `4 stamped (a,c,d,e) is over the threshold — stderr=${flat(r.stderr)}`);
+    assert.match(r.stderr, /STALE RECEIPT/, `stderr=${flat(r.stderr)}`);
+    assert.match(r.stderr, /RECEIPT AGE UNVERIFIABLE/, `stderr=${flat(r.stderr)}`);
+    assert.match(r.stderr, /RECORDS NO FILES/, `stderr=${flat(r.stderr)}`);
+    assert.match(r.stderr, /DEFERRED RECEIPT/, `the file-scoped withholding is disclosed — stderr=${flat(r.stderr)}`);
+    assert.doesNotMatch(r.stderr, /DO NOT OVERLAP/, `the overlap advisory is structurally unreachable once a receipt matches — stderr=${flat(r.stderr)}`);
+
+    assert.equal(readTrailerValues(dir).length, 4, 'one trailer per STAMPED entry; the deferred one contributes none');
+    assert.deepEqual(readLedger(dir), [deferred], 'the deferred receipt survives un-consumed; every stamped one is gone');
   } finally {
     cleanup();
   }

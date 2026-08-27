@@ -221,7 +221,42 @@ try {
     // A pre-field entry has no `claimed_files` and falls back to `files` —
     // today's behavior, never a silently empty lane.
     const entryFiles = Array.isArray(e.claimed_files) ? e.claimed_files : e.files;
-    const matched = entryFiles.filter((f) => candidateSet.has(f));
+    const matchedExact = entryFiles.filter((f) => candidateSet.has(f));
+    // GLOB LITERAL-PREFIX OVERLAP (board a63b226d) — PREFIX-AWARE (startsWith)
+    // matching, and ONLY for this field: `claimed_glob_prefixes` (absent on a
+    // pre-field entry -> [], same degrade-to-nothing posture as claimed_files
+    // above) holds directory prefixes a brief claimed via a literal-prefix
+    // "**" glob ("YOUR FILES: scripts/hooks/**"). `claimed_files`/`files`
+    // stay EXACT-STRING-EQUALITY ONLY, completely unchanged — prefix
+    // matching never applies to them, so this cannot widen today's behavior
+    // for any brief that never used the glob idiom. A candidate file overlaps
+    // a claimed prefix when it IS that prefix or sits anywhere under it
+    // ('/' boundary, so "packages/mcp-server-utils/x.ts" can never falsely
+    // match a "packages/mcp-server" prefix — the boundary check requires the
+    // '/' itself, not just a shared string prefix).
+    //
+    // DISCLOSED, NOT A DEFECT (board a63b226d follow-up review, MEDIUM,
+    // CONFIRMED): EXTRACTION of glob-prefix claims is bidirectional — a
+    // glob is suppressed as a prohibition and registered as a claim on
+    // EITHER side (h22's globPrefixesFromBlocks runs on every SubagentStart,
+    // regardless of which lane is starting) — but COMPARISON here is NOT.
+    // This block only prefix-matches THIS outgoing dispatch's own LITERAL
+    // candidates (`files`, extracted above via extractPathCandidates) against
+    // a live entry's `claimed_glob_prefixes`. It never calls
+    // extractGlobPrefixCandidates on the OUTGOING prompt, so two shapes stay
+    // silent: (1) an outgoing brief itself claiming a glob ("YOUR FILES:
+    // scripts/hooks/**") against a live entry's LITERAL claim on a file
+    // under it (e.g. "scripts/hooks/h10-....mjs") — the reverse of what this
+    // block checks; and (2) prefix-vs-prefix, two glob claims on overlapping
+    // subtrees with no literal file named by either side. Deliberately
+    // unbuilt (not merely unnoticed): nobody's reproduction needed it, and
+    // this family prefers bounded under-warning over the added surface a
+    // second extraction+comparison pass would add (P1).
+    const entryPrefixes = Array.isArray(e.claimed_glob_prefixes) ? e.claimed_glob_prefixes : [];
+    const matchedPrefix = entryPrefixes.length
+      ? files.filter((f) => entryPrefixes.some((p) => f === p || f.startsWith(`${p}/`)))
+      : [];
+    const matched = [...new Set([...matchedExact, ...matchedPrefix])];
     if (matched.length) {
       overlaps.push({ agentType: e.agent_type ?? 'agent', agentId: e.agent_id, files: matched });
       matched.forEach((f) => overlapPaths.add(f));

@@ -12,10 +12,79 @@ import { readStdin, deny, allow, openStore, repoRel, withRetry, environmentDefec
 import { ledgerPath, hasFreshRead, readLedger, isLedgerTorn } from './lib/ledger.mjs';
 import { scopeCheck, readDebugScope, ENFORCEMENT_SURFACE } from './lib/contract.mjs';
 
-const input = readStdin();
-const cwd = input.cwd;
-const toolPath = input.tool_input?.file_path;
-const rel = repoRel(toolPath, cwd);
+// THE INPUT BOUNDARY IS ITSELF A GATE (board 4a66ba58 — same F5 class as the
+// fail-closed try below; anti_pattern e13f0fb5 owns the class). readStdin()
+// reads fd 0 and JSON.parses it, both unguarded: called bare at the top level,
+// a truncated or non-JSON stdin threw OUT of the hook, Node exited 1, and exit
+// 1 is the platform's NON-BLOCKING code — the runner reads it as ALLOW and the
+// Edit/Write runs UNEXAMINED. A gate that cannot read its own input has
+// verified NOTHING and must fail CLOSED (P5). Reproduced against HEAD.
+//
+// EXPLICITLY ACCEPTED AVAILABILITY TRADEOFF (the same one H15 discloses, and
+// it applies here in FULL): H3 is registered BOTH globally (hooks.json) and in
+// agent frontmatter, so this denial reaches the CONDUCTOR's own Edit/Write
+// too. A persistent runner/input fault therefore blocks the repair edits as
+// well, and the session can wedge until restart. Accepted deliberately — under
+// broken infrastructure the alternative is a contract gate that silently
+// passes every edit it never read — but it is an availability cost, not a free
+// win, and it is recorded here rather than discovered later.
+//
+// AND THE BLAST RADIUS IS THE WHOLE MACHINE, NOT "THIS PROJECT": this catch
+// sits ABOVE the openStore probe below, because the project is unknowable
+// before the input parses — so a broken runner denies Edit/Write in EVERY
+// project the plugin is loaded into, not only Sterling ones. That ordering is
+// forced (the probe needs `input.cwd`). It does not WIDEN H3's project reach —
+// the existing `if (!store) deny(...)` branch already refuses in a project with
+// no store — but stating this as "the conductor's own edits" would understate
+// which sessions a runner fault can wedge.
+//
+// AUDIENCE IS UNKNOWABLE ON THIS PATH, which is why the wording carries BOTH
+// resolutions: the field that names the audience (`agent_id`) rides in the very
+// input that failed to parse. `agentId: undefined` selects the repair-facing
+// instruction (correct for the conductor, who has no one above to escalate to)
+// and the detail states the agent-facing half explicitly, so a spawned agent is
+// never told to "let the conductor fix it" when it may BE the conductor reading.
+let input;
+try {
+  input = readStdin();
+  // NOT EVERY BAD PARSE THROWS (independent review, MEDIUM). `JSON.parse` on a
+  // valid-but-non-object document returns a non-object WITHOUT throwing, so
+  // wrapping the parse CALL does not by itself guarantee this gate holds an
+  // object. This guard validates the RESULT.
+  //
+  // WHICH INPUTS ACTUALLY REACH IT — measured, not assumed (an earlier revision
+  // of this comment claimed `null` reached here and it was WRONG; the test file's
+  // AC6/AC7 now pin the real division):
+  //   • `null` NEVER reaches this line. readStdin dereferences the parsed value
+  //     itself — `projectRoot(input.cwd)` at lib/common.mjs:102 — so a null
+  //     document throws INSIDE readStdin, and the catch below is what denies.
+  //     That is a correct, already-fail-closed outcome; it simply is not this
+  //     guard's doing, and this guard cannot be made to fire first without
+  //     either editing the shared readStdin (out of this file's contract) or
+  //     re-reading fd 0, which is impossible after readStdin has consumed it.
+  //   • SCALARS DO reach it: `"x"`, `5`, `true` all survive readStdin untouched
+  //     (`'x'.cwd` is undefined, not a throw; `projectRoot(undefined)` returns
+  //     null on its own `!from` guard), arrive here as non-objects, and would
+  //     otherwise flow into the derivations with every field silently
+  //     undefined — a gate evaluating a contract against nothing. This guard is
+  //     the only thing that stops that, and AC7 is its pin.
+  // Throwing rather than denying inline is deliberate: it routes through the
+  // SAME catch and the SAME both-audiences wording, so every "the gate never
+  // saw its input" case reads identically to the reader.
+  if (!input || typeof input !== 'object') {
+    throw new TypeError(`hook input parsed to ${input === null ? 'null' : typeof input}, not an object`);
+  }
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      'H3',
+      `[stdin] hook input could not be read or parsed (${(e && e.message) || e}) — a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). ` +
+        `An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the edit would be ALLOWED unexamined). ` +
+        `IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H3 yourself — exit \`blocked\`, citing this message VERBATIM. Otherwise:`,
+      { agentId: undefined }
+    )
+  );
+}
 
 // NAME THE LEDGER AND ITS WINDOW. ledgerPath resolves THREE different files
 // (lib/ledger.mjs) and the old denial named none of them, so one sentence covered
@@ -65,28 +134,45 @@ function evidenceDenial(mode, lp, path) {
   );
 }
 
-// Enforcement self-protection (§6 H3, build-proven — a blocked session
-// attempted disableAllHooks self-repair): for SPAWNED AGENTS, edits to the
-// enforcement surface are denied unconditionally in every mode, regardless of
-// scope, store presence, or registered maps. The conductor (human-attended)
-// is exempt and goes through the normal contract rules below.
-if (input.agent_id && toolPath) {
-  const fwd = String(toolPath).replace(/\\/g, '/');
-  const hooksDir = dirname(fileURLToPath(import.meta.url)).replace(/\\/g, '/'); // bundled: <plugin>/hooks
-  if (fwd === hooksDir || fwd.startsWith(hooksDir + '/')) {
-    deny(`H3 [self-protection]: '${toolPath}' is inside the bundled hooks directory — the enforcement surface is never agent-editable, in any mode (§6 H3)`);
-  }
-  if (rel && ENFORCEMENT_SURFACE.some((g) => matchesGlob(rel, g))) {
-    deny(`H3 [self-protection]: '${rel}' is enforcement surface (${ENFORCEMENT_SURFACE.join(', ')}) — never agent-editable, in any mode (§6 H3); if enforcement is misbehaving, exit blocked and report it`);
-  }
-}
-
 // A BLOCKING gate that cannot verify must DENY, never void itself: an uncaught
 // throw exits 1, which the platform treats as non-blocking (decision 2422e76a's
 // fail-closed rule, applied here per audit finding 5/43). Busy throws retry;
 // everything else denies in the catch below.
+//
+// THE BOUNDARY NOW OPENS BEFORE THE PATH DERIVATION AND THE SELF-PROTECTION
+// BLOCK (board 4a66ba58 — H3 was the worst instance of the class, ~74 lines of
+// executable statements sitting OUTSIDE it). What makes a statement dangerous
+// is its POSITION, not the identity of the call: `repoRel`/`join` throw a
+// TypeError on a non-string cwd, and `fileURLToPath`/`matchesGlob` can throw
+// too — and every one of those throws exited 1, i.e. ALLOW. The block that
+// makes `.claude/agents/**` and `settings*.json` un-editable was itself
+// unprotected, so the self-protection could be voided by exactly the throw it
+// exists to survive. Nothing was reordered: the statements keep their original
+// sequence (derive → self-protect → store), so the self-protection still runs
+// BEFORE the store probe and stays independent of store presence. A throw
+// inside them now routes through this function's catch, which DENIES.
 let store;
 try {
+  const cwd = input.cwd;
+  const toolPath = input.tool_input?.file_path;
+  const rel = repoRel(toolPath, cwd);
+
+  // Enforcement self-protection (§6 H3, build-proven — a blocked session
+  // attempted disableAllHooks self-repair): for SPAWNED AGENTS, edits to the
+  // enforcement surface are denied unconditionally in every mode, regardless of
+  // scope, store presence, or registered maps. The conductor (human-attended)
+  // is exempt and goes through the normal contract rules below.
+  if (input.agent_id && toolPath) {
+    const fwd = String(toolPath).replace(/\\/g, '/');
+    const hooksDir = dirname(fileURLToPath(import.meta.url)).replace(/\\/g, '/'); // bundled: <plugin>/hooks
+    if (fwd === hooksDir || fwd.startsWith(hooksDir + '/')) {
+      deny(`H3 [self-protection]: '${toolPath}' is inside the bundled hooks directory — the enforcement surface is never agent-editable, in any mode (§6 H3)`);
+    }
+    if (rel && ENFORCEMENT_SURFACE.some((g) => matchesGlob(rel, g))) {
+      deny(`H3 [self-protection]: '${rel}' is enforcement surface (${ENFORCEMENT_SURFACE.join(', ')}) — never agent-editable, in any mode (§6 H3); if enforcement is misbehaving, exit blocked and report it`);
+    }
+  }
+
   store = openStore(cwd);
   if (!store)
     deny(
@@ -126,9 +212,18 @@ try {
   }
   allow();
 } catch (e) {
+  // `input?.agent_id`, NOT `input.agent_id`: a handler that throws while
+  // building its denial is uncaught, and uncaught means exit 1 — NON-BLOCKING,
+  // i.e. the fail-closed catch would fail OPEN. This is DEFENCE IN DEPTH, and
+  // deliberately unfalsifiable by input today: the stdin boundary above now
+  // guarantees a non-null object, so no hook input can reach this line with a
+  // null `input`. It stays because the cost is one character and the failure it
+  // prevents is silent — but do not mistake it for the guard that carries the
+  // null-stdin verdict. That verdict is carried by the typeof check above, and
+  // the test file records exactly that division.
   deny(
     environmentDefectDenial('H3', `Contract evaluation failed (${(e && e.message) || e}) — failing closed (P5).`, {
-      agentId: input.agent_id,
+      agentId: input?.agent_id,
     })
   );
 }

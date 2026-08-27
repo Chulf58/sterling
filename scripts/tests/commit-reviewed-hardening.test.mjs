@@ -321,7 +321,7 @@ test('commit-reviewed.mjs (hardening) DUPLICATES: two ledger entries sharing the
     stageChange(dir);
     writeLedger(dir, [
       { agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' },
-      { agent_type: 'reviewer-correctness', files: ['src/other.mjs'], at: '2026-08-22T00:01:00.000Z' },
+      { agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:01:00.000Z' },
     ]);
 
     // EXPECTED FAILURE SHAPE: an implementation that de-dupes trailers by

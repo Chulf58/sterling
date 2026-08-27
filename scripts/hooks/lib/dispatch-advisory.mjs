@@ -216,6 +216,75 @@ export function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// GLOB LITERAL-PREFIX EXTRACTION (board a63b226d, research_finding 289cd172
+// "a SEPARATE blind spot, in both directions"). PATH_CANDIDATE_RE
+// (dispatch-prompt.mjs:27) hard-requires a literal '.' immediately after a
+// directory prefix (the extension group) — a glob token like
+// "scripts/hooks/**" contains no '.' at all, so extractPathCandidates()
+// yields NOTHING for it: written as a positive claim it registers no
+// territory, written as a prohibition it suppresses nothing, and both fail
+// silently (proven by regex trace, not inferred — there is no starting
+// index at which the extension atom can be satisfied when the string
+// carries no '.'; pinned by the mutation-armed tests below, added under
+// board a63b226d).
+//
+// SCOPE, DELIBERATELY NARROW (P1 — bounded under-warning beats a flood):
+// this catches exactly ONE idiom, the measured one — a literal, non-glob
+// directory prefix terminated by a bare '**' ("scripts/hooks/**",
+// "packages/mcp-server/**"). It does NOT attempt general glob matching (no
+// brace/char-class/single-star-without-directory support, e.g.
+// "scripts/hooks/*.mjs" or "**/*.mjs" stay unhandled) and imports no
+// globbing dependency (hooks stay dependency-light, decision f5638a84's
+// constraint). A caller wanting the raw literal glob token back (e.g. to
+// build a suppression-check pattern against the original prompt text, the
+// same way h22/h26 already do for extractPathCandidates output) can always
+// recover it as `prefix + '**'` — GLOB_PREFIX_RE's match always ends in the
+// literal '**' it was matched on, so no second export is needed for that.
+//
+// MINIMUM TWO SEGMENTS (conductor-directed bound, board a63b226d follow-up
+// — the flood risk a prefix-aware overlap comparison introduces). A
+// directory-prefix claim is inherently BROADER than an exact-file claim, so
+// the depth of the prefix is the only lever that keeps the overlap
+// comparison (h26-dispatch-overlap.mjs) from crying wolf on every lane that
+// merely mentions a file somewhere under a shallow, near-universal
+// directory. A ONE-segment prefix — "scripts/**", "packages/**" — would
+// make nearly every lane in this repo overlap nearly every other one (both
+// directories hold dozens of unrelated files across unrelated
+// subsystems); the conductor named exactly this pair as the line to draw.
+// A TWO-segment prefix — "scripts/hooks/**", "packages/mcp-server/**" —
+// names one coherent subsystem/package, which is the board's own
+// motivating example and the shape a real "own this directory" claim takes
+// in practice. `{2,}` on the segment-repetition group draws that line:
+// "scripts/**" and "packages/**" are never extracted at all (silently
+// under-warned, the accepted direction — P1), while "scripts/hooks/**" and
+// "packages/mcp-server/**" still are.
+//
+// WIRING: h22-dispatch-register.mjs's claimedFromBlocks-sibling
+// globPrefixesFromBlocks() writes the negation-checked output into its OWN
+// register field, `claimed_glob_prefixes` — deliberately NOT folded into
+// `claimed_files` (a flat FILE-path list every existing reader compares by
+// exact string equality; repoRel/normalizeRepoPath legitimately STRIPS a
+// trailing '/', so a trailing-slash marker could not even survive the same
+// toRegisterPaths() normalization every candidate already goes through).
+// h26-dispatch-overlap.mjs compares the OUTGOING dispatch's own literal
+// candidate files against a live entry's `claimed_glob_prefixes` via
+// startsWith — prefix-aware ONLY for that field, exact-string equality is
+// completely unchanged for `claimed_files`/`files`. Suppression falls out
+// for free either way: hasUnsuppressedMatch/isNegatedContext are plain
+// clause-scoped text analysis with no dependency on the mention being
+// file-shaped, so a prohibition marker ahead of a glob token suppresses it
+// exactly as it would a literal path. The SAME pre-existing gap applies
+// unchanged either way: isNegatedContext only inspects text BEFORE the
+// mention (see above), so a TRAILING marker after a glob mention leaks
+// precisely as it does for a literal path today — this addition neither
+// narrows nor widens that separate, already-known defect.
+const GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
+
+export function extractGlobPrefixCandidates(text) {
+  const found = String(text ?? '').match(GLOB_PREFIX_RE) ?? [];
+  return [...new Set(found.map((m) => m.slice(0, -2)))]; // strip the trailing '**', keep the '/'
+}
+
 /** Any 'reviewer-*' agent type (reviewer-correctness, reviewer-security, …). */
 export function isReviewerClass(type) {
   return !!type && type.startsWith('reviewer-');

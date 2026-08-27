@@ -174,6 +174,40 @@ const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 //     equality across the open. An adversary racing path resolution itself can
 //     evade that; the residual is disclosed, not silently closed.
 //
+// WHAT THE WIN32 DETECTION ARM REACHES — FILES YES, DIRECTORIES NO (board
+// 7c120461 route (c); stated here rather than left to be inferred, because a
+// comment claiming a protection the code does not have is worse than the gap
+// itself — anti-pattern security-comment-asserts-protection-the-code-does-not-have).
+// IDENTITY VERIFICATION is what makes the Windows arm robust to libuv's
+// reparse-tag mapping: `openLeafNoFollow` compares bigint dev/ino AND kind
+// across the open, so a leaf whose NAME redirects is caught whatever lstat
+// chose to call it. Every win32 path that reads BYTES goes through it — the (A)
+// state hash (hashClassifiedLeaf -> sha256OfFileStreamed), the (B) baseline
+// bytes, the enforcement stamp — so the FILE-shaped state escapes (a regular
+// file swapped for a link to identical bytes) are DETECTED on Windows by
+// identity, not by kind.
+// DIRECTORIES GET NO SUCH CHECK. Node cannot open a directory as a descriptor
+// on win32, so `classifyLeafAt`'s win32 arm decides 'dir' from the lstat KIND
+// ALONE, `dirHandleOf` hands the recursion the PATH, and `withPinnedParent`
+// classifies each ancestor component with `lstatKind` and re-resolves it by
+// name. A directory-shaped redirect therefore rests entirely on lstat reporting
+// it as a symlink. For a POSIX symlink that is certain; for an NTFS JUNCTION —
+// which, unlike a symlink, needs no privilege to create — it is a libuv
+// reparse-tag detail this repo has NOT MEASURED on native Windows, and it is
+// deliberately NOT assumed here. If lstat does not call a junction a symlink,
+// then a junction swapped over a pre-dirty enforcement DIRECTORY, or over an
+// ancestor of a pre-dirty path, is neither prevented nor detected and the (A)
+// state comparison reports it "unchanged".
+// THE SETTLEMENT IS A TEST, NOT AN ASSUMPTION: PIN-WIN32-JUNCTION-ANCESTOR /
+// PIN-WIN32-JUNCTION-LEAF in h17-pre-state-snapshot.test.mjs state the required
+// behavior and SKIP off native Windows with a named reason. Run the h17 suite
+// on a Windows host to settle it. Do NOT close this by weakening the
+// comparison so both platforms behave alike (that reopens escapes live on
+// Linux), and do NOT add a bigint lstat/stat divergence check on the strength
+// of reasoning alone — it sits on the ancestor walk, so a false deny there
+// denies EVERY agent Bash call on the majority platform, which 2a69a8d7
+// already ruled unshippable.
+//
 // THE PROTECTION BOUNDARY STARTS AT THE WORKSPACE ROOT — NAMED, NOT ASSUMED
 // (decision h17-repo-root-authentication-is-out-of-scope, ruling on residual 2
 // of dfe70090). H17 assumes the workspace root selected by the hook runner is
@@ -619,7 +653,16 @@ function withPinnedParent(cwd, rel, what, opts, fn) {
 // exactly as an lstat would have classified them.
 // NATIVE WINDOWS keeps the lstat arm: libuv ignores O_NOFOLLOW there and Node
 // cannot open a directory as a descriptor at all, so the disclosed
-// detection-not-prevention envelope (2a69a8d7) applies unchanged.
+// detection-not-prevention envelope (2a69a8d7) applies unchanged. PRECISELY
+// WHAT THAT MEANS HERE, because "detection" overstates it for one branch: the
+// win32 detection is delivered by `openLeafNoFollow`'s bigint dev/ino + kind
+// check on the BYTE-READ path, which a 'file' leaf always reaches and a 'dir'
+// leaf never does. So a win32 'file' verdict is re-established by identity
+// before its bytes are used, while a win32 'dir' verdict is a KIND VERDICT ONLY
+// — nothing here or downstream re-checks that the directory this walk descends
+// into is the object lstat classified. See "FILES YES, DIRECTORIES NO" in the
+// platform-envelope block above for the escape that rests on it (board
+// 7c120461) and for the test that settles it on a Windows host.
 // The returned `fd` (Linux, file or directory) is the CALLER's to close.
 function classifyLeafAt(parentHandle, leaf) {
   const anchored = `${parentHandle}/${leaf}`;

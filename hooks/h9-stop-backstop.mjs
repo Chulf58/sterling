@@ -5040,8 +5040,21 @@ var configSchema = external_exports.object({
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
+  //
+  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
+  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
+  // on the fragment's executable argument, normalizing only a leading './'
+  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
+  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // therefore sanctions nothing unless the command is literally run from the
+  // script's own directory, which H14's repo-root confinement never produces.
+  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
+  // exemption was an unanchored substring test, and became a silent false DENY
+  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
+  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
+  // out below. Keep this list basename-free.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list

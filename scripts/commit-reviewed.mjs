@@ -73,6 +73,26 @@
 //     (guarded interpolation + a try/catch that degrades to one stderr note),
 //     because a warning-only check that can abort a commit inverts its own
 //     ruling.
+//   - FILE-SCOPED STAMPING (board 51d93c34 requirement 2): stamping used to be
+//     all-or-nothing — every eligible receipt landed on whatever was staged,
+//     which forced concurrently-reviewed slices to commit as ONE unit
+//     (decision reviewed-set-commits-as-one-unit-until-receipts-are-file-scoped,
+//     c45b6ee4). Now a receipt whose recorded `files` intersect the staged set
+//     is STAMPED; a receipt recording NO usable files is ALSO stamped (an empty
+//     files[] is the STRONGEST unverifiable-territory signal, never "matches
+//     nothing"); a receipt whose files intersect nothing staged is DEFERRED —
+//     disclosed by name, NOT stamped, NOT consumed, NOT deleted, and left for
+//     the commit that stages its territory, exactly like a foreign receipt.
+//     FALLBACK: if NO eligible receipt matches the staged set there is nothing
+//     to select on, so the rule does not apply and every eligible receipt is
+//     stamped exactly as before — because H22's file attribution is measured
+//     unreliable (board 09e03d76; research finding 289cd172: negated paths are
+//     recorded, positively-asserted ones can be dropped, globs register
+//     nothing), and refusing on it would brick this CLI and train
+//     --waive-reviews. NET INVARIANT: the stamped set is always a SUBSET of the
+//     old behavior's and never empty while any eligible receipt exists, so this
+//     rule can only remove a FALSE attestation — it can never add a trailer,
+//     invent evidence, or turn a commit that succeeds today into a refusal.
 //   - >=1 valid entry but NOTHING STAGED: refuse (exit 1), do NOT consume
 //     the ledger (P5 — never mint an empty commit that silently eats real
 //     review evidence for nothing).
@@ -345,10 +365,103 @@ const stagedFiles = new Set(
     .filter(Boolean)
     .map(normalizePath)
 );
+// ===========================================================================
+// FILE-SCOPED STAMPING (board 51d93c34 requirement 2). The measured defect:
+// four valid same-session same-branch receipts covering THREE slices were all
+// stamped and consumed on ONE commit, because stamping is commit-scoped while
+// a receipt already records the files[] it reviewed. Decision
+// reviewed-set-commits-as-one-unit-until-receipts-are-file-scoped (c45b6ee4)
+// ruled the one-unit commit as the INTERIM answer and named this as the fix.
+// Concurrently-reviewed slices can now commit separately: each commit spends
+// only the receipts whose recorded territory it actually stages.
+//
+// THREE CLASSES, and the split is deliberate in every direction:
+//   MATCHED      — usable files[] intersecting the staged set. Stamped.
+//   UNATTRIBUTED — no usable file path at all. ALWAYS stamped. An empty
+//                  files[] is the STRONGEST unverifiable-territory signal (see
+//                  the RECORDS NO FILES advisory below), never "matches
+//                  nothing": H22's extractor legitimately records nothing for
+//                  a real review, and a reviewer brief phrased "do not modify
+//                  X, only review it" is exactly the shape that produces it.
+//                  Withholding here would silently destroy review evidence.
+//   DEFERRED     — usable files[] intersecting NOTHING staged, while some
+//                  OTHER receipt DID match. Not stamped, not consumed, not
+//                  deleted; disclosed by name and left for the commit that
+//                  stages its territory. Same posture as a foreign receipt.
+//
+// THE FALLBACK IS THE WHOLE SAFETY ARGUMENT. When NO eligible receipt matches
+// the staged set, no selection is possible, so this rule does not fire at all
+// and every eligible receipt is stamped exactly as before. That is not a
+// loophole, it is the measured reality: research finding
+// h26-registers-do-not-touch-paths-as-held-territory (289cd172, 2026-08-26)
+// establishes that files[] is written by h22-dispatch-register.mjs with NO
+// negation suppression and NO glob handling, so a receipt can both carry a
+// path its brief forbade and LOSE a path the brief positively asserted
+// ("do not edit tests/x, instead fix src/auth.mjs" drops src/auth.mjs). A
+// zero-match ledger is therefore far more likely to mean the attribution
+// failed than that every reviewer looked at other work — and board 09e03d76
+// measured exactly that, every receipt mis-attributed. Refusing there would
+// brick the CLI and train --waive-reviews, inverting this gate's purpose.
+//
+// INVARIANT THIS PRESERVES (the reason this is safe on the merge-gate
+// surface): the stamped set is always a SUBSET of what today's code stamps,
+// and is never empty while eligibleEntries is non-empty (the fallback
+// guarantees it). So this rule can only ever REMOVE a trailer that would have
+// been a false attestation — it can never add one, never invent evidence, and
+// never turn a commit that succeeds today into a refusal.
+//
+// KNOWN, ACCEPTED LIMITATION (review, acknowledged no-action): a receipt whose
+// files[] records a path git will never stage again — a pre-rename spelling, a
+// deleted file — can be deferred on every future commit and so is effectively
+// STRANDED in the ledger. It is not silent (each deferral discloses it by name,
+// and H1 reports the survivor at the next SessionStart) and it is never a false
+// attestation, which is the direction that matters on this surface. Remove such
+// a receipt by hand once judged; do NOT relax the match to make it spendable.
+const usableFiles = (e) => (Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : []);
+const touchesStaged = (e) => usableFiles(e).some((f) => stagedFiles.has(normalizePath(f)));
+// Attributed = carries territory that CAN be judged. Scoping only applies when
+// at least one attributed receipt actually matches this diff.
+const fileScopingApplies = eligibleEntries.some((e) => usableFiles(e).length > 0 && touchesStaged(e));
+const stampEntries = [];
+const deferredEntries = [];
+for (const e of eligibleEntries) {
+  if (!fileScopingApplies || usableFiles(e).length === 0 || touchesStaged(e)) stampEntries.push(e);
+  else deferredEntries.push(e);
+}
+// STRUCTURALLY UNREACHABLE, DELIBERATELY NOT SILENT (P5). The partition above
+// guarantees a non-empty stamp set: fileScopingApplies is true only when some
+// entry both has usable files AND touches the staged set (so that entry is
+// stamped), and when it is false every eligible entry is stamped — and
+// eligibleEntries was already proven non-empty. If a future edit breaks that
+// reasoning, the failure would otherwise be SILENT AND WORST-CASE: zero trailer
+// lines, a commit that lands anyway, and a trailer verification that compares
+// [] against [] and PASSES — i.e. an unreviewed-looking commit reported as a
+// success, with the ledger consumed. Refuse loudly instead, before committing.
+if (stampEntries.length === 0) {
+  fail(
+    `commit-reviewed: INTERNAL INVARIANT VIOLATED — file-scoped stamping selected ZERO receipts out of ${eligibleEntries.length} eligible one(s), which the ` +
+      `partition is constructed to make impossible. Refusing rather than creating a commit with no Reviewed-By-Agent trailer at all (which would land, ` +
+      `verify vacuously, and consume the ledger). Nothing is stamped and nothing is consumed — report this, and commit with bare 'git commit' plus the ` +
+      `merge gate if you need to proceed now.`
+  );
+}
+// Collected as well as printed, for the same reason foreign disclosures are:
+// what was NOT spent is exactly what a reader of this CLI's report needs.
+const deferredDisclosures = deferredEntries.map(
+  (e) =>
+    `commit-reviewed: DEFERRED RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) reviewed ` +
+    `[${usableFiles(e).join(', ')}], none of which this commit stages, while ${stampEntries.length} other receipt(s) DO cover this diff. Stamping it here ` +
+    `would claim a review of files absent from the diff (a false attestation on the merge gate's audit surface), and consuming it would strand the slice it ` +
+    `really reviewed with no evidence at all (board 51d93c34). It stays in the ledger untouched — commit the files it names and it will be spent there.`
+);
+for (const line of deferredDisclosures) console.error(line);
+
 // eligibleEntries, not validEntries: a foreign receipt is not being spent on
 // this commit, so warning that its sabotage does not target this diff would be
-// noise about a receipt this invocation deliberately leaves alone.
-for (const e of eligibleEntries) {
+// noise about a receipt this invocation deliberately leaves alone. stampEntries
+// narrows that same reasoning one step further — a DEFERRED receipt is equally
+// not being spent here.
+for (const e of stampEntries) {
   if (!Array.isArray(e.sabotage_targets)) continue;
   for (const t of e.sabotage_targets) {
     if (typeof t !== 'string' || !t || stagedFiles.has(normalizePath(t))) continue;
@@ -411,21 +524,30 @@ function safeLabel(v) {
 // cost a commit. Nothing inside this block writes, commits, or filters
 // entries, so skipping it is always safe.
 // Every advisory below is about WHAT IS BEING SPENT, so all of them iterate
-// eligibleEntries — the foreign entries were already disclosed above, by a
-// mechanism that WITHHOLDS rather than warns, and re-warning about them here
-// would double-report a receipt this commit never touches.
+// stampEntries — the foreign entries and the file-scope DEFERRED entries were
+// already disclosed above, by mechanisms that WITHHOLD rather than warn, and
+// re-warning about them here would double-report receipts this commit never
+// touches.
 try {
-  if (eligibleEntries.length > MULTI_SPEND_WARN_ABOVE) {
+  if (stampEntries.length > MULTI_SPEND_WARN_ABOVE) {
     warnSpend(
-      `commit-reviewed: MULTI-SPEND — ${eligibleEntries.length} review receipts are being stamped on ONE commit (advisory threshold: more than ${MULTI_SPEND_WARN_ABOVE}); ` +
-        `all ${eligibleEntries.length} are consumed in this single act, so any that reviewed OTHER work is permanently spent here. Receipts: ` +
-        `${eligibleEntries.map((e) => `${e.agent_type}@${safeLabel(e.at)}`).join(', ')}. ` +
-        `A stretch of receipts usually means an earlier code-touching commit was made with bare 'git commit' and never consumed its own. ` +
+      `commit-reviewed: MULTI-SPEND — ${stampEntries.length} review receipts are being stamped on ONE commit (advisory threshold: more than ${MULTI_SPEND_WARN_ABOVE}); ` +
+        `all ${stampEntries.length} are consumed in this single act, so any that reviewed OTHER work is permanently spent here. Receipts: ` +
+        `${stampEntries.map((e) => `${e.agent_type}@${safeLabel(e.at)}`).join(', ')}. ` +
+        // CAUSE TEXT CORRECTED (board 51d93c34; decision c45b6ee4 measured the
+        // old single-cause wording misdiagnosing the NORMAL case). The prior
+        // text named only the bare-'git commit' leak, which would mislead
+        // precisely in the workflow the session baseline (decision b39a478e)
+        // makes standard: several lanes reviewed concurrently in ONE session.
+        `TWO DIFFERENT CAUSES PRODUCE THIS, and they need opposite responses. (1) CONCURRENT MULTI-LANE REVIEW in one session — the normal shape under ` +
+        `the session baseline (decision b39a478e), where each lane earns its own receipt; since file-scoped stamping shipped (board 51d93c34) every ` +
+        `receipt named here either covers this diff or records no territory at all, so this is usually benign. (2) AN EARLIER code-touching commit made ` +
+        `with bare 'git commit', which never consumed the receipts its own review earned — check for a trailer-less commit behind this one. ` +
         `This is a warning, not a refusal — nothing is rejected or deduped.`
     );
   }
 
-  for (const e of eligibleEntries) {
+  for (const e of stampEntries) {
     const entryFiles = Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : [];
     if (entryFiles.length === 0) {
       // A receipt naming NO files is the STRONGEST form of unverifiable
@@ -440,16 +562,23 @@ try {
           `record nothing for a real review, so the entry is stamped and consumed exactly as before.`
       );
     } else if (!entryFiles.some((f) => stagedFiles.has(normalizePath(f)))) {
+      // REACHABLE ONLY IN THE FILE-SCOPING FALLBACK (see the partition above):
+      // when some other receipt DID match, a non-overlapping one is DEFERRED
+      // rather than stamped, and is disclosed there instead. Reaching this line
+      // therefore means NO eligible receipt matched the diff at all, which is
+      // the state where the attribution itself is the prime suspect.
       warnSpend(
         `commit-reviewed: RECEIPT FILES DO NOT OVERLAP THIS DIFF — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) names [${entryFiles.join(', ')}], ` +
-          `none of which this commit stages. ADVISORY ONLY, and deliberately not a refusal: the recorded files come from H22's transcript-based ` +
-          `dispatch-prompt extractor, which was MEASURED attributing a real review's territory to the wrong turn entirely (board 09e03d76), so a ` +
-          `non-overlap is evidence to look at, never proof the review was unrelated. The entry is stamped and consumed exactly as before.`
+          `none of which this commit stages, AND no other eligible receipt covers this diff either — so file-scoped stamping (board 51d93c34) has nothing ` +
+          `to select on and does not apply here. ADVISORY ONLY, and deliberately not a refusal: the recorded files come from H22's transcript-based ` +
+          `dispatch-prompt extractor, which was MEASURED attributing a real review's territory to the wrong turn entirely (board 09e03d76) and which ` +
+          `records negated paths while dropping some positively-asserted ones (research finding 289cd172), so a non-overlap is evidence to look at, never ` +
+          `proof the review was unrelated. The entry is stamped and consumed exactly as before.`
       );
     }
   }
 
-  for (const e of eligibleEntries) {
+  for (const e of stampEntries) {
     const recordedAt = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
     if (Number.isNaN(recordedAt)) {
       warnSpend(
@@ -476,7 +605,7 @@ try {
   );
 }
 
-const trailerLines = eligibleEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
+const trailerLines = stampEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
 const fullMessage = `${message}\n\n${trailerLines.join('\n')}`;
 
 const commit = spawnSync('git', ['commit', '-m', fullMessage], { cwd: target, encoding: 'utf8', timeout: 30_000 });
@@ -570,7 +699,7 @@ if (trailerCheck.status !== 0) {
 // truncation) or a value that belongs to none of the entries this
 // invocation actually stamped. Trailers are a multiset (duplicates allowed,
 // FIX/R1 above), so both sides are sorted before comparing.
-const expectedTrailerValues = [...eligibleEntries.map((e) => e.agent_type)].sort();
+const expectedTrailerValues = [...stampEntries.map((e) => e.agent_type)].sort();
 const actualTrailerValues = (trailerCheck.stdout ?? '')
   .split('\n')
   .map((l) => l.trim())
@@ -676,24 +805,50 @@ try {
     // NULL-SAFE via `?? null`: a legacy pre-expiry entry carries none of the
     // three, and absence normalizes identically on both sides (both reads come
     // from the same file), so those entries still match exactly as before.
+    //
+    // `files` JOINED THAT LIST WITH FILE-SCOPED STAMPING (review, HIGH — board
+    // 51d93c34). The rule above is not decoration: EVERY field that decides the
+    // partition must decide the consume. File scoping made `files` a partition
+    // field, and omitting it reintroduced — inside the very feature built to
+    // prevent it — the silent destruction of a real reviewer's evidence.
+    // THE MEASURED SHAPE: two reviewer-security dispatches in ONE message share
+    // agent_type AND the Start-millisecond `at`, and being same-session
+    // same-branch they share session_id/branch/base_sha too, so those five
+    // fields discriminate NOTHING. One records lane A, one lane B. Commit lane A
+    // and the partition stamps A while deferring B — but if B precedes A in the
+    // file, the filter below finds sameIdentity(B, A) true and splices B out.
+    // Lane B's evidence is destroyed, the never-consumed guarantee is broken,
+    // and A's receipt is then stamped onto the lane B commit through the
+    // no-match fallback: a trailer naming a review that never saw that diff.
+    // Before file scoping this was harmless (both were stamped and the multiset
+    // consumed both); the DEFERRED class is what created the asymmetry.
+    // SHAPE-STABLE across every files[] form, because both sides are parsed from
+    // the SAME file: absent normalizes to null on both sides and matches;
+    // absent vs [] correctly does NOT match (the a===null guard); [] vs [] and
+    // ['x'] vs ['x'] deep-equal; a non-array string compares by string equality.
+    // Max depth 2, far inside IDENTITY_DEPTH_CAP. Two receipts identical in
+    // EVERY field including files still consume correctly — they share one
+    // partition verdict by construction, and the multiset splice below claims
+    // one stamped occurrence each, so neither can survive forever.
     const identityField = (e, k) => (e[k] === undefined ? null : e[k]);
     const sameIdentity = (fresh, stamped) =>
       typeof fresh.agent_type === 'string' &&
       fresh.agent_type === stamped.agent_type &&
       boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP) &&
-      ['session_id', 'branch', 'base_sha'].every((k) =>
+      ['session_id', 'branch', 'base_sha', 'files'].every((k) =>
         boundedDeepEqual(identityField(fresh, k), identityField(stamped, k), IDENTITY_DEPTH_CAP)
       );
     // MULTISET consume by splicing the stamped list: each fresh entry claims at
     // most one still-unclaimed stamped occurrence, so two identical stamped
     // entries consume exactly two matching fresh ones and any excess fresh
     // occurrence survives. O(n^2) is irrelevant at ledger scale (tens).
-    // The STAMPED set — eligibleEntries, never validEntries: a foreign receipt
-    // was never stamped, so it must never be identity-matched away here. That
-    // is the "never silently deleted" half of the expiry ruling, and it holds
-    // structurally (the foreign entry simply is not in this list) rather than
-    // by a filter that could be got wrong.
-    const unclaimedStamped = [...eligibleEntries];
+    // The STAMPED set — stampEntries, never validEntries or eligibleEntries: a
+    // foreign receipt and a file-scope DEFERRED receipt were both never
+    // stamped, so neither must ever be identity-matched away here. That is the
+    // "never silently deleted" half of both rulings, and it holds STRUCTURALLY
+    // (those entries simply are not in this list) rather than by a filter that
+    // could be got wrong.
+    const unclaimedStamped = [...stampEntries];
     const survivors = freshLedger.filter((e) => {
       if (!e || typeof e !== 'object') return true; // a malformed fresh entry was never stamped — it survives untouched
       const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
@@ -724,10 +879,14 @@ try {
 console.log(
   JSON.stringify({
     committed: true,
-    reviewed_by: eligibleEntries.map((e) => e.agent_type),
+    reviewed_by: stampEntries.map((e) => e.agent_type),
     spend_warnings: spendWarnings,
     // What was deliberately NOT spent, for the same reason spend_warnings are
     // echoed here: a reader of this report must see the withheld receipts too.
     foreign_receipts: foreignDisclosures,
+    // Withheld by FILE SCOPE rather than by session/branch identity (board
+    // 51d93c34) — reported separately because the two withholdings mean
+    // different things and have different remedies.
+    deferred_receipts: deferredDisclosures,
   })
 );

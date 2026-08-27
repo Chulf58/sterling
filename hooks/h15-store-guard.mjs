@@ -4928,8 +4928,21 @@ var configSchema = external_exports.object({
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
+  //
+  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
+  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
+  // on the fragment's executable argument, normalizing only a leading './'
+  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
+  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // therefore sanctions nothing unless the command is literally run from the
+  // script's own directory, which H14's repo-root confinement never produces.
+  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
+  // exemption was an unanchored substring test, and became a silent false DENY
+  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
+  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
+  // out below. Keep this list basename-free.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5089,7 +5102,16 @@ try {
     environmentDefectDenial(
       "H15",
       `[cwd] the hook input's cwd could not be resolved to a project path (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input.agent_id }
+      // OPTIONAL CHAIN, not decoration: a fail-closed HANDLER that can itself
+      // throw exits non-2 and voids the gate (the F5 class this file exists to
+      // avoid). MEASURED 2026-08-27: no reachable input lands here with a
+      // non-object `input` — stdin `null` throws inside readStdin's own
+      // `projectRoot(input.cwd)` and is caught above, and a primitive/array
+      // input yields `undefined` cwd, which takes the not-a-Sterling-project
+      // allow branch without ever throwing. So this is belt-and-braces on an
+      // unreachable path, kept because the cost is one character and the
+      // failure mode it forecloses is a silently voided blocking gate.
+      { agentId: input?.agent_id }
     )
   );
 }
@@ -5105,7 +5127,8 @@ try {
     environmentDefectDenial(
       "H15",
       `Internal error while preprocessing the command text for the store-mention check (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input.agent_id }
+      { agentId: input?.agent_id }
+      // same handler-cannot-throw rule as the [cwd] catch above
     )
   );
 }
@@ -5116,7 +5139,8 @@ try {
 } catch (e) {
   deny(
     environmentDefectDenial("H15", `Store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {
-      agentId: input.agent_id
+      agentId: input?.agent_id
+      // same handler-cannot-throw rule as the [cwd] catch above
     })
   );
 }
@@ -5408,6 +5432,9 @@ function redirectsIntoStore(str) {
   }
   return false;
 }
+function sanctionedFragmentHasShellRider(fragment) {
+  return redirectsIntoStore(fragment) || /(?:\$\(|`|[<>]\()/.test(fragment);
+}
 function classifyFragment(fragment) {
   const trimmed = fragment.trim();
   if (!trimmed || !STORE_MENTION_RE.test(trimmed) && !STORE_MENTION_RE.test(unquotedText(trimmed))) {
@@ -5431,7 +5458,8 @@ var offending = null;
 var offendingIsDbSeal = false;
 try {
   for (const frag of splitFragments(command)) {
-    if (fragmentRunsSanctionedScript(frag, allowScripts)) continue;
+    const sanctioned = fragmentRunsSanctionedScript(frag, allowScripts);
+    if (sanctioned && !sanctionedFragmentHasShellRider(frag)) continue;
     const result = classifyFragment(frag);
     if (result.write) {
       offending = result.fragment;
@@ -5444,7 +5472,8 @@ try {
     environmentDefectDenial(
       "H15",
       `Internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input.agent_id }
+      { agentId: input?.agent_id }
+      // same handler-cannot-throw rule as the [cwd] catch above
     )
   );
 }

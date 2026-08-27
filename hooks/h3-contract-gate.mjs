@@ -5080,8 +5080,21 @@ var configSchema = external_exports.object({
   // §6 H15 store write-path guard: shell commands referencing the store are
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
+  //
+  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
+  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
+  // on the fragment's executable argument, normalizing only a leading './'
+  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
+  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // therefore sanctions nothing unless the command is literally run from the
+  // script's own directory, which H14's repo-root confinement never produces.
+  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
+  // exemption was an unanchored substring test, and became a silent false DENY
+  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
+  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
+  // out below. Keep this list basename-free.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5613,11 +5626,11 @@ var SterlingStore = class _SterlingStore {
     };
   }
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
-  insertRelation(sourceId, rel2, targetId, at) {
+  insertRelation(sourceId, rel, targetId, at) {
     if (sourceId === targetId) {
-      throw new Error(`relation '${rel2}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
+      throw new Error(`relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
     }
-    this.db.prepare("INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)").run(sourceId, rel2, targetId, at);
+    this.db.prepare("INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)").run(sourceId, rel, targetId, at);
   }
   /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
    *
@@ -6719,14 +6732,14 @@ var SterlingStore = class _SterlingStore {
    *  the target across every mounted store — cross-store edges are a legitimate shape
    *  (promotion itself writes them: supersedes / informed_by across project↔domain)
    *  that a store-local get cannot see. Standalone usage keeps the local check. */
-  addLink(sourceId, rel2, targetId, targetValidated = false) {
+  addLink(sourceId, rel, targetId, targetValidated = false) {
     this.assertWritable("addLink");
     const source = this.get(sourceId);
     if (!source)
       throw new Error(`addLink: no record '${sourceId}'`);
     if (!targetValidated && !this.get(targetId))
       throw new Error(`addLink: no target record '${targetId}'`);
-    const parsedRel = linkSchema.shape.rel.parse(rel2);
+    const parsedRel = linkSchema.shape.rel.parse(rel);
     if (parsedRel === "supersedes") {
       throw new Error(`addLink: rel 'supersedes' cannot be written as a raw edge \u2014 supersession is a lifecycle transition, not a link. Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`);
     }
@@ -7032,15 +7045,15 @@ function withRetry(fn) {
   }
   throw last;
 }
-function openStore(cwd2) {
-  const p = join(cwd2, ".sterling", "sterling.db");
+function openStore(cwd) {
+  const p = join(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
-function repoRel(toolPath2, cwd2) {
-  if (!toolPath2) return null;
-  const fwd = String(toolPath2).replace(/\\/g, "/");
+function repoRel(toolPath, cwd) {
+  if (!toolPath) return null;
+  const fwd = String(toolPath).replace(/\\/g, "/");
   try {
-    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd2);
+    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
     return normalizeRepoPath(fwd);
   } catch {
     return null;
@@ -7051,10 +7064,10 @@ function repoRel(toolPath2, cwd2) {
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join as join2, dirname as dirname3 } from "node:path";
-function ledgerPath(cwd2, runId, agentId) {
-  if (runId && agentId) return join2(cwd2, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
-  if (agentId) return join2(cwd2, ".sterling", "transient", "reads", `agent-${agentId}.json`);
-  return join2(cwd2, ".sterling", "transient", "conductor-reads.json");
+function ledgerPath(cwd, runId, agentId) {
+  if (runId && agentId) return join2(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
+  if (agentId) return join2(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
+  return join2(cwd, ".sterling", "transient", "conductor-reads.json");
 }
 function readLedger(path) {
   if (!existsSync3(path)) return [];
@@ -7100,30 +7113,30 @@ function isLedgerTorn(path) {
 // scripts/hooks/lib/contract.mjs
 import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, existsSync as existsSync4 } from "node:fs";
 import { join as join3, dirname as dirname4 } from "node:path";
-function debugScopePath(cwd2) {
-  return join3(cwd2, ".sterling", "transient", "debug-scope.json");
+function debugScopePath(cwd) {
+  return join3(cwd, ".sterling", "transient", "debug-scope.json");
 }
-function readDebugScope(cwd2) {
-  const p = debugScopePath(cwd2);
+function readDebugScope(cwd) {
+  const p = debugScopePath(cwd);
   return existsSync4(p) ? JSON.parse(readFileSync3(p, "utf8")) : null;
 }
 var ENFORCEMENT_SURFACE = [".claude/settings*.json", ".claude/agents/**", ".sterling/config.json"];
-function scopeCheck({ brief, debugScope, rel: rel2, amendments = [] }) {
+function scopeCheck({ brief, debugScope, rel, amendments = [] }) {
   if (brief) {
     for (const oos of brief.out_of_scope) {
-      if (matchesGlob(rel2, oos)) return { deny: `'${rel2}' is declared out_of_scope ('${oos}') in the brief` };
+      if (matchesGlob(rel, oos)) return { deny: `'${rel}' is declared out_of_scope ('${oos}') in the brief` };
     }
     const allowed = /* @__PURE__ */ new Set([...brief.blast_radius.files.map((f) => f.path), ...brief.incidental_scope, ...amendments]);
-    if (!allowed.has(rel2)) {
-      return { deny: `'${rel2}' is outside the brief's blast_radius + incidental_scope \u2014 re-scope, don't route around the gate (contract-violated)` };
+    if (!allowed.has(rel)) {
+      return { deny: `'${rel}' is outside the brief's blast_radius + incidental_scope \u2014 re-scope, don't route around the gate (contract-violated)` };
     }
     return {};
   }
   if (debugScope) {
-    const inMap = debugScope.paths.some((g) => rel2 === g || matchesGlob(rel2, g));
+    const inMap = debugScope.paths.some((g) => rel === g || matchesGlob(rel, g));
     if (!inMap) {
       return {
-        deny: `'${rel2}' is outside the registered debug-scope map \u2014 confirm or expand the map (scripts/debug-scope.mjs register) before editing (\xA76 H3 debug-scope mode)`
+        deny: `'${rel}' is outside the registered debug-scope map \u2014 confirm or expand the map (scripts/debug-scope.mjs register) before editing (\xA76 H3 debug-scope mode)`
       };
     }
   }
@@ -7131,10 +7144,21 @@ function scopeCheck({ brief, debugScope, rel: rel2, amendments = [] }) {
 }
 
 // scripts/hooks/h3-contract-gate.mjs
-var input = readStdin();
-var cwd = input.cwd;
-var toolPath = input.tool_input?.file_path;
-var rel = repoRel(toolPath, cwd);
+var input;
+try {
+  input = readStdin();
+  if (!input || typeof input !== "object") {
+    throw new TypeError(`hook input parsed to ${input === null ? "null" : typeof input}, not an object`);
+  }
+} catch (e) {
+  deny(
+    environmentDefectDenial(
+      "H3",
+      `[stdin] hook input could not be read or parsed (${e && e.message || e}) \u2014 a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the edit would be ALLOWED unexamined). IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H3 yourself \u2014 exit \`blocked\`, citing this message VERBATIM. Otherwise:`,
+      { agentId: void 0 }
+    )
+  );
+}
 function evidenceDenial(mode, lp, path) {
   if (isLedgerTorn(lp)) {
     const salvagedCount = readLedger(lp).length;
@@ -7154,18 +7178,21 @@ function evidenceDenial(mode, lp, path) {
   const window = input.agent_id ? "this AGENT's own ledger \u2014 reads by the conductor or by another agent are never yours" : "the CONDUCTOR ledger. Evidence EXPIRES WHEN THE FILE CHANGES (read-time content hash vs current bytes) and on context compaction \u2014 so either you never Read this exact file, or it has been modified since your last Read";
   return `H3 [${mode}]: no fresh read-evidence for '${path}' \u2014 Read the exact file before editing. Checked ${lp} (${count} entr${count === 1 ? "y" : "ies"}), which is ${window}. Grep/Glob hits are not read-evidence.`;
 }
-if (input.agent_id && toolPath) {
-  const fwd = String(toolPath).replace(/\\/g, "/");
-  const hooksDir = dirname5(fileURLToPath(import.meta.url)).replace(/\\/g, "/");
-  if (fwd === hooksDir || fwd.startsWith(hooksDir + "/")) {
-    deny(`H3 [self-protection]: '${toolPath}' is inside the bundled hooks directory \u2014 the enforcement surface is never agent-editable, in any mode (\xA76 H3)`);
-  }
-  if (rel && ENFORCEMENT_SURFACE.some((g) => matchesGlob(rel, g))) {
-    deny(`H3 [self-protection]: '${rel}' is enforcement surface (${ENFORCEMENT_SURFACE.join(", ")}) \u2014 never agent-editable, in any mode (\xA76 H3); if enforcement is misbehaving, exit blocked and report it`);
-  }
-}
 var store;
 try {
+  const cwd = input.cwd;
+  const toolPath = input.tool_input?.file_path;
+  const rel = repoRel(toolPath, cwd);
+  if (input.agent_id && toolPath) {
+    const fwd = String(toolPath).replace(/\\/g, "/");
+    const hooksDir = dirname5(fileURLToPath(import.meta.url)).replace(/\\/g, "/");
+    if (fwd === hooksDir || fwd.startsWith(hooksDir + "/")) {
+      deny(`H3 [self-protection]: '${toolPath}' is inside the bundled hooks directory \u2014 the enforcement surface is never agent-editable, in any mode (\xA76 H3)`);
+    }
+    if (rel && ENFORCEMENT_SURFACE.some((g) => matchesGlob(rel, g))) {
+      deny(`H3 [self-protection]: '${rel}' is enforcement surface (${ENFORCEMENT_SURFACE.join(", ")}) \u2014 never agent-editable, in any mode (\xA76 H3); if enforcement is misbehaving, exit blocked and report it`);
+    }
+  }
   store = openStore(cwd);
   if (!store)
     deny(
@@ -7203,7 +7230,7 @@ try {
 } catch (e) {
   deny(
     environmentDefectDenial("H3", `Contract evaluation failed (${e && e.message || e}) \u2014 failing closed (P5).`, {
-      agentId: input.agent_id
+      agentId: input?.agent_id
     })
   );
 }
