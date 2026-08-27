@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
-import { initialUi, TABS, type UiState } from '../state.js';
+import { buildDashboardState, initialUi, TABS, type UiState, type DashboardState } from '../state.js';
 import * as stateMod from '../state.js';
 import * as viewmodel from '../viewmodel.js';
 
@@ -85,6 +85,27 @@ import * as viewmodel from '../viewmodel.js';
 const SYS_TAB = 3;
 
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
+
+/** One rendered tab cell as the hit-test measures it (state.tabs[i].label).
+ *  Narrow cast + an existence assert per read, so a missing label fails on an
+ *  assertion rather than on undefined arithmetic. */
+interface TabCell {
+  label?: string;
+}
+/** The x of tab i's label, DERIVED from the labels the renderer produced: cells
+ *  start at terminal x=1 and each cell is `label.length + 2` wide. Tab labels
+ *  are dynamic (the Tasks label carries its open-task count), so the tab row's
+ *  absolute coordinates are not a constant this oracle may hardcode. */
+function tabLabelX(s: DashboardState, i: number): number {
+  const cells = s.tabs as unknown as TabCell[];
+  assert.ok(i < cells.length, `tab ${i} is present in the rendered tab row`);
+  let x = 1;
+  for (let j = 0; j < i; j++) {
+    assert.equal(typeof cells[j].label, 'string', `tab cell ${j} exposes its rendered label`);
+    x += cells[j].label!.length + 2;
+  }
+  return x + 1;
+}
 
 // ---- injected snapshot shape (interface slice: AgentRosterSnapshot) --------
 interface CatalogEntry {
@@ -281,12 +302,13 @@ test('phase4 registry: the digit-4 hotkey scales via TABS.length and selects the
 test('phase4 registry: a tab-bar click on the last cell hit-tests to the System tab (layout scales by TABS.length)', () => {
   const { store, cleanup } = storeFixture();
   try {
-    // the established tab-bar layout (state.test.ts: Knowledge clicked at x=9) is
-    // a 1-space-padded cell per label on terminal row 2: cell_i starts at
-    // 1 + Σ_{j<i}(len_j + 2); its label's first char is start+1. The last cell
+    // the established tab-bar layout is a 1-space-padded cell per RENDERED label
+    // on terminal row 2: cell_i starts at 1 + Σ_{j<i}(len_j + 2), its label's
+    // first char at start+1. The lengths come from the labels the renderer
+    // actually produced (state.tabs[j].label) — NOT from the bare TABS registry
+    // labels, since the Tasks label carries its open-task count. The last cell
     // must appear by the SAME formula — that IS the scaling contract.
-    const start = 1 + TABS.slice(0, 3).reduce((acc, label) => acc + label.length + 2, 0);
-    const x = start + 1;
+    const x = tabLabelX(buildDashboardState(store, st()), SYS_TAB);
     const r = SR.reduce(store, st(), { kind: 'click', x, y: 2 });
     assert.equal(r.ui.tab, SYS_TAB, 'clicking the last tab cell selects the System tab');
   } finally {
