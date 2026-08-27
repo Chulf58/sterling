@@ -212,7 +212,15 @@ export function refusalFor(c) {
 export function stampConsumerRoleIfAbsent(cwd, log) {
   const configPath = join(cwd, '.sterling', 'config.json');
   if (!existsSync(configPath)) {
-    log('\n▸ machine-role stamp — SKIPPED: no .sterling/config.json (run /sterling:init here first)');
+    // The guidance, not the gate: this function must never CREATE the config (a
+    // machine-role-only config would be a schema-shaped file nothing else wrote), and
+    // "run /sterling:init here first" was the wrong instruction — since board 2a6b45c2
+    // nothing requires the clone to be init'd as a project, so a clone with no config
+    // is the normal consumer shape. H1 then reports the role as UNDECLARED, which it
+    // already documents as "treat as CONSUMER" — the safe posture, not a gap.
+    log(
+      '\n▸ machine-role stamp — SKIPPED: no .sterling/config.json in the clone. Normal for a consumer machine (the clone is not init\'d as a project). H1 reports MACHINE ROLE: UNDECLARED, which is treated as CONSUMER — declare machine_role explicitly only on the authoring machine.',
+    );
     return;
   }
   try {
@@ -529,10 +537,21 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // Re-bake this machine's generated artifacts against the new templates. The
   // ensure pass never overwrites what it cannot prove it generated, so a
   // hand-edited launcher is reported as `differs`, not clobbered.
+  // THE GATE IS ABOUT THE CLONE-AS-PROJECT ARTIFACTS ONLY (board 2a6b45c2). It reads
+  // like a bootstrap route and is not one: init REFUSES without recorded declarations,
+  // so a clone that was never init'd cannot be re-baked from here, and the old skip
+  // message told the reader to init the clone — advice that is now wrong. Since board
+  // 2a6b45c2, .claude-plugin/sterling-mcp.json (the file plugin.json's `mcpServers`
+  // names, and the ONLY thing here a consumer machine actually needs) is ensured in the
+  // clone by EVERY /sterling:init run, whatever its --target — so a clone with no
+  // .sterling/config.json is the NORMAL consumer shape, not a broken one, and nothing
+  // is missing when this step is skipped.
   if (existsSync(join(cwd, '.sterling', 'config.json'))) {
     step('re-bake machine artifacts (init ensure pass)', nodeBin, [join(cwd, 'scripts', 'init.mjs'), '--target', cwd], { show: true, tolerate: true });
   } else {
-    log('\n▸ re-bake machine artifacts — SKIPPED: no .sterling/config.json in the Sterling clone (run /sterling:init here to get launchers + MCP config on this machine)');
+    log(
+      '\n▸ re-bake machine artifacts — SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is ensured in this clone by every /sterling:init run in ANY project (board 2a6b45c2). Run /sterling:init in a project — not here — if this machine has never done so.',
+    );
   }
 
   // Stamp the consumer role now that the fast-forward + rebuild are complete

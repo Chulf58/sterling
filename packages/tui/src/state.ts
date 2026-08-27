@@ -5,7 +5,7 @@
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
-import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
+import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
 export const TABS = ['Tasks', 'Knowledge', 'Queue', 'System'] as const;
@@ -319,6 +319,48 @@ function rankTermsOf(query: string): string[] {
 }
 
 /**
+ * Reverse-edge (`inbound_supersedes`) disclosure for ONE card, board c6e3561f
+ * arm 2. Applied at the point a card is known to be RENDERED — every node-push
+ * site in nodesFor, the search branches included — and gated on that card
+ * being EXPANDED, because only an expanded card's body is ever built
+ * (buildDashboardState renders `card.body` for expanded knowledge cards only).
+ *
+
+ * THE HONEST BOUND is "one reverse-edge query per STRUCTURALLY EMITTED, EXPANDED
+ * knowledge card, per projection call" — NOT "one per tick", and NOT bounded by
+ * what the user can actually SEE. Two amplifications, both confirmed by outside-
+ * family review 2026-08-27 and deliberately NOT engineered away here:
+ * (a) hydration runs while building every emitted node, BEFORE viewport clipping,
+ *     so an expanded card scrolled far above or below the visible rows is still
+ *     queried; and
+
+ * (b) a single input event can call nodesFor() more than once — there are FOUR
+ *     call sites (reduce, buildSelf, the click path, and main.ts's redraw), so
+ *     "per tick" undercounts by whatever the event path multiplies.
+ * The pin below measures ONE direct buildDashboardState() call with an effectively
+ * unbounded viewport, so it CANNOT see either amplification: treat the bound as
+ * read-verified, not test-enforced. Stated at full strength rather than softened
+
+ * because the previous wording overclaimed and a reader trusted it.
+ *
+ * WHY N IS IRREDUCIBLE, given the above: `ui.expanded` is ADDITIVE — reduce's
+ * toggle never collapses siblings — so N simultaneously-expanded cards cost N
+ * queries, and each of those N cards is drawing a body that must carry its
+ * disclosure. What hydrating at the PUSH SITE buys is the other direction, which
+ * the earlier record-level gate got wrong: it also fired for cards sitting behind
+ * a COLLAPSED sub-category, which are never emitted at all. Those now cost zero.
+ */
+function hydrateInbound(
+  card: Card,
+  ui: UiState,
+  reader: { inboundSupersedes(id: string): unknown[] },
+): Card {
+  if (!ui.expanded.includes(card.id)) return card;
+  const inbound = reader.inboundSupersedes(card.id);
+  return inbound.length ? withInboundSupersedes(card, toInboundSupersedesEntries(inbound)) : card;
+}
+
+/**
  * The Knowledge tab is an up-to-4-level collapse/expand tree: knowledge
  * CATEGORY → SOURCE store → SUB-CATEGORY (code component) → record. The
  * sub-category level groups an expanded source's records by component
@@ -343,13 +385,17 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
   if (query) {
     const terms = rankTermsOf(query);
     if (terms.length) {
+      // SEARCH also carries the inbound_supersedes disclosure (review finding,
+      // lane A2): a card reached by search and the same card reached by the
+      // category tree must render identically — same body, same disclosure —
+      // and the query stays gated on that card being expanded.
       if (knowledge) {
-        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: true }));
+        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: 'card' as const, card: hydrateInbound(card, ui, knowledge), depth: 0, knowledge: true }));
       }
       const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
       return store
         .query({ types, rank_terms: terms, match_all: true, cap })
-        .map((r) => ({ kind: 'card' as const, card: { ...toCard(r), source: 'project' }, depth: 0, knowledge: true }));
+        .map((r) => ({ kind: 'card' as const, card: hydrateInbound({ ...toCard(r), source: 'project' }, ui, store), depth: 0, knowledge: true }));
     }
   }
 
@@ -377,6 +423,11 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
       const records = knowledge
         ? knowledge.querySource(sc.source, { types: [cat.type], cap })
         : store.query({ types: [cat.type], cap });
+      // inbound_supersedes disclosure (board c6e3561f part (2)) is hydrated
+      // per CARD at the push sites below (hydrateInbound), not per fetched
+      // record here: a record behind a COLLAPSED sub-category is fetched but
+      // never rendered, and paying a reverse-edge query for it was the false
+      // half of the old "one query for the expanded card" bound.
       // 4th level: bucket the fetched records by code COMPONENT (single-bucket,
       // dominant). A source that resolves to a single bucket SKIPS the
       // sub-category level (collapse-single-bucket, P1) — its cards sit at
@@ -385,9 +436,10 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
       // expanded. No new query — we regroup the records already fetched, so the
       // COUNT-then-fetch perf model is untouched.
       const groups = knowledgeSubgroups(records);
+      const reader = knowledge ?? store;
       if (groups.length <= 1) {
         for (const card of groups[0]?.cards ?? []) {
-          nodes.push({ kind: 'card', card: { ...card, source: sc.source }, depth: 2, knowledge: true });
+          nodes.push({ kind: 'card', card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 2, knowledge: true });
         }
         continue;
       }
@@ -395,7 +447,7 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
         nodes.push({ kind: 'subcategory', catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
         if (!ui.expanded.includes(subId(cat.type, sc.source, g.key))) continue;
         for (const card of g.cards) {
-          nodes.push({ kind: 'card', card: { ...card, source: sc.source }, depth: 3, knowledge: true });
+          nodes.push({ kind: 'card', card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 3, knowledge: true });
         }
       }
     }
@@ -576,12 +628,62 @@ function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: numb
 /** Bridge the pure System projection into a DashboardState the renderer draws:
  *  the catalog banner as leading dim rows, then the roster rows. Untested by the
  *  phase oracle (which calls buildSystemTab directly) — this feeds main.ts. */
+/**
+ * Tab labels, with the Tasks tab carrying its open-task count: "Tasks (13)".
+ *
+ * THE COUNT IS OPEN USER-SOURCE TODOS — the board, not the maintenance queue.
+ * `source: 'user'` is load-bearing: without it this would also count the
+ * system-source maintenance items that live on the Queue tab, and those two
+ * surfaces answer different questions (a task is wanted work; a queue item is
+ * mechanism-detected debt). It counts ITEMS, not objectives, so an objective
+ * holding four slices contributes 4 — the tab answers "how much is on the
+ * board", while the rows beneath it group those same items by objective.
+ *
+ * Via store.count(), i.e. COUNT(*) through the same baseFilter query() uses —
+ * deliberately NOT todoCards().length, which counts GROUP headers rather than
+ * items and would silently cap at its own listing cap.
+ *
+ * DISCLOSED DIVERGENCE, above todoCards' cap (500 since 2026-08-27) only: this
+ * count is UNCAPPED while the listing is capped, so a board of 600 renders
+ * "Tasks (600)" above 500 listed rows. Deliberate — the tab should tell the
+ * truth about the board's size rather than echo a display limit — but it means
+ * the number and the row count stop agreeing past the cap, and the honest fix
+ * is paging the listing, never capping the count to match it. The two numbers
+ * live in different files, so if the cap moves again this sentence must move
+ * with it.
+ *
+ * THESE LABELS ARE THE ONLY SOURCE OF TRUTH FOR TAB WIDTH. The mouse hit-test
+ * derives each tab's x-extent from the label actually rendered, so a count that
+ * changes a label's length moves the click target with it. Anything recomputing
+ * widths from the bare TABS constant would drift the moment a count appears —
+ * which is why this returns labels rather than just a number.
+ */
+function tabsFor(store: SterlingStore, activeTab: number): { label: string; active: boolean }[] {
+  let taskCount: number | null = null;
+  try {
+    taskCount = store.count({ types: ['todo'], source: 'user' });
+  } catch {
+    // A count is decoration on a tab bar; failing to read one must never take
+    // the whole dashboard down, so degrade to the bare label. NOT claimed: that
+    // the missing count is a useful signal — a viewer cannot tell it from the
+    // feature being off. It is silent, and that is acceptable ONLY because a
+    // genuinely broken store cannot hide here: nodesFor/todoCards read the same
+    // store in the same buildDashboardState call and would throw first.
+    taskCount = null;
+  }
+  return TABS.map((label, i) => ({
+    label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label,
+    active: i === activeTab,
+  }));
+}
+
 function systemDashboardState(
   ui: UiState,
   width: number,
   banner: string[],
   projectName: string,
   bodyTop: number,
+  tabs: { label: string; active: boolean }[],
   roster?: AgentRosterSnapshot
 ): DashboardState {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
@@ -613,7 +715,7 @@ function systemDashboardState(
     screenRow += lines.length;
   }
   return {
-    tabs: TABS.map((label, i) => ({ label, active: i === ui.tab })),
+    tabs,
     rows,
     emptyMessage: view.rows.length ? undefined : '(no configured models)',
     footer: `←/→ or 1-${TABS.length} tabs · ↑/↓ rows · enter change model/effort · esc cancel · q quit`,
@@ -627,8 +729,11 @@ function systemDashboardState(
 export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot): DashboardState {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
+  // Computed ONCE here and threaded into every projection, so the Tasks count
+  // and the widths the hit-test measures can never come from two places.
+  const tabs = tabsFor(store, ui.tab);
   // System tab (run r-f9a7): its own projection, not a card/knowledge list.
-  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, roster);
+  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, roster);
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
@@ -733,7 +838,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
   // shows on the spacer row on the Knowledge tab regardless of the query.
   const searchActive = ui.tab === KNOWLEDGE_TAB;
   return {
-    tabs: TABS.map((label, i) => ({ label, active: i === ui.tab })),
+    tabs,
     rows,
     emptyMessage:
       nodes.length === 0
@@ -1017,8 +1122,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
       if (event.y === state.bodyTop - 1) {
         let x = 1;
-        for (let i = 0; i < TABS.length; i++) {
-          const width = TABS[i].length + 2; // ' label '
+        // Measure the labels THE RENDERER ACTUALLY DREW (state.tabs), never the
+        // bare TABS constant: the Tasks tab carries a count ("Tasks (13)"), so a
+        // width taken from the constant would be short by the count's width and
+        // every click past the first tab would land on the wrong one — and it
+        // would drift again with each digit the count gains.
+        for (let i = 0; i < state.tabs.length; i++) {
+          const width = state.tabs[i].label.length + 2; // ' label '
           if (event.x >= x && event.x < x + width) return { ui: switchTab(i), effects };
           x += width;
         }

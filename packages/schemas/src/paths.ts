@@ -75,18 +75,59 @@ export function matchesGlob(path: string, glob: string): boolean {
   return new RegExp('^' + re + '$').test(path.replace(/\\/g, '/'));
 }
 
+const normSep = (p: string) => String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+
+/**
+ * THE canonical case-folding rule for comparing two filesystem paths, in ONE
+ * place so no caller re-derives it. Containment/equality is CASE-SENSITIVE
+ * except for genuinely case-insensitive drive-prefixed (NTFS) paths:
+ * whole-path case-folding wrongly relativized a differently-cased SIBLING
+ * directory on a case-sensitive FS — audit finding 32/43 (the company runs
+ * WSL-primary, ext4 case-sensitive), and unconditional folding makes /Repo and
+ * /repo — genuinely distinct directories on Linux — compare equal.
+ *
+ * Folding is decided by the PAIR, not by either path alone: a drive prefix on
+ * EITHER side means both sides are NTFS-cased.
+ */
+function foldPairForCompare(a: string, b: string): [string, string] {
+  const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
+  return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
+}
+
+/**
+ * Do two paths name the SAME location? Separator- and trailing-slash-
+ * insensitive; case-sensitive per foldPairForCompare's drive-aware rule.
+ *
+ * Exported so callers needing only the comparison (H4's repo-root check) reuse
+ * the rule instead of copying an unconditional toLowerCase, which is correct on
+ * NTFS and WRONG on a case-sensitive filesystem.
+ */
+export function samePath(a: string, b: string): boolean {
+  const [x, y] = foldPairForCompare(normSep(a), normSep(b));
+  return x === y;
+}
+
+/**
+ * Is `p` absolute on EITHER host? node:path's isAbsolute is HOST-NATIVE, so it
+ * answers a different question depending on which OS runs Node — 'C:\\tree' and
+ * '\\tree' are absolute under win32 and relative under POSIX. Any path that
+ * crosses hosts (config values, stored records) must be classified with this
+ * host-independent predicate instead (decision windows-linux-parity).
+ *
+ * Absolute means: a drive prefix FOLLOWED BY a separator ('C:/x', 'C:\\x' — but
+ * not the drive-relative 'C:x', which win32 also calls relative), a POSIX root
+ * ('/x'), or a Windows root-relative / UNC path ('\\x', '\\\\server\\share').
+ */
+export function isAbsolutePathAnyHost(p: string): boolean {
+  const s = String(p ?? '');
+  return /^[A-Za-z]:[\\/]/.test(s) || s.startsWith('/') || s.startsWith('\\');
+}
+
 /** Helper for callers holding an absolute path plus repo-root context. */
 export function toRepoRelative(absolutePath: string, repoRoot: string): string {
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
-  const abs = norm(absolutePath);
-  const root = norm(repoRoot);
-  // Containment is CASE-SENSITIVE except for genuinely case-insensitive
-  // drive-prefixed (NTFS) paths: whole-path case-folding wrongly relativized a
-  // differently-cased SIBLING directory on a case-sensitive FS — audit finding
-  // 32/43 (the company runs WSL-primary, ext4 case-sensitive).
-  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
-  const a = drivePrefixed ? abs.toLowerCase() : abs;
-  const r = drivePrefixed ? root.toLowerCase() : root;
+  const abs = normSep(absolutePath);
+  const root = normSep(repoRoot);
+  const [a, r] = foldPairForCompare(abs, root);
   if (!(a === r || a.startsWith(r + '/'))) {
     throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
   }

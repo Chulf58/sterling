@@ -17,6 +17,67 @@ const NOW = '2026-06-10T12:00:00.000Z';
 /** UiState literal helper — defaults from initialUi, overrides on top. */
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 
+// ---------------------------------------------------------------------------
+// Tab-bar geometry, DERIVED from the labels the renderer actually produced.
+// The invariant worth pinning is "a click inside tab i's RENDERED extent selects
+// tab i" — never a layout constant: tab labels are DYNAMIC (the Tasks label
+// carries its open-task count, so its width changes with the store), and a
+// hardcoded x pins today's label widths instead of the behaviour.
+// ---------------------------------------------------------------------------
+
+/** One rendered tab cell as the hit-test measures it (state.tabs[i].label).
+ *  Reached through a narrow cast so the file compiles however the DashboardState
+ *  tab type is declared; every read existence-asserts the label FIRST, so a
+ *  missing label fails on an assertion, never on undefined arithmetic. */
+interface TabCell {
+  label?: string;
+  active?: boolean;
+}
+const tabCells = (s: DashboardState): TabCell[] => s.tabs as unknown as TabCell[];
+
+/** Tab i's rendered extent in 1-based terminal columns, computed exactly as the
+ *  hit-test computes it: cells start at x=1 and each cell is `label.length + 2`
+ *  wide (one padding column either side).
+ *    • `labelStart` — the label's first character (what the old hardcoded pins
+ *      aimed at).
+ *    • `nearEnd`    — two columns INSIDE the cell's right boundary. Deliberately
+ *      inset: it still discriminates a several-column mismeasurement of the
+ *      cells to its left, while a ±1 disagreement about the cell row's origin
+ *      cannot make it land in a neighbouring cell. */
+function tabExtent(
+  s: DashboardState,
+  i: number,
+): { cellStart: number; labelStart: number; nearEnd: number; label: string } {
+  const cells = tabCells(s);
+  assert.ok(i < cells.length, `tab ${i} is present in the rendered tab row`);
+  let x = 1;
+  for (let j = 0; j < i; j++) {
+    assert.equal(typeof cells[j].label, 'string', `tab cell ${j} exposes its rendered label`);
+    x += cells[j].label!.length + 2;
+  }
+  const label = cells[i].label;
+  assert.equal(typeof label, 'string', `tab cell ${i} exposes its rendered label`);
+  const width = label!.length + 2;
+  return { cellStart: x, labelStart: x + 1, nearEnd: x + width - 3, label: label! };
+}
+
+/** The x a tab-bar click must use to land on tab i's label — the derived
+ *  replacement for the old hardcoded coordinates. */
+const tabClickX = (s: DashboardState, i: number): number => tabExtent(s, i).labelStart;
+
+/** A bare project store with NOTHING seeded (fixture() seeds todos). */
+function emptyFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-state-empty-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  return {
+    store,
+    cleanup: () => {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
 function envelope(type: string) {
   return {
     id: randomUUID(),
@@ -217,8 +278,10 @@ test('header row: project folder name rides on the state; tabs shift to the seco
     const s = buildDashboardState(store, initialUi, Infinity, Infinity, 'Sterling');
     assert.equal(s.projectName, 'Sterling', 'the folder name is carried for the renderer to draw on row 0');
 
-    // tab-bar clicks now land on terminal line 2 — the project name owns line 1
-    const tabClick = reduce(store, initialUi, { kind: 'click', x: 9, y: 2 });
+    // tab-bar clicks now land on terminal line 2 — the project name owns line 1.
+    // the x is DERIVED from the labels THIS state rendered (tab labels are
+    // dynamic — the Tasks label carries its open-task count), never a constant.
+    const tabClick = reduce(store, initialUi, { kind: 'click', x: tabClickX(s, 1), y: 2 });
     assert.equal(tabClick.ui.tab, 1, 'Knowledge selected on the shifted tab row');
 
     // a click on the header row itself selects nothing
@@ -268,8 +331,9 @@ test('banner layout: bodyTop follows banner height; suppressed = today\'s layout
     assert.equal(screenLineToRow(s, 7), 0, 'first body row under a 3-row banner');
     assert.equal(screenLineToRow(s, 6), -1, 'the spacer line is not a body row');
 
-    // tab-bar click now lands on terminal line bodyTop-1 (=5), not 2
-    const tabClick = reduce(store, initialUi, { kind: 'click', x: 9, y: 5 }, { showBanner: true });
+    // tab-bar click now lands on terminal line bodyTop-1 (=5), not 2; the x is
+    // derived from the banner-shifted state's own rendered tab labels
+    const tabClick = reduce(store, initialUi, { kind: 'click', x: tabClickX(s, 1), y: 5 }, { showBanner: true });
     assert.equal(tabClick.ui.tab, 1, 'Knowledge selected on the banner-shifted tab row');
     // a click on a banner row selects nothing
     const bannerClick = reduce(store, initialUi, { kind: 'click', x: 1, y: 2 }, { showBanner: true });
@@ -443,8 +507,11 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
     assert.equal(clickFirst.effects[0]!.type, 'select');
     assert.equal((clickFirst.effects[0] as { id: string }).id, t1.id);
 
-    // tab bar is the SECOND row now (project name is row 1): ' Tasks  Knowledge … ' — Knowledge after ' Tasks ' (7 cols)
-    const tabClick = reduce(store, ui, { kind: 'click', x: 9, y: 2 });
+    // tab bar is the SECOND row now (project name is row 1). The Knowledge cell's
+    // x comes from the RENDERED labels — the Tasks label carries its open-task
+    // count, so ' Tasks ' is no longer 7 columns wide.
+    const sTabs = buildDashboardState(store, ui);
+    const tabClick = reduce(store, ui, { kind: 'click', x: tabClickX(sTabs, 1), y: 2 });
     assert.equal(tabClick.ui.tab, 1, 'clicked Knowledge');
 
     const rc = reduce(store, click.ui, { kind: 'rightclick' });
@@ -453,6 +520,79 @@ test('reduce: mouse — wheel scrolls, click activates by screen line, tab-bar c
     // click in dead space: no-op
     const dead = reduce(store, ui, { kind: 'click', x: 1, y: 50 });
     assert.deepEqual(dead.effects, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('tab labels: the Tasks tab carries its OPEN-TASK COUNT — "Tasks (N)" counts source:user todos ONLY, never source:system maintenance items', () => {
+  // CONTROL ARM, FIRST — it must pass for the OPPOSITE reason: with ZERO user
+  // todos the label reads 'Tasks (0)' even though two system maintenance items
+  // exist in the same store. A hardcoded '(3)' fails here; a count over ALL
+  // todos reads '(2)' and fails here too. So a green on the second arm below
+  // cannot be explained by either.
+  const empty = emptyFixture();
+  try {
+    empty.store.create({ ...envelope('todo'), text: 'reconcile something', source: 'system', system_reason: 'reconcile_needed' });
+    empty.store.create({ ...envelope('todo'), text: 'capture something', source: 'system', system_reason: 'capture_owed' });
+    const labels = tabCells(buildDashboardState(empty.store, initialUi)).map((c) => c.label);
+    assert.equal(labels[0], 'Tasks (0)', 'no open USER tasks → Tasks (0); the two system items are not counted');
+  } finally {
+    empty.cleanup();
+  }
+
+  // 3 user todos + 2 system maintenance items in one store → 'Tasks (3)'
+  const mixed = emptyFixture();
+  try {
+    for (const text of ['first user task', 'second user task', 'third user task']) {
+      mixed.store.create({ ...envelope('todo'), text, source: 'user' });
+    }
+    mixed.store.create({ ...envelope('todo'), text: 'reconcile something', source: 'system', system_reason: 'reconcile_needed' });
+    mixed.store.create({ ...envelope('todo'), text: 'article missing somewhere', source: 'system', system_reason: 'article_missing' });
+
+    const labels = tabCells(buildDashboardState(mixed.store, initialUi)).map((c) => c.label);
+    assert.equal(labels[0], 'Tasks (3)', 'the Tasks label counts the 3 open user todos and EXCLUDES the 2 system items');
+    // only the Tasks label is rewritten — every other tab keeps its registry label
+    assert.deepEqual(labels.slice(1), TABS.slice(1), 'no other tab label gains a count');
+    assert.ok(labels[0]!.startsWith(TABS[0]), 'the Tasks label still begins with its registry label');
+  } finally {
+    mixed.cleanup();
+  }
+});
+
+test('tab hit-test tracks the RENDERED tab labels: with a non-empty Tasks count, a click inside tab i\'s extent selects tab i — the LAST tab included', () => {
+  // SABOTAGE that must turn this test RED: in packages/tui/src/state.ts revert
+  // the tab-bar hit-test's cell width from `state.tabs[i].label.length + 2` back
+  // to `TABS[i].length + 2`.
+  //
+  // WHICH ARM CARRIES THE VERDICT: the `nearEnd` arm. The bare 'Tasks' label is
+  // 4 columns narrower than 'Tasks (3)', so under that sabotage every cell from
+  // index 1 on is MEASURED 4 columns left of where it was DRAWN. A click at a
+  // label's first char still falls inside the (11-column) Knowledge cell and
+  // would stay green — so the `labelStart` arm alone would be a hollow pin. The
+  // `nearEnd` arm (2 columns inside the cell's right boundary) spills into the
+  // next measured cell, or past the last one, and goes red. Tab 0's own nearEnd
+  // arm is red under the sabotage too, and it is anchored at x=1, so it does not
+  // depend on the cells-start-at-1 convention at all.
+  const { store, cleanup } = fixture(); // 2 user todos seeded
+  try {
+    store.create({ ...envelope('todo'), text: 'third todo', source: 'user' });
+    const s = buildDashboardState(store, initialUi);
+    const cells = tabCells(s);
+    assert.equal(cells[0].label, 'Tasks (3)', 'precondition: the Tasks label is WIDER than its bare registry label');
+    assert.ok(cells.length > 1, 'precondition: more than one tab, so a mis-measured cell selects the WRONG tab');
+
+    for (let i = 0; i < cells.length; i++) {
+      const ext = tabExtent(s, i);
+      assert.ok(ext.nearEnd > ext.labelStart, `tab ${i}'s cell is wide enough for two distinct probes`);
+      for (const [arm, x] of [['label start', ext.labelStart], ['nearEnd', ext.nearEnd]] as const) {
+        // start from a DIFFERENT tab every time, so a no-op click can never be
+        // mistaken for a correct selection
+        const from = st({ tab: (i + 1) % cells.length });
+        const r = reduce(store, from, { kind: 'click', x, y: 2 });
+        assert.equal(r.ui.tab, i, `a click at tab ${i}'s ${arm} (x=${x}, label "${ext.label}") selects tab ${i}`);
+      }
+    }
   } finally {
     cleanup();
   }

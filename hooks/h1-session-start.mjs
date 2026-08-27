@@ -7292,7 +7292,7 @@ function pluginRoot() {
   }
   return null;
 }
-function samePath(a, b) {
+function samePath2(a, b) {
   const norm = (p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "");
   return norm(a) === norm(b);
 }
@@ -7427,7 +7427,7 @@ try {
 var roleContext = "";
 try {
   const root = pluginRoot();
-  if (root && samePath(input.cwd, root)) {
+  if (root && samePath2(input.cwd, root)) {
     const role = config?.machine_role;
     if (role === "authoring") {
       roleContext = "\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) \u2014 Sterling work lands and merges here; CLAUDE.md's authoring contract applies.";

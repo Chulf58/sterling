@@ -4104,13 +4104,15 @@ function matchesGlob(path, glob) {
   }
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
+var normSep = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+function foldPairForCompare(a, b) {
+  const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
+  return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
+}
 function toRepoRelative(absolutePath, repoRoot) {
-  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const abs = norm(absolutePath);
-  const root = norm(repoRoot);
-  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
-  const a = drivePrefixed ? abs.toLowerCase() : abs;
-  const r = drivePrefixed ? root.toLowerCase() : root;
+  const abs = normSep(absolutePath);
+  const root = normSep(repoRoot);
+  const [a, r] = foldPairForCompare(abs, root);
   if (!(a === r || a.startsWith(r + "/"))) {
     throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
   }

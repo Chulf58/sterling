@@ -77,6 +77,42 @@
 // longer exists FAILS; a hook declared `advisory` that calls the imported deny
 // binding FAILS, because the label is then a lie about what the hook can do.
 //
+// THE EXEMPT CLASS IS CROSS-CHECKED TOO, and this is a correction (board
+// 9f8d4c03): the mislabel check originally fired ONLY for `advisory`, so a hook
+// classified `exempt` was skipped outright and MOVING a hook to `exempt` retired
+// its fail-closed boundary requirement with NO complaint. A checker whose exempt
+// list can quietly drop a requirement is worse than no checker, because it reports
+// green over the hole. `exempt` is the one place this file is told "this gate may
+// fail open" — and being told to ignore something is precisely what has to be
+// loud (P5). So an exempt hook THAT DENIES must be named in the EXEMPTIONS
+// register, and that entry must carry:
+//   • `decision` — the governing record (slug or id). A justification citing
+//     nothing is not a justification; it is an assertion.
+//   • `reason`   — why failing closed is WRONG for this specific gate. Required
+//     because a ruling stripped of its justification reproduces, at the reading
+//     surface, the gap it was written to close.
+//   • `denials`  — the EXACT deny-call identities the exemption covers, compared
+//     as a multiset in BOTH directions, exactly as the baseline ratchet is. An
+//     exemption is granted to a named deny SET, never to a file forever: an
+//     unlisted deny FAILS (the exemption did not cover it) and a listed deny that
+//     is gone FAILS as stale. A COUNT would let one denial be swapped for another
+//     invisibly, which is the same defect the statement-identity ratchet exists to
+//     prevent, one register over.
+// An exempt hook with ZERO deny calls needs no entry: it cannot block anything, so
+// there is no boundary requirement to retire. That is the ONLY thing zero denies
+// excuses, and the distinction is load-bearing: an entry that EXISTS is validated
+// and compared REGARDLESS of how many denies are observed, so an exempt hook whose
+// sole deny() was DELETED with its entry left behind reports every listed denial as
+// STALE rather than passing green. Skipping the cross-check on an empty deny set
+// was a fail-open inside this fail-closed checker, and it is now impossible by
+// construction — the register's own emptiness check happens after the lookup.
+// An EXEMPTIONS entry naming a hook that is not classified exempt FAILS as a stale
+// register — a leftover justification must never sit ready to excuse a future move.
+// SCOPE, stated exactly: like the advisory cross-check beside it, the deny set is
+// the calls to the IMPORTED deny binding (see denyBindingNames' residual note). A
+// deny reached only through a local helper is not enumerated, and no claim is made
+// that it is.
+//
 // THE BASELINE is an EXACT-FINDING RATCHET, keyed by STATEMENT TEXT rather than by
 // line number so a finding's identity survives unrelated line shifts. Both
 // directions fail:
@@ -85,6 +121,31 @@
 // A pure subset therefore does NOT silently pass. That is deliberate — whoever
 // fixes a hook prunes its baseline entry in the SAME change, which is what makes
 // the baseline only ever shrink instead of rotting into a list nobody trusts.
+//
+// THE GROWTH LOCK — because the baseline is STRUCTURALLY A SUPPRESSION LIST
+// (board 9f8d4c03). The two rules above stop a hole being suppressed by ACCIDENT:
+// a new finding fails, a fixed one must be pruned. What they do NOT do is
+// distinguish "one entry pruned because it was fixed" from "one entry APPENDED
+// because it was inconvenient" — both leave a list of accepted fail-opens, and a
+// human editing this file can do the second as easily as the first. The defect was
+// never the 107 entries; it was that a 108th would look exactly like a fix.
+// So growth must go through one of exactly two doors, and neither is quiet:
+//   • FOUNDING_BASELINE_TOTAL locks the count of UNJUSTIFIED entries, and the
+//     comparison is EXACT — too many fails as an unjustified append, too few fails
+//     demanding the number be lowered in the same change that fixed the entry.
+//     Exactness is the whole point: a CEILING would leave headroom behind every
+//     fix, and headroom is the silent-append space this lock exists to close.
+//     The constant is itself pinned by a test, so raising it to admit a 108th
+//     entry cannot happen without also editing a test file — which is gated and
+//     reviewed. Stated flat rather than flatteringly: this does not make an append
+//     IMPOSSIBLE, it makes it impossible to do SILENTLY. Anyone may still do it
+//     deliberately, in the open, across two files and a review.
+//   • An entry may instead carry `admitted: '<why, and what admitted it>'`. Such an
+//     entry does not count toward the founding total — and it is REPRINTED on
+//     EVERY run, passing or failing, for as long as it exists. A sanctioned
+//     append is therefore permanently visible rather than a line nobody reads
+//     again. A blank `admitted` FAILS: the escape hatch does not open on an empty
+//     string.
 //
 // STATEMENT IDENTITY is the statement's WHOLE source text (leading comments
 // excluded) with every whitespace run collapsed to one space, trimmed. For a
@@ -171,6 +232,34 @@ const MANIFEST = {
 };
 
 // ---------------------------------------------------------------------------
+// EXEMPTIONS — the JUSTIFICATION register for the `exempt` class. See the header:
+// every exempt hook that DENIES must appear here with the governing decision, the
+// reason failing closed is wrong for that specific gate, and the exact deny-call
+// identities the exemption covers. Anything else about an exempt hook — its
+// unguarded top-level statements, its sham catch — is deliberately NOT reported;
+// the exemption is precisely a ruling that those do not have to be fixed.
+//
+// COMPANION OF THE SHIPPED MANIFEST, not of an arbitrary one. `--manifest`
+// without `--exemptions` therefore yields an EMPTY register rather than this one:
+// justifications written for real hooks cannot govern a fixture's hooks, and
+// carrying them over would report every entry here as stale against a scan
+// directory that has never heard of h24.
+// ---------------------------------------------------------------------------
+const EXEMPTIONS = {
+  'h24-gate-exit-lint.mjs': {
+    decision: 'gate-exit-lint-h24-masked-exit-codes',
+    reason:
+      "H24 gates EVERY Bash command. Decision gate-exit-lint-h24-masked-exit-codes explicitly REJECTED failing closed on a corrupt config for this one gate: a parse error in .sterling/config.json would otherwise deny every Bash command machine-wide — a Bash-wide wedge, which is a worse outcome than losing one lint. So its catch calls allow(), by ruling, and the hook says so in its own header. The exemption covers the FAIL-OPEN POSTURE only; it is not a licence for the hook to grow new verdicts unexamined, which is what the `denials` list below pins.",
+    // H24's ONE verdict (h24-gate-exit-lint.mjs:214), under the same
+    // whole-flattened-statement identity the baseline uses. Measured by running
+    // this check, never hand-typed.
+    denials: [
+      "deny( `H24: gate invocation masked — '${gate}' is followed at top level by '${sep}', which swallows … #95f20af2",
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
 // BASELINE — the KNOWN-OPEN debt at the time this check landed, measured by
 // running this checker, never hand-guessed. It may only ever SHRINK: adding an
 // entry here is admitting a new hole, and the review that lets one in should say
@@ -201,7 +290,17 @@ const BASELINE = {
   'h4-read-wall.mjs': [
     { statement: 'const input = readStdin();' },
     { statement: 'let target = input.tool_input?.file_path;' },
-    { statement: "if (input.tool_name === 'Grep') { const mode = input.tool_input?.output_mode; if (mode === undefined … #ba7e44c7" },
+    // HASH ROTATED 2026-08-27 (#ba7e44c7 -> #7715b6d0), NOT a new hole and NOT a
+    // shrink: the SAME founding statement, whose interior changed when its
+    // case-folding was corrected to the drive-aware samePath rule (board
+    // c1c53267 — unconditional toLowerCase is right on NTFS and wrong on a
+    // case-sensitive filesystem). The header's accepted cost at the identity
+    // section is exactly this, and its instruction to RE-EXAMINE on edit was
+    // followed: the underlying debt is that this block runs before the deny
+    // decision outside a denying try. Fixing it means restructuring a BLOCKING
+    // hook's fail-closed boundary, which is its own slice with its own review,
+    // not a drive-by inside a path-predicate change. Count stays 107.
+    { statement: "if (input.tool_name === 'Grep') { const mode = input.tool_input?.output_mode; if (mode === undefined … #7715b6d0" },
     { statement: 'const rel = repoRel(target, input.cwd);' },
     { statement: 'if (!rel) allow();' },
     { statement: 'const DOC_RE = /\\.(md|txt|rst|adoc)$/i;' },
@@ -265,6 +364,17 @@ const BASELINE = {
     { statement: 'let offending = null;' },
     { statement: 'let offendingIsDbSeal = false;' },
     { statement: 'if (!offending) allow();' },
+    // RE-MINTED 2026-08-27, not appended: board 2ca5d977 added one PROVENANCE
+    // line to each of these two denials, which changed the statements' TEXT and
+    // therefore their identity digests. REVERTED 2026-08-27 when the H15 lane was
+    // PARKED (finding cc35e43c: the clone-provenance check binds the SPELLING, not
+    // the file bash executes — an executed symlink bypass). The digests below are
+    // the HEAD 0e01c42 originals; if that lane is unparked, swap them back to
+    // #1b7829a6 / #729c93fa in the same change. Nothing about their fail-closed status moved and no statement
+    // entered or left the finding set, so this was a DELETE-AND-ADD of two
+    // identities and FOUNDING_BASELINE_TOTAL stays 107. This is the detector
+    // re-mint loop board 92f7e826 (identity schema v3) exists to address — a
+    // text edit to a baselined statement looks exactly like new debt.
     { statement: 'if (offendingIsDbSeal) { const match = DB_MENTION_RE.exec(command); const matchedText = match ? matc … #d2276435' },
     // The terminal verdict itself. Its argument list is executable code
     // (`allowScripts.join(', ')`), so a throw there voids the gate at the very
@@ -337,6 +447,13 @@ const BASELINE = {
   ],
 };
 
+// THE GROWTH LOCK (see the header). The number of baseline entries above that do
+// NOT carry an `admitted` justification. Compared EXACTLY: fix a hook, prune its
+// entry, and LOWER this number in the same change — the diff then shows the
+// ratchet turning the only direction it is allowed to turn. A number going UP in a
+// diff is an append, and it is meant to be as conspicuous as that sounds.
+const FOUNDING_BASELINE_TOTAL = 107;
+
 const CLASSES = new Set(['blocking', 'advisory', 'exempt']);
 const LABEL = 'fail-closed boundary';
 
@@ -345,18 +462,25 @@ function fail(message) {
   process.exit(1);
 }
 
+const FLAGS = new Set(['--scan-dir', '--manifest', '--baseline', '--exemptions', '--founding-total']);
+
 function parseArgs(argv) {
-  const out = { scanDir: null, manifest: null, baseline: null };
+  const out = { scanDir: null, manifest: null, baseline: null, exemptions: null, foundingTotal: null };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = argv[i + 1];
-    if (flag !== '--scan-dir' && flag !== '--manifest' && flag !== '--baseline') {
-      fail(`unrecognized argument '${flag}'. Usage: node scripts/check-failclosed-boundary.mjs [--scan-dir <dir>] [--manifest <file>] [--baseline <file>]`);
+    if (!FLAGS.has(flag)) {
+      fail(`unrecognized argument '${flag}'. Usage: node scripts/check-failclosed-boundary.mjs [--scan-dir <dir>] [--manifest <file>] [--baseline <file>] [--exemptions <file>] [--founding-total <n>]`);
     }
     if (value === undefined) fail(`'${flag}' needs a value.`);
     if (flag === '--scan-dir') out.scanDir = value;
     if (flag === '--manifest') out.manifest = value;
     if (flag === '--baseline') out.baseline = value;
+    if (flag === '--exemptions') out.exemptions = value;
+    if (flag === '--founding-total') {
+      if (!/^\d+$/.test(value)) fail(`'--founding-total' needs a non-negative integer, got '${value}'.`);
+      out.foundingTotal = Number(value);
+    }
     i += 1;
   }
   return out;
@@ -704,7 +828,16 @@ function syntaxErrorOf(sourceFile, name, text) {
 const args = parseArgs(process.argv.slice(2));
 const scanDir = args.scanDir ? resolvePath(process.cwd(), args.scanDir) : DEFAULT_SCAN_DIR;
 const manifest = args.manifest ? readJson(args.manifest, 'manifest') : MANIFEST;
+// See the EXEMPTIONS header: the shipped register governs the SHIPPED manifest, so
+// overriding the manifest without also overriding the exemptions gives an empty
+// register — never the shipped one.
+const exemptions = args.exemptions ? readJson(args.exemptions, 'exemptions') : args.manifest ? {} : EXEMPTIONS;
 const baseline = args.baseline ? readJson(args.baseline, 'baseline') : BASELINE;
+// The growth lock governs the SHIPPED baseline — the only list a human can append
+// to, and the thing `npm run check` actually reads. A `--baseline` fixture with no
+// explicit `--founding-total` is not that list, so the lock stands down for it
+// rather than failing every fixture against a constant measured on real hooks.
+const foundingTotalDeclared = args.foundingTotal ?? (args.baseline ? null : FOUNDING_BASELINE_TOTAL);
 
 let entries;
 try {
@@ -725,6 +858,8 @@ const parseErrors = [];
 const mislabeled = [];
 const noBoundary = [];
 const observed = new Map(); // basename -> [{ line, statement }]
+const exemptOnDisk = new Set(); // basenames the manifest classifies exempt, present on disk
+const exemptDenials = new Map(); // basename -> [deny-call identity] observed in an exempt hook
 const counts = { blocking: 0, advisory: 0, exempt: 0 };
 
 for (const name of files) {
@@ -738,6 +873,9 @@ for (const name of files) {
     continue;
   }
   counts[cls] += 1;
+  // Recorded BEFORE the read/parse, so an exempt hook that fails to parse is still
+  // known to exist and its register entry is not additionally reported as a ghost.
+  if (cls === 'exempt') exemptOnDisk.add(name);
 
   let text;
   try {
@@ -773,6 +911,17 @@ for (const name of files) {
     mislabeled.push(name);
     continue;
   }
+  // The exempt class is CROSS-CHECKED, not skipped (board 9f8d4c03). Its boundary
+  // rule is excused by ruling; its DENY SET is not — enumerate it and let the
+  // EXEMPTIONS register be held to it below. Same binding-name basis as the
+  // advisory cross-check directly above, so the two agree on what "can deny" means.
+  if (cls === 'exempt') {
+    exemptDenials.set(
+      name,
+      denyCallsIn(sourceFile, denyBindingNames(sourceFile)).map(({ call }) => flattenIdentity(call.getText(sourceFile)))
+    );
+    continue;
+  }
   if (cls !== 'blocking') continue;
 
   const found = [];
@@ -796,10 +945,85 @@ for (const name of files) {
   if (found.length > 0) observed.set(name, found);
 }
 
+// --- the exempt-class cross-check ------------------------------------------
+
+const unjustifiedExemptions = []; // exempt + denies, but nothing in the register
+const malformedExemptions = []; // register entry that does not carry a real justification
+const ghostExemptions = []; // register entry for a hook that is not exempt on disk
+const unlistedDenials = []; // a deny in an exempt hook the exemption does not cover
+const staleDenials = []; // a listed denial that is no longer in the file
+
+// A justification that cites nothing, or explains nothing, is not a justification.
+// Every problem is collected so one run reports the whole entry, not its first flaw.
+function exemptionProblems(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return ["must be an object { decision, reason, denials: [ … ] }"];
+  }
+  const problems = [];
+  if (typeof entry.decision !== 'string' || entry.decision.trim() === '') {
+    problems.push("needs a non-empty 'decision' naming the governing record (slug or id) that granted this exemption");
+  }
+  if (typeof entry.reason !== 'string' || entry.reason.trim() === '') {
+    problems.push("needs a non-empty 'reason' stating why failing CLOSED is wrong for this specific gate");
+  }
+  if (!Array.isArray(entry.denials) || entry.denials.some((d) => typeof d !== 'string')) {
+    problems.push("needs a 'denials' array of the exact deny-call identities this exemption covers");
+  }
+  return problems;
+}
+
+for (const [name, identities] of exemptDenials) {
+  const entry = exemptions[name];
+  if (entry === undefined) {
+    // No deny call means no blocking behaviour, so there is no boundary
+    // requirement to retire and nothing to excuse: an exempt hook with ZERO
+    // denies legitimately needs NO entry. Not requiring one is the ONLY thing a
+    // zero-deny hook is excused from — see directly below.
+    if (identities.length === 0) continue;
+    unjustifiedExemptions.push({ name, identities });
+    continue;
+  }
+  // AN ENTRY THAT EXISTS IS ALWAYS CHECKED, INCLUDING WHEN THE HOOK NOW DENIES
+  // NOTHING. This was a FAIL-OPEN INSIDE A FAIL-CLOSED CHECKER (found by two
+  // independent reviewers, one outside-family): a bare `if (identities.length
+  // === 0) continue;` used to sit ABOVE the lookup and skip the WHOLE
+  // cross-check — shape validation and the stale arm included. So deleting an
+  // exempt hook's sole deny() while leaving its EXEMPTIONS entry intact passed
+  // GREEN: the entry was not a ghost (the ghost check only asks whether the hook
+  // is still classified exempt), nothing was unlisted, and the listed denials
+  // were never compared against anything. A later deny whose flattened identity
+  // happened to match the stale string would then be auto-covered with NO
+  // review, and a malformed entry was never validated at all. It contradicted
+  // this file's own header both ways ("a listed deny that is gone FAILS as
+  // stale"; "a leftover justification must never sit ready to excuse a future
+  // move"). Zero observed identities is not "nothing to check": it is the
+  // STRONGEST stale signal there is, because EVERY listed denial is gone.
+  const problems = exemptionProblems(entry);
+  if (problems.length > 0) {
+    malformedExemptions.push({ name, problems });
+    continue;
+  }
+  // Multiset by identity, both directions — the same rule and the same reason as
+  // the baseline ratchet: a count would let one denial be swapped for another.
+  const remaining = entry.denials.map((d) => d.trim());
+  for (const identity of identities) {
+    const at = remaining.indexOf(identity);
+    if (at === -1) unlistedDenials.push({ name, identity });
+    else remaining.splice(at, 1);
+  }
+  for (const identity of remaining) staleDenials.push({ name, identity });
+}
+
+for (const name of Object.keys(exemptions).sort()) {
+  if (!exemptOnDisk.has(name)) ghostExemptions.push(name);
+}
+
 // --- the exact-finding ratchet ---------------------------------------------
 
 const newFindings = [];
 const staleBaseline = [];
+const admittedEntries = [];
+let foundingTotal = 0;
 const hookNames = new Set([...observed.keys(), ...Object.keys(baseline)]);
 let baselinedCount = 0;
 let baselinedHooks = 0;
@@ -813,6 +1037,19 @@ for (const name of [...hookNames].sort()) {
   const expected = (rawEntries ?? []).map((entry) => {
     if (!entry || typeof entry !== 'object' || typeof entry.statement !== 'string') {
       fail(`baseline entry for '${name}' must be an object with a string "statement" field.`);
+    }
+    // THE GROWTH LOCK's two doors (see the header). No `admitted` field means the
+    // entry is one of the founding, measured set and counts toward the locked
+    // total. An `admitted` entry is a deliberate, justified append: it does NOT
+    // count, and it is reprinted on every run for as long as it exists.
+    if (entry.admitted === undefined) {
+      foundingTotal += 1;
+    } else if (typeof entry.admitted !== 'string' || entry.admitted.trim() === '') {
+      fail(
+        `baseline entry for '${name}' has an "admitted" field that is not a non-empty string. An admitted fail-open must name what admitted it — the escape hatch does not open on a blank.`
+      );
+    } else {
+      admittedEntries.push({ name, statement: entry.statement.trim(), admitted: entry.admitted.trim() });
     }
     return entry.statement.trim();
   });
@@ -838,6 +1075,10 @@ const manifestGhosts = Object.keys(manifest)
   .filter((name) => !files.includes(name))
   .sort();
 
+// EXACT, never a ceiling: headroom left behind a fix is the silent-append space
+// this lock exists to close.
+const foundingLockBroken = foundingTotalDeclared !== null && foundingTotal !== foundingTotalDeclared;
+
 // --- report ----------------------------------------------------------------
 
 const failed =
@@ -846,6 +1087,12 @@ const failed =
   parseErrors.length > 0 ||
   mislabeled.length > 0 ||
   manifestGhosts.length > 0 ||
+  unjustifiedExemptions.length > 0 ||
+  malformedExemptions.length > 0 ||
+  ghostExemptions.length > 0 ||
+  unlistedDenials.length > 0 ||
+  staleDenials.length > 0 ||
+  foundingLockBroken ||
   newFindings.length > 0 ||
   staleBaseline.length > 0;
 
@@ -854,6 +1101,13 @@ const failed =
 // surface it.
 for (const name of noBoundary) {
   console.log(`${LABEL}: NOTICE — ${name} is classified 'blocking' but has no fail-closed boundary (no top-level try whose catch reaches deny()).`);
+}
+
+// Likewise on every run, pass or fail: an ADMITTED fail-open is a deliberate
+// append to the suppression list, and the price of that door being open at all is
+// that it is never quiet again.
+for (const a of admittedEntries) {
+  console.log(`${LABEL}: ADMITTED FAIL-OPEN — ${a.name}: "${a.statement}" — admitted by: ${a.admitted}`);
 }
 
 if (failed) {
@@ -875,6 +1129,32 @@ if (failed) {
   for (const name of mislabeled) {
     console.error(`  ${name} — classified 'advisory' in the manifest, but it CALLS the imported deny() binding. deny() exits 2, so this hook blocks: reclassify it 'blocking' and satisfy the boundary rule, or remove the deny() call.`);
   }
+  for (const { name, identities } of unjustifiedExemptions) {
+    console.error(`  ${name} — classified 'exempt' and it DENIES (${identities.length} deny call(s)), but NO entry justifies it in the exemption register. 'exempt' retires this hook's fail-closed boundary requirement, so it may not be granted silently: add an entry carrying the governing 'decision', a 'reason' stating why failing closed is wrong for THIS gate, and 'denials' listing exactly:`);
+    for (const identity of identities) console.error(`      ${identity}`);
+  }
+  for (const { name, problems } of malformedExemptions) {
+    for (const problem of problems) console.error(`  ${name} — exemption entry ${problem}.`);
+  }
+  for (const name of ghostExemptions) {
+    console.error(`  ${name} — named in the exemption register but NOT classified 'exempt' on disk. The register is stale; delete the entry. A leftover justification must never sit ready to excuse a future move to 'exempt'.`);
+  }
+  for (const { name, identity } of unlistedDenials) {
+    console.error(`  ${name} — an exempt hook's deny is NOT covered by its exemption: ${identity}`);
+  }
+  if (unlistedDenials.length > 0) {
+    console.error("    An exemption is granted to a NAMED DENY SET, never to a file forever. A new verdict in an exempt gate is a new fail-open path, and it has to be ruled on: extend 'denials' deliberately, or move the hook back to 'blocking'.");
+  }
+  for (const { name, identity } of staleDenials) {
+    console.error(`  ${name} — exemption lists a denial that is no longer in the file. DELETE it: ${identity}`);
+  }
+  if (foundingLockBroken) {
+    if (foundingTotal > foundingTotalDeclared) {
+      console.error(`  BASELINE APPEND REFUSED — ${foundingTotal} unjustified baseline entry(ies) against a declared founding total of ${foundingTotalDeclared}. The baseline is a list of ACCEPTED FAIL-OPENS and it may only shrink. If a statement genuinely must be admitted, give that entry an "admitted": "<why, and what admitted it>" field — it will then be reprinted on every run instead of blending into the list. Raising the founding total is the other door, and it is deliberately not a quiet one.`);
+    } else {
+      console.error(`  FOUNDING TOTAL IS STALE — ${foundingTotal} unjustified baseline entry(ies) against a declared founding total of ${foundingTotalDeclared}. An entry was pruned without lowering the number: lower it in the SAME change. The comparison is exact on purpose — a ceiling would leave headroom behind every fix, and headroom is exactly the silent-append space the lock exists to close.`);
+    }
+  }
   if (newFindings.length > 0) {
     console.error(`  ${newFindings.length} fail-closed finding(s) with no baseline entry:`);
     for (const f of newFindings) {
@@ -894,7 +1174,7 @@ if (failed) {
 
 const debt =
   baselinedCount > 0
-    ? `; ${baselinedCount} known-open statement(s) across ${baselinedHooks} hook(s) remain baselined as DEBT — the ratchet only shrinks`
+    ? `; ${baselinedCount} known-open statement(s) across ${baselinedHooks} hook(s) remain baselined as DEBT (${foundingTotal} founding, ${admittedEntries.length} admitted) — the ratchet only shrinks`
     : '; no baselined debt remains';
 console.log(
   `${LABEL}: ok (${files.length} hook(s) in ${scanDir}: ${counts.blocking} blocking, ${counts.advisory} advisory, ${counts.exempt} exempt${debt})`

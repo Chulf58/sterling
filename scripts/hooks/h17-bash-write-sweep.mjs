@@ -112,7 +112,7 @@
 // pathname mid-operation (residual 3). (2) The procfs preflight AUTHENTICATES
 // THE FILESYSTEM with statfs PROC_SUPER_MAGIC before its fd round-trip, and
 // compares dev/ino as bigint: a decoy directory pre-seeded with numeric symlinks
-// can emulate any fd number a probe samples, but it cannot forge a kernel
+// can emulate any fd number a probe samples, but it cannot fabricate a kernel
 // filesystem magic (residual 1). (3) Residual 2 — repo-root authentication — is
 // OUT OF THE THREAT MODEL and closed by disclosure, not mechanism (decision
 // h17-repo-root-authentication-is-out-of-scope). S3 (git read-blob restore),
@@ -234,21 +234,49 @@ const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 // classifies each ancestor component with `lstatKind` and re-resolves it by
 // name. A directory-shaped redirect therefore rests entirely on lstat reporting
 // it as a symlink. For a POSIX symlink that is certain; for an NTFS JUNCTION —
-// which, unlike a symlink, needs no privilege to create — it is a libuv
-// reparse-tag detail this repo has NOT MEASURED on native Windows, and it is
-// deliberately NOT assumed here. If lstat does not call a junction a symlink,
-// then a junction swapped over a pre-dirty enforcement DIRECTORY, or over an
-// ancestor of a pre-dirty path, is neither prevented nor detected and the (A)
-// state comparison reports it "unchanged".
-// THE SETTLEMENT IS A TEST, NOT AN ASSUMPTION: PIN-WIN32-JUNCTION-ANCESTOR /
-// PIN-WIN32-JUNCTION-LEAF in h17-pre-state-snapshot.test.mjs state the required
-// behavior and SKIP off native Windows with a named reason. Run the h17 suite
-// on a Windows host to settle it. Do NOT close this by weakening the
-// comparison so both platforms behave alike (that reopens escapes live on
-// Linux), and do NOT add a bigint lstat/stat divergence check on the strength
-// of reasoning alone — it sits on the ancestor walk, so a false deny there
-// denies EVERY agent Bash call on the majority platform, which 2a69a8d7
-// already ruled unshippable.
+// which, unlike a symlink, needs no privilege to create — it was a libuv
+// reparse-tag detail this repo had not measured.
+// NOW MEASURED, AND THE ANSWER IS THE GOOD ONE (2026-08-27, native-Windows
+// session; research_finding native-windows-platform-measurements-2026-08-27):
+// for a `mklink /J` junction Node's lstat reports isSymbolicLink() === TRUE and
+// isDirectory() === FALSE. So lstat DOES call a junction a symlink, and the
+// feared escape does not exist. NAME THE MECHANISM PRECISELY, because the first
+// draft of this comment named the WRONG one and both reviewers caught it:
+// detection does NOT come from `sameKind` in `openLeafNoFollow` — that is the
+// lstat/fstat identity check on the BYTE-READ path, which a 'file' leaf always
+// reaches and a 'dir' leaf NEVER does (see the note at `classifyLeafAt` below;
+// Node cannot open a directory as an fd on win32). The junction is caught
+// EARLIER and in two different places. LEAF: `classifyLeafAt`'s win32 arm tests
+// isSymbolicLink() BEFORE isDirectory(), so a junction classifies 'symlink',
+// not 'dir'; the (A) state it records is therefore type 'symlink' where the
+// baseline held type 'dir'. THREE layers of `sameState` then refuse it, and the
+// FIRST to fire is the hoisted `a.unattestable || b.unattestable` guard — the
+// recorded symlink state carries UNATTESTABLE_SYMLINK — so the TYPE term
+// (`a.type !== b.type`) and the outright `a.type === 'symlink'` refusal behind
+// it are defence-in-depth here, not the operative check. Symlinks are
+// unattestable by construction (Ruling B). ANCESTOR:
+// `withPinnedParent` classifies each component with `lstatKind` and THROWS on
+// `kind !== 'dir'`, so a junction swapped over an ancestor refuses the walk
+// rather than being compared at all. This is platform SAMENESS for the junction
+// CLASSIFICATION case; no code change follows.
+// CORRECTION OF THE COMMENT THAT STOOD HERE: it claimed "THE SETTLEMENT IS A
+// TEST, NOT AN ASSUMPTION: PIN-WIN32-JUNCTION-ANCESTOR / PIN-WIN32-JUNCTION-LEAF
+// in h17-pre-state-snapshot.test.mjs". NO TEST OF EITHER NAME HAS EVER EXISTED
+// in this repo — `PIN-WIN32-JUNCTION-ANCESTOR` and `PIN-WIN32-JUNCTION-LEAF`
+// appear nowhere but in that claim (anti_pattern
+// security-comment-asserts-protection-the-code-does-not-have; board 54047620).
+// SCOPED HONESTLY, because the first draft of this correction overclaimed here
+// too and a reviewer caught it: the word `junction` DOES occur elsewhere in
+// scripts/ — scripts/tests/enforcement.test.mjs:265 and :305 pass it as the
+// symlinkSync TYPE argument — so the true claim is about those two PIN names,
+// not about the word. Do not re-add such a pin on the strength of this measurement
+// either: the h17 suite currently reports 0 pass / 36 SKIP on native Windows,
+// so a pin added there would never run and would be hollow by construction.
+// STILL BINDING: do NOT close anything here by weakening the comparison so both
+// platforms behave alike (that reopens escapes live on Linux), and do NOT add a
+// bigint lstat/stat divergence check on the strength of reasoning alone — it
+// sits on the ancestor walk, so a false deny there denies EVERY agent Bash call
+// on the majority platform, which 2a69a8d7 already ruled unshippable.
 //
 // THE PROTECTION BOUNDARY STARTS AT THE WORKSPACE ROOT — NAMED, NOT ASSUMED
 // (decision h17-repo-root-authentication-is-out-of-scope, ruling on residual 2
@@ -351,7 +379,7 @@ const UNATTESTABLE_FILE_BYTES = 'file-bytes-unstable';
 // The closure is to authenticate the FILESYSTEM instead of counting entries:
 // `statfs` reports the mounted filesystem's magic, and PROC_SUPER_MAGIC
 // (0x9fa0) is a KERNEL fact no unprivileged directory of decoy symlinks can
-// forge — arbitrary-fd mapping is a property of procfs semantics, not of any
+// fabricate — arbitrary-fd mapping is a property of procfs semantics, not of any
 // entry we could sample. The two checks are complementary and BOTH are needed:
 // the magic establishes "this is procfs" (so fd mapping is dynamic), the
 // round-trip establishes "this particular procfs location is an FD DIRECTORY"
@@ -723,7 +751,9 @@ function withPinnedParent(cwd, rel, what, opts, fn) {
 // — nothing here or downstream re-checks that the directory this walk descends
 // into is the object lstat classified. See "FILES YES, DIRECTORIES NO" in the
 // platform-envelope block above for the escape that rests on it (board
-// 7c120461) and for the test that settles it on a Windows host.
+// 7c120461) and for the 2026-08-27 native-Windows MEASUREMENT that settles it.
+// There is no test that settles it: the h17 suite reports 0 pass / 36 SKIP on
+// native Windows, so a pin added there would be hollow by construction.
 // The returned `fd` (Linux, file or directory) is the CALLER's to close.
 function classifyLeafAt(parentHandle, leaf) {
   const anchored = `${parentHandle}/${leaf}`;

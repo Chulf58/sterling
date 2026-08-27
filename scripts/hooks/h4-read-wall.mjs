@@ -5,7 +5,7 @@
 // outside the repository, and locate-only Grep (files_with_matches/count) anywhere.
 // Denied: repo source CONTENT — via Read or content-mode Grep alike (the r-ea9e
 // bypass: a denied Read re-fetched through Grep with -C context lines).
-import { matchesGlob } from '@sterling/schemas';
+import { matchesGlob, samePath } from '@sterling/schemas';
 import { readStdin, deny, allow, loadConfig, repoRel, environmentDefectDenial } from './lib/common.mjs';
 
 const input = readStdin();
@@ -18,8 +18,13 @@ if (input.tool_name === 'Grep') {
   target = input.tool_input?.path;
   const fwd = target ? String(target).replace(/\\/g, '/').replace(/\/+$/, '') : '';
   const isAbs = /^[A-Za-z]:/.test(fwd) || fwd.startsWith('/');
+  // samePath carries the DRIVE-AWARE folding rule (packages/schemas/src/paths.ts):
+  // case-insensitive only for drive-prefixed NTFS paths. This used to fold case
+  // UNCONDITIONALLY, which is right on Windows and wrong on a case-sensitive
+  // filesystem — '/Repo' and '/repo' are distinct directories on Linux, and
+  // treating a sibling repo's root as THIS repo's root mis-scoped the wall.
   const isRepoRoot = isAbs
-    ? fwd.toLowerCase() === String(input.cwd).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    ? samePath(fwd, input.cwd)
     : !repoRel(fwd, input.cwd); // a relative path stays in-repo; '.', './' resolve to the root
   if (!target || isRepoRoot) {
     // NAME THE OBSERVED MODE. The recognized set is checked above and anything
