@@ -4104,13 +4104,19 @@ function matchesGlob(path, glob) {
   }
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
+var normSep = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+function foldPairForCompare(a, b) {
+  const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
+  return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
+}
+function samePath(a, b) {
+  const [x, y] = foldPairForCompare(normSep(a), normSep(b));
+  return x === y;
+}
 function toRepoRelative(absolutePath, repoRoot) {
-  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const abs = norm(absolutePath);
-  const root = norm(repoRoot);
-  const drivePrefixed = /^[A-Za-z]:/.test(abs) || /^[A-Za-z]:/.test(root);
-  const a = drivePrefixed ? abs.toLowerCase() : abs;
-  const r = drivePrefixed ? root.toLowerCase() : root;
+  const abs = normSep(absolutePath);
+  const root = normSep(repoRoot);
+  const [a, r] = foldPairForCompare(abs, root);
   if (!(a === r || a.startsWith(r + "/"))) {
     throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
   }
@@ -5141,7 +5147,7 @@ if (input.tool_name === "Grep") {
   target = input.tool_input?.path;
   const fwd = target ? String(target).replace(/\\/g, "/").replace(/\/+$/, "") : "";
   const isAbs = /^[A-Za-z]:/.test(fwd) || fwd.startsWith("/");
-  const isRepoRoot = isAbs ? fwd.toLowerCase() === String(input.cwd).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() : !repoRel(fwd, input.cwd);
+  const isRepoRoot = isAbs ? samePath(fwd, input.cwd) : !repoRel(fwd, input.cwd);
   if (!target || isRepoRoot) {
     const known = "'files_with_matches', 'count', or omitted";
     const modeNote = mode === void 0 || mode === "content" ? `output_mode was ${mode === void 0 ? "omitted" : "'content'"}` : `output_mode '${mode}' is NOT a value this gate recognizes (${known} locate without showing content) and unrecognized values fail CLOSED into the content path \u2014 if you meant to locate only, that is why this denied`;

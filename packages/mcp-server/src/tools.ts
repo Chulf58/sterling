@@ -5,9 +5,9 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ZodError } from 'zod';
-import { normalizeRepoPath, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -489,7 +489,13 @@ export class SterlingTools {
     if (!name) return { root: this.repoRoot, unresolved: false };
     const mapped = this.config.working_trees?.[name];
     if (!mapped) return { root: undefined, unresolved: true };
-    if (isAbsolute(mapped)) return { root: mapped, unresolved: false };
+    // HOST-INDEPENDENT classification (decision windows-linux-parity):
+    // config.working_trees maps a name to an absolute-OR-project-relative path
+    // (decision a0fc8743), so this branch decides which. node:path's isAbsolute
+    // is host-native, so the SAME config resolved differently depending on which
+    // OS ran the server — 'C:\\tree' and '\\tree' read as absolute on Windows and
+    // as relative on Linux, where they were then joined onto the project root.
+    if (isAbsolutePathAnyHost(mapped)) return { root: mapped, unresolved: false };
     if (!this.repoRoot) return { root: undefined, unresolved: true };
     return { root: join(this.repoRoot, mapped), unresolved: false };
   }

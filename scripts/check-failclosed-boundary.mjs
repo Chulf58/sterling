@@ -290,7 +290,17 @@ const BASELINE = {
   'h4-read-wall.mjs': [
     { statement: 'const input = readStdin();' },
     { statement: 'let target = input.tool_input?.file_path;' },
-    { statement: "if (input.tool_name === 'Grep') { const mode = input.tool_input?.output_mode; if (mode === undefined … #ba7e44c7" },
+    // HASH ROTATED 2026-08-27 (#ba7e44c7 -> #7715b6d0), NOT a new hole and NOT a
+    // shrink: the SAME founding statement, whose interior changed when its
+    // case-folding was corrected to the drive-aware samePath rule (board
+    // c1c53267 — unconditional toLowerCase is right on NTFS and wrong on a
+    // case-sensitive filesystem). The header's accepted cost at the identity
+    // section is exactly this, and its instruction to RE-EXAMINE on edit was
+    // followed: the underlying debt is that this block runs before the deny
+    // decision outside a denying try. Fixing it means restructuring a BLOCKING
+    // hook's fail-closed boundary, which is its own slice with its own review,
+    // not a drive-by inside a path-predicate change. Count stays 107.
+    { statement: "if (input.tool_name === 'Grep') { const mode = input.tool_input?.output_mode; if (mode === undefined … #7715b6d0" },
     { statement: 'const rel = repoRel(target, input.cwd);' },
     { statement: 'if (!rel) allow();' },
     { statement: 'const DOC_RE = /\\.(md|txt|rst|adoc)$/i;' },

@@ -19,6 +19,15 @@
 // on withCodexEntry's OWN observable output. This tests the real end-to-end
 // contract (probe -> merged servers) without inventing an internal shape.
 //
+// SCOPED EXCEPTION as of decision ffe7c416 (host-native init, user-decided
+// 2026-08-27): probeCodexWin's `command` field IS now part of the declared
+// interface — defect (2) of that ruling is precisely that the resolved
+// absolute path was being discarded, so "the path survives the probe" is an
+// acceptance criterion and cannot be tested through withCodexEntry alone. The
+// exception is narrow: it covers probeCodexWin's `ok`/`command`/`reason`
+// fields only. It does NOT license exact-shape deepEquals on a probe result —
+// see the Part D preamble below for why those were removed.
+//
 // spawnFn is modeled on node:child_process's spawnSync return convention
 // (the one every other spawn wrapper in this repo already uses — see
 // scripts/tests/init-ensure.test.mjs's runHook/init helpers): {error, status}.
@@ -177,8 +186,24 @@ test('codexSkipLine("timeout") starts with the fixed prefix and is distinguishab
 // because H5 correctly denied the implementing agent test-file writes).
 //
 // DECLARED CONTRACT under test:
-//   - same return shape as probeCodex: {ok:true} | {ok:false, reason} with
-//     reason ∈ {binary-absent, not-logged-in, timeout}.
+//   - {ok:true, command:<the resolved ABSOLUTE path>} on success, or
+//     {ok:false, reason} with reason ∈ {binary-absent, not-logged-in, timeout}
+//     and NO command, on every failure.
+//
+//     AMENDED by decision ffe7c416 (host-native init, user-decided 2026-08-27).
+//     Two pins in this section previously asserted `deepEqual(result, {ok:true})`
+//     — an EXACT-SHAPE check that forbids the resolved path surviving, which is
+//     exactly the defect the ruling orders closed: ffe7c416 defect (2) records
+//     that CODEX_MCP_ENTRY hardcoded a bare `codex` and threw away the path
+//     where.exe had just resolved, so a successful probe did NOT prove the
+//     written entry would spawn (npm installs codex as codex.cmd, hostile to
+//     shell-less spawning, and research_finding 0c712d94 measured PATH to be an
+//     unreliable presence oracle on the very host this must work on). Those two
+//     deepEquals are now `assert.equal(result.ok, true)` PLUS a POSITIVE
+//     assertion on result.command. The exact-shape discipline is not simply
+//     dropped: the CONTROL ARM immediately below pins command === undefined on
+//     every failure path, so "attach the path on success" cannot be satisfied by
+//     an implementation that blanket-attaches a command to everything.
 //   - resolves the binary via spawnFn('where.exe', ['codex'], ...) — reaching
 //     the WINDOWS PATH through WSL interop — deliberately NOT spawnSync('codex')
 //     directly, which would resolve under WSL's OWN PATH instead.
@@ -205,7 +230,95 @@ function winWhereOkThenFn(loginResult) {
   };
 }
 
-test('probeCodexWin: resolves via spawnFn("where.exe", ["codex"], ...) — the WINDOWS PATH through WSL interop — then runs "<resolved> login status" through the same injected spawnFn; both steps succeeding yields {ok:true}', () => {
+function winTimeoutResult(what) {
+  // spawnSync's shape when the child is killed on options.timeout: BOTH .error
+  // (ETIMEDOUT) and .signal (SIGTERM). The discriminator vs a plain ENOENT.
+  return { error: Object.assign(new Error(`spawn ${what} ETIMEDOUT`), { code: 'ETIMEDOUT' }), signal: 'SIGTERM', status: null };
+}
+
+// Every way probeCodexWin can fail, as a table — the CONTROL ARM's fixture set.
+const WIN_FAILURE_CASES = [
+  {
+    name: 'where.exe non-zero exit (codex not on the Windows PATH)',
+    env: {},
+    reason: 'binary-absent',
+    spawnFn: (cmd) => (cmd === 'where.exe' ? { error: undefined, status: 1, stdout: '' } : { error: undefined, status: 0 }),
+  },
+  {
+    name: 'where.exe itself unreachable (ENOENT — no WSL interop)',
+    env: {},
+    reason: 'binary-absent',
+    spawnFn: (cmd) => (cmd === 'where.exe'
+      ? { error: Object.assign(new Error('spawn where.exe ENOENT'), { code: 'ENOENT' }), status: null }
+      : { error: undefined, status: 0 }),
+  },
+  {
+    // BOUNDARY THE DISPATCH SPEC DID NOT NAME. `where.exe` can exit 0 having
+    // printed nothing useful; an implementation that gates on `status === 0`
+    // alone then reports SUCCESS carrying an EMPTY command, which is strictly
+    // worse than the bare-'codex' defect ffe7c416 closes — it writes an MCP
+    // entry with no command at all. Classified binary-absent because nothing
+    // was resolved; the ok:false and command:undefined assertions are the
+    // load-bearing half, the reason value is this suite's oracle call.
+    name: 'where.exe exits 0 but resolves NOTHING (whitespace-only stdout)',
+    env: {},
+    reason: 'binary-absent',
+    spawnFn: (cmd) => (cmd === 'where.exe' ? { error: undefined, status: 0, stdout: '  \r\n' } : { error: undefined, status: 0 }),
+  },
+  {
+    name: 'resolution step times out',
+    env: {},
+    reason: 'timeout',
+    spawnFn: (cmd) => (cmd === 'where.exe' ? winTimeoutResult('where.exe') : { error: undefined, status: 0 }),
+  },
+  {
+    name: 'login status exits non-zero (not logged in)',
+    env: {},
+    reason: 'not-logged-in',
+    spawnFn: winWhereOkThenFn({ error: undefined, status: 1 }),
+  },
+  {
+    name: 'login status times out',
+    env: {},
+    reason: 'timeout',
+    spawnFn: winWhereOkThenFn(winTimeoutResult('codex')),
+  },
+  {
+    name: 'STERLING_CODEX_WIN_PATH defined-but-EMPTY (nothing to run login status against)',
+    env: { STERLING_CODEX_WIN_PATH: '' },
+    reason: 'binary-absent',
+    spawnFn: () => { throw new Error('an empty forced path must never spawn anything'); },
+  },
+];
+
+test('CONTROL ARM (ffe7c416 command carriage): EVERY probeCodexWin failure path carries NO command — ok:false and command === undefined', () => {
+  // PLACED FIRST, AND IT MUST PASS FOR THE OPPOSITE REASON to the two success
+  // pins below. "result.command === the resolved path on success" has more than
+  // one possible cause: a correct implementation that carries the resolution
+  // forward, OR a blanket one that stamps a command onto every result it
+  // returns (e.g. always setting `command: forced ?? resolved ?? 'codex'`).
+  // Those two are indistinguishable from the success side alone — the second
+  // would wire a bogus MCP entry off a FAILED probe, which is worse than the
+  // bare-'codex' defect ffe7c416 exists to close, and it would read as a fully
+  // green suite. This arm is what tells them apart: it is green only when the
+  // command is attached BECAUSE the probe succeeded.
+  for (const c of WIN_FAILURE_CASES) {
+    const result = probeCodexWin({ spawnFn: c.spawnFn, timeoutMs: 2000, env: c.env });
+    assert.equal(result.ok, false, `${c.name}: probe reports failure`);
+    assert.equal(result.reason, c.reason, `${c.name}: the discriminating reason survives`);
+    assert.equal(result.command, undefined, `${c.name}: a FAILED probe resolves NO usable command — an entry must never be wired from it`);
+  }
+});
+// SABOTAGE: attach the command unconditionally rather than only on the success
+// branch (e.g. build the result object as `{ok, reason, command: forcedOrResolved}`
+// for every return) — the `result.command === undefined` assertion goes red on
+// the failure cases that DID resolve something (the empty-forced-path case and
+// the not-logged-in case, whose where.exe step succeeded before login failed).
+// SECOND SABOTAGE (the one this arm is really for): return
+// `{ok:false, reason, command:'codex'}` as a "safe default" — every success pin
+// below stays green, and only this arm goes red.
+
+test('probeCodexWin: resolves via spawnFn("where.exe", ["codex"], ...) — the WINDOWS PATH through WSL interop — then runs "<resolved> login status" through the same injected spawnFn; both steps succeeding yields ok:true CARRYING the resolved path', () => {
   // CONTROL ARM for the STERLING_CODEX_WIN_PATH bypass tests below: this proves
   // where.exe DOES get called and login status DOES get attempted (and DOES
   // reach {ok:true}) when no override is set — so a bypass test's "where.exe
@@ -222,11 +335,24 @@ test('probeCodexWin: resolves via spawnFn("where.exe", ["codex"], ...) — the W
   assert.equal(calls.length, 2, 'exactly two spawnFn calls — resolve, then login status');
   assert.deepEqual(calls[0], { cmd: 'where.exe', args: ['codex'] }, 'first call resolves via where.exe, NOT spawnSync("codex") directly (which would resolve under WSL\'s own PATH)');
   assert.deepEqual(calls[1], { cmd: WIN_CODEX_PATH, args: ['login', 'status'] }, 'second call runs "<resolved> login status" on the path where.exe returned');
-  assert.deepEqual(result, { ok: true }, 'both steps succeeding yields ok:true');
+  assert.equal(result.ok, true, 'both steps succeeding yields ok:true');
+  assert.equal(
+    result.command,
+    WIN_CODEX_PATH,
+    'the probe CARRIES the path where.exe resolved (decision ffe7c416 defect 2): a probe that proves an absolute executable spawns, then hands back nothing but ok:true, forces the caller onto a bare "codex" that is NOT known to spawn — the exact gap that left codex-on-Windows broken after a SUCCESSFUL probe'
+  );
 });
 // SABOTAGE: call spawnFn('codex', ...) directly instead of resolving through
 // where.exe first — calls[0].cmd would be 'codex', not 'where.exe', and the
 // deepEqual on calls[0] goes red.
+// SABOTAGE (ffe7c416 defect 2, the pin's own subject): return a bare `{ok:true}`
+// from the success branch, dropping the resolved path — the
+// `result.command === WIN_CODEX_PATH` assertion goes red while every other
+// assertion in this test stays green, so the failure names the defect exactly.
+// WHICH GUARD CARRIES THE VERDICT: the success branch's own construction of the
+// result object. Nothing else in probeCodexWin defends this — there is no
+// second layer here, so a single-guard mutation IS the whole story (contrast
+// init-ensure win case 6, where isManagedCodexAddWin is one of several).
 
 test('probeCodexWin: where.exe non-zero exit (codex not on the Windows PATH) -> {ok:false, reason:"binary-absent"}, login-status never invoked', () => {
   let loginCalled = false;
@@ -290,6 +416,70 @@ test('probeCodexWin: where.exe-resolution spawnSync-shaped timeout (error ETIMED
 // SABOTAGE: treat a timed-out where.exe call identically to a plain miss
 // (reason 'binary-absent') — the result.reason assertion goes red.
 
+// ---- two resolution boundaries the dispatch spec did not name --------------
+// Both are Windows-specific properties of `where.exe` output, and both produce
+// a probe that reports SUCCESS while carrying a command that cannot spawn —
+// the exact failure mode ffe7c416 defect (2) exists to close, reached by a
+// different route than the one the ruling documents.
+
+test('probeCodexWin: where.exe exits 0 but resolves NOTHING (empty / whitespace-only stdout) -> ok:false, reason "binary-absent", NO command — never a success carrying an empty command string', () => {
+  for (const stdout of ['', '\r\n', '   \r\n  ']) {
+    let loginCalled = false;
+    const spawnFn = (cmd) => {
+      if (cmd === 'where.exe') return { error: undefined, status: 0, stdout };
+      loginCalled = true;
+      return { error: undefined, status: 0 };
+    };
+    const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
+    assert.equal(result.ok, false, `stdout ${JSON.stringify(stdout)}: nothing was resolved, so the probe must FAIL — a status-0-only gate reports success here`);
+    assert.equal(result.reason, 'binary-absent', `stdout ${JSON.stringify(stdout)}: nothing on the Windows PATH matched, which is binary-absent`);
+    assert.equal(result.command, undefined, `stdout ${JSON.stringify(stdout)}: no command is carried — an empty-string command would be written straight into the MCP config and never start a server`);
+    assert.equal(loginCalled, false, `stdout ${JSON.stringify(stdout)}: nothing was resolved, so there is no path to run "login status" against`);
+  }
+});
+// SABOTAGE: gate resolution on `status === 0` alone (ignore whether stdout
+// actually held a path) — the probe proceeds to spawn '' for login status,
+// loginCalled flips true and result.ok becomes true, so three of the four
+// assertions go red on the very first fixture.
+// WHICH GUARD CARRIES THE VERDICT: the emptiness check on where.exe's stdout,
+// after the exit-status check. There is no second layer — the status check
+// alone cannot see this case, which is the whole point of the pin.
+
+test('probeCodexWin: where.exe returning SEVERAL matches resolves the FIRST line only — a multi-line blob is not a spawnable command', () => {
+  // Real `where.exe codex` prints one line PER match, and an npm-global codex
+  // installs as BOTH an extensionless shim and codex.cmd, so multi-line output
+  // is the ordinary case on the target host, not an exotic one. An
+  // implementation that trims the whole stdout instead of taking a line hands
+  // back "C:\\...\\codex.cmd\r\nC:\\...\\codex" as a command.
+  //
+  // FIXTURE ORDERING IS DELIBERATE: the .cmd is FIRST, so this pin stays green
+  // under BOTH defensible policies (take the first match, or prefer the .cmd)
+  // and goes red only for the ones that are actually broken — take the last
+  // match, or keep the whole blob. The pin is about spawnability, not about
+  // adjudicating a preference the ruling never stated.
+  const WIN_CODEX_SHIM = 'C:\\Users\\test\\AppData\\Roaming\\npm\\codex';
+  const calls = [];
+  const spawnFn = (cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === 'where.exe') return { error: undefined, status: 0, stdout: `${WIN_CODEX_PATH}\r\n${WIN_CODEX_SHIM}\r\n` };
+    if (cmd === WIN_CODEX_PATH) return { error: undefined, status: 0 };
+    throw new Error(`unexpected spawnFn call for cmd ${JSON.stringify(cmd)} — only the first where.exe match is a spawnable candidate`);
+  };
+  const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
+  assert.equal(result.ok, true, 'a multi-match resolution is still a successful resolution');
+  assert.equal(result.command, WIN_CODEX_PATH, 'exactly the first match is carried — not the last, and not both joined');
+  assert.ok(!/[\r\n]/.test(result.command), 'no line terminator survives into the command: a command containing a newline cannot be spawned, and would be written verbatim into the generated MCP config');
+  assert.deepEqual(calls[1], { cmd: WIN_CODEX_PATH, args: ['login', 'status'] }, 'and login status was verified against THAT candidate — the probe proves the command it carries, rather than proving one path and reporting another');
+});
+// SABOTAGE: resolve with `stdout.trim()` over the whole buffer instead of its
+// first line — result.command becomes the two paths joined by CRLF, so the
+// equality, the no-newline guard and the calls[1] deepEqual all go red (the
+// fake's throw fires first in practice, which is itself the signal that the
+// resolved command was never spawnable).
+// SABOTAGE (subtler): take the LAST line (e.g. filter(Boolean).pop()) —
+// result.command becomes the extensionless shim; the fake throws on the
+// unexpected login-status target and the command equality goes red.
+
 test('probeCodexWin: STERLING_CODEX_WIN_PATH set (non-empty) bypasses where.exe detection entirely — login status runs directly against the given path', () => {
   const FORCED_PATH = 'C:\\forced\\codex.exe';
   let whereCalled = false;
@@ -303,11 +493,22 @@ test('probeCodexWin: STERLING_CODEX_WIN_PATH set (non-empty) bypasses where.exe 
   };
   const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: { STERLING_CODEX_WIN_PATH: FORCED_PATH } });
   assert.equal(whereCalled, false, 'where.exe is never invoked once STERLING_CODEX_WIN_PATH is defined — even the plain-path case bypasses detection (see the control-arm test above, where where.exe IS called with no override)');
-  assert.deepEqual(result, { ok: true }, 'login status against the forced path succeeds');
+  assert.equal(result.ok, true, 'login status against the forced path succeeds');
+  assert.equal(
+    result.command,
+    FORCED_PATH,
+    'the FORCED path is what the probe carries forward — not the where.exe fixture path, not a bare "codex" (decision ffe7c416 defect 2). This is also what makes STERLING_CODEX_WIN_PATH a usable command seam for init-ensure.test.mjs, which drives the end-to-end wiring through it'
+  );
+  assert.notEqual(result.command, WIN_CODEX_PATH, 'the seam wins over detection — the where.exe fixture path never leaks into a forced-path result');
 });
 // SABOTAGE: read STERLING_CODEX_WIN_PATH but still call where.exe first as a
 // sanity check before honoring it — whereCalled flips true and that assertion
 // goes red.
+// SABOTAGE (command carriage): on the forced-path branch, return `{ok:true}`
+// without the command, or return the where.exe-detected path instead of the
+// forced one — the `result.command === FORCED_PATH` assertion goes red, and the
+// notEqual guard catches specifically the "seam honored for detection but the
+// detected path still wins the result" mix-up.
 
 test('probeCodexWin: STERLING_CODEX_WIN_PATH set to the EMPTY STRING forces binary-absent — defined-even-if-empty still bypasses where.exe, but an empty path has nothing to run login status against', () => {
   let anySpawnCalled = false;
@@ -325,3 +526,90 @@ test('probeCodexWin: STERLING_CODEX_WIN_PATH set to the EMPTY STRING forces bina
 // where.exe branch, so the call throws instead of returning {ok:false,
 // reason:'binary-absent'}, and/or anySpawnCalled flips true — either way this
 // pin goes red, which is exactly how it catches the truthiness-vs-presence bug.
+
+// =============================================================================
+// Part E (decision ffe7c416, defect 2) — withCodexEntry consumes the probe's
+// CARRIED COMMAND. Spec-only: scripts/lib/codex-mcp.mjs was NOT read to author
+// these.
+//
+// Carrying the path out of probeCodexWin (Part D above) only closes half the
+// defect; the other half is the consumer. CODEX_MCP_ENTRY's bare `codex` stays
+// the FALLBACK for a probe that carries no path (the WSL/Linux probeCodex, whose
+// success genuinely means "the `codex` on PATH ran"), so the two arms below are
+// a matched pair and each is the other's control:
+//   path present -> the entry's command IS that path;
+//   path absent  -> the entry is exactly CODEX_MCP_ENTRY, unchanged.
+// An implementation satisfying only one of them is a defect in the other
+// direction, and neither arm alone can see it.
+// =============================================================================
+
+const ENTRY_PATH = 'C:\\x\\codex.cmd';
+
+test('withCodexEntry: a probe carrying a command wires THAT ABSOLUTE PATH as the entry command (ffe7c416 defect 2 — the bare "codex" is what left codex-on-Windows unable to spawn)', () => {
+  const result = withCodexEntry({}, { ok: true, command: ENTRY_PATH });
+  assert.deepEqual(
+    result,
+    { codex: { command: ENTRY_PATH, args: ['mcp-server'] } },
+    'exactly one entry, whose command is the probed path and whose args are still the mcp-server invocation'
+  );
+});
+// SABOTAGE: ignore probeResult.command and splice in CODEX_MCP_ENTRY regardless
+// (the pre-ruling behavior) — the deepEqual goes red on command:'codex'.
+// SABOTAGE (subtler): carry the command but drop args (`{command}` only) — the
+// deepEqual goes red on the missing args, catching an entry that would be
+// written into an MCP config and then never start a server.
+
+test('withCodexEntry: the path-carrying entry gets its OWN args array — mutating the produced entry cannot corrupt the shared CODEX_MCP_ENTRY constant', () => {
+  const result = withCodexEntry({}, { ok: true, command: ENTRY_PATH });
+  // Identity FIRST, mutation second, deliberately: if the arrays are shared this
+  // assertion fails and the test aborts BEFORE the push below, so a genuine
+  // defect never corrupts the module constant for the tests that run after it.
+  assert.notEqual(result.codex.args, CODEX_MCP_ENTRY.args, 'the entry does not alias CODEX_MCP_ENTRY.args — a shared array makes every caller a mutator of the shared constant');
+  assert.notEqual(result.codex, CODEX_MCP_ENTRY, 'nor does the entry alias the CODEX_MCP_ENTRY object itself');
+  result.codex.args.push('--canary');
+  assert.deepEqual(CODEX_MCP_ENTRY.args, ['mcp-server'], 'the shared constant is untouched after mutating the produced entry');
+  assert.deepEqual(CODEX_MCP_ENTRY, { command: 'codex', args: ['mcp-server'] }, 'CODEX_MCP_ENTRY as a whole survives — it is the fallback every no-path caller still receives');
+});
+// SABOTAGE: build the path-carrying entry as `{...CODEX_MCP_ENTRY, command}` —
+// the spread is shallow, so `args` is still the SHARED array; the first
+// notEqual goes red. (This is the whole point of the pin: the spread form looks
+// correct and is the form an implementer reaches for first.)
+
+test('withCodexEntry: a successful probe carrying NO command falls back to CODEX_MCP_ENTRY exactly — the bare-command entry survives for the probe that legitimately has no path (control arm for the pin above)', () => {
+  const result = withCodexEntry({}, { ok: true });
+  assert.deepEqual(result, { codex: CODEX_MCP_ENTRY }, 'no path carried -> the shipped bare entry, unchanged');
+  assert.deepEqual(result.codex, { command: 'codex', args: ['mcp-server'] }, 'spelled out, so the pin does not merely compare CODEX_MCP_ENTRY to itself');
+});
+// SABOTAGE: make the command mandatory (e.g. `command: probeResult.command`
+// unconditionally) — the fallback entry's command becomes undefined and both
+// deepEquals go red. This arm must pass for the OPPOSITE reason to the
+// path-carrying pin above: it is green only when the path is used BECAUSE it
+// was present, not because a command is always taken from the probe.
+
+test('withCodexEntry: a FAILED probe wires nothing even when it carries a command — ok, never command presence, is what gates the entry', () => {
+  // Boundary the spec did not name: a one-line implementation that keys off
+  // `probeResult.command` instead of `probeResult.ok` looks right and passes
+  // every other pin in this file, but it would wire an MCP entry off a probe
+  // that reported NOT LOGGED IN — a server that spawns and then fails.
+  const result = withCodexEntry({ sterling: { command: 'node', args: ['main.js'] } }, { ok: false, reason: 'not-logged-in', command: ENTRY_PATH });
+  assert.ok(!('codex' in result), 'a failed probe adds no codex entry, whatever else it carries');
+  assert.deepEqual(result.sterling, { command: 'node', args: ['main.js'] }, 'existing entries preserved');
+});
+// SABOTAGE: gate on `if (probeResult.command)` instead of `if (probeResult.ok)`
+// — the codex key appears and the `!('codex' in result)` assertion goes red.
+
+test('withCodexEntry: purity holds for the path-carrying arm too — a frozen input yields a NEW object, input untouched, existing entries preserved beside codex', () => {
+  const original = Object.freeze({ sterling: Object.freeze({ command: 'node', args: ['main.js'] }) });
+  let result;
+  // a mutating implementation on a frozen object throws in strict ESM — the call
+  // completing at all is part of the assertion.
+  assert.doesNotThrow(() => { result = withCodexEntry(original, { ok: true, command: ENTRY_PATH }); }, 'withCodexEntry does not attempt to write to its frozen input');
+  assert.notEqual(result, original, 'a NEW object is returned, never the input');
+  assert.deepEqual(original, { sterling: { command: 'node', args: ['main.js'] } }, 'input unchanged after the call');
+  assert.deepEqual(result.codex, { command: ENTRY_PATH, args: ['mcp-server'] }, 'the path-carrying entry is present in the returned object');
+  assert.deepEqual(result.sterling, { command: 'node', args: ['main.js'] }, 'existing sterling entry preserved beside codex');
+});
+// SABOTAGE: mutate and return the input (`mcpServers.codex = entry; return
+// mcpServers;`) — the frozen input makes the assignment throw in strict mode, so
+// doesNotThrow goes red; on a non-frozen input the notEqual identity assertion
+// is what catches it, which is why both are asserted rather than either alone.

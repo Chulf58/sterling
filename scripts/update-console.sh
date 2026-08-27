@@ -10,6 +10,13 @@
 # this wrapper runs it with NO session in the loop and holds the window open so
 # a Windows user actually reads the outcome instead of watching it flash away.
 #
+# DELIBERATELY HAS NO NATIVE-WINDOWS COUNTERPART, and must not grow one: the
+# updater itself is node (scripts/update.mjs), so all this wrapper adds is node
+# resolution, the outcome line and the pause — and cmd.exe does those three
+# things inline. templates/update-win-native.bat is that inline form; porting
+# this file to batch would duplicate the updater's console duties in a second
+# language for no gain (decision ffe7c416).
+#
 # Deliberately NOT `set -e`: a failed update must still reach the pause below.
 set -u
 cd "$(dirname "$0")/.."

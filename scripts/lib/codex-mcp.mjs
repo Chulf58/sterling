@@ -56,7 +56,9 @@ export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, 
 // this feeds. Resolution instead goes through `where.exe codex` (WSL interop reaching
 // the WINDOWS PATH, same mechanism as init.mjs's own whereWin('node')), THEN the
 // resolved path is probed with `login status` exactly like probeCodex above. Same
-// {ok, reason} contract, same injectable spawnFn/env/timeoutMs seams (one spawnFn
+// {ok, reason} contract PLUS `command` on success — the exact executable the probe
+// spawned, which is what gets written into the MCP entry (board 4c3a8e59; a bare
+// `codex` entry is not what the probe proved). Same injectable spawnFn/env/timeoutMs seams (one spawnFn
 // serves both the where.exe call and the login-status call — tests dispatch on the
 // first arg to stub each independently).
 export function probeCodexWin({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
@@ -110,18 +112,39 @@ export function probeCodexWin({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_M
   if (result.status !== 0) {
     return { ok: false, reason: 'not-logged-in' };
   }
-  return { ok: true };
+  // `command: codexPath` — the EXACT executable this probe just spawned successfully
+  // (decision host-native-init-with-dev-machine-escape-hatch, board 4c3a8e59). Returning
+  // only {ok:true} threw the resolution away, so the written entry (bare `codex`) was a
+  // DIFFERENT command from the one the probe proved: on Windows `codex` is typically npm's
+  // codex.cmd, which node cannot spawn shell-lessly, and PATH is a measured-unreliable
+  // oracle on the native host (research_finding native-windows-platform-measurements-2026-08-27).
+  // Persisting the probed path makes probe success actually EVIDENCE for the entry: the
+  // probe spawned this exact string shell-lessly via spawnSync, so the MCP client can too.
+  return { ok: true, command: codexPath };
 }
 
 // The official codex mcp-server stdio subcommand — no wrapper (research_finding dadf858e).
+// The bare `codex` command is the FALLBACK spelling, used when a probe result carries no
+// resolved path (probeCodex resolves `codex` on PATH by spawning that same bare command,
+// so there its success does prove the entry). A probe that DID resolve an absolute path
+// (probeCodexWin) overrides `command` with it — see codexEntryFor below.
 export const CODEX_MCP_ENTRY = { command: 'codex', args: ['mcp-server'] };
+
+// The codex entry a given probe result justifies: the probed absolute command when the
+// probe resolved one, else the bare CODEX_MCP_ENTRY spelling. `args` is always the
+// official mcp-server subcommand — only the command spelling varies.
+function codexEntryFor(probeResult) {
+  return probeResult.command
+    ? { command: probeResult.command, args: [...CODEX_MCP_ENTRY.args] }
+    : CODEX_MCP_ENTRY;
+}
 
 // Given the mcpServers object init is about to write (already carrying `sterling`) and
 // a probe result, returns the mcpServers object WITH or WITHOUT the codex entry. Pure —
 // no fs — so the create/matches/differs ensure comparison in init.mjs stays deterministic
 // and this merge is independently unit-testable.
 export function withCodexEntry(mcpServers, probeResult) {
-  return probeResult.ok ? { ...mcpServers, codex: CODEX_MCP_ENTRY } : { ...mcpServers };
+  return probeResult.ok ? { ...mcpServers, codex: codexEntryFor(probeResult) } : { ...mcpServers };
 }
 
 // Maps probeCodex's terse reason literals to the actionable text named at the
