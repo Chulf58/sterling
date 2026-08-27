@@ -8,8 +8,8 @@
 // inside this module; swapping drivers is a one-file change.
 
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync } from 'node:fs';
-import { dirname, resolve as resolvePath } from 'node:path';
+import { mkdirSync, existsSync, realpathSync } from 'node:fs';
+import { dirname, basename, join, resolve as resolvePath } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -509,6 +509,58 @@ export function assertNoFieldLoss(op: string, before: Record<string, unknown>, a
   );
 }
 
+/**
+ * Journal-mode policy (decision store-journal-policy-delete-on-9p): SQLite WAL
+ * needs coherent shared memory (-shm) across every process that opens the
+ * database, and the 9p/drvfs mount WSL uses for Windows drives does not
+ * provide it — measured twice on that topology as intermittent
+ * SQLITE_IOERR_SHORT_READ / 'database is locked' incident families. A store
+ * reached over such a mount is demoted to journal_mode=DELETE (no -shm at
+ * all), and the demotion is STICKY: a non-9p open of an EXISTING store
+ * already in DELETE leaves it alone rather than flipping it back, so a
+ * native-Windows open never fights a WSL demotion. Fresh stores are
+ * classified explicitly because a brand-new SQLite file is born in DELETE
+ * mode — without the freshness arm a fresh single-context store would never
+ * enter WAL at all.
+ */
+export function journalDemotionRequired(
+  absPath: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== 'linux') return false;
+  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, '/'));
+}
+
+/**
+ * A required 9p demotion did not land — refusing the open (P5): proceeding in
+ * WAL would keep the exact unsafe topology the policy exists to remove.
+ *
+ * fixer-mode F1: `options.cause` carries the original thrown error when the
+ * refusal came from a PRAGMA that threw (e.g. SQLITE_BUSY under a live
+ * holder) rather than one that merely returned an unexpected mode; readers
+ * needing the raw driver error read `.cause`. `options.message` lets a caller
+ * override the default 9p-demotion wording entirely for a refusal that is NOT
+ * a demotion-under-contention case (fixer-mode F2's legacy-schema arm has its
+ * own remedy — migrate the store — and must not tell the reader to close
+ * connections and retry, which would not help there).
+ */
+export class JournalDemotionRefusedError extends Error {
+  constructor(
+    readonly dbPath: string,
+    readonly returnedMode: string,
+    options?: { cause?: unknown; message?: string },
+  ) {
+    super(
+      options?.message ??
+        `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') — ` +
+          `this store is reached over a 9p mount where WAL is unsupported (decision ` +
+          `store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`,
+      options?.cause !== undefined ? { cause: options.cause } : undefined,
+    );
+    this.name = 'JournalDemotionRefusedError';
+  }
+}
+
 export class SterlingStore {
   private db: DatabaseSync;
 
@@ -549,6 +601,23 @@ export class SterlingStore {
     this.dbPath = resolvePath(path);
     this.db = new DatabaseSync(path);
 
+    // fixer-mode F4 (Codex MEDIUM): classify the REAL path, not the lexical
+    // one — a symlinked project dir (e.g. /home/x/proj -> /mnt/c/...) dodges
+    // journalDemotionRequired's lexical /mnt/<drive>/ match on this.dbPath.
+    // realpathSync resolves the CONTAINING DIRECTORY (the db file itself may
+    // not exist yet on a fresh store, so resolving dirname alone survives
+    // that case) and the file's basename is rejoined onto it. Any realpath
+    // error (permission, exotic FS, race) falls back to the lexical dbPath —
+    // that is this code's pre-existing behavior, not a new gap. The exported
+    // journalDemotionRequired itself stays lexical-only and keeps its
+    // existing unit pins; only the CALL SITE below is fed the resolved path.
+    let classifiedPath = this.dbPath;
+    try {
+      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
+    } catch {
+      /* fall back to the lexical path */
+    }
+
     // Schema-version guard — checked BEFORE journal_mode/foreign_keys/DDL land
     // (stable-identity design-v2 / 2176748e; fixer-mode F1): this ordering
     // guarantees that a too-new store is refused with NOTHING touched — not
@@ -570,18 +639,120 @@ export class SterlingStore {
     // probe is sqlite_master BEFORE the DDL runs — the only moment at which
     // "this file has no schema yet" is still observable — and it is a read, so
     // the refusal path still writes nothing.
+    let isFresh = false;
     if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       const objects = (
         this.db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }
       ).n;
       if (objects > 0) {
+        // fixer-mode F2 (Codex HIGH): a legacy store reached over 9p must not
+        // stay in WAL — this read-only branch RETURNS before the journal-mode
+        // PRAGMA below ever runs, so without this check a pre-migration store
+        // opened from WSL would keep an -shm-coordinated WAL handle open on
+        // the exact 9p topology [store-journal-policy-delete-on-9p] exists to
+        // remove. This is a REFUSAL, not a demotion: PRAGMA journal_mode=DELETE
+        // WRITES to the file even when it "succeeds", and a legacy connection
+        // is read-only by contract (assertV2Surface/assertWritable refuse
+        // every write), so it can never legitimately perform the demotion
+        // itself — the remedy is migrating the store, never "close other
+        // connections and retry" (there is no live holder here for that
+        // remedy to help with). Already-DELETE (or any non-WAL) legacy stores
+        // are untouched, matching the sticky/read-only behavior above.
+        if (journalDemotionRequired(classifiedPath)) {
+          let legacyMode: string;
+          try {
+            legacyMode = (
+              this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
+            ).journal_mode;
+          } catch (e) {
+            // The mode probe itself failing must not leak the constructor's
+            // handle — close, then propagate the driver error unchanged (this
+            // is a probe failure, not a refused demotion).
+            this.db.close();
+            throw e;
+          }
+          if (legacyMode === 'wal') {
+            this.db.close();
+            throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
+              message:
+                `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, ` +
+                `PRAGMA journal_mode='${legacyMode}') — this store is reached over a 9p mount where WAL is ` +
+                `unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema ` +
+                `version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. ` +
+                `Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context — ` +
+                `closing other connections will not help here.`,
+            });
+          }
+        }
         this.legacySchemaVersion = foundSchemaVersion;
         this.openedSchemaVersion = foundSchemaVersion;
         return; // read-only: no journal_mode, no DDL, no stamp — nothing written
       }
+      isFresh = true; // no schema objects yet: this very open created the file
     }
 
-    this.db.exec('PRAGMA journal_mode=WAL');
+    // Journal-mode policy [store-journal-policy-delete-on-9p]: over 9p, demote
+    // to DELETE and REFUSE the open when the demotion does not land; elsewhere
+    // assert WAL — except on an existing store already demoted to DELETE,
+    // which stays demoted (sticky; see journalDemotionRequired's doc block).
+    if (journalDemotionRequired(classifiedPath)) {
+      let returnedMode: string;
+      try {
+        returnedMode = (
+          this.db.prepare('PRAGMA journal_mode=DELETE').get() as { journal_mode: string }
+        ).journal_mode;
+      } catch (e) {
+        // fixer-mode F1 (joint finding): a PRAGMA that THROWS (SQLITE_BUSY
+        // under a live holder) used to close and rethrow the raw driver
+        // error, so callers got a generic SQLite error instead of the typed
+        // refusal every other demotion-failure path promises. Wrap it the
+        // same way the returned-mode arm below does, carrying the original
+        // error as `cause` so nothing about the underlying failure is lost.
+        this.db.close();
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new JournalDemotionRefusedError(this.dbPath, detail, {
+          cause: e,
+          message:
+            `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) — ` +
+            `this store is reached over a 9p mount where WAL is unsupported (decision ` +
+            `store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`,
+        });
+      }
+      if (returnedMode !== 'delete') {
+        this.db.close();
+        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
+      }
+    } else {
+      const currentMode = (
+        this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
+      ).journal_mode;
+      if (currentMode !== 'delete') {
+        this.db.exec('PRAGMA journal_mode=WAL');
+      } else if (isFresh) {
+        // fixer-mode F3 (Codex HIGH): `isFresh` was captured from the
+        // pre-DDL sqlite_master probe above, before any of this open's own
+        // work ran. A concurrent opener of the SAME file can initialize
+        // (and even 9p-demote) the store in the gap between that probe and
+        // this decision, leaving `isFresh` stale — execing WAL here on the
+        // stale flag would flip a store the other opener just observed and
+        // left in `delete` back to WAL. Re-probe AT DECISION TIME instead of
+        // trusting the flag: only treat the store as still-fresh if
+        // sqlite_master is STILL empty right now. This closes the
+        // cross-context fresh-open race described above; it does NOT close
+        // the (much smaller) window still remaining between THIS COUNT(*)
+        // read and the WAL exec immediately below — that residual race is
+        // accepted, not closed. PREDICTED to close the race described above;
+        // the guard expected to carry the verdict is this `stillFresh`
+        // re-probe. Not executed — no multi-process test exists for this
+        // fix (review-verified, not pinned, per the fixer-mode brief).
+        const stillFresh = (
+          this.db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }
+        ).n === 0;
+        if (stillFresh) {
+          this.db.exec('PRAGMA journal_mode=WAL');
+        }
+      }
+    }
     this.db.exec('PRAGMA foreign_keys=ON');
     this.db.exec(DDL);
     // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
