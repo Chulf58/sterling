@@ -641,14 +641,16 @@ function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: numb
  *
  * Via store.count(), i.e. COUNT(*) through the same baseFilter query() uses —
  * deliberately NOT todoCards().length, which counts GROUP headers rather than
- * items and would silently cap at its own cap:200.
+ * items and would silently cap at its own listing cap.
  *
- * DISCLOSED DIVERGENCE, above 200 items only: this count is UNCAPPED while
- * todoCards caps its listing at 200, so a board of 250 renders "Tasks (250)"
- * above 200 listed rows. Deliberate — the tab should tell the truth about the
- * board's size rather than echo a display limit — but it means the number and
- * the row count stop agreeing past the cap, and the honest fix is to raise or
- * page the listing, not to cap the count to match it.
+ * DISCLOSED DIVERGENCE, above todoCards' cap (500 since 2026-08-27) only: this
+ * count is UNCAPPED while the listing is capped, so a board of 600 renders
+ * "Tasks (600)" above 500 listed rows. Deliberate — the tab should tell the
+ * truth about the board's size rather than echo a display limit — but it means
+ * the number and the row count stop agreeing past the cap, and the honest fix
+ * is paging the listing, never capping the count to match it. The two numbers
+ * live in different files, so if the cap moves again this sentence must move
+ * with it.
  *
  * THESE LABELS ARE THE ONLY SOURCE OF TRUTH FOR TAB WIDTH. The mouse hit-test
  * derives each tab's x-extent from the label actually rendered, so a count that

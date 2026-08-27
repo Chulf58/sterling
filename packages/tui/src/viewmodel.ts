@@ -355,11 +355,40 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
  * uses), so the board reads as N objectives, not N×slices. Standalone items
  * stay flat cards. A group with zero open members never renders (its items
  * were removed, so the map never sees the name).
+ *
+ * CAP 500 (user-raised 2026-08-27 from 200). It bounds the LISTING, not the
+ * Tasks tab's count, which is an uncapped COUNT(*) — so a board above 500 shows
+ * a number larger than the rows listed, and the tail is silently absent rather
+ * than truncated-with-a-notice.
+ *
+ * THE COST IS THE CAP, because the fold does not reduce it: the loop below
+ * builds a full Card for EVERY fetched row, and `expanded` is consulted only at
+ * row-EMISSION time. Collapsing an objective hides rows; it never skips
+ * construction. Dominant work is O(total text bytes) twice over — store.query
+ * JSON.parses all 500 record bodies, then `text.split('\n')` materialises each
+ * whole text as substrings to keep only the first line. `body` is a reference,
+ * not a copy, and nothing is memoised: the array is rebuilt per call.
+ *
+ * BUDGET AGAINST THE EVENT PATH, NOT THE 1 Hz TICK — the tick is the CHEAPEST
+ * consumer at one call/s. A single keypress reaches this ~3× (reduce, then
+ * revealAt→buildSelf, then main.ts's redraw), and held key-repeat can reach
+ * ~90 calls/s. Reviewed 2026-08-27: at 500 items and this repo's text sizes
+ * (1.4k–9.2k chars) that is comfortably safe for the tick and for discrete
+ * keypresses, and NOT comfortably safe for sustained key-repeat scrolling.
+ * Those figures are ESTIMATED from allocation volume, not measured.
+ *
+ * IF IT EVER NEEDS RAISING AGAIN, in this order — the cheap wins first, and
+ * count-then-fetch is NOT the first fix: (1) memoise the projection per
+ * (store-version, expanded) so one input event projects once instead of ~3×;
+ * (2) replace the split with an indexOf('\n') slice; both keep this shape and
+ * move the ceiling several-fold. Only past roughly 1,500–2,000 items on this
+ * text profile does the Knowledge tree's count-then-fetch-per-source pattern
+ * (decision 5f8419c5) become genuinely required.
  */
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
-  for (const t of store.query({ types: ['todo'], source: 'user', cap: 200 })) {
+  for (const t of store.query({ types: ['todo'], source: 'user', cap: 500 })) {
     const todo = t as unknown as { id: string; text: string; priority?: string; file_keys?: string[]; objective?: string };
     const card: Card = {
       id: todo.id,
