@@ -69,12 +69,115 @@
 // — until a genuinely HARD boundary (a blank line, or a sentence-ending
 // !?;/period) ends the list.
 //
+// The ONE path/glob extractor (board a63b226d's constraint, and c56862a9's
+// original defect was exactly a second divergent heuristic): the trailing-
+// prohibition reach below needs to know whether a candidate prohibition clause
+// names any path of its OWN, and it asks the shared regexes rather than
+// re-deriving a path shape here. dispatch-prompt.mjs imports nothing from this
+// module, so there is no cycle.
+import { PATH_CANDIDATE_RE, extractPathCandidates } from './dispatch-prompt.mjs';
+
 // A period is a clause boundary only when SENTENCE-ENDING (followed by
 // whitespace or end-of-string) — a bare '.' can never split mid-path, because
 // nearly every candidate mention here (a file path, an extension) contains
 // one ("util.mjs", "h26-dispatch-overlap.mjs"); splitting on it unconditionally
 // would sever the very mention this module exists to evaluate.
 const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
+
+// TRAILING PROHIBITION MARKERS (board 59c30a7f) — the complement of the
+// write-side negation fix (board c56862a9, commit 5eea229), which deliberately
+// did NOT close this half. Everything above reaches BACKWARD from a mention to
+// a marker that precedes it, so a prohibition arriving AFTER the paths —
+// "Other live lanes own A, B, C — do not edit those." — never reaches them and
+// they stay CLAIMED. Reproduced live 2026-08-27 at HEAD, with the write-side
+// fix already shipped: H26 warned a lane about a file its own brief had
+// explicitly forbidden it to touch. Two boundary behaviours make it concrete:
+// an em-dash is a SOFT boundary absorbed only when a prohibition is ALREADY in
+// `soFar` (see splitClauses), so the paths land in a clause carrying no marker
+// yet; and ';' is a HARD split with the same result.
+//
+// WHY THE REACH IS NARROW, AND WHY THAT IS THE WHOLE DESIGN. Reaching backward
+// is dangerous in a way reaching forward is not: over-suppression drops
+// genuinely-claimed territory from claimed_files and SILENTLY REMOVES REAL
+// overlap warnings, which is strictly worse than the cosmetic false positive
+// being fixed (board 59c30a7f: "a naive fix is worse than the bug"). So the
+// backward reach fires ONLY for an ANAPHORIC TERRITORY PROHIBITION — a clause
+// that (a) carries a PROHIBITION marker (bare negators never reach backward:
+// "never"/"no"/"without" are the idiomatic class, and idioms are exactly what
+// a backward reach would over-collect), (b) names a TERRITORY verb
+// (touch/edit/modify/change/write/alter — NOT "do not break it", which
+// prohibits a KIND OF CHANGE to a file the lane genuinely owns), (c) ends in a
+// BACK-REFERRING pronoun (those/these/them/it/that) with no room for an object
+// of its own between verb and pronoun, and (d) contains NO path candidate and
+// NO glob token of its own — a clause naming its own paths is a FRESH
+// prohibition governing THOSE, already handled by the forward reach, not a
+// back-reference. It then reaches back exactly ONE clause, and never across a
+// PARAGRAPH break (a blank line ends the passage an anaphor can plausibly
+// refer to; without that bound a prohibition at the bottom of a long brief
+// could erase the territory section at its top).
+//
+// TWO FURTHER GATES ON WHAT THE REACH MAY SUPPRESS (outside-model review of
+// the first cut, 2026-08-27, both defects reproduced by executing the
+// matcher). The bounds above answer HOW FAR the reach travels; these answer
+// WHICH MENTIONS INSIDE THAT REACH it is allowed to touch — the first cut
+// applied it to every match indiscriminately, and hasUnsuppressedMatch is NOT
+// a path-only surface:
+//
+//   (i) PATH-SHAPED MENTIONS ONLY. h25-dispatch-capability.mjs:119 asks this
+//   same function about TOOL CAPABILITIES (wholeTokenRe('Bash')) and
+//   lib/dispatch-residue.mjs:118 about CONFIGURED RESOURCE NAMES. "Use Bash to
+//   inspect scripts/a.mjs; do not edit it." prohibits the FILE, yet the first
+//   cut reported Bash as suppressed too — H25 then silently drops a
+//   missing-capability warning for a tool the brief explicitly requires. An
+//   anaphoric TERRITORY prohibition can only be disclaiming TERRITORY, so the
+//   reach now fires only when the matched text is itself path- or glob-shaped
+//   (isPathShapedMention, asking the SAME shared regexes — never a second path
+//   heuristic). A capability or resource mention is never suppressed by it.
+//
+//   (ii) A SINGULAR PRONOUN CANNOT REFER TO SEVERAL PATHS. "Claim src/a.mjs
+//   and src/b.mjs; do not edit it." unclaimed BOTH paths on the first cut.
+//   "it"/"that" can refer to at most one referent, so the reach fires for a
+//   SINGULAR anaphor only when the clause it reaches back into names exactly
+//   ONE distinct path/glob candidate; with two or more the referent is
+//   ambiguous and ambiguity resolves toward NOT suppressing (over-claiming is
+//   a loud, correctable warning; under-claiming is silent). PLURAL anaphors
+//   (those/these/them) are unchanged and stay count-independent — "Other lanes
+//   own A, B — do not edit those" is board 59c30a7f's whole motivating shape,
+//   and a plural pronoun standing for a single path is ordinary prose.
+//
+// ACCEPTED RESIDUAL OVER-SUPPRESSION, NOT SOLVED (same review, case 3): when
+// the clause names exactly one path AND some other singular noun, a singular
+// anaphor is genuinely ambiguous between them and this module has no way to
+// tell — "Fix src/a.mjs while preserving the public API; do not change it."
+// suppresses src/a.mjs although "it" may mean the API. Resolving that needs
+// pronoun-referent semantics, which nothing here implements and this comment
+// does not claim (anti-pattern 586bccdc: a guard's comment must never assert a
+// protection the code does not carry). The bound is narrow — it requires a
+// prohibition marker AND a territory verb (touch/edit/modify/change/write/
+// alter) AND a trailing pronoun AND no path of the prohibition's own — and
+// within that shape the path reading is the dominant one, so it is accepted
+// rather than papered over.
+//
+// EVERY DIRECTION THIS DOES NOT COVER IS DELIBERATE UNDER-SUPPRESSION, the
+// direction this advisory family already accepts (P1, parallel-lanes "bounded
+// under-warning"): "do not go near those" (verb not in the set), "do not touch
+// any of the files listed above" (no pronoun), a prohibition two clauses back,
+// a SINGULAR pronoun over a multi-path clause (gate (ii) above), a capability
+// or resource mention (gate (i) above), and a path MENTIONED TWICE where only
+// one occurrence is covered (any unsuppressed occurrence still claims —
+// hasUnsuppressedMatch's existing any-occurrence semantics are unchanged).
+//
+// ONE SHARED DETECTOR, as the board requires: this lands in
+// hasUnsuppressedMatch, so h22's write side (claimed_files,
+// claimed_glob_prefixes), h26's read side and h25 all inherit it at once — a
+// second divergent heuristic on the read and write sides WAS the original
+// c56862a9 defect. h22's `files` is untouched (it is computed with the BARE
+// extractor and means territory EXAMINED — receipts, residue probes, H10
+// deferral — see research_finding 289cd172).
+const TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
+const ANAPHOR_RE = String.raw`(?:those|these|them|it|that)`;
+// Which of those pronouns can stand for MORE THAN ONE referent — gate (ii).
+const PLURAL_ANAPHOR_TEST = /^(?:those|these|them)$/i;
 
 // KNOWN IMPRECISION (disclosed, missed-warning direction, accepted): \bno\b's
 // reach still spans the whole clause (bounded only by BARE_NEGATOR_WINDOW
@@ -91,10 +194,27 @@ const SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|
 const PROHIBITION_TEST = new RegExp(PROHIBITION_RE, 'i');
 const BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, 'gi');
 const SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, 'i');
+// marker → (≤2 filler words) → territory verb → (≤2 filler words) → anaphor.
+// The two tight windows are what makes "do not edit any of those" reach while
+// "do not edit tests/x.test.mjs or anything like it" does not: the second
+// clause has its own object between the verb and the pronoun.
+// The anaphor is CAPTURED (group 1) so the reach can tell a singular pronoun
+// from a plural one — see gate (ii) in the comment block above.
+const TRAILING_PROHIBITION_TEST = new RegExp(
+  `${PROHIBITION_RE}\\s*(?:[\\w'’-]+\\s+){0,2}\\b${TERRITORY_VERB_RE}\\b\\s*(?:[\\w'’-]+\\s+){0,2}\\b(${ANAPHOR_RE})\\b`,
+  'i'
+);
 const SUBJECT_VERB_WINDOW = 40; // chars — pragmatic, narrower than the prohibition marker's whole-clause reach
 const BARE_NEGATOR_WINDOW = 5; // tokens after the negator — pragmatic, see the repro table above
 
-export function splitClauses(text) {
+/**
+ * The clause walk, with the one extra fact the TRAILING-prohibition reach
+ * needs that a bare string list cannot carry: whether each clause was ended by
+ * a PARAGRAPH break (a blank line). Returns `{text, endedByParagraphBreak}[]`.
+ * `splitClauses` below is the unchanged string-list projection of this — every
+ * existing caller and pin keeps its exact shape.
+ */
+export function scanClauses(text) {
   const s = String(text ?? '');
   const clauses = [];
   let clauseStart = 0;
@@ -103,9 +223,10 @@ export function splitClauses(text) {
   while ((m = HARD_BOUNDARY_RE.exec(s))) {
     const boundaryStart = m.index;
     const boundaryEnd = boundaryStart + m[0].length;
-    const isHard = m[1] !== undefined || m[2] !== undefined || m[3] !== undefined;
+    const isParagraph = m[1] !== undefined;
+    const isHard = isParagraph || m[2] !== undefined || m[3] !== undefined;
     if (isHard) {
-      clauses.push(s.slice(clauseStart, boundaryStart));
+      clauses.push({ text: s.slice(clauseStart, boundaryStart), endedByParagraphBreak: isParagraph });
       clauseStart = boundaryEnd;
       continue;
     }
@@ -114,11 +235,59 @@ export function splitClauses(text) {
     // prohibition marker — then absorb it and keep the clause extending.
     const soFar = s.slice(clauseStart, boundaryStart);
     if (PROHIBITION_TEST.test(soFar)) continue;
-    clauses.push(soFar);
+    clauses.push({ text: soFar, endedByParagraphBreak: false });
     clauseStart = boundaryEnd;
   }
-  clauses.push(s.slice(clauseStart));
+  clauses.push({ text: s.slice(clauseStart), endedByParagraphBreak: false });
   return clauses;
+}
+
+export function splitClauses(text) {
+  return scanClauses(text).map((c) => c.text);
+}
+
+/**
+ * True when `clause` is an ANAPHORIC TERRITORY PROHIBITION — a trailing
+ * "— do not edit those." / "; do not touch it." that disclaims the territory
+ * named in the clause BEFORE it, rather than prohibiting something of its own.
+ * See the TRAILING PROHIBITION MARKERS comment above for why each condition is
+ * load-bearing; the two path guards are the ones that keep this from reaching
+ * back over a clause that names its own object.
+ */
+export function isAnaphoricProhibitionClause(clause) {
+  return anaphoricProhibitionNumber(clause) !== null;
+}
+
+/**
+ * The same verdict as isAnaphoricProhibitionClause, but carrying the ONE extra
+ * fact gate (ii) needs: whether the back-referring pronoun is `'plural'`
+ * (those/these/them — may stand for a whole list) or `'singular'` (it/that —
+ * can refer to at most one thing). `null` when the clause is not an anaphoric
+ * territory prohibition at all.
+ */
+export function anaphoricProhibitionNumber(clause) {
+  const text = String(clause ?? '');
+  const m = text.match(TRAILING_PROHIBITION_TEST);
+  if (!m) return null;
+  // ONE SHARED EXTRACTOR, never a second path heuristic (board a63b226d /
+  // c56862a9): a clause naming any path or glob of its own is a fresh
+  // prohibition governing THOSE, already covered by the forward reach.
+  // String.match with a /g regex ignores and does not leave lastIndex behind,
+  // so the shared PATH_CANDIDATE_RE/GLOB_PREFIX_RE constants stay untouched.
+  if (text.match(PATH_CANDIDATE_RE)) return null;
+  if (text.match(GLOB_PREFIX_RE)) return null;
+  return PLURAL_ANAPHOR_TEST.test(m[1]) ? 'plural' : 'singular';
+}
+
+/**
+ * How many DISTINCT territory referents a clause names — literal path
+ * candidates plus literal glob-prefix tokens, deduped. Gate (ii)'s input: a
+ * SINGULAR anaphor can only be reached back from when this is exactly 1.
+ * Both counts come from the shared extractors, never a local path shape.
+ */
+function distinctTerritoryMentions(clause) {
+  const text = String(clause ?? '');
+  return new Set([...extractPathCandidates(text), ...extractGlobPrefixCandidates(text)]).size;
 }
 
 /**
@@ -201,11 +370,26 @@ export function isSuppressedContext(clause, index, checkSubjectVerb = true) {
 export function hasUnsuppressedMatch(text, pattern, { checkSubjectVerb = true } = {}) {
   const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
   const global = new RegExp(pattern.source, flags);
-  for (const clause of splitClauses(text)) {
+  const clauses = scanClauses(text);
+  for (let i = 0; i < clauses.length; i++) {
+    const clause = clauses[i].text;
+    // TRAILING PROHIBITION (board 59c30a7f): the reach is ONE clause forward
+    // and never crosses a paragraph break — see the comment block above.
+    // GATE (ii): a singular pronoun reaches back only into a clause naming
+    // exactly ONE territory referent; a plural one is count-independent.
+    const number = clauses[i].endedByParagraphBreak
+      ? null
+      : anaphoricProhibitionNumber(clauses[i + 1]?.text);
+    const trailingSuppresses =
+      number === 'plural' || (number === 'singular' && distinctTerritoryMentions(clause) === 1);
     global.lastIndex = 0;
     let m;
     while ((m = global.exec(clause))) {
-      if (!isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
+      // GATE (i): a TERRITORY prohibition can only disclaim TERRITORY, so it
+      // never suppresses a capability (H25) or resource (dispatch-residue)
+      // mention — only a path- or glob-shaped one.
+      const suppressedByTrailing = trailingSuppresses && isPathShapedMention(m[0]);
+      if (!suppressedByTrailing && !isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
       if (m.index === global.lastIndex) global.lastIndex++; // guard a zero-width match
     }
   }
@@ -279,6 +463,29 @@ export function escapeRe(s) {
 // precisely as it does for a literal path today — this addition neither
 // narrows nor widens that separate, already-known defect.
 const GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
+
+// GATE (i)'s test — see the TRAILING PROHIBITION comment block above. Built
+// from the SAME two shared regexes rather than a third path shape: a mention
+// is territory-shaped when the WHOLE matched text is a literal path candidate
+// or a literal glob-prefix token. Declared here, below GLOB_PREFIX_RE, because
+// it is composed at module-init time and a `const` cannot be read before its
+// own declaration; every reader of it is a function body, so ordering in the
+// file does not constrain the call sites.
+//
+// The two sources are /g regexes: `.source` is read, never their lastIndex, so
+// composing them here cannot perturb the extractors.
+const PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
+
+/**
+ * True when `token` is ENTIRELY a repo-path or glob-prefix token. Callers pass
+ * the raw matched text; H25's capability pattern legitimately captures a
+ * leading non-word character (wholeTokenRe's `(?:^|[^\w])`), so the token is
+ * trimmed before testing — a tool or resource NAME can never satisfy either
+ * shape either way, since both require a directory separator.
+ */
+export function isPathShapedMention(token) {
+  return PATH_SHAPED_TEST.test(String(token ?? '').trim());
+}
 
 export function extractGlobPrefixCandidates(text) {
   const found = String(text ?? '').match(GLOB_PREFIX_RE) ?? [];

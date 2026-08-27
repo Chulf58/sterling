@@ -4964,6 +4964,15 @@ var configSchema = external_exports.object({
   // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
   // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
   // out below. Keep this list basename-free.
+  //
+  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
+  // must stay element-identical to this default — it is what reaches this list
+  // into a consumer config that already carries an EXPLICIT allow_scripts array
+  // (a zod .default() applies only when the field is ABSENT, so a frozen config
+  // never gains a grown default; board 52c1d504). That module is dependency-free
+  // by contract and this package's tsconfig pins rootDir to src, so neither can
+  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
+  // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
     allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
   }).default({}),
@@ -5084,17 +5093,34 @@ function loadConfig(cwd) {
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 
+// scripts/hooks/lib/transcript.mjs
+var TAIL_BYTES = 1024 * 1024;
+
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+
 // scripts/hooks/lib/dispatch-advisory.mjs
 var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
+var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
+var ANAPHOR_RE = String.raw`(?:those|these|them|it|that)`;
+var PLURAL_ANAPHOR_TEST = /^(?:those|these|them)$/i;
 var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
 var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
 var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
 var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
 var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
 var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+var TRAILING_PROHIBITION_TEST = new RegExp(
+  `${PROHIBITION_RE}\\s*(?:[\\w'\u2019-]+\\s+){0,2}\\b${TERRITORY_VERB_RE}\\b\\s*(?:[\\w'\u2019-]+\\s+){0,2}\\b(${ANAPHOR_RE})\\b`,
+  "i"
+);
 var SUBJECT_VERB_WINDOW = 40;
 var BARE_NEGATOR_WINDOW = 5;
-function splitClauses(text) {
+function scanClauses(text) {
   const s = String(text ?? "");
   const clauses = [];
   let clauseStart = 0;
@@ -5103,19 +5129,32 @@ function splitClauses(text) {
   while (m = HARD_BOUNDARY_RE.exec(s)) {
     const boundaryStart = m.index;
     const boundaryEnd = boundaryStart + m[0].length;
-    const isHard = m[1] !== void 0 || m[2] !== void 0 || m[3] !== void 0;
+    const isParagraph = m[1] !== void 0;
+    const isHard = isParagraph || m[2] !== void 0 || m[3] !== void 0;
     if (isHard) {
-      clauses.push(s.slice(clauseStart, boundaryStart));
+      clauses.push({ text: s.slice(clauseStart, boundaryStart), endedByParagraphBreak: isParagraph });
       clauseStart = boundaryEnd;
       continue;
     }
     const soFar = s.slice(clauseStart, boundaryStart);
     if (PROHIBITION_TEST.test(soFar)) continue;
-    clauses.push(soFar);
+    clauses.push({ text: soFar, endedByParagraphBreak: false });
     clauseStart = boundaryEnd;
   }
-  clauses.push(s.slice(clauseStart));
+  clauses.push({ text: s.slice(clauseStart), endedByParagraphBreak: false });
   return clauses;
+}
+function anaphoricProhibitionNumber(clause) {
+  const text = String(clause ?? "");
+  const m = text.match(TRAILING_PROHIBITION_TEST);
+  if (!m) return null;
+  if (text.match(PATH_CANDIDATE_RE)) return null;
+  if (text.match(GLOB_PREFIX_RE)) return null;
+  return PLURAL_ANAPHOR_TEST.test(m[1]) ? "plural" : "singular";
+}
+function distinctTerritoryMentions(clause) {
+  const text = String(clause ?? "");
+  return (/* @__PURE__ */ new Set([...extractPathCandidates(text), ...extractGlobPrefixCandidates(text)])).size;
 }
 function isNegatedContext(clause, index) {
   const text = String(clause ?? "");
@@ -5144,11 +5183,16 @@ function isSuppressedContext(clause, index, checkSubjectVerb = true) {
 function hasUnsuppressedMatch(text, pattern, { checkSubjectVerb = true } = {}) {
   const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
   const global = new RegExp(pattern.source, flags);
-  for (const clause of splitClauses(text)) {
+  const clauses = scanClauses(text);
+  for (let i = 0; i < clauses.length; i++) {
+    const clause = clauses[i].text;
+    const number = clauses[i].endedByParagraphBreak ? null : anaphoricProhibitionNumber(clauses[i + 1]?.text);
+    const trailingSuppresses = number === "plural" || number === "singular" && distinctTerritoryMentions(clause) === 1;
     global.lastIndex = 0;
     let m;
     while (m = global.exec(clause)) {
-      if (!isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
+      const suppressedByTrailing = trailingSuppresses && isPathShapedMention(m[0]);
+      if (!suppressedByTrailing && !isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
       if (m.index === global.lastIndex) global.lastIndex++;
     }
   }
@@ -5156,6 +5200,15 @@ function hasUnsuppressedMatch(text, pattern, { checkSubjectVerb = true } = {}) {
 }
 function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
+var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
+function isPathShapedMention(token) {
+  return PATH_SHAPED_TEST.test(String(token ?? "").trim());
+}
+function extractGlobPrefixCandidates(text) {
+  const found = String(text ?? "").match(GLOB_PREFIX_RE) ?? [];
+  return [...new Set(found.map((m) => m.slice(0, -2)))];
 }
 function isReviewerClass(type) {
   return !!type && type.startsWith("reviewer-");
@@ -5256,7 +5309,7 @@ function hasVerbOrTddTrigger(text) {
   }
   return false;
 }
-function extractPathCandidates(text) {
+function extractPathCandidates2(text) {
   const matches = String(text ?? "").match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.[A-Za-z0-9]+/g) ?? [];
   return matches.map((m) => m.replace(/[.,;:]+$/, ""));
 }
@@ -5269,7 +5322,7 @@ function hasPathTrigger(text, cwd) {
   }
   const globs = (config?.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
   if (!globs.length) return false;
-  const candidates = extractPathCandidates(text).filter((path) => globs.some((glob) => matchesGlob(path, glob)));
+  const candidates = extractPathCandidates2(text).filter((path) => globs.some((glob) => matchesGlob(path, glob)));
   return candidates.some((path) => hasUnsuppressedMatch(text, new RegExp(escapeRe(path)), { checkSubjectVerb: false }));
 }
 function testAuthoringAdvisory(subagentType, prompt, cwd) {

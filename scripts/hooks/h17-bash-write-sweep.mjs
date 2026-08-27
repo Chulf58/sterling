@@ -119,6 +119,48 @@
 // S4 ((B) detect-and-deny) and S5 (Pre-snapshot atomicity) are the remaining
 // slices and are NOT in this file yet; restoreTracked's in-HEAD `git checkout`
 // arm is the one primitive still resolved by pathname, and it is S3's to close.
+// v4.0 (USER RULING 2026-08-27) — THE (B) ADDITION ARM NO LONGER DELETES. A file
+// that appears in protected (B) territory with no entry in this call's Pre
+// baseline is DENIED and REPORTED, and it SURVIVES ON DISK BYTE-IDENTICAL.
+// Deleting is IRREVERSIBLE and H17 cannot distinguish a malicious plant from a
+// legitimate file the conductor just created; the sweep is a DETECTOR, and a
+// detector that deletes can destroy real work on a false positive. Accepted
+// cost: a real plant stays on disk until a human takes it off. Everything the
+// v3.5 paragraph above says about "the (B) delete arm" is therefore HISTORICAL —
+// `removeUnder`/`removeFileAt` are deleted, not merely uncalled (gravestones at
+// their old sites), and the only delete primitive left in this file is
+// `removeTreeAt`, reachable ONLY from `restoreTracked`. THE RESTORE ARMS ARE
+// UNCHANGED: a modified/deleted baselined file still has its bytes put back,
+// because a recorded pre-image (and, on the (A) side, HEAD) is a recoverable
+// source of truth that an ADDITION by definition lacks. Additions are reported
+// through their own `unauthorizedAdditions` list with their own wording — never
+// through `violations`, whose text says "reverted" and would be a false action
+// claim (anti-pattern 586bccdc).
+// v4.1 (2026-08-27, outside-family review of v4.0 — CONFIRMED HIGH): DELETING
+// THE (B) ADDITION ARM'S UNLINK WAS NOT STRUCTURALLY SUFFICIENT. The (B) surface
+// has a SECOND route into this hook, and it runs EARLIER. `git add -f
+// .claude/agents/x.md` puts a gitignored (B) file in the INDEX, so
+// `git status --porcelain` reports it as an ADDITION; it enters the (A) TRACKED
+// sweep, `isEnforcementSurface` makes it an (A) violation, `restoreTracked` finds
+// it is NOT IN HEAD, and the not-in-HEAD arm DELETED it — before the (B)
+// collection (which runs after the whole (A) sweep) could record the addition or
+// emit the "left on disk" disposition. Same ruling violated, opposite surface.
+// WHY THE ORIGINAL REVIEW MISSED IT, recorded so the reasoning is not repeated:
+// it verified that `removeTreeAt`'s only callers are its own recursion and
+// `restoreTracked`'s not-in-HEAD arm, and treated that arm as safe because it is
+// "git-recoverable". IT IS NOT — not-in-HEAD is precisely the arm with no blob to
+// recover from, and for a force-added file it is the deletion path.
+// THE REPAIR IS TWO INDEPENDENT LAYERS, both keyed on the SAME `isEnforcementSurface`
+// predicate (no second notion of "protected"): (1) `restoreTracked`'s not-in-HEAD
+// arm returns a DISPOSITION for a (B) path instead of entering any delete
+// primitive; (2) `removeTreeAt` itself refuses to unlink a (B) path — in its
+// recursion too, so a protected DESCENDANT of a deletable directory survives and
+// its parents are not rmdir'd. The (A) sweep then routes the survivor into the
+// SAME `unauthorizedAdditions` list the (B) arm uses (deduped, since both
+// surfaces can now name one path). THE (A) RESTORE FOR A MODIFIED TRACKED FILE
+// IS UNTOUCHED: in-HEAD means git holds the bytes, so reverting is recoverable
+// and stays. The dangerous intersection is NOT-IN-HEAD ∧ (B)-SURFACE, and that
+// is exactly what the two layers cut out.
 import {
   writeFileSync,
   existsSync,
@@ -210,16 +252,22 @@ const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 //
 // THE PROTECTION BOUNDARY STARTS AT THE WORKSPACE ROOT — NAMED, NOT ASSUMED
 // (decision h17-repo-root-authentication-is-out-of-scope, ruling on residual 2
-// of dfe70090). H17 assumes the workspace root selected by the hook runner is
-// the trusted namespace anchor. It prevents (Linux) or detects (Windows)
-// redirection BELOW that root, but it does not authenticate root identity
-// ACROSS hook processes: a per-process descriptor authenticates only its own
-// invocation, and persisting the root's dev/ino into the temp records would
-// authenticate nothing, because those records are themselves agent-writable.
-// An actor able to rename or replace the workspace root, its .git, or the
-// parent namespace is OUTSIDE H17's protection boundary — such an actor can
-// equally replace the store, the config and the enforcement surface, so there
-// is nothing left for this hook to protect. Closing it would need a trusted
+// of dfe70090). THE RULING'S MANDATED DISCLOSURE, VERBATIM:
+//   "H17 assumes the workspace root selected by the hook runner is the trusted
+//    namespace anchor. It prevents or detects redirection below that root, but
+//    does not authenticate root identity across hook processes. An actor able to
+//    rename or replace the workspace root, its .git, or the parent namespace is
+//    outside H17's protection boundary."
+// WHICH HALF IS WHICH ON THIS PLATFORM, since "prevents or detects" is not one
+// guarantee: BELOW the root it is PREVENTION on Linux (O_NOFOLLOW + pinned
+// descriptors) and DETECTION ONLY on native Windows (2a69a8d7). AND WHY THE ROOT
+// ITSELF IS NEITHER: a per-process descriptor authenticates only its own
+// invocation, while the exposure spans the separate Pre and Post hook processes;
+// persisting the root's dev/ino into the temp records would authenticate nothing,
+// because those records are themselves agent-writable and so forgeable by the
+// very actor they would guard against; and an actor who can rename the root can
+// equally replace the store, the config and the enforcement surface, so there is
+// nothing left for this hook to protect. Closing it soundly would need a trusted
 // runner-provided handle, which does not exist; the honest disposition is this
 // disclosure, not a sixth mechanism that looks like a guarantee.
 //
@@ -245,6 +293,16 @@ const IS_WIN32 = process.platform === 'win32';
 // One shared constant so the record's shape, its validator and its comparison
 // can never drift apart.
 const UNATTESTABLE_SYMLINK = 'symlink-target';
+
+// The marker a FILE's state carries when the snapshot could not attest its BYTES
+// because the file was being written throughout every bounded read attempt
+// (board fabf21d8). Modelled on `walk_budget_exceeded`: an honest record that
+// this path was NOT attested, which `sameState` and `stampCouldAttest` treat as
+// NEVER equal and NEVER attestable — so it can only ever make a verdict
+// STRICTER, never launder a change. One shared literal constant, checked by the
+// validator by VALUE (the same repair Ruling B's marker took), so the record's
+// shape, its validator and its comparison cannot drift apart.
+const UNATTESTABLE_FILE_BYTES = 'file-bytes-unstable';
 
 // Ruling C's preflight, as a pure probe: null when secure I/O is available on
 // this platform, else the EXACT operator-facing reason. Called once, at the top
@@ -385,13 +443,15 @@ function openPinnedDir(path) {
 // WHAT THIS ANCHOR IS NOT — the named limit (decision
 // h17-repo-root-authentication-is-out-of-scope, residual 2 of dfe70090). "Trust
 // anchor" is an ASSUMPTION this hook inherits from its runner, not a property it
-// verifies: H17 assumes the workspace root selected by the hook runner is the
-// trusted namespace anchor, prevents or detects redirection below that root, and
-// does NOT authenticate root identity across hook processes. An actor able to
-// rename or replace the workspace root, its .git, or the parent namespace is
-// outside H17's protection boundary. That is a ruled scope boundary — see the
-// platform-envelope block at the top of this layer for why authenticating it
-// cross-process is unsound rather than merely unbuilt.
+// verifies. THE RULING'S MANDATED DISCLOSURE, VERBATIM:
+//   "H17 assumes the workspace root selected by the hook runner is the trusted
+//    namespace anchor. It prevents or detects redirection below that root, but
+//    does not authenticate root identity across hook processes. An actor able to
+//    rename or replace the workspace root, its .git, or the parent namespace is
+//    outside H17's protection boundary."
+// That is a ruled scope boundary — see the platform-envelope block at the top of
+// this layer for why authenticating it cross-process is unsound rather than
+// merely unbuilt.
 // Still O_DIRECTORY, so a root symlink pointing at a NON-directory fails
 // (ENOTDIR) rather than being accepted; still O_NONBLOCK, same reason as above.
 function openRootAnchorDir(path) {
@@ -521,8 +581,9 @@ function openLeafNoFollow(abs, extraFlags = 0) {
 //     gone") was WRONG when first written and a review caught it. Every path that
 //     READS bytes now classifies BY OPENING and reads from that same descriptor:
 //     the (A) state hash, the (B) baseline bytes, the enforcement stamp. What is
-//     NOT closed is the pair on the MUTATING side — `removeFileAt` and
-//     `removeTreeAt` lstat the leaf and then unlink the NAME, and `writeUnder`'s
+//     NOT closed is the pair on the MUTATING side — `removeTreeAt` (the last
+//     delete primitive in this file) lstats the leaf and then unlinks the NAME,
+//     and `writeUnder`'s
 //     ancestor walk lstats each component before pinning it. Those are the same
 //     bounded exposure the first bullet describes and cannot be closed without
 //     unlinkat/renameat, which Node does not expose.
@@ -779,22 +840,21 @@ function writeRegularAt(parentHandle, leaf, buf, rel) {
   }
 }
 
-// UNLINK a regular file through a PINNED parent. `rmSync` without `recursive`
-// is an unlink of the NAME: it never dereferences a symlink standing there, and
-// with the parent pinned it can never be aimed outside that directory. The kind
-// check keeps the settled (B) disposition — a leaf that is no longer a regular
-// file is a TYPE AMBIGUITY and denies WITHOUT being touched.
-function removeFileAt(parentHandle, leaf, rel) {
-  const anchored = `${parentHandle}/${leaf}`;
-  const kind = lstatKind(anchored);
-  if (kind !== 'file' && kind !== 'absent') {
-    throw new Error(
-      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) — a symlink, directory or other ` +
-        `non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
-    );
-  }
-  rmSync(anchored, { force: true });
-}
+// [DELETED 2026-08-27, user ruling — see the `removeUnder` gravestone further
+// down.] `removeFileAt(parentHandle, leaf, rel)` used to unlink a single regular
+// file through a pinned parent. Its ONLY caller was `removeUnder`, the (B)
+// addition arm's delete, and the ruling took that arm out: an unexpected
+// addition is DENIED and REPORTED and the file SURVIVES on disk. With no caller
+// left, keeping the primitive would leave an unlink sitting in the file that a
+// later edit could re-aim at the addition path — the structural point of the
+// ruling is that this file no longer HOLDS a single-file delete for baseline
+// diffing to reach. `removeTreeAt` below is now the only delete primitive here,
+// and its only caller is `restoreTracked`'s NOT-IN-HEAD arm.
+// CORRECTION (v4.1, 2026-08-27): the parenthetical that used to end the sentence
+// above — "(git-recoverable)" — WAS FALSE, AND BELIEVING IT WAS THE DEFECT.
+// NOT-IN-HEAD is precisely the arm with NO blob to recover from, and a
+// `git add -f`'d (B) file lands there via the (A) sweep. `removeTreeAt` now
+// refuses (B) paths itself — see its own header.
 
 // RECURSIVE DELETE, one pinned directory at a time — the replacement for
 // `rmSync(join(cwd, rel), {recursive:true})`, which resolved the WHOLE path
@@ -806,15 +866,44 @@ function removeFileAt(parentHandle, leaf, rel) {
 // removed, never followed. Budgeted for the same reason every other walk here
 // is: unbounded recursion that overflows the stack kills the process, and a
 // killed guard exits non-2, which the platform reads as ALLOW.
-function removeTreeAt(parentHandle, leaf, rel, depth = 0) {
+// RETURNS `leftOnDisk` — the accumulated list of PROTECTED (B) paths this walk
+// refused to unlink. Empty means the subtree is gone; non-empty means the caller
+// must report those paths through the DETECT-AND-LEAVE disposition instead of
+// claiming a revert.
+//
+// LAYER 2 OF THE (B)-SURVIVAL GUARD (2026-08-27 defect repair; the ruling itself
+// is the `removeUnder` gravestone below). The v4.0 ruling took the delete out of
+// the (B) ADDITION ARM, but the (B) SURFACE is reachable by a SECOND route that
+// the deletion of `removeUnder` did not close: a (B) file `git add -f`'d into the
+// index is reported by `git status --porcelain` as an ADDITION, so it enters the
+// EARLIER (A) sweep, `isEnforcementSurface` makes it an (A) violation, and the
+// (A) restore's NOT-IN-HEAD arm lands HERE — deleting the very file the ruling
+// says must survive, BEFORE the (B) collection ever runs to notice it. The guard
+// lives INSIDE the delete primitive (and inside its recursion, keyed on the rel
+// it is about to remove) rather than only at the call site, so the deletion is
+// STRUCTURALLY UNREACHABLE for a (B) path no matter who calls, by what route, or
+// whether a future caller remembers to check. It also covers the case the
+// call-site check cannot see: a not-in-HEAD DIRECTORY (`?? .claude/`) whose own
+// rel is not enforcement surface but whose CHILDREN are — the recursion tests
+// every descendant, so a recursive delete can never reach a protected leaf.
+// A directory that kept anything is NOT rmdir'd (the rmdirSync below is gated on
+// the accumulator not having grown), so the surviving file keeps its parents.
+function removeTreeAt(parentHandle, leaf, rel, depth = 0, leftOnDisk = []) {
   WALK_BUDGET.chargeDepth(depth, rel);
+  if (isEnforcementSurface(rel)) {
+    // NOT read, NOT written, NOT truncated, NOT unlinked — the only thing that
+    // happens to a protected path here is that it is NAMED for the denial.
+    leftOnDisk.push(rel);
+    return leftOnDisk;
+  }
   const anchored = `${parentHandle}/${leaf}`;
   const kind = lstatKind(anchored);
-  if (kind === 'absent') return;
+  if (kind === 'absent') return leftOnDisk;
   if (kind !== 'dir') {
     rmSync(anchored, { force: true });
-    return;
+    return leftOnDisk;
   }
+  const keptBefore = leftOnDisk.length;
   withPinnedDir(anchored, (dirHandle) => {
     // INCREMENTAL, NOT MATERIALIZING (board 55fcccac clause 3, review finding A):
     // readdirSync builds the WHOLE listing — every Dirent — before the first
@@ -852,9 +941,14 @@ function removeTreeAt(parentHandle, leaf, rel, depth = 0) {
         if (!primary) throw closeErr;
       }
     }
-    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1);
+    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1, leftOnDisk);
   });
-  rmdirSync(anchored);
+  // GATED, not unconditional: a directory that still holds a protected (B)
+  // descendant must survive too, or the survival guarantee for the leaf is
+  // undone by the rmdir of its parent (and the rmdirSync would fail ENOTEMPTY
+  // anyway, throwing a misattributed environment-defect denial).
+  if (leftOnDisk.length === keptBefore) rmdirSync(anchored);
+  return leftOnDisk;
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +972,18 @@ function removeTreeAt(parentHandle, leaf, rel, depth = 0) {
 
 // Fixed read buffer for every streamed hash — constant memory, reused per file.
 const HASH_CHUNK_BYTES = 64 * 1024;
+
+// How many times the hashing core may re-read a file that moved under it before
+// it gives up and declares the bytes UNATTESTABLE (board fabf21d8). A FIXED
+// COUNT, not a deadline and not a condition: the loop is `for (attempt = 1;
+// attempt <= HASH_STABILITY_ATTEMPTS; attempt++)` over a constant, each attempt
+// reads at most the size ITS OWN fstat reported (so a file being appended to
+// faster than the hash advances cannot extend an attempt), and there is no
+// sleep, no wait and no recursion — so the retry TERMINATES in at most three
+// bounded passes whatever the file does. Three because the failure it answers is
+// a write window closing (one retry is often enough) while every additional pass
+// is work a security gate pays on its critical path.
+const HASH_STABILITY_ATTEMPTS = 3;
 
 // Structural walk budgets. Sized far above ordinary use and far below the
 // pathological shapes that kill the process: a normal dirty untracked tree is
@@ -913,6 +1019,25 @@ class WalkBudgetError extends Error {
     super(message);
     this.name = 'WalkBudgetError';
     this.budget = budget;
+  }
+}
+
+// A file whose bytes could NOT be attested because the file was being written
+// THROUGHOUT the snapshot — distinguishable from every other throw for the same
+// reason WalkBudgetError is: the (A) STATE snapshot converts it into an explicit
+// `file_unattested` state (never equal, never stamp-attestable), while every
+// OTHER caller of the hashing core lets it reach a fail-closed catch and DENY.
+// Board fabf21d8: the exact-size + re-fstat stability check (Codex F3) denies the
+// guarded command whenever ANOTHER legitimate process is appending to a dirty
+// file while PRE takes its snapshot — but at PRE the command has not run yet, so
+// a mutation there cannot be its doing and "violation signal" is too strong.
+// A BOUNDED RETRY answers the common case (a brief write window closes and the
+// second or third attempt is stable); persistent instability is recorded, not
+// laundered.
+class FileUnstableError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'FileUnstableError';
   }
 }
 
@@ -1004,31 +1129,49 @@ function sha256OfFileStreamed(abs) {
 // a path. This is what lets a caller that has just CLASSIFIED a leaf hash the
 // very object it classified — no second resolution, so no window between the
 // two. The descriptor stays the caller's to close.
+// BOUNDED RETRY FOR A STABLE SNAPSHOT (board fabf21d8). The single-attempt shape
+// treated ANY size/mtime/ctime movement as a hard throw, and PRE's per-path loop
+// turns a throw into a DENY of the still-unexecuted command — so a dirty file
+// being written by another legitimate process during the snapshot window denied
+// the guarded Bash call. That is fail-closed but WRONG: at Pre the mutation
+// cannot be the command's doing. Retry a bounded number of times for a stable
+// pass; only PERSISTENT instability is unattestable, and it is RECORDED as such
+// (FileUnstableError -> `file_unattested`) rather than laundered into a digest.
+// The retry cannot weaken any verdict: an attempt still returns a digest ONLY
+// when its own read covered exactly the bytes its fstat promised AND size/mtime/
+// ctime did not move across it, which is the identical acceptance test as before.
+// TERMINATION: a fixed attempt count over bounded work — see HASH_STABILITY_ATTEMPTS.
+// EXPLICIT READ POSITIONS, not the fd's own offset: a retry must re-read from
+// byte 0, and the shared descriptor's offset is left wherever the previous
+// attempt stopped. Positional reads make each attempt independent of the last
+// (and of any other reader of the same descriptor).
 function sha256OfOpenFd(fd, label) {
-  const st = fstatSync(fd);
-  if (!st.isFile()) {
+  if (!fstatSync(fd).isFile()) {
     throw new Error(`'${label}' is not a regular file (fstat) — refusing to stream-hash it; only a regular file's bytes are hashable`);
   }
-  {
+  let lastReason = null;
+  for (let attempt = 1; attempt <= HASH_STABILITY_ATTEMPTS; attempt++) {
+    const st = fstatSync(fd);
     const expectedSize = st.size;
     const hash = createHash('sha256');
     const buf = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
     let total = 0;
     while (total < expectedSize) {
       const want = Math.min(HASH_CHUNK_BYTES, expectedSize - total);
-      const n = readSync(fd, buf, 0, want, null); // null position: sequential, the fd's own offset advances
+      const n = readSync(fd, buf, 0, want, total); // EXPLICIT position: this attempt owns its offsets
       if (n <= 0) break; // shrank/EOF-early → caught by the size re-check below
       hash.update(n === HASH_CHUNK_BYTES ? buf : buf.subarray(0, n)); // update COPIES into the digest, so the buffer is safe to reuse
       total += n;
     }
     const st2 = fstatSync(fd);
-    if (total !== expectedSize || st2.size !== expectedSize || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
-      throw new Error(
-        `'${label}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) — refusing a torn hash; a file mutating mid-hash is itself a violation signal`
-      );
+    if (total === expectedSize && st2.size === expectedSize && st2.mtimeMs === st.mtimeMs && st2.ctimeMs === st.ctimeMs) {
+      return hash.digest('hex');
     }
-    return hash.digest('hex');
+    lastReason = `attempt ${attempt}/${HASH_STABILITY_ATTEMPTS} read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}`;
   }
+  throw new FileUnstableError(
+    `'${label}' changed under every one of ${HASH_STABILITY_ATTEMPTS} bounded stream-hash attempts (${lastReason}) — refusing a torn hash; its bytes are UNATTESTABLE for this snapshot`
+  );
 }
 
 // A SIZE-PRECHECKED read for the small JSON records this hook reads back (board
@@ -1367,7 +1510,23 @@ function pathStateAt(parentHandle, leaf, rel, idx, budget, depth) {
       throw new Error(`unsupported file type at '${rel}' — cannot snapshot its state, so this command's writes are unverifiable`);
     }
     const mode = h.st.mode & 0o7777; // PERMISSION bits only; the type is its own term
-    if (h.kind === 'file') return { exists: true, type: 'file', mode, index, sha256: hashClassifiedLeaf(h, rel) };
+    if (h.kind === 'file') {
+      // BOARD fabf21d8: a file being written throughout the snapshot is not a
+      // violation — at PRE the command has not run — but neither is it
+      // attestable. Record the honest "not attested" state, exactly as an
+      // over-budget walk does, instead of throwing a deny at a snapshot stage.
+      // ONLY FileUnstableError is converted: every other hashing failure (a
+      // vanished leaf, an unreadable descriptor, a non-regular file) still
+      // propagates and still denies, unchanged.
+      let sha256;
+      try {
+        sha256 = hashClassifiedLeaf(h, rel);
+      } catch (e) {
+        if (!(e instanceof FileUnstableError)) throw e;
+        return { exists: true, type: 'file', mode, index, file_unattested: UNATTESTABLE_FILE_BYTES };
+      }
+      return { exists: true, type: 'file', mode, index, sha256 };
+    }
     if (h.kind === 'dir') {
       // An untracked directory reaches the sweep as its COLLAPSED path (`?? dir/`),
       // so comparing the directory alone would let a write to a file inside it pass
@@ -1500,11 +1659,23 @@ function sameState(a, b) {
   // Defense in depth with the explicit symlink arm below: BOTH must be stripped
   // for a link to compare equal again.
   if (a.unattestable || b.unattestable) return false;
+  // CONCURRENT-MUTATION MARKER (board fabf21d8), same disposition and hoisted for
+  // the same reason: a file whose bytes could not be attested carries NO digest,
+  // so the file arm below would compare `undefined === undefined` and report a
+  // file that was mutating throughout the snapshot as "unchanged" — the exact
+  // laundering the marker exists to prevent.
+  if (a.file_unattested || b.file_unattested) return false;
   if (!a.exists) return true;
   if (a.type !== b.type) return false; // FILE TYPE
   if (a.mode !== b.mode) return false; // MODE
   if (a.type === 'symlink') return false; // SYMLINK: unattestable by construction (Ruling B) — never equal, target never read
-  if (a.type === 'file') return a.sha256 === b.sha256; // BYTES (raw-byte sha256, whole file)
+  if (a.type === 'file') {
+    // Defense in depth with the hoisted marker check above, on the symlink arm's
+    // precedent: BOTH must be stripped before an unattested file can compare
+    // equal again.
+    if (a.file_unattested || b.file_unattested) return false;
+    return a.sha256 === b.sha256; // BYTES (raw-byte sha256, whole file)
+  }
   if (a.type === 'dir') {
     // AN UNATTESTED WALK IS NEVER "UNCHANGED" (board 55fcccac clause 3): a
     // recorded state carrying `walk_budget_exceeded` says the tree was too
@@ -1548,6 +1719,12 @@ function ownKeys(o) {
 const STATE_FIELDS = {
   absent: ['exists', 'index'],
   file: ['exists', 'type', 'mode', 'index', 'sha256'],
+  // BOARD fabf21d8: a file whose bytes were UNATTESTABLE carries the marker
+  // INSTEAD of a digest — never both, which is why it is its own shape rather
+  // than an optional extra field on `file`. Admitting it opens nothing: its only
+  // effect anywhere is to make a state NEVER equal and NEVER stamp-attestable,
+  // so a crafted record that adds it can only make the comparison stricter.
+  file_unattested: ['exists', 'type', 'mode', 'index', 'file_unattested'],
   // RULING B (532a4383): a symlink carries an `unattestable` MARKER, never a
   // `target` — the target was the racy read-through this ruling removed. A
   // record that still carries `target` (an older snapshot, or a crafted one)
@@ -1587,6 +1764,18 @@ function stateShapeError(cwd, v, where) {
   if (v.type !== 'file' && v.type !== 'symlink' && v.type !== 'dir') return `'${where}' has an unrecognized 'type' (${JSON.stringify(v.type)})`;
   if (!Number.isInteger(v.mode) || v.mode < 0 || v.mode > 0o7777) return `'${where}' has an invalid 'mode' (${JSON.stringify(v.mode)})`;
   if (v.type === 'file') {
+    // THE UNATTESTED SHAPE FIRST, and by the LITERAL marker (the same repair
+    // Ruling B's marker took): a validator that accepts "some non-empty string"
+    // accepts a crafted record whose marker is a value nothing else in this file
+    // recognizes. A record carrying the marker must carry NO digest — the two
+    // together would be a shape neither arm speaks for.
+    if (v.file_unattested !== undefined) {
+      if (v.file_unattested !== UNATTESTABLE_FILE_BYTES) {
+        return `'${where}' is a file whose 'file_unattested' marker is not the literal ${JSON.stringify(UNATTESTABLE_FILE_BYTES)} (${JSON.stringify(v.file_unattested)})`;
+      }
+      if (v.sha256 !== undefined) return `'${where}' is a file carrying BOTH a sha256 digest and the 'file_unattested' marker — a state no comparison can speak for`;
+      return strayFieldError(v, STATE_FIELDS.file_unattested, where);
+    }
     if (typeof v.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(v.sha256)) return `'${where}' is a file with no sha256 digest`;
     return strayFieldError(v, STATE_FIELDS.file, where);
   }
@@ -1643,12 +1832,20 @@ function stampCouldAttest(recorded, current) {
   // walk_budget_exceeded marker already gets below, hoisted so it covers every
   // shape carrying a marker (a symlink today).
   if (recorded.unattestable || current.unattestable) return false;
+  // BOARD fabf21d8: bytes that could not be attested are not a difference a BYTE
+  // HASH can speak for — the marker must be NON-LAUNDERABLE through the stamp
+  // exactly as `walk_budget_exceeded` is. Hoisted so it covers every shape the
+  // marker can land on, and repeated on the file arm below (defense in depth).
+  if (recorded.file_unattested || current.file_unattested) return false;
   if (recorded.index !== current.index) return false; // INDEX: unattestable
   if (!current.exists) return recorded.exists === true; // present -> absent: {path, deleted:true}
   if (!recorded.exists) return false; // absent -> present: an existence flip, unattestable
   if (recorded.type !== current.type) return false; // TYPE: unattestable
   if (recorded.mode !== current.mode) return false; // MODE: unattestable
-  if (current.type === 'file') return true; // only the bytes can still differ
+  if (current.type === 'file') {
+    if (recorded.file_unattested || current.file_unattested) return false; // defense in depth with the hoisted check above
+    return true; // only the bytes can still differ
+  }
   if (current.type === 'symlink') return false; // link TARGET: unattestable
   if (current.type === 'dir') {
     // An over-budget Pre walk (board 55fcccac) recorded NO children, so there
@@ -1923,8 +2120,10 @@ function sha256OfRegularFile(cwd, rel, what = `stamp attestation of '${rel}'`) {
 // intermediate or final — so a directory is always classified BEFORE it is
 // walked or listed, never interleaved with the walk itself.
 // `what` names the surface in the refusal so one walk can serve the (B) read,
-// the (B) restore write, the (B) delete arm and the (A) tracked restore
-// without four copies of the most security-critical loop in this hook.
+// the (B) restore write and the (A) tracked restore without three copies of the
+// most security-critical loop in this hook. (It also served the (B) DELETE arm
+// until the 2026-08-27 ruling deleted that arm — see the `removeUnder`
+// gravestone; no caller of this walk deletes an unexpected addition any more.)
 //
 // SLICE 1 (decision 532a4383) MOVED THIS WALK ONTO THE SECURE-I/O LAYER. The
 // induction above ("every path handed to lstat has zero symlinks in its
@@ -2258,34 +2457,101 @@ function writeUnder(cwd, rel, content) {
   });
 }
 
-// The (B) sweep's DELETE primitive (board 128fedb7 site 2) — a delete aimed the
-// same way writeUnder can be aimed, and previously the only (B) primitive with
-// no guard of its own: `rmSync(join(cwd, rel), {recursive:true, force:true})`
-// resolves the WHOLE path before it deletes, so a linked ancestor pointed the
-// recursive delete at a tree outside the repository. collectBaseline's own
-// no-follow walk denies before this is normally reached, but a primitive that
-// can be AIMED is never trusted to be safe only because an earlier scan said so
-// (the reasoning writeUnder already carries).
-// Two narrowings, both deliberate:
-//   * `recursive` is GONE — every key collectBaseline produces is a REGULAR
-//     FILE (`de.isFile()`), so recursion was never needed here, and a hook that
-//     holds no recursive-delete primitive cannot have one aimed.
-//   * the final component must be a regular file (or already absent): a (B)
-//     entry that turned into a symlink/directory since the walk is a TYPE
-//     AMBIGUITY, and the settled disposition is deny WITHOUT touching it.
-// SLICE 2: same change as writeUnder — the kind check and the unlink share one
-// held parent descriptor, so the delete cannot be re-aimed by an ancestor
-// swapped after the classification. (Named residual, unchanged by this slice:
-// the unlink is still a NAME operation inside that pinned directory, so a racer
-// can exchange WHICH entry sits under the leaf name between the check and the
-// unlink. The blast radius is bounded to this directory and the link itself is
-// never dereferenced — Node exposes no unlinkat to close the last inch.)
-function removeUnder(cwd, rel) {
-  withPinnedParent(cwd, rel, `(B) baseline removal of '${rel}'`, {}, (parentHandle, leaf) => {
-    if (parentHandle === null) return; // ancestor absent → nothing to remove
-    removeFileAt(parentHandle, leaf, rel);
-  });
-}
+// GRAVESTONE — `removeUnder(cwd, rel)` WAS the (B) sweep's DELETE primitive
+// (board 128fedb7 site 2): the addition arm called it on every live (B) file
+// absent from the Pre baseline, so an unexpected file in protected territory was
+// unlinked and then denied. DELETED 2026-08-27 by user ruling: an unexpected
+// ADDITION is DENIED and REPORTED, and the FILE SURVIVES ON DISK.
+// WHY, kept here because the reason is the ruling and a ruling stripped of its
+// justification gets re-opened: deleting is IRREVERSIBLE, and H17 cannot
+// distinguish a malicious plant from a legitimate file the conductor just
+// created. The sweep is a DETECTOR, and a detector that deletes can destroy real
+// work on a single false positive. ACCEPTED COST, stated so nobody "fixes" it
+// back: a real plant stays on disk until a human takes it off — the denial keeps
+// firing meanwhile, so the plant buys the attacker nothing but a red gate.
+// STRUCTURAL, NOT ADVISORY: the function is GONE, not merely uncalled, and so is
+// its only helper `removeFileAt` (gravestone at its old site above). The (B)
+// addition path therefore holds NO delete primitive at all — there is nothing
+// for a future edit to re-aim, and no comment standing in for a guard
+// (anti-pattern 586bccdc: a security surface must never claim a protection that
+// only prose implements). The one delete primitive left in this file is
+// `removeTreeAt`, and its ONLY caller is `restoreTracked`'s NOT-IN-HEAD arm.
+// AND THAT WAS NOT ENOUGH — read this before trusting the paragraph above (v4.1,
+// 2026-08-27, outside-family review, CONFIRMED). Removing the (B) arm's delete
+// closed the (B) ROUTE to the (B) surface; it left the (A) ROUTE open. A (B) file
+// `git add -f`'d into the index is reported by `git status` as an ADDITION, is an
+// (A) violation by `isEnforcementSurface`, is NOT IN HEAD, and so was DELETED by
+// `restoreTracked`'s not-in-HEAD arm — while the (B) collection, which runs after
+// the entire (A) sweep, never saw it and never emitted the "left on disk"
+// disposition. THE PROTECTION IS A PROPERTY OF THE PATH, NOT OF THE SURFACE THAT
+// NOTICED IT. Both `restoreTracked`'s not-in-HEAD arm and `removeTreeAt` itself
+// (recursion included) now refuse `isEnforcementSurface` paths, and the (A) sweep
+// routes the survivor into `unauthorizedAdditions`.
+// THE RESTORE PATH IS DELIBERATELY UNCHANGED and the asymmetry is the point: a
+// MODIFIED TRACKED file has a recoverable source of truth (its committed bytes),
+// so reverting it destroys nothing that git cannot hand back. An ADDITION has no
+// such source — the bytes exist nowhere else — which is exactly why detection,
+// not deletion, is the correct disposition for it.
+// SABOTAGE TABLE for this ruling (specified, never run in-place — mutation runs
+// are conductor-only, decision 02e03ed8, and in-place mutation of
+// scripts/hooks/** is anti-pattern 37b3cb0a):
+//   S1: reintroduce an unlink on the addition arm (restore removeUnder and call
+//       it where `unauthorizedAdditions.push(rel)` now sits).
+//       REAL CARRIER: enforcement.test.mjs AC8's SURVIVAL + BYTE-IDENTITY
+//       assertions (`existsSync(evilAgent)` + `deepEqual(readFileSync(...),
+//       plantedBytes)`). NOT the exit code — MEASURED ON THIS EXACT FILE: an
+//       exit-code assertion stayed GREEN with the survive guard absent, because
+//       the old code deleted the file FIRST and denied (exit 2) anyway. Same
+//       exit code, opposite disk outcome. Never "simplify" an addition pin down
+//       to `assert.equal(r.code, 2)` — that pins nothing about the disk.
+//   S2: truncate/rewrite the addition in place instead of leaving it untouched
+//       (e.g. write an empty placeholder). CARRIER: the BYTE-IDENTITY assertion
+//       alone — `existsSync` still passes, so presence is not the verdict either.
+//   S3: push additions back into `violations`. CARRIER: the
+//       `doesNotMatch(/reverted|removed/i)` assertion, because the `violations`
+//       wording claims the bytes were rolled back — an action that no longer
+//       happens.
+//   S4: drop the disposition wording from the addition denial (generic "denied").
+//       CARRIER: the `match(/detect/i)` + `match(/left/i)` assertions.
+//   S5: drop `unauthorizedAdditions.length` from the deny condition below.
+//       CARRIER: the exit-code assertion — this is the ONE addition-arm sabotage
+//       the exit code does catch, precisely because it is the one that stops the
+//       denial from firing at all.
+// SABOTAGE TABLE, v4.1 (A)-ROUTE ADDENDUM — same rules (specified, never run
+// in-place). The scenario for every row: Pre baseline has no `.claude/agents/
+// evil.md`; the audited command creates it and runs `git add -f` on it.
+//   S6: remove LAYER 1 only (the `isEnforcementSurface` early return in
+//       `restoreTracked`'s not-in-HEAD arm).
+//       EXPECTED: STILL GREEN. Layer 2 catches the same exact-path hit inside
+//       `removeTreeAt` and produces the same `leftOnDisk` disposition. This row
+//       exists so nobody reads a green suite after a one-layer strip as proof
+//       the pin is hollow — the layers are genuine defence in depth with
+//       DIFFERENT REACH, and the verdict for THIS scenario is carried by either
+//       one alone (measured-lesson discipline: strip every layer to tell a
+//       hollow pin from a defended one).
+//   S7: remove LAYER 2 only (the `isEnforcementSurface` refusal at the top of
+//       `removeTreeAt`). EXPECTED: STILL GREEN for this scenario, for the mirror
+//       reason. It goes RED for the DESCENDANT scenario (a not-in-HEAD directory
+//       whose child is (B) surface), which layer 1's exact-path test cannot see.
+//   S8: remove BOTH layers (i.e. restore the pre-v4.1 code).
+//       REAL CARRIER: SURVIVAL + BYTE-IDENTITY of `.claude/agents/evil.md` after
+//       the Post hook. NOT THE EXIT CODE — measured on this exact file, the deny
+//       fires either way (the file is an (A) violation before and after), so an
+//       exit-code assertion stays GREEN while the file is destroyed. This is the
+//       same trap S1 records, and it is why the v4.0 pin did not catch v4.1's
+//       defect: the (A) route denied, so only a disk assertion could see it.
+//   S9: gate the survival on the (B) collection instead — e.g. re-order the (B)
+//       stage before the (A) sweep and drop the path-level guards. CARRIER: the
+//       `storeErr` variant, where the (B) stage is skipped entirely and the file
+//       is deleted again. Ordering is not a guard; the guard belongs on the path.
+//   S10: un-gate the `rmdirSync` in `removeTreeAt` (delete the directory even
+//       when a protected descendant was kept). CARRIER: the DESCENDANT
+//       scenario's survival assertion — the leaf refusal is worthless if its
+//       parent is removed out from under it (and the rmdir would throw
+//       ENOTEMPTY, denying with a misattributed environment-defect message).
+//   S11: push the (A)-detected survivor into `violations` instead of
+//       `unauthorizedAdditions`. CARRIER: the `doesNotMatch(/reverted/i)` +
+//       `match(/left/i)` wording assertions — S3's carrier, on the (A) route.
 
 // Parse `git status --porcelain -z`: NUL-separated entries `XY <path>`; a
 // rename/copy (R/C) consumes a SECOND field `XY NEW\0OLD` — evaluate BOTH.
@@ -2537,19 +2803,55 @@ function mintRestorePerformed(cwd, paths, agentId) {
 //     process where no descriptor of ours reaches. NAMED, OPEN RESIDUAL — it is
 //     S3's to close (Ruling A: read the blob and materialize it through the
 //     pinned write primitive instead of invoking checkout at all).
+// RETURNS THE DISPOSITION, because since the 2026-08-27 addition ruling the two
+// outcomes must be REPORTED DIFFERENTLY and the caller cannot tell them apart
+// from the path alone:
+//   { restored: true,  leftOnDisk: [] }        → bytes were put back (violations)
+//   { restored: false, leftOnDisk: [paths] }   → protected (B) path(s) DETECTED
+//                                                and LEFT ON DISK (additions)
 function restoreTracked(cwd, relRaw) {
   const rel = relRaw.replace(/\/+$/, ''); // untracked dir collapses to `?? dir/`
   const inHead = spawnSync('git', ['-C', cwd, 'cat-file', '-e', 'HEAD:' + rel], { encoding: 'utf8' }).status === 0;
   if (inHead) {
+    // UNCHANGED, AND DELIBERATELY SO: a path IN HEAD has a recoverable source of
+    // truth, so reverting it destroys nothing git cannot hand back. This arm is
+    // NOT narrowed by the (B) guard below — the asymmetry between a MODIFIED
+    // TRACKED file and an ADDITION is the whole content of the ruling.
     assertRealAncestors(cwd, rel, `(A) tracked restore of '${rel}'`);
     const r = spawnSync('git', ['-C', cwd, 'checkout', 'HEAD', '--', rel], { encoding: 'utf8' });
     if (r.error || r.status !== 0) throw new Error(`checkout HEAD -- ${rel} failed: ${r.stderr || r.error}`);
-  } else {
-    withPinnedParent(cwd, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
-      if (parentHandle === null) return; // ancestor absent → nothing to remove
-      removeTreeAt(parentHandle, leaf, rel);
-    });
+    return { restored: true, leftOnDisk: [] };
   }
+  // LAYER 1 OF THE (B)-SURVIVAL GUARD — the NOT-IN-HEAD arm is the DELETE arm,
+  // and deletion is the irreversible half of this function. A path that is on the
+  // protected (B) surface AND absent from HEAD has its bytes NOWHERE ELSE: that
+  // intersection is exactly the v4.0 ruling's "unexpected ADDITION", whichever
+  // sweep noticed it first. `git add -f .claude/agents/x.md` routes such a file
+  // through the (A) sweep, which used to reach `removeTreeAt` below and destroy
+  // it before the (B) collection could report it. Returning HERE means no delete
+  // primitive is entered at all for this path — no ancestor walk, no classify, no
+  // unlink — and the caller routes it to the DETECTED-DENIED-LEFT-ON-DISK
+  // disposition. `isEnforcementSurface` is the same predicate the (A) violation
+  // test and the (B) glob set use; there is deliberately no second notion of
+  // "protected" in this file.
+  // DEFENCE IN DEPTH, NOT REDUNDANCY: `removeTreeAt` refuses the same paths on
+  // its own (layer 2), so each layer independently carries the verdict for an
+  // exact-path hit — see the sabotage table at the `removeUnder` gravestone,
+  // which records that stripping EITHER layer alone leaves the pin green and
+  // only stripping BOTH turns it red. Their REACH differs, which is why both
+  // exist: layer 1 also skips the ancestor walk (so a swapped ancestor cannot
+  // turn a protected addition into a misattributed environment-defect denial),
+  // while layer 2 also covers protected DESCENDANTS of a non-protected directory.
+  if (isEnforcementSurface(rel)) return { restored: false, leftOnDisk: [rel] };
+  const leftOnDisk = withPinnedParent(cwd, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return []; // ancestor absent → nothing to remove
+    return removeTreeAt(parentHandle, leaf, rel);
+  });
+  // A PARTIAL removal (a not-in-HEAD directory holding protected descendants) is
+  // reported as an ADDITION LEFT ON DISK and NOT as a revert: `violations` says
+  // the named path was "reverted", and that would be a false action claim for a
+  // tree whose protected members are still standing (anti-pattern 586bccdc).
+  return { restored: leftOnDisk.length === 0, leftOnDisk };
 }
 
 // THE INPUT BOUNDARY IS ITSELF A GATE (repair of an outside-family review
@@ -2778,6 +3080,24 @@ try {
   // restore_performed maintenance item is minted per path here, once every
   // restore attempt below has run.
   const restoredPaths = [];
+  // UNEXPECTED ADDITIONS in the (B) enforcement surface — live files with no
+  // entry in this call's Pre baseline (user ruling 2026-08-27; see the
+  // `removeUnder` gravestone). DELIBERATELY A SEPARATE LIST FROM `violations`,
+  // and this is not cosmetics: the `violations` denial says the named bytes were
+  // "reverted", which is TRUE for the restore arms and would be a FALSE ACTION
+  // CLAIM for an addition now that nothing deletes it. A security surface that
+  // claims a protection it does not implement is anti-pattern 586bccdc — the
+  // false claim is worse than the gap, because it stops the next reader looking.
+  // These paths are DENIED, REPORTED, and LEFT ON DISK BYTE-IDENTICAL.
+  // TWO PRODUCERS since the 2026-08-27 defect repair — the (B) collection AND
+  // the earlier (A) sweep, which meets a `git add -f`'d (B) file first — so the
+  // list is fed through a DEDUPING writer. One path detected by both surfaces is
+  // ONE finding; naming it twice in the denial makes the report look like two
+  // plants.
+  const unauthorizedAdditions = [];
+  const noteUnauthorizedAddition = (rel) => {
+    if (!unauthorizedAdditions.includes(rel)) unauthorizedAdditions.push(rel);
+  };
 
   // No working store → no runId to key the attribution record on, so
   // `preDirty` stays empty: unverifiable attribution is never treated as
@@ -3197,7 +3517,18 @@ try {
       // there is no "difference confined to bytes" to establish — AC13's
       // clean-at-Pre behaviour stays exactly as it was.
       if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
-      restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
+      const outcome = restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
+      if (!outcome.restored) {
+        // PROTECTED (B) PATH, DETECTED BY THE (A) SWEEP (2026-08-27 defect
+        // repair). Nothing was deleted; route it to the addition disposition so
+        // the user ruling holds on THIS path too. This push is load-bearing, not
+        // a duplicate of the (B) arm's: the (B) stage is skipped entirely under
+        // `storeErr`, and it only sees paths `collectBaseline` returns — without
+        // this the addition could be denied with no wording at all, or (under a
+        // broken store) not reported at all.
+        for (const kept of outcome.leftOnDisk) noteUnauthorizedAddition(kept);
+        continue; // NOT a `violations` entry — nothing was reverted here
+      }
       violations.push(rel);
       restoredPaths.push(rel); // FIX-B: mints a restore_performed item below
     }
@@ -3291,6 +3622,48 @@ try {
     }
 
     const current = collectBaseline(cwd); // reading a swapped dir throws → outer catch → deny (AC9c)
+
+    // EMPTY-AT-REST BASELINE IS UNVERIFIABLE, NOT "THE SET WAS EMPTY" (board
+    // 880e0d7a). The audited agent can write arbitrary bytes to its OWN
+    // os.tmpdir() records, so a well-formed, stable `{}` sitting there at Post is
+    // reachable by CRAFT — and every current (B) file then reads as an
+    // "unauthorized addition" and is deleted by the removal arm below, turning
+    // this hook into the mass-delete of the very surface it protects. Cross-check
+    // against the PRE PRODUCER (`collectBaseline`, the same function that just
+    // built `current`): an initialized project always has `.claude/agents/**`, so
+    // a validated key set that is EMPTY while the live surface is NOT is proof
+    // the record does not describe this project — deny WITHOUT entering the
+    // destructive arm, removing nothing.
+    // DISTINCT FROM THE MID-READ TRUNCATION GUARD in readBoundedFromFd (exact-size
+    // + re-fstat, Codex F4): that one catches a record torn WHILE it is being
+    // read. This one catches a record that is already, stably, empty when the read
+    // begins — the read succeeds and reports `{}` faithfully. Neither covers the
+    // other.
+    // GATED ON `current` BEING NON-EMPTY so it can never false-deny a project
+    // that genuinely has no (B) surface: with nothing live there is nothing for
+    // the removal arm to take, so there is no damage to prevent and no verdict to
+    // change (P1).
+    // READ THIS BEFORE THE PARAGRAPH ABOVE (added 2026-08-27 with the addition
+    // ruling): the "mass-delete" the guard's prose and its denial string describe
+    // is HISTORICAL — the addition arm no longer deletes anything, so a crafted
+    // empty baseline can no longer erase the enforcement surface. The guard is
+    // NOT redundant: without it every live (B) file is REPORTED as an
+    // unauthorized addition and the call denies on a fabricated finding, which is
+    // a mass FALSE REPORT and an unattributable denial. Both the prose and the
+    // denial text below are left VERBATIM on purpose — the string is pinned by
+    // scripts/tests/h17-baseline-integrity-redo.test.mjs (frozen), and it is
+    // still true as written: nothing is removed.
+    if (Object.keys(valid).length === 0 && Object.keys(current).length > 0) {
+      deny(
+        `H17: the (B) content baseline for this call records ZERO enforcement files while ${Object.keys(current).length} exist now ` +
+          `(${Object.keys(current).slice(0, 8).join(', ')}${Object.keys(current).length > 8 ? ', …' : ''}). An initialized project always has a non-empty (B) set, ` +
+          `so an empty baseline does not describe this project: it is UNVERIFIABLE, not evidence that the enforcement surface was empty at Pre. ` +
+          `NOTHING WAS REMOVED — the removal arm is not entered on an unverifiable baseline, because trusting one would delete every enforcement file ` +
+          `as an "unauthorized addition". These records live in os.tmpdir() and are writable by the audited command, so a crafted baseline is conduct, ` +
+          `not environment; failing closed (P5). Exit contract-violated, never route around.`
+      );
+    }
+
     for (const [rel, content] of Object.entries(valid)) {
       if (!(rel in current)) {
         writeUnder(cwd, rel, content); // baseline file deleted → recreate
@@ -3304,8 +3677,13 @@ try {
     }
     for (const rel of Object.keys(current)) {
       if (!(rel in valid)) {
-        removeUnder(cwd, rel); // new → delete, ancestor- and kind-guarded (board 128fedb7)
-        violations.push(rel);
+        // NEW → DETECT AND REPORT, never delete (user ruling 2026-08-27). The
+        // file is not read, not written, not truncated and not unlinked by this
+        // arm: the ONLY thing that happens to an unexpected addition here is
+        // that its path is recorded for the denial below. There is no delete
+        // primitive in this scope to call — see the `removeUnder` gravestone for
+        // the ruling, its justification, and the sabotage table.
+        noteUnauthorizedAddition(rel); // deduped: the (A) sweep may have met it first
         baselineViolations.push(rel);
       }
     }
@@ -3380,7 +3758,11 @@ try {
     }
   }
 
-  if (violations.length || preExisting.length || changedPreDirty.length) {
+  // `unauthorizedAdditions.length` is a FIRST-CLASS deny trigger, not a rider on
+  // `violations`: since the addition arm no longer mutates anything, this list is
+  // the ONLY trace an unexpected addition leaves — drop it from this condition
+  // and a planted file allows silently (sabotage S5 at the gravestone).
+  if (violations.length || unauthorizedAdditions.length || preExisting.length || changedPreDirty.length) {
     const parts = [];
     if (changedPreDirty.length) {
       // Decision 7021526c step 3. NOT the environment-defect class: the state
@@ -3403,6 +3785,22 @@ try {
           `only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
       );
     }
+    if (unauthorizedAdditions.length) {
+      // WORDING IS LOAD-BEARING (user ruling 2026-08-27). It must state the
+      // DISPOSITION, because the disposition is unusual: the gate denied and the
+      // file is still there. It must NOT borrow the `violations` vocabulary
+      // above ("reverted") — describing an action that no longer happens is the
+      // 586bccdc failure at the user-facing surface, and it would tell a human
+      // the plant is gone when it is sitting on their disk.
+      parts.push(
+        `H17: UNAUTHORIZED ADDITION(S) DETECTED in the protected (B) enforcement surface, and LEFT IN PLACE ON DISK: ${unauthorizedAdditions.join(', ')} ` +
+          `— exit contract-violated, never route around. These path(s) hold no entry in this call's Pre-image baseline and appeared inside this command's window. ` +
+          `The command is DENIED; the file(s) still sit on disk, BYTE-IDENTICAL to what was written there. H17 DETECTED the addition, it did not delete it: ` +
+          `deleting is IRREVERSIBLE, and this sweep cannot tell a malicious plant from a legitimate file the conductor just created — a detector that deletes ` +
+          `destroys real work on one false positive. A HUMAN must inspect each path above and take it off disk if it is a plant; H17 keeps denying agent Bash ` +
+          `while it stands, so an addition left in place buys nothing but a red gate. Nothing of yours was undone.`
+      );
+    }
     // DEGRADED-LOUD ON THE (B) SIDE (board 11609d1f), the mirror of
     // `degradedReason` on the (A) side: the verdict above stands, but it was
     // reached against a baseline SHARED with every other lane in this run, so
@@ -3411,9 +3809,14 @@ try {
     // gains nothing from the notice (P1).
     if (baselineShared && baselineViolations.length) {
       parts.push(
-        `H17: DEGRADED (B) VERIFICATION — the (B)-set path(s) above (${baselineViolations.join(', ')}) were compared and restored against a SHARED ` +
+        // "compared and restored" was accurate while every (B) difference ended
+        // in a write or an unlink. Since the addition arm only DETECTS (user
+        // ruling 2026-08-27), `baselineViolations` mixes restored paths with
+        // additions nothing touched, so the verb narrows to what is true of all
+        // of them: they were COMPARED against the shared baseline.
+        `H17: DEGRADED (B) VERIFICATION — the (B)-set path(s) above (${baselineViolations.join(', ')}) were compared against a SHARED ` +
           `PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the ` +
-          `pre-image it restored was this call's own.`
+          `pre-image compared against was this call's own.`
       );
     }
     // DEGRADED-LOUD ON THE (A) SIDE (board 489554d4), the mirror of the (B) block

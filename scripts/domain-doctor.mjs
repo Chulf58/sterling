@@ -68,10 +68,8 @@
 //     question worth asking about one logical store split across TWO physical
 //     files by the homedir/context flip, because a whole-file copy carries
 //     records AND their v2 provenance (record_versions, record_aliases,
-//     record_relations) intact, which a row replay cannot. READ-ONLY: it
-//     reports and NEVER writes — there is no --apply (the write half was
-//     removed after review found an unlockable concurrent-commit-loss race and
-//     a non-atomic replace; its requirements live on board 44434103).
+//     record_relations) intact, which a row replay cannot. READ-ONLY: this
+//     form reports and never writes.
 //     Exit 0 the destination is a clean subset, so adopting would be safe and
 //     complete; exit 3 a FINDING — record ids, record_aliases historical_ids
 //     or record_versions snapshots that exist ONLY in the destination, each
@@ -82,10 +80,23 @@
 //     is only half) a Sterling store. EQUAL versions are fine at any version,
 //     including a pre-v2 pair: a whole-file copy mirrors whatever the source
 //     is, so "both sides must be v2" is migrate's rule, not this one.
+//
+//   node scripts/domain-doctor.mjs adopt --from <db> --to <db> --apply --create-only
+//     The ONE write adopt can perform: PUBLISH a fresh destination that does
+//     not exist yet. It never replaces an existing destination and it does not
+//     heal or merge an existing split — that stays deliberately unbuilt (board
+//     44434103). VACUUM INTO takes a transactionally consistent point-in-time
+//     snapshot into a unique temporary name IN THE DESTINATION DIRECTORY; the
+//     snapshot is then CLOSED and re-validated on its own terms; only then is
+//     it published with linkSync, whose create-if-absent is atomic on both
+//     Unix and native Windows. Exit 0 published; exit 2 anything else,
+//     including EEXIST when the destination already exists or appears
+//     mid-run — never a partial or replaced destination.
 import {
   readFileSync, readdirSync, existsSync, mkdirSync, openSync, readSync, closeSync,
-  realpathSync, statSync, rmSync,
+  realpathSync, statSync, rmSync, linkSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -524,9 +535,11 @@ function droppedKeyPaths(before, after, path = '', depth = 0, out = []) {
  *  supersedes relation a retired record's successor lives in — cannot cross
  *  here at all. Those cases are REFUSED before the first write rather than
  *  half-copied. Whole-file adoption is the SHAPE that would carry them, but
- *  `adopt` is a read-only probe with no apply path (board 44434103), so today
- *  those refusals have no operable route past them — stated plainly in the
- *  messages rather than pointing at a mode that cannot write (decision
+ *  `adopt`'s only write is CREATE-ONLY publication onto a destination that does
+ *  not exist yet (board 44434103), and migrate refuses outright without an
+ *  EXISTING destination — so those refusals still have no operable route past
+ *  them — stated plainly in the messages rather than pointing at a mode that
+ *  cannot serve this case (decision
  *  [migrate-relations-containment-narrows-migrate-to-unlinked-stores]).
  *
  *  THE SAME CONTAINMENT ARGUMENT RUNS AT FIELD LEVEL (board bd3f0acf): the
@@ -536,12 +549,58 @@ function droppedKeyPaths(before, after, path = '', depth = 0, out = []) {
  *  cross with that field silently removed. Refused too, before any write: the
  *  guard below simulates the parse and asks whether any key path the source
  *  holds fails to survive it. */
+/** THE ESCAPE HATCH IS NOT OPERABLE FOR THIS CASE — one text, four refusals
+ *  (decision [migrate-relations-containment-narrows-migrate-to-unlinked-stores],
+ *  which records the old overstatement as a real defect and names "fixing the
+ *  wording" as one of the two moves that close it; the other, landing adopt's
+ *  write half, landed as CREATE-ONLY publication — board 44434103).
+ *
+ *  Every containment refusal below names whole-file adoption as the shape that
+ *  WOULD carry what migrate cannot, and `adopt` is that shape — but its write
+ *  half never REPLACES: it publishes only onto a destination that does not
+ *  exist yet (see adoptCreateOnly()), while migrate refuses outright unless the
+ *  destination already exists. So every message that reaches this text is
+ *  talking about a destination adopt will not write to, and a message that says
+ *  "Use 'adopt'" and stops would send an operator mid-incident to a mode that
+ *  refuses them again, with nothing explaining why the tool suggested it. That
+ *  is not failing loud (P5); it is failing loud about the diagnosis and quietly
+ *  wrong about the remedy.
+ *
+ *  IT IS A SHARED CONSTANT RATHER THAN FOUR COPIES BECAUSE THE DIVERGENCE WAS
+ *  THE DEFECT: the record_relations refusal was written with the honest
+ *  disclosure while its three older siblings kept the bare "Use 'adopt'", so
+ *  one guard told the truth and three did not. A single text cannot drift that
+ *  way, and when the write half lands exactly one string changes. */
+const NO_OPERABLE_ROUTE =
+  `Whole-file adoption is the shape that WOULD carry this intact, but THERE IS NO WORKING ROUTE FOR THIS CASE (decision ` +
+  `[migrate-relations-containment-narrows-migrate-to-unlinked-stores]): migrate only ever reaches this refusal with a ` +
+  `destination that ALREADY EXISTS, and adopt's write half is CREATE-ONLY — it publishes a fresh destination that does not ` +
+  `exist yet and never replaces or heals an existing one. Against THIS destination 'adopt' is therefore still only a ` +
+  `READ-ONLY probe: it can report whether adopting WOULD be safe, it cannot perform it. Healing an existing split remains ` +
+  `deliberately unbuilt (board 44434103). Nothing was written.`;
+
 function migrate() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
   const apply = process.argv.includes('--apply');
   if (!existsSync(from)) fail(`no source store at ${from}`);
-  if (!existsSync(to)) fail(`no destination store at ${to} — migrate merges into an existing store; create it by mounting first, or use 'adopt', which creates a missing destination`);
+  // THE FIFTH REFUSAL PATH (outside-model review, 2026-08-27): this message
+  // predates NO_OPERABLE_ROUTE and used to promise that "'adopt' creates a
+  // missing destination" while adopt refused --apply outright. It is the ONE
+  // case create-only publication genuinely serves — a destination that does not
+  // exist yet is exactly what adoptCreateOnly() publishes onto — so it points
+  // there by its full invocation, and says in the same breath what stays
+  // unbuilt, rather than leaving "adopt" to be read as general adoption.
+  if (!existsSync(to)) {
+    fail(
+      `no destination store at ${to} — migrate merges into an EXISTING store and never creates one. For a MISSING destination the ` +
+        `operable route is create-only adoption: 'node scripts/domain-doctor.mjs adopt --from ${from} --to ${to} --apply --create-only' ` +
+        `publishes a fresh destination from a consistent point-in-time snapshot of the source, carrying record_versions, ` +
+        `record_aliases and record_relations intact — a row replay cannot. It refuses (EEXIST) the moment anything exists at that ` +
+        `path, and healing or merging an EXISTING split remains deliberately unbuilt (board 44434103). Otherwise create the ` +
+        `destination by mounting it first, then re-run migrate. Nothing was read or written.`
+    );
+  }
   // EVERY guard runs before the first write, and a refusal prints nothing from
   // the copy path: each dest.create() commits its OWN transaction, so a
   // refusal discovered mid-way cannot be rolled back and would leave the
@@ -562,21 +621,20 @@ function migrate() {
     fail(
       `refusing: the source holds ${versionRows} record_versions row(s) — version snapshots live outside the records table and ` +
         `the validated create path never writes them, so every archived version would be dropped while the copied record still ` +
-        `claimed its high version number. Use 'adopt' (whole-file, provenance intact). Nothing was written.`
+        `claimed its high version number. ${NO_OPERABLE_ROUTE}`
     );
   }
   if (aliasRows) {
     fail(
       `refusing: the source holds ${aliasRows} record_aliases row(s) — historical ids resolve through that table alone, so every ` +
-        `pre-migration id pointing at these records would stop resolving in the copy. Use 'adopt' (whole-file, provenance intact). ` +
-        `Nothing was written.`
+        `pre-migration id pointing at these records would stop resolving in the copy. ${NO_OPERABLE_ROUTE}`
     );
   }
   if (retired.length) {
     fail(
       `refusing: the source holds ${retired.length} record(s) with lifecycle 'retired' (${retired.map((r) => r.id).join(', ')}) — a retired ` +
         `record's successor is an inbound supersedes RELATION, not a body field, so it cannot be reconstructed from the body and the ` +
-        `validated create path refuses it outright. Use 'adopt' (whole-file, provenance intact). Nothing was written.`
+        `validated create path refuses it outright. ${NO_OPERABLE_ROUTE}`
     );
   }
   // Checked AFTER the retired-lifecycle guard above: retiring a record is the
@@ -587,10 +645,7 @@ function migrate() {
     fail(
       `refusing: the source holds ${relationRows} record_relations row(s) — relations live outside the records table and the ` +
         `validated create path rebuilds them (lossily, and only self-links a body's own convenience links[] names) rather than ` +
-        `copying them structurally, so every one would be silently lost or restamped. THERE IS NO WORKING ROUTE FOR A LINKED ` +
-        `STORE TODAY (decision [migrate-relations-containment-narrows-migrate-to-unlinked-stores]): whole-file adoption is the ` +
-        `shape that would carry relations intact, but 'adopt' is a READ-ONLY probe — it can only report whether adopting WOULD ` +
-        `be safe, it cannot perform it, and its write half is unbuilt (board 44434103). Nothing was written.`
+        `copying them structurally, so every one would be silently lost or restamped. ${NO_OPERABLE_ROUTE}`
     );
   }
   // THE DESTINATION'S RESOLVABLE-ID NAMESPACE IS A UNION, not one table
@@ -946,16 +1001,17 @@ function supersessionPointers(dbPath) {
  *  stranding migrate can only half-answer (board b96ebf47) — would replacing
  *  the destination FILE with the source lose anything?
  *
- *  It only ANSWERS. adopt had a write half; review found two HIGH defects in it
- *  that cannot be fixed without a concurrency protocol, so the user ruled it
- *  removed rather than gated (an unreachable-but-shipped write path is worse
- *  than an absent one): the subset proof and the backup were separate,
- *  unlocked snapshots, so a live MCP server committing between them lost that
- *  record permanently — present in neither the source nor the backup — and
- *  unlinking an open SQLite file left the writer on an unlinked inode; and the
- *  rmSync-then-VACUUM-INTO replace left the destination ABSENT for a window
- *  with no crash-safety. Requirements for a locked, atomic apply path are kept
- *  on board 44434103.
+ *  WITHOUT `--apply --create-only` it only ANSWERS. adopt once had a general
+ *  write half; review found two HIGH defects in it that cannot be fixed without
+ *  a concurrency protocol, so the user ruled it removed rather than gated (an
+ *  unreachable-but-shipped write path is worse than an absent one): the subset
+ *  proof and the backup were separate, unlocked snapshots, so a live MCP server
+ *  committing between them lost that record permanently — present in neither
+ *  the source nor the backup — and unlinking an open SQLite file left the writer
+ *  on an unlinked inode; and the rmSync-then-VACUUM-INTO replace left the
+ *  destination ABSENT for a window with no crash-safety. What came back (board
+ *  44434103) is deliberately NOT that path: adoptCreateOnly() below never
+ *  replaces anything, so neither defect has a surface here.
  *
  *  The verdict is THREE-VALUED, mirroring sweep: 0 the destination is a clean
  *  subset (adoption would be safe and complete), 3 a FINDING to report, 2 the
@@ -967,16 +1023,43 @@ function supersessionPointers(dbPath) {
 function adopt() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
-  if (process.argv.includes('--apply')) {
+  const apply = process.argv.includes('--apply');
+  const createOnly = process.argv.includes('--create-only');
+  // THE TWO FLAGS ARE ONE GESTURE, and the pairing is required in both
+  // directions. `--create-only` exists so nobody can reach a write by typing
+  // the flag they already know: bare `--apply` is what an operator types when
+  // they believe general adoption works, and it must keep saying that it does
+  // not — the write that exists is a DIFFERENT, much narrower thing and has to
+  // be asked for by its own name.
+  if (apply && !createOnly) {
     fail(
-      `--apply is not implemented: adopt is a read-only probe and writes nothing, ever. Its write half was REMOVED after review found ` +
-        `a concurrent-commit-loss race between the subset proof and the backup, and a non-atomic replace that left the destination ` +
-        `absent on any failure — neither is fixable without a concurrency protocol. The requirements are tracked on board 44434103. ` +
-        `Nothing was read or written.`
+      `--apply alone is not implemented: adopt's general write half — replacing, healing or merging an EXISTING destination — was ` +
+        `REMOVED after review found a concurrent-commit-loss race between the subset proof and the backup, and a non-atomic replace ` +
+        `that left the destination absent on any failure; neither is fixable without a concurrency protocol, and healing an existing ` +
+        `split remains deliberately unbuilt (board 44434103). The ONE write this mode can perform is CREATE-ONLY publication onto a ` +
+        `destination that does not exist yet — ask for it by name: --apply --create-only. Nothing was read or written.`
+    );
+  }
+  if (createOnly && !apply) {
+    fail(
+      `--create-only is a modifier of --apply, not a mode of its own — on its own it reads as a request to publish that would write ` +
+        `nothing, and this tool does not guess which half you meant. Drop it for the read-only probe, or pass both flags ` +
+        `('--apply --create-only') to publish a fresh destination. Nothing was read or written.`
     );
   }
   if (!existsSync(from)) fail(`no source store at ${from} — it does not exist. Nothing was read or written.`);
   refuseSameFile(from, to, 'adopt');
+
+  // THE WRITE PATH FORKS HERE — before the SOURCE's schema version is probed
+  // and before the destination is inspected in any way. Both omissions are
+  // deliberate: the version gate is re-run against the SNAPSHOT, which is the
+  // file that actually gets published (and whose header needs no WAL fallback,
+  // so it cannot touch a live writer's sidecars), and the destination is never
+  // looked at at all — see adoptCreateOnly().
+  if (apply) {
+    adoptCreateOnly(from, to);
+    return;
+  }
 
   // VERSION GATE — before either store's CONTENTS are read. An adoption
   // MIRRORS the source file, and mirroring makes exactly two pairings unsafe:
@@ -992,7 +1075,6 @@ function adopt() {
   // user_version 0 pending a separate migration fix (board d055b150), and
   // adopting it must keep working. A missing destination has no version to
   // compare, which is the allowed case, not an error.
-  const destExists = existsSync(to);
   const fromProbe = probeSchemaVersion(from);
   if (fromProbe.error) fail(fromProbe.error);
   if (fromProbe.version > SUPPORTED_SCHEMA_VERSION) {
@@ -1002,6 +1084,8 @@ function adopt() {
         `Nothing was written.`
     );
   }
+
+  const destExists = existsSync(to);
   let toProbe;
   if (destExists) {
     toProbe = probeSchemaVersion(to);
@@ -1041,7 +1125,10 @@ function adopt() {
       ? `  destination: ${describe(dst)} — schema version ${toProbe.version} (${toProbe.source})`
       : `  destination: does not exist yet, so it holds 0 record(s) and nothing could be lost by adopting`
   );
-  console.log('  DRY-RUN, ALWAYS: this mode reports and never writes — there is no --apply (board 44434103).');
+  console.log(
+    '  DRY-RUN: this form reports and never writes. The only write adopt can perform is --apply --create-only, which publishes ' +
+      'a fresh destination that does not exist yet and never replaces, heals or merges an existing one (board 44434103).'
+  );
   if (!destOnlyIds.length && !destOnlyAliases.length && !destOnlyVersions.length) {
     console.log('ADOPTABLE: every destination record id, record_aliases historical_id and record_versions snapshot is present in the source — replacing the destination file would lose nothing');
     return;
@@ -1059,6 +1146,258 @@ function adopt() {
       `record_versions row(s) exist only in the destination — adopting the source over it would destroy exactly those. Nothing was written.`
   );
   process.exit(3);
+}
+
+/** The snapshot whose life is bound to THIS PROCESS, not to a remembered
+ *  cleanup step (P4). Every refusal in the publication path below is a fail(),
+ *  and fail() calls process.exit — which SKIPS `finally` blocks. A try/finally
+ *  cleanup would therefore leak a full copy of a knowledge store beside the
+ *  destination on exactly the failure paths that matter most. 'exit' listeners
+ *  DO run on process.exit and after an uncaught throw, so binding the removal
+ *  there is the one cleanup that cannot be skipped. */
+let pendingSnapshot = null;
+process.on('exit', () => {
+  if (!pendingSnapshot) return;
+  // force: true — a snapshot that never got created, or was already published
+  // and unlinked, must not turn cleanup into a second failure.
+  rmSync(pendingSnapshot, { force: true });
+  rmSync(`${pendingSnapshot}-wal`, { force: true });
+  rmSync(`${pendingSnapshot}-shm`, { force: true });
+});
+
+/**
+ * Take the point-in-time snapshot through a READ-ONLY connection on the source.
+ *
+ * VACUUM INTO is read-only with respect to the source and transactionally
+ * CONSISTENT: a concurrent WAL writer cannot tear the output, and commits made
+ * after the read snapshot begins are simply ABSENT from it. It also refuses if
+ * its output file already exists, which is why the output name is unique.
+ *
+ * THE SOURCE'S SIDECARS ARE CLEANED UP CONDITIONALLY — the same shape
+ * readOnlyProbe and idsIn use (anti_pattern 8616e72d), and for the same reason:
+ * a read-only open of a WAL store MATERIALIZES an empty -wal and -shm that a
+ * read-only connection cannot unlink, so an open that removes nothing leaves
+ * litter beside the USER'S store on every invocation — including the ones that
+ * go on to REFUSE, since this runs before the publication gate. So: remember
+ * which of -wal/-shm existed BEFORE the open and remove ONLY the ones this open
+ * created. A sidecar observed present beforehand is left EXACTLY as found —
+ * deleting a live -wal destroys committed, uncheckpointed frames belonging to
+ * someone else, which is why the removal is never unconditional.
+ *
+ * RESIDUAL RACE, STATED RATHER THAN PAPERED OVER: `existsSync` answers about a
+ * moment that has passed. A writer can create a sidecar AFTER the check and
+ * before the close, and this function would then remove a file it did not
+ * create. It cannot PROVE ownership, only observe absence — the same limitation
+ * readOnlyProbe carries (already boarded; not solved here). Narrowing that
+ * window is a separate ruling; what is guaranteed here is only the weaker,
+ * honest property: nothing is removed that was not observed ABSENT first.
+ * A sidecar that survives is DISCLOSED by the caller (P5).
+ * (readOnlyProbe is still used on the SNAPSHOT below — that file's name is
+ * unique to this process, so ownership there is provable rather than assumed.)
+ */
+function vacuumIntoSnapshot(from, snapshot) {
+  const walPath = `${from}-wal`;
+  const shmPath = `${from}-shm`;
+  const hadWal = existsSync(walPath);
+  const hadShm = existsSync(shmPath);
+  /** Remove ONLY what was observed ABSENT above — never unconditionally. Runs
+   *  on the failure paths too: fail() calls process.exit, which skips a
+   *  finally, so a refusal that skipped this would still litter and the
+   *  "nothing was written" it prints would be false. */
+  const dropSidecarsThisOpenCreated = () => {
+    if (!hadWal) rmSync(walPath, { force: true });
+    if (!hadShm) rmSync(shmPath, { force: true });
+  };
+  let db;
+  try {
+    db = new DatabaseSync(from, { readOnly: true });
+  } catch (e) {
+    dropSidecarsThisOpenCreated();
+    fail(
+      `refusing: the source store '${from}' could not be opened read-only to snapshot it (${e.message}). Nothing was published and ` +
+        `no destination was created.`
+    );
+  }
+  let err = null;
+  try {
+    // A single-quote-escaped SQL string literal: VACUUM INTO takes an
+    // expression, and the destination directory is caller-supplied text.
+    db.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+  } catch (e) {
+    err = e;
+  }
+  // Closed BEFORE any refusal is raised: fail() exits the process and would
+  // skip a finally, so the close cannot be left to one.
+  try {
+    db.close();
+  } catch { /* the snapshot is already taken or already failed; a close error changes neither */ }
+  // AFTER the close, and BEFORE the refusal below for the same reason the close
+  // is: fail() exits the process.
+  dropSidecarsThisOpenCreated();
+  if (err) {
+    fail(
+      `refusing: could not take a point-in-time snapshot of the source store '${from}' — VACUUM INTO '${snapshot}' failed ` +
+        `(${err.message}). Nothing was published and no destination was created.`
+    );
+  }
+}
+
+/**
+ * adopt --from <db> --to <db> --apply --create-only: the WRITE half, in the one
+ * shape that needs no cooperation from any other process (board 44434103).
+ *
+ * THE ORDERING IS THE SAFETY PROPERTY, and nothing here may be reordered:
+ *   1. VACUUM INTO a UNIQUE TEMPORARY name IN THE DESTINATION DIRECTORY;
+ *   2. CLOSE SQLite, then VALIDATE THAT SNAPSHOT — the version and structural
+ *      gates re-run against the closed temporary database;
+ *   3. linkSync(temp, to);
+ *   4. remove the temporary name ONLY after the link succeeded.
+ *
+ * ABSENCE IS ENFORCED BY THE PUBLICATION PRIMITIVE, NEVER BY A CHECK. This
+ * function deliberately never asks whether the destination exists: an
+ * existsSync answered before the copy is a TOCTOU check, and the race it loses
+ * is the exact one that got the previous write half removed — a session
+ * lazy-creating the destination (§2.3) while the copy is in flight. linkSync
+ * creates the destination entry ATOMICALLY and fails EEXIST if anything won
+ * that race, on native Windows (CreateHardLinkW) as well as Unix (link(2)), so
+ * the outcome is fail-closed on BOTH platforms rather than Unix-only. Either
+ * SterlingStore creates the path first and this publication loses with EEXIST,
+ * or this publication lands the complete snapshot first and the mount opens a
+ * complete file. There is no unlinked live inode and no partial-destination
+ * window at any instant — which is why this needs no barrier inside the mount
+ * path and no quiescence proof over the source.
+ *
+ * DELIBERATELY NOT USED, each for a measured reason:
+ *   - renameSync: replacement semantics DIFFER between platforms (Unix replaces
+ *     silently; Windows refuses over an open file), and a primitive whose
+ *     contract changes per platform cannot carry a fail-closed guarantee.
+ *   - copyFileSync with COPYFILE_EXCL, or reserving the destination with an
+ *     O_EXCL open: CREATION is exclusive, but the destination is then visible
+ *     and openable by another process while the copy is still incomplete.
+ *     Exclusive creation is not atomic publication.
+ *   - WAL exclusivity as a quiescence proof: it needs a WRITABLE open on the
+ *     store it is proving about (anti_pattern 8616e72d) and holding it across
+ *     the publication works on Unix and FAILS on native Windows — a parity
+ *     break on the majority platform.
+ *
+ * WHAT THIS IS NOT, stated in the output rather than left to be inferred: the
+ * snapshot is consistent but potentially STALE, because commits made after it
+ * begins are absent; and if the source stays live the split simply continues
+ * from the next commit. This is a fresh publication — not a completed move, not
+ * a heal, and not a merge.
+ */
+function adoptCreateOnly(from, to) {
+  const destDir = dirname(to);
+  try {
+    // The destination's PARENT, and only the parent — the same lazy-create
+    // shape §2.3 performs on first mount. A directory is not a destination
+    // entry: the publication below still fails EEXIST if the store FILE
+    // materializes while this runs.
+    mkdirSync(destDir, { recursive: true });
+  } catch (e) {
+    fail(
+      `refusing: the destination directory '${destDir}' could not be created (${e.message}). Nothing was published and no ` +
+        `destination was created at '${to}'.`
+    );
+  }
+  // UNIQUE, and IN THE DESTINATION DIRECTORY. Unique because VACUUM INTO
+  // refuses an existing output and because two concurrent doctors must not
+  // collide; in the destination directory because a hard link cannot cross a
+  // filesystem, so a snapshot taken anywhere else would have to be COPIED into
+  // place — which is precisely the non-atomic publication this design exists
+  // to avoid.
+  const snapshot = POSIX(join(destDir, `.adopt-snapshot-${process.pid}-${randomUUID()}.tmp`));
+  pendingSnapshot = snapshot;
+
+  console.log(`adopt --apply --create-only ${from} → ${to}`);
+  vacuumIntoSnapshot(from, snapshot);
+  console.log(`  snapshot: consistent point-in-time image taken with VACUUM INTO '${snapshot}' (source opened READ-ONLY)`);
+  if (existsSync(`${from}-wal`) || existsSync(`${from}-shm`)) {
+    console.log(
+      `  note: a -wal/-shm sidecar sits beside the source '${from}' and was LEFT EXACTLY AS FOUND — the snapshot's read-only open ` +
+        `removes only a sidecar it observed ABSENT beforehand, and deleting another process's WAL would destroy its uncommitted ` +
+        `frames. (Observation is not proof of ownership: a writer that created a sidecar AFTER that check is a window this path ` +
+        `does not close.)`
+    );
+  }
+
+  // VALIDATE THE SNAPSHOT, NOT THE SURVEY. Any earlier observation of the live
+  // source describes a DIFFERENT file at a DIFFERENT time and need not describe
+  // this snapshot at all, so the gates re-run here against the CLOSED temporary
+  // database — the actual bytes about to be published.
+  const snapProbe = probeSchemaVersion(snapshot);
+  if (snapProbe.error) {
+    fail(
+      `refusing: the point-in-time snapshot of '${from}' is not a readable SQLite database — ${snapProbe.error}. The snapshot has ` +
+        `been removed and NO destination was created at '${to}'.`
+    );
+  }
+  if (snapProbe.version > SUPPORTED_SCHEMA_VERSION) {
+    fail(
+      `refusing: the point-in-time snapshot of '${from}' is at schema version ${snapProbe.version}, newer than the ` +
+        `v${SUPPORTED_SCHEMA_VERSION} schema this build understands — publishing it would plant a store nothing on this machine can ` +
+        `open. Upgrade this Sterling clone instead. The snapshot has been removed and NO destination was created at '${to}'.`
+    );
+  }
+  const snap = surveyStore(snapshot, snapProbe.version, { side: 'snapshot' });
+  if (snap.missing.length) {
+    fail(
+      `refusing: the point-in-time snapshot of '${from}' (taken as '${snapshot}') is not a complete Sterling store — ` +
+        (snap.missing.includes('records')
+          ? `it holds no 'records' table at all, so it is a SQLite file but not a knowledge store`
+          : `its header claims schema v${snapProbe.version} while the v2 identity table(s) ${snap.missing.join(', ')} are absent, so it ` +
+            `is HALF-MIGRATED`) +
+        `. The SNAPSHOT is what is validated here, never the source as it was surveyed earlier — a survey cannot describe a file it ` +
+        `was not taken from. The snapshot has been removed and NO destination was created at '${to}'.`
+    );
+  }
+  console.log(
+    `  snapshot holds ${snap.ids.size} record(s), ${snap.aliasIds.size} record_aliases row(s), ${snap.versionKeys.size} ` +
+      `record_versions row(s), ${snap.relationCount} record_relations row(s) — schema version ${snapProbe.version} (${snapProbe.source})`
+  );
+
+  // PUBLICATION. The link IS the guard.
+  try {
+    linkSync(snapshot, to);
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      fail(
+        `REFUSED: create-only adoption never replaces an existing store. Publishing to '${to}' was refused by the filesystem with ` +
+          `EEXIST — either the destination already existed, or a session lazy-created it while this snapshot was being taken. Either ` +
+          `way the link, not a preliminary existence check, is what refused, and the file at '${to}' was neither read, replaced nor ` +
+          `touched. Healing an existing split remains deliberately unbuilt (board 44434103); use the read-only adopt probe ` +
+          `('node scripts/domain-doctor.mjs adopt --from ${from} --to ${to}') to assess it. The snapshot has been removed.`
+      );
+    }
+    fail(
+      `refusing: the snapshot could not be published to '${to}' (${e.code ?? 'error'}: ${e.message}). Publication is a hard link ` +
+        `inside the destination directory, so an unsupported link, a cross-volume destination, a read-only directory or a network ` +
+        `filesystem all land HERE — loudly — rather than exposing a partial database under the destination's name. The snapshot has ` +
+        `been removed and NO destination was created at '${to}'.`
+    );
+  }
+
+  // STEP 4, and only now: the destination and the snapshot are the SAME inode
+  // under two names, so dropping the temporary name leaves the published file
+  // untouched.
+  let snapshotRemoved = true;
+  try {
+    rmSync(snapshot, { force: true });
+  } catch {
+    snapshotRemoved = false;
+  }
+  pendingSnapshot = snapshotRemoved ? null : snapshot;
+  if (!snapshotRemoved) {
+    console.log(
+      `  note: publication SUCCEEDED but the temporary name '${snapshot}' could not be removed — it is a second name for the ` +
+        `published file, safe to delete.`
+    );
+  }
+  console.log(
+    `CREATED FRESH DESTINATION at '${to}' from a consistent point-in-time snapshot of '${from}'. No existing destination was ` +
+      `replaced. Concurrent source commits after the snapshot start may be absent. This does not heal or merge an existing split; ` +
+      `existing destinations remain unsupported under board 44434103.`
+  );
 }
 
 /** show --db <store.db> --id <id>: READ-ONLY forensic read of one record, on

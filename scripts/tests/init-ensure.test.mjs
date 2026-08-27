@@ -237,23 +237,25 @@ test('universal sterling domain: a config lacking it gains it on re-init (refres
 });
 
 // =============================================================================
-// Board 1b3c7bf3 — config-space remediation-script merge (decision bc0f81e3
-// supersession). SPEC-ONLY: init.mjs's implementation was NOT read to author
-// these — only the dispatch SPEC and store-remediation.mjs's declared exports
-// (REMEDIATION_SCRIPTS, appendMissingRemediation) were used, mirroring the
-// universal-domain managed-refresh test above (same 'refreshed' vocabulary,
-// same read-modify-write-then-still-validates shape).
+// Board 52c1d504 — config-space SANCTIONED-script merge (generalizes the
+// board 1b3c7bf3 / decision bc0f81e3 remediation reach). SPEC-ONLY: init.mjs's
+// implementation was NOT read to author these — only the dispatch SPEC and
+// store-remediation.mjs's declared exports (SANCTIONED_SCRIPTS,
+// appendMissingSanctioned) were used, mirroring the universal-domain
+// managed-refresh test above (same 'refreshed' vocabulary, same
+// read-modify-write-then-still-validates shape).
 //
-// SPEC: a recorded config whose store_guard.allow_scripts is missing one or
-// both of REMEDIATION_SCRIPTS gains EXACTLY the missing ones on a flagless
-// re-run, reported 'refreshed' with the added scripts disclosed in the detail
-// text; existing entries/order preserved; the merged raw JSON still validates
-// via parseConfig. Already-has-both is NOT rewritten for this reason (falls
-// through to the normal matches/differs outcome). A wrong-shaped store_guard
-// or allow_scripts skips the merge with a warning, field left untouched.
+// SPEC: a recorded config whose store_guard.allow_scripts is missing any of
+// SANCTIONED_SCRIPTS (config.ts's shipped allow_scripts default) gains
+// EXACTLY the missing ones on a flagless re-run, reported 'refreshed' with the
+// added scripts disclosed in the detail text; existing entries/order
+// preserved; the merged raw JSON still validates via parseConfig.
+// Already-fully-covered is NOT rewritten for this reason (falls through to
+// the normal matches/differs outcome). A wrong-shaped store_guard or
+// allow_scripts skips the merge with a warning, field left untouched.
 // =============================================================================
 
-test('store_guard remediation merge: a config missing ONE remediation script gains exactly that one on re-init (refreshed), hand-tunings and existing allow_scripts entries/order preserved', () => {
+test('store_guard sanctioned merge: a config missing PART of the shipped sanctioned list gains exactly the missing part on re-init (refreshed), hand-tunings and existing allow_scripts entries/order preserved', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -275,8 +277,19 @@ test('store_guard remediation merge: a config missing ONE remediation script gai
     const after = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(
       after.store_guard.allow_scripts,
-      ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'],
-      'only the missing script is appended; existing entries and their order are untouched'
+      [
+        'scripts/some-admin-script.mjs',
+        'scripts/migration-preflight.mjs',
+        'scripts/dispose-run.mjs',
+        'scripts/init.mjs',
+        'scripts/consume-exit.mjs',
+        'scripts/architecture-projection.mjs',
+        'scripts/domain-doctor.mjs',
+        'scripts/commit-reviewed.mjs',
+        'scripts/migrate-stores.mjs',
+        'packages/tui/bundle/sterling-tui.mjs',
+      ],
+      'only the MISSING shipped sanctioned scripts are appended; existing entries and their order are untouched'
     );
     assert.equal(after.caps.inner_loop_n, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
   } finally {
@@ -287,11 +300,11 @@ test('store_guard remediation merge: a config missing ONE remediation script gai
 // schema default instead of read-modify-write appending onto the recorded
 // array — the caps.inner_loop_n hand-tuning assertion goes red (or the
 // 'scripts/some-admin-script.mjs' entry vanishes from `after`).
-// SABOTAGE (order): reorder allow_scripts into REMEDIATION_SCRIPTS canonical
+// SABOTAGE (order): reorder allow_scripts into SANCTIONED_SCRIPTS canonical
 // order on merge — the deepEqual on `after.store_guard.allow_scripts` goes red
 // because 'scripts/some-admin-script.mjs' would no longer lead the array.
 
-test('store_guard remediation merge: a config missing BOTH remediation scripts gains both, in order, appended after existing entries; both disclosed', () => {
+test('store_guard sanctioned merge: a config missing EVERY shipped sanctioned script gains them all, in SANCTIONED_SCRIPTS order, appended after existing entries; all disclosed', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -306,12 +319,24 @@ test('store_guard remediation merge: a config missing BOTH remediation scripts g
     assert.ok(line, 'refreshed line present');
     assert.match(line[0], /scripts\/migration-preflight\.mjs/, 'migration-preflight.mjs disclosed');
     assert.match(line[0], /scripts\/migrate-stores\.mjs/, 'migrate-stores.mjs disclosed');
+    assert.match(line[0], /packages\/tui\/bundle\/sterling-tui\.mjs/, 'the TUI launcher is disclosed by name — repo-relative, never a bare basename');
 
     const after = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(
       after.store_guard.allow_scripts,
-      ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'],
-      'both missing scripts appended, in REMEDIATION_SCRIPTS order, after the pre-existing entry'
+      [
+        'scripts/some-admin-script.mjs',
+        'scripts/dispose-run.mjs',
+        'scripts/init.mjs',
+        'scripts/consume-exit.mjs',
+        'scripts/architecture-projection.mjs',
+        'scripts/domain-doctor.mjs',
+        'scripts/commit-reviewed.mjs',
+        'scripts/migration-preflight.mjs',
+        'scripts/migrate-stores.mjs',
+        'packages/tui/bundle/sterling-tui.mjs',
+      ],
+      'every missing script appended, in SANCTIONED_SCRIPTS order, after the pre-existing entry'
     );
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -324,37 +349,50 @@ test('store_guard remediation merge: a config missing BOTH remediation scripts g
 // names in the report line (e.g. print a bare "refreshed" with no detail) —
 // both `assert.match(line[0], ...)` disclosure assertions go red.
 
-test('store_guard remediation merge: already has both — NOT rewritten for this reason; a flagless re-run of a TUNED config (custom allow_scripts) reports differs (not refreshed), byte-identical, order untouched', () => {
+test('store_guard sanctioned merge: already fully covered — NOT rewritten for this reason; a flagless re-run of a TUNED config (custom allow_scripts) reports differs (not refreshed), byte-identical, order untouched', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
     const configPath = join(dir, '.sterling', 'config.json');
     const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    // both present, deliberately in NON-canonical order with an admin entry
-    // between them — presence, not canonical order, is what must be checked.
-    // This 3-element allow_scripts no longer equals the schema default (which
-    // carries more entries), so the config as a whole is a TUNED config: the
-    // correct overall outcome is 'differs' (hand-tuned, left untouched) — the
-    // remediation-specific claim under test is narrower: it must NOT be
-    // 'refreshed' for the remediation reason, and must be byte-identical.
-    cfg.store_guard = { allow_scripts: ['scripts/migrate-stores.mjs', 'scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'] };
+    // EVERY shipped sanctioned script present, deliberately in NON-canonical
+    // order with an unrelated admin entry among them — presence, not canonical
+    // order, is what must be checked (board 52c1d504 re-cut: the old fixture
+    // listed only the two migration scripts, a premise the ruling invalidated —
+    // such a config is now missing seven entries and MUST be refreshed).
+    // The extra admin entry keeps this array unequal to the schema default, so
+    // the config as a whole is TUNED and the correct overall outcome is
+    // 'differs'; the merge-specific claim is narrower: never 'refreshed' for
+    // the merge reason, and byte-identical.
+    cfg.store_guard = { allow_scripts: [
+      'scripts/migrate-stores.mjs',
+      'scripts/some-admin-script.mjs',
+      'packages/tui/bundle/sterling-tui.mjs',
+      'scripts/migration-preflight.mjs',
+      'scripts/commit-reviewed.mjs',
+      'scripts/domain-doctor.mjs',
+      'scripts/architecture-projection.mjs',
+      'scripts/consume-exit.mjs',
+      'scripts/init.mjs',
+      'scripts/dispose-run.mjs',
+    ] };
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
     const before = readFileSync(configPath, 'utf8');
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+differs\b/m, 'a tuned allow_scripts makes the whole config differ from the schema default — reported differs');
-    assert.ok(!/^\.sterling\/config\.json\s+refreshed\b/m.test(rerun.stdout), 'never reported refreshed for the remediation reason — both scripts are already present');
-    assert.equal(readFileSync(configPath, 'utf8'), before, 'byte-identical — the non-canonical order is left exactly as recorded, never touched by the remediation merge');
+    assert.ok(!/^\.sterling\/config\.json\s+refreshed\b/m.test(rerun.stdout), 'never reported refreshed for the merge reason — every shipped sanctioned script is already present');
+    assert.equal(readFileSync(configPath, 'utf8'), before, 'byte-identical — the non-canonical order is left exactly as recorded, never touched by the sanctioned merge');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 // SABOTAGE: check presence via a strict canonical-order subsequence match
 // instead of plain membership — this non-canonical-order fixture would then
-// be (wrongly) treated by the remediation merge as missing something, and
+// be (wrongly) treated by the sanctioned merge as missing something, and
 // the byte-identical assertion goes red (the merge would rewrite the file
-// even though both scripts are already present).
+// even though every shipped sanctioned script is already present).
 
 // =============================================================================
 // Round 2 (board 1b3c7bf3 supersession) — RAW-SERIALIZE preserves unknown keys.
@@ -368,10 +406,10 @@ test('store_guard remediation merge: already has both — NOT rewritten for this
 // throws-or-not validation gate — or any unknown top-level key present in a
 // recorded config (a future field this init build doesn't know about yet)
 // would silently vanish on the very re-init that also performs the
-// remediation-script merge.
+// sanctioned-script merge.
 // =============================================================================
 
-test('config raw-serialize: an unknown/future top-level key survives byte-for-byte through a re-init that ALSO performs the remediation-script merge (parseConfig is a validation gate only, never the serialized shape)', () => {
+test('config raw-serialize: an unknown/future top-level key survives byte-for-byte through a re-init that ALSO performs the sanctioned-script merge (parseConfig is a validation gate only, never the serialized shape)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -380,14 +418,14 @@ test('config raw-serialize: an unknown/future top-level key survives byte-for-by
     // an unknown top-level key this build's schema does not declare — schema-valid
     // overall because unrecognized keys are tolerated (non-strict), not rejected.
     cfg.future_policy = { some_future_field: 'x', nested: { a: 1, b: [1, 2, 3] } };
-    // AND, in the same write, a missing remediation script — so the merge path
+    // AND, in the same write, missing sanctioned scripts — so the merge path
     // that writes the file back is actually exercised, not just the load gate.
     cfg.store_guard = { allow_scripts: ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'] };
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
     const rerun = init(dir); // flagless re-init
     assert.equal(rerun.code, 0, rerun.stderr);
-    assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\b/m, 'the remediation merge fired — refreshed, not matches/differs');
+    assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\b/m, 'the sanctioned merge fired — refreshed, not matches/differs');
 
     const after = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(
@@ -397,8 +435,19 @@ test('config raw-serialize: an unknown/future top-level key survives byte-for-by
     );
     assert.deepEqual(
       after.store_guard.allow_scripts,
-      ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'],
-      'the remediation merge itself still ran correctly in the same write'
+      [
+        'scripts/some-admin-script.mjs',
+        'scripts/migration-preflight.mjs',
+        'scripts/dispose-run.mjs',
+        'scripts/init.mjs',
+        'scripts/consume-exit.mjs',
+        'scripts/architecture-projection.mjs',
+        'scripts/domain-doctor.mjs',
+        'scripts/commit-reviewed.mjs',
+        'scripts/migrate-stores.mjs',
+        'packages/tui/bundle/sterling-tui.mjs',
+      ],
+      'the sanctioned merge itself still ran correctly in the same write'
     );
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -409,7 +458,7 @@ test('config raw-serialize: an unknown/future top-level key survives byte-for-by
 // — parseConfig's non-strict object strips future_policy on output, so
 // after.future_policy is undefined and the first deepEqual goes red.
 
-test('a schema-invalid store_guard makes init REFUSE outright (exit 2, "does not validate") — the anti-destructive load gate, not the remediation merge, is what actually guards this path', () => {
+test('a schema-invalid store_guard makes init REFUSE outright (exit 2, "does not validate") — the anti-destructive load gate, not the sanctioned merge, is what actually guards this path', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);

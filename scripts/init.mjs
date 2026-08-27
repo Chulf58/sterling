@@ -32,7 +32,7 @@ import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-dist
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, probeCodexWin, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
-import { appendMissingRemediation } from './lib/store-remediation.mjs';
+import { appendMissingSanctioned } from './lib/store-remediation.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Test-isolation seam (mirrors STERLING_REGISTRY_DB/STERLING_WIN_NODE): the
@@ -204,26 +204,28 @@ if (!recorded) {
     mutationNotes.push(`added the universal '${UNIVERSAL_DOMAIN}' domain to stack tags (now [${eff.stackTags.join(', ')}])`);
   }
 
-  // Remediation-script reach (decision bc0f81e3, board 1b3c7bf3): a config
-  // frozen with an EXPLICIT store_guard.allow_scripts before the schema
-  // default grew never gains newly-sanctioned scripts, because an explicit
-  // array REPLACES the zod default rather than extending it — and the
-  // store's refuse-until-migrated posture then makes the mandated migration
-  // scripts the one thing an H15-denied consumer can never run to escape it.
-  // Additive-only, disclosed below (never silent — anti_pattern 94f16632);
-  // a wrong-shaped store_guard/allow_scripts is warned about and left alone,
-  // never replaced.
+  // Sanctioned-script reach (board 52c1d504; original trap: decision bc0f81e3,
+  // board 1b3c7bf3): a config frozen with an EXPLICIT store_guard.allow_scripts
+  // before the schema default grew never gains newly-sanctioned scripts,
+  // because an explicit array REPLACES the zod default rather than extending
+  // it — measured for the mandated migration scripts (the one thing an
+  // H15-denied consumer could never run to escape a read-only store) and again
+  // for the TUI launcher. The merge carries exactly what config.ts SHIPS as
+  // sanctioned, so it changes which projects that list reaches, never what is
+  // on it. Additive-only, disclosed below (never silent — anti_pattern
+  // 94f16632); a wrong-shaped store_guard/allow_scripts is warned about and
+  // left alone, never replaced.
   const rawGuard = mutated.store_guard;
   if (rawGuard !== undefined) {
     if (rawGuard === null || typeof rawGuard !== 'object' || Array.isArray(rawGuard)) {
-      warns.push("warn: .sterling/config.json store_guard is not an object — skipping the remediation-script reach merge (decision bc0f81e3); its shape was not written by init and will not be replaced");
+      warns.push('warn: .sterling/config.json store_guard is not an object — skipping the sanctioned-script reach merge (board 52c1d504); its shape was not written by init and will not be replaced');
     } else if (rawGuard.allow_scripts !== undefined && !Array.isArray(rawGuard.allow_scripts)) {
-      warns.push('warn: .sterling/config.json store_guard.allow_scripts is not an array — skipping the remediation-script reach merge (decision bc0f81e3); its shape was not written by init and will not be replaced');
+      warns.push('warn: .sterling/config.json store_guard.allow_scripts is not an array — skipping the sanctioned-script reach merge (board 52c1d504); its shape was not written by init and will not be replaced');
     } else if (Array.isArray(rawGuard.allow_scripts)) {
-      const { next, added } = appendMissingRemediation(rawGuard.allow_scripts);
+      const { next, added } = appendMissingSanctioned(rawGuard.allow_scripts);
       if (added.length) {
         mutated = { ...mutated, store_guard: { ...rawGuard, allow_scripts: next } };
-        mutationNotes.push(`store_guard.allow_scripts gained missing remediation script(s): ${added.join(', ')} (decision bc0f81e3)`);
+        mutationNotes.push(`store_guard.allow_scripts gained script(s) Sterling ships as sanctioned that this explicit array was missing: ${added.join(', ')}`);
       }
     }
     // allow_scripts absent on an explicit store_guard object: the schema

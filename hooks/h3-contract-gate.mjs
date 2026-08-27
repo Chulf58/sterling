@@ -5093,6 +5093,15 @@ var configSchema = external_exports.object({
   // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
   // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
   // out below. Keep this list basename-free.
+  //
+  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
+  // must stay element-identical to this default — it is what reaches this list
+  // into a consumer config that already carries an EXPLICIT allow_scripts array
+  // (a zod .default() applies only when the field is ABSENT, so a frozen config
+  // never gains a grown default; board 52c1d504). That module is dependency-free
+  // by contract and this package's tsconfig pins rootDir to src, so neither can
+  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
+  // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
     allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
   }).default({}),
@@ -5346,6 +5355,43 @@ function deepReplaceString(value, from, to) {
 var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
+var MAX_BODY_COMPARE_DEPTH = 64;
+function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (before === null || typeof before !== "object")
+    return out;
+  if (Array.isArray(before)) {
+    if (!Array.isArray(after))
+      return out;
+    for (let i = 0; i < before.length; i++) {
+      if (i >= after.length)
+        out.push(`${path}[${i}]`);
+      else
+        droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+    }
+    return out;
+  }
+  if (after === null || typeof after !== "object" || Array.isArray(after))
+    return out;
+  const parsed = after;
+  for (const key of Object.keys(before)) {
+    const here = path ? `${path}.${key}` : key;
+    if (!Object.prototype.hasOwnProperty.call(parsed, key))
+      out.push(here);
+    else
+      droppedKeyPaths(before[key], parsed[key], here, depth + 1, out);
+  }
+  return out;
+}
+function assertNoFieldLoss(op, before, after) {
+  const dropped = droppedKeyPaths(before, after);
+  if (dropped.length === 0)
+    return;
+  const type = typeof before.type === "string" ? before.type : "unknown";
+  throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+}
 var SterlingStore = class _SterlingStore {
   db;
   /**
@@ -5649,6 +5695,7 @@ var SterlingStore = class _SterlingStore {
       throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
     }
     const record = validateRecord(prepared.input);
+    assertNoFieldLoss("create", prepared.input, record);
     this.tx(() => {
       this.insertRecord(record);
       this.logActivity("created", record, record.created_at);

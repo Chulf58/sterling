@@ -324,7 +324,31 @@ test('PIN H2 (mint survives a subsequent baseline deny): the restore_performed i
     const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `both (A) restore and (B) baseline deny must still produce a single deny — ${r.stderr}`);
     assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'the (A) tracked path is restored to HEAD');
-    assert.equal(existsSync(evilAgent), false, '(B) new gitignored agent file is deleted (restore to baseline-absent)');
+    // Re-cut 2026-08-27 per user ruling: (B) additions are DETECTED + DENIED
+    // and LEFT ON DISK, never deleted — deleting is irreversible and H17
+    // cannot tell a malicious plant from a legitimate file the conductor
+    // just created. This line previously asserted deletion and, being FIRST,
+    // aborted the test before the mint assertion below ever ran — a live
+    // instance of anti-pattern f1d66bef (an early assertion masking every
+    // later one). The mint assertion at the bottom of this test was UNREACHED
+    // until this re-cut.
+    // Verdict carrier: SURVIVAL + BYTE-IDENTITY, never the exit code above —
+    // measured on this exact file, an exit-code-only assertion stayed GREEN
+    // with the survive-on-disk guard removed, because the old code deleted
+    // the file FIRST and still denied (exit 2) afterward: same exit code,
+    // opposite disk outcome.
+    assert.ok(existsSync(evilAgent), '(B) new gitignored agent file survives on disk (no delete)');
+    // Sabotage: reintroduce removeFileAt/removeUnder (or any code path that
+    // deletes evilAgent before or after denying) → this assertion goes red.
+    assert.equal(
+      readFileSync(evilAgent, 'utf8'),
+      '# smuggled agent (hooks stripped)\n',
+      '(B) surviving file is byte-identical to what was planted, not merely present'
+    );
+    // Sabotage: truncate, re-encode, or partially rewrite evilAgent instead of
+    // leaving it untouched (e.g. write an empty placeholder in its place) →
+    // this assertion goes red even though the existsSync check above would
+    // still pass.
 
     const items = store
       .query({ types: ['todo'], cap: 100 })

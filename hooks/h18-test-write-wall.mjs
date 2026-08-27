@@ -4976,6 +4976,15 @@ var configSchema = external_exports.object({
   // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
   // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
   // out below. Keep this list basename-free.
+  //
+  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
+  // must stay element-identical to this default — it is what reaches this list
+  // into a consumer config that already carries an EXPLICIT allow_scripts array
+  // (a zod .default() applies only when the field is ABSENT, so a frozen config
+  // never gains a grown default; board 52c1d504). That module is dependency-free
+  // by contract and this package's tsconfig pins rootDir to src, so neither can
+  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
+  // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
     allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
   }).default({}),

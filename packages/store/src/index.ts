@@ -418,6 +418,97 @@ export type ToolStore = Pick<
   | 'withTransactionForScope'
 >;
 
+/** Depth bound for the create-time field-loss walk below. The `before` side is a
+ *  CALLER-supplied body that nothing upstream has capped, so an unbounded
+ *  recursion would turn a pathological (or corrupt) input into a RangeError +
+ *  stack trace instead of the promised refusal. Exceeding the bound THROWS a
+ *  plain message — the bound is far past any legal record shape, so hitting it
+ *  is itself the finding. Same value and same reasoning as the reference
+ *  implementation in scripts/domain-doctor.mjs (MAX_BODY_COMPARE_DEPTH). */
+const MAX_BODY_COMPARE_DEPTH = 64;
+
+/** Every key path present in `before` that is ABSENT from `after` — the LOSS
+ *  half of a round-trip comparison, and deliberately only that half.
+ *
+ *  LIFTED FROM scripts/domain-doctor.mjs's droppedKeyPaths (board bd3f0acf, the
+ *  scripts/ half of this item), which is the measured reference implementation:
+ *  the FIRST version of that guard used top-level `unknownFieldsIn()` and review
+ *  caught that `files: [{path, role, note}]` sails straight through it while
+ *  still losing `note`. zod strips at EVERY nesting level, so the detector must
+ *  walk to every level too. Not imported — scripts/ is standalone `.mjs` with no
+ *  workspace imports (invariant 4) — so the algorithm is lifted here, in the
+ *  package that owns the write path, and both call sites share this one copy.
+ *
+ *  Reports dotted paths with array indices — 'files[0].note',
+ *  'current_ac[2].ac_id' — because a bare field name at depth tells a caller
+ *  nothing about which record part is about to be dropped.
+ *
+ *  PRESENCE, NEVER VALUE: a key whose VALUE changed is a normalization the
+ *  schema boundary performs on purpose (normalizeRepoPath canonicalizes
+ *  file_keys and files[].path), not damage; flagging it would refuse good
+ *  records. A key that is GONE is unrecoverable. One-directional containment is
+ *  also why schema DEFAULTS — which ADD keys the caller never sent — do not
+ *  false-positive here.
+ *
+ *  A source array LONGER than its parsed counterpart counts as loss too, so a
+ *  dropped element cannot hide behind index-wise walking. */
+export function droppedKeyPaths(before: unknown, after: unknown, path = '', depth = 0, out: string[] = []): string[] {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (before === null || typeof before !== 'object') return out;
+  if (Array.isArray(before)) {
+    if (!Array.isArray(after)) return out;
+    for (let i = 0; i < before.length; i++) {
+      if (i >= after.length) out.push(`${path}[${i}]`);
+      else droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+    }
+    return out;
+  }
+  if (after === null || typeof after !== 'object' || Array.isArray(after)) return out;
+  const parsed = after as Record<string, unknown>;
+  for (const key of Object.keys(before as Record<string, unknown>)) {
+    const here = path ? `${path}.${key}` : key;
+    if (!Object.prototype.hasOwnProperty.call(parsed, key)) out.push(here);
+    else droppedKeyPaths((before as Record<string, unknown>)[key], parsed[key], here, depth + 1, out);
+  }
+  return out;
+}
+
+/** CREATE-TIME FIELD-LOSS REFUSAL (board bd3f0acf, narrowly amending decision
+ *  44e45931). `validateRecord` ends in `entry.schema.parse(input)` and zod
+ *  STRIPS unknown keys silently at every depth, so before this guard every
+ *  create caller other than the MCP tool surface (tools.ts, which has its own
+ *  `unknownFieldsIn` check) could hand over a body carrying a legacy or
+ *  hand-added field, get SUCCESS back, and read it back missing that field —
+ *  silent, permanent knowledge loss in the system whose charter is not losing
+ *  knowledge.
+ *
+ *  44e45931 REJECTED making every record schema `.strict()` because "strictness
+ *  would land on every write path including internal ones and legacy
+ *  round-trips". This is deliberately NARROWER than that: it is create-only and
+ *  does NOT touch applyInPlace, enqueueSystemTodo or supersede, so the legacy
+ *  round-trips that argument protects are untouched.
+ *
+ *  NO EXEMPTION FOR INTERNAL MINTS. An unknown field on an internally-minted
+ *  record is a bug in this repo — a schema or a mint that have drifted apart —
+ *  and it must throw here rather than be quietly excused.
+ *
+ *  Throws BEFORE any transaction opens: nothing is written, and the message says
+ *  so, naming EVERY dropped path (not just the first) so one refusal is enough
+ *  to fix the caller. */
+export function assertNoFieldLoss(op: string, before: Record<string, unknown>, after: unknown): void {
+  const dropped = droppedKeyPaths(before, after);
+  if (dropped.length === 0) return;
+  const type = typeof before.type === 'string' ? before.type : 'unknown';
+  throw new Error(
+    `${op}: record type '${type}' does not define ${dropped.length === 1 ? 'this field' : 'these fields'}, and the ` +
+      `schema parse would DROP ${dropped.length === 1 ? 'it' : 'them'} silently: ${dropped.join(', ')}. ` +
+      `Refused before the write — NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid ` +
+      `set) or add the field to the registered schema; a write must never report success for what it discarded.`
+  );
+}
+
 export class SterlingStore {
   private db: DatabaseSync;
 
@@ -811,6 +902,13 @@ export class SterlingStore {
       );
     }
     const record = validateRecord(prepared.input);
+    // Board bd3f0acf: the parse above STRIPS unknown keys at every depth. Compare
+    // key-path presence pre- vs post-parse and refuse if anything was lost —
+    // BEFORE tx() opens, so a refusal leaves no row and no activity entry. The
+    // comparison runs on prepared.input (post identity normalization) so the
+    // envelope fields resolveIdentity itself writes back — status/superseded_by —
+    // are on both sides and never read as loss.
+    assertNoFieldLoss('create', prepared.input, record);
     this.tx(() => {
       this.insertRecord(record);
       this.logActivity('created', record, record.created_at);

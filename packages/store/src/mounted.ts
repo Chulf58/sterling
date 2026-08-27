@@ -11,7 +11,7 @@
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, DEFAULT_QUERY_CAP, type QueryOptions } from './index.js';
+import { SterlingStore, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 
 /** A domain store to mount: its manifest name + its already-resolved DB path. */
@@ -71,7 +71,15 @@ export class MountedStores {
    *  accepts was rejected through the mounted surface, because the schemas
    *  registry still declares the derived status/superseded_by fields. */
   create(input: unknown): DurableRecord {
-    const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
+    const normalized = SterlingStore.normalizeIdentityEnvelope(input);
+    const record = validateRecord(normalized);
+    // Board bd3f0acf — this site is NOT redundant with SterlingStore.create's own
+    // guard. This surface is not a pass-through: it parses (and therefore strips)
+    // HERE, before delegating, so the store below only ever sees an
+    // already-cleaned record and its guard could never fire for a mounted caller.
+    // The refusal must happen against the caller's own body, which only exists at
+    // this point in the chain.
+    assertNoFieldLoss('create', normalized, record);
     return this.storeFor(record.scope).create(record);
   }
 

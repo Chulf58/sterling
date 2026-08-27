@@ -104,16 +104,27 @@ test('(A5) INTEGRATION: a leading prohibition suppresses a glob mention exactly 
 });
 
 // ---------------------------------------------------------------------------
-// (A6) DISCLOSED, NOT FIXED HERE: the pre-existing trailing-marker defect
-// (isNegatedContext only inspects text BEFORE the mention) applies to glob
-// mentions exactly as it already does to literal paths. Expected TRUE
-// (not suppressed) both before and after this change.
+// (A6) RE-CUT (board 59c30a7f, 2026-08-27): this arm used to pin a
+// DELIBERATELY DISCLOSED gap — isNegatedContext only inspected text BEFORE a
+// mention, so a trailing prohibition after a glob mention did NOT suppress
+// it, and the assertion below read `assert.equal(stillUnsuppressed, true)`.
+// That premise is no longer true: board 59c30a7f added a backward reach
+// (scripts/hooks/lib/dispatch-advisory.mjs, the shared detector) that
+// suppresses a trailing anaphoric territory prohibition for ANY mention
+// shape, literal or glob — the glob interaction was never a second
+// heuristic, so it inherits the fix automatically (see
+// dispatch-advisory-trailing-prohibition.test.mjs (A4) for the same shape
+// pinned directly on the shared detector). Leaving this assertion as `true`
+// would now assert something FALSE at HEAD, so it is inverted, not bent.
+// SABOTAGE: drop the `|| trailingSuppresses` term in hasUnsuppressedMatch —
+// this flips back to unsuppressed (the pre-59c30a7f behavior), reproducing
+// the gap this arm now asserts is closed.
 // ---------------------------------------------------------------------------
-test('(A6) DISCLOSED GAP (unchanged by this addition): a TRAILING prohibition after a glob mention does not suppress it', () => {
+test('(A6) a TRAILING prohibition after a glob mention now suppresses it (board 59c30a7f)', () => {
   const prompt = 'Other agents own scripts/hooks/** — do not touch those.';
   const [prefix] = extractGlobPrefixCandidates(prompt);
-  const stillUnsuppressed = hasUnsuppressedMatch(prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false });
-  assert.equal(stillUnsuppressed, true);
+  const suppressed = !hasUnsuppressedMatch(prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false });
+  assert.equal(suppressed, true);
 });
 
 // ===========================================================================

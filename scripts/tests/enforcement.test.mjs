@@ -12,7 +12,11 @@ import { resolveToolchains, checkAdapterRegistry, loadAdapter } from '../adapter
 import { findBackslashCommandsInHooksJson } from '../lib/agent-distribution.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const HOOKS = join(root, 'scripts', 'hooks');
+// Mutation seam (slice S1, board 5402a024) — mirrors h24-gate-exit-lint.test.mjs:48.
+// STERLING_HOOKS_DIR lets a clean-room mutation run point this suite at a mutant
+// bundle. Unset falls back to today's hard-coded scripts/hooks — byte-identical
+// behavior to before this seam existed.
+const HOOKS = process.env.STERLING_HOOKS_DIR || join(root, 'scripts', 'hooks');
 const NOW = '2026-06-10T12:00:00.000Z';
 
 let SterlingStore;
@@ -1402,22 +1406,58 @@ test('H17 AC5: no agent_id (conductor) → exit 0, nothing touched, short-circui
 });
 
 // ---------------------------------------------------------------------------
-// AC8 (v3.1 EXPANDED) — gitignored enforcement writes caught via the (B) baseline + restored;
-//   agents/evil.md (new→delete), .sterling/config.json (modified→restore),
-//   .claude/settings.local.json (v3.1 NEW, modified→restore). sterling.db change NOT flagged.
+// AC8 (v3.1 EXPANDED, addition arm RE-CUT 2026-08-27 per user ruling) — gitignored
+//   enforcement writes caught via the (B) baseline;
+//   agents/evil.md (new → DENIED + REPORTED, left ON DISK — deleting an unexpected
+//     addition is irreversible and H17 cannot tell a malicious plant from a
+//     legitimate file the conductor just created; the sweep is a detector, not
+//     an eraser, so a real plant survives on disk until a human removes it),
+//   .sterling/config.json (modified→restore — UNCHANGED by the ruling: git is a
+//     recoverable source of truth for a tracked/known baseline, so restore-on-modify
+//     still applies),
+//   .claude/settings.local.json (v3.1 NEW, modified→restore — also unchanged).
+//   sterling.db change NOT flagged.
 // ---------------------------------------------------------------------------
 
-test('H17 AC8: gitignored (B)-set writes caught via baseline + restored; sterling.db NOT flagged', { skip: GIT_SKIP }, () => {
+test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+left in place, modified files restored; sterling.db NOT flagged', { skip: GIT_SKIP }, () => {
   const { dir, store, cleanup } = makeGitProject();
   try {
-    // --- .claude/agents/evil.md : NEW → deleted ---
+    // --- .claude/agents/evil.md : NEW → DENIED, file SURVIVES byte-identical on disk ---
     const evilAgent = join(dir, '.claude', 'agents', 'evil.md');
     const legitAgent = join(dir, '.claude', 'agents', 'coder.md');
+    const plantedBytes = Buffer.from('# smuggled agent (hooks stripped)\n');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(evilAgent, '# smuggled agent (hooks stripped)\n');
+    writeFileSync(evilAgent, plantedBytes);
     let r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `new gitignored agent file must deny — ${oneLine(r.stderr)}`);
-    assert.equal(existsSync(evilAgent), false, 'new (B)-set file deleted (restore to baseline-absent)');
+    // Verdict carrier for this arm: SURVIVAL + BYTE-IDENTITY, not the exit code above.
+    // Measured on this exact file: an exit-code-only assertion stayed GREEN even with
+    // the survive-on-disk guard removed, because the old code deleted the file FIRST
+    // and still denied (exit 2) afterward — same exit code, opposite disk outcome.
+    // Do not "simplify" this arm back to an exit-code check.
+    assert.ok(existsSync(evilAgent), 'unexpected addition must survive on disk (no delete)');
+    // Sabotage: reintroduce the old unlink-on-addition call (or any code path that
+    // removes evilAgent before/after denying) → this assertion goes red.
+    assert.deepEqual(
+      readFileSync(evilAgent),
+      plantedBytes,
+      'surviving file must be byte-identical to what was planted, not merely present'
+    );
+    // Sabotage: truncate, re-encode, or partially rewrite evilAgent instead of leaving
+    // it untouched (e.g. write an empty placeholder in its place) → this assertion
+    // goes red even though existsSync above would still pass.
+    assert.doesNotMatch(
+      oneLine(r.stderr),
+      /reverted|removed/i,
+      'denial message must not claim an action (revert/remove) that no longer happens'
+    );
+    // Sabotage: leave the old "restore to baseline-absent" / "reverted" wording in the
+    // (B)-addition denial message path → this assertion goes red.
+    assert.match(oneLine(r.stderr), /detect/i, 'denial message must say the addition was DETECTED');
+    assert.match(oneLine(r.stderr), /left/i, 'denial message must say the file was LEFT in place / on disk');
+    // Sabotage: drop the "detected and left in place" wording from the addition-denial
+    // message (e.g. revert to a generic "denied" with no disposition stated) →
+    // this assertion goes red.
     assert.ok(existsSync(legitAgent), 'a legit pre-existing agent file is left untouched');
 
     // --- .sterling/config.json : MODIFIED → restored (kept valid so h17 config reads still succeed) ---

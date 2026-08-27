@@ -5102,6 +5102,15 @@ var configSchema = external_exports.object({
   // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
   // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
   // out below. Keep this list basename-free.
+  //
+  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
+  // must stay element-identical to this default — it is what reaches this list
+  // into a consumer config that already carries an EXPLICIT allow_scripts array
+  // (a zod .default() applies only when the field is ABSENT, so a frozen config
+  // never gains a grown default; board 52c1d504). That module is dependency-free
+  // by contract and this package's tsconfig pins rootDir to src, so neither can
+  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
+  // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
     allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
   }).default({}),
@@ -5355,6 +5364,43 @@ function deepReplaceString(value, from, to) {
 var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
+var MAX_BODY_COMPARE_DEPTH = 64;
+function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (before === null || typeof before !== "object")
+    return out;
+  if (Array.isArray(before)) {
+    if (!Array.isArray(after))
+      return out;
+    for (let i = 0; i < before.length; i++) {
+      if (i >= after.length)
+        out.push(`${path}[${i}]`);
+      else
+        droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+    }
+    return out;
+  }
+  if (after === null || typeof after !== "object" || Array.isArray(after))
+    return out;
+  const parsed = after;
+  for (const key of Object.keys(before)) {
+    const here = path ? `${path}.${key}` : key;
+    if (!Object.prototype.hasOwnProperty.call(parsed, key))
+      out.push(here);
+    else
+      droppedKeyPaths(before[key], parsed[key], here, depth + 1, out);
+  }
+  return out;
+}
+function assertNoFieldLoss(op, before, after) {
+  const dropped = droppedKeyPaths(before, after);
+  if (dropped.length === 0)
+    return;
+  const type = typeof before.type === "string" ? before.type : "unknown";
+  throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+}
 var SterlingStore = class _SterlingStore {
   db;
   /**
@@ -5658,6 +5704,7 @@ var SterlingStore = class _SterlingStore {
       throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
     }
     const record = validateRecord(prepared.input);
+    assertNoFieldLoss("create", prepared.input, record);
     this.tx(() => {
       this.insertRecord(record);
       this.logActivity("created", record, record.created_at);
@@ -7092,6 +7139,7 @@ var NO_RUN = "no-run";
 var PROCFS_FD_DIR = process.env.STERLING_H17_PROCFS_FD_DIR || "/proc/self/fd";
 var IS_WIN32 = process.platform === "win32";
 var UNATTESTABLE_SYMLINK = "symlink-target";
+var UNATTESTABLE_FILE_BYTES = "file-bytes-unstable";
 var PROC_SUPER_MAGIC = 0x9fa0n;
 function secureIoUnavailableReason(probeDir) {
   if (IS_WIN32) return null;
@@ -7319,25 +7367,20 @@ function writeRegularAt(parentHandle, leaf, buf, rel) {
     closePinned(fd, primary);
   }
 }
-function removeFileAt(parentHandle, leaf, rel) {
-  const anchored = `${parentHandle}/${leaf}`;
-  const kind = lstatKind(anchored);
-  if (kind !== "file" && kind !== "absent") {
-    throw new Error(
-      `refusing to remove (B) baseline path '${rel}': the entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink, directory or other non-regular entry standing where the baseline walk saw a file is denied without being deleted, never removed through`
-    );
-  }
-  rmSync(anchored, { force: true });
-}
-function removeTreeAt(parentHandle, leaf, rel, depth = 0) {
+function removeTreeAt(parentHandle, leaf, rel, depth = 0, leftOnDisk = []) {
   WALK_BUDGET.chargeDepth(depth, rel);
+  if (isEnforcementSurface(rel)) {
+    leftOnDisk.push(rel);
+    return leftOnDisk;
+  }
   const anchored = `${parentHandle}/${leaf}`;
   const kind = lstatKind(anchored);
-  if (kind === "absent") return;
+  if (kind === "absent") return leftOnDisk;
   if (kind !== "dir") {
     rmSync(anchored, { force: true });
-    return;
+    return leftOnDisk;
   }
+  const keptBefore = leftOnDisk.length;
   withPinnedDir(anchored, (dirHandle) => {
     const names = [];
     const dir = opendirSync(dirHandle);
@@ -7359,11 +7402,13 @@ function removeTreeAt(parentHandle, leaf, rel, depth = 0) {
         if (!primary) throw closeErr;
       }
     }
-    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1);
+    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1, leftOnDisk);
   });
-  rmdirSync(anchored);
+  if (leftOnDisk.length === keptBefore) rmdirSync(anchored);
+  return leftOnDisk;
 }
 var HASH_CHUNK_BYTES = 64 * 1024;
+var HASH_STABILITY_ATTEMPTS = 3;
 var MAX_WALK_NODES = 1e4;
 var MAX_WALK_DEPTH = 64;
 var MAX_RECORD_BYTES = 16 * 1024 * 1024;
@@ -7373,6 +7418,12 @@ var WalkBudgetError = class extends Error {
     super(message);
     this.name = "WalkBudgetError";
     this.budget = budget;
+  }
+};
+var FileUnstableError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "FileUnstableError";
   }
 };
 function newWalkBudget() {
@@ -7418,30 +7469,32 @@ function sha256OfFileStreamed(abs) {
   }
 }
 function sha256OfOpenFd(fd, label) {
-  const st = fstatSync(fd);
-  if (!st.isFile()) {
+  if (!fstatSync(fd).isFile()) {
     throw new Error(`'${label}' is not a regular file (fstat) \u2014 refusing to stream-hash it; only a regular file's bytes are hashable`);
   }
-  {
+  let lastReason = null;
+  for (let attempt = 1; attempt <= HASH_STABILITY_ATTEMPTS; attempt++) {
+    const st = fstatSync(fd);
     const expectedSize = st.size;
     const hash = createHash("sha256");
     const buf = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
     let total = 0;
     while (total < expectedSize) {
       const want = Math.min(HASH_CHUNK_BYTES, expectedSize - total);
-      const n = readSync(fd, buf, 0, want, null);
+      const n = readSync(fd, buf, 0, want, total);
       if (n <= 0) break;
       hash.update(n === HASH_CHUNK_BYTES ? buf : buf.subarray(0, n));
       total += n;
     }
     const st2 = fstatSync(fd);
-    if (total !== expectedSize || st2.size !== expectedSize || st2.mtimeMs !== st.mtimeMs || st2.ctimeMs !== st.ctimeMs) {
-      throw new Error(
-        `'${label}' changed while being stream-hashed (read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}) \u2014 refusing a torn hash; a file mutating mid-hash is itself a violation signal`
-      );
+    if (total === expectedSize && st2.size === expectedSize && st2.mtimeMs === st.mtimeMs && st2.ctimeMs === st.ctimeMs) {
+      return hash.digest("hex");
     }
-    return hash.digest("hex");
+    lastReason = `attempt ${attempt}/${HASH_STABILITY_ATTEMPTS} read ${total} of ${expectedSize} bytes; size ${st.size}->${st2.size}, mtime ${st.mtimeMs}->${st2.mtimeMs}, ctime ${st.ctimeMs}->${st2.ctimeMs}`;
   }
+  throw new FileUnstableError(
+    `'${label}' changed under every one of ${HASH_STABILITY_ATTEMPTS} bounded stream-hash attempts (${lastReason}) \u2014 refusing a torn hash; its bytes are UNATTESTABLE for this snapshot`
+  );
 }
 function readBoundedFile(abs, maxBytes, what) {
   return readBoundedBuffer(abs, maxBytes, what).toString("utf8");
@@ -7583,7 +7636,16 @@ function pathStateAt(parentHandle, leaf, rel, idx, budget, depth) {
       throw new Error(`unsupported file type at '${rel}' \u2014 cannot snapshot its state, so this command's writes are unverifiable`);
     }
     const mode = h.st.mode & 4095;
-    if (h.kind === "file") return { exists: true, type: "file", mode, index, sha256: hashClassifiedLeaf(h, rel) };
+    if (h.kind === "file") {
+      let sha256;
+      try {
+        sha256 = hashClassifiedLeaf(h, rel);
+      } catch (e) {
+        if (!(e instanceof FileUnstableError)) throw e;
+        return { exists: true, type: "file", mode, index, file_unattested: UNATTESTABLE_FILE_BYTES };
+      }
+      return { exists: true, type: "file", mode, index, sha256 };
+    }
     if (h.kind === "dir") {
       budget.chargeDepth(depth, rel);
       const children = /* @__PURE__ */ Object.create(null);
@@ -7653,11 +7715,15 @@ function sameState(a, b) {
   if (a.exists !== b.exists) return false;
   if (a.index !== b.index) return false;
   if (a.unattestable || b.unattestable) return false;
+  if (a.file_unattested || b.file_unattested) return false;
   if (!a.exists) return true;
   if (a.type !== b.type) return false;
   if (a.mode !== b.mode) return false;
   if (a.type === "symlink") return false;
-  if (a.type === "file") return a.sha256 === b.sha256;
+  if (a.type === "file") {
+    if (a.file_unattested || b.file_unattested) return false;
+    return a.sha256 === b.sha256;
+  }
   if (a.type === "dir") {
     if (a.walk_budget_exceeded || b.walk_budget_exceeded) return false;
     if (!isStateObject(a.children) || !isStateObject(b.children)) return false;
@@ -7681,6 +7747,12 @@ function ownKeys(o) {
 var STATE_FIELDS = {
   absent: ["exists", "index"],
   file: ["exists", "type", "mode", "index", "sha256"],
+  // BOARD fabf21d8: a file whose bytes were UNATTESTABLE carries the marker
+  // INSTEAD of a digest — never both, which is why it is its own shape rather
+  // than an optional extra field on `file`. Admitting it opens nothing: its only
+  // effect anywhere is to make a state NEVER equal and NEVER stamp-attestable,
+  // so a crafted record that adds it can only make the comparison stricter.
+  file_unattested: ["exists", "type", "mode", "index", "file_unattested"],
   // RULING B (532a4383): a symlink carries an `unattestable` MARKER, never a
   // `target` — the target was the racy read-through this ruling removed. A
   // record that still carries `target` (an older snapshot, or a crafted one)
@@ -7707,6 +7779,13 @@ function stateShapeError(cwd2, v, where) {
   if (v.type !== "file" && v.type !== "symlink" && v.type !== "dir") return `'${where}' has an unrecognized 'type' (${JSON.stringify(v.type)})`;
   if (!Number.isInteger(v.mode) || v.mode < 0 || v.mode > 4095) return `'${where}' has an invalid 'mode' (${JSON.stringify(v.mode)})`;
   if (v.type === "file") {
+    if (v.file_unattested !== void 0) {
+      if (v.file_unattested !== UNATTESTABLE_FILE_BYTES) {
+        return `'${where}' is a file whose 'file_unattested' marker is not the literal ${JSON.stringify(UNATTESTABLE_FILE_BYTES)} (${JSON.stringify(v.file_unattested)})`;
+      }
+      if (v.sha256 !== void 0) return `'${where}' is a file carrying BOTH a sha256 digest and the 'file_unattested' marker \u2014 a state no comparison can speak for`;
+      return strayFieldError(v, STATE_FIELDS.file_unattested, where);
+    }
     if (typeof v.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(v.sha256)) return `'${where}' is a file with no sha256 digest`;
     return strayFieldError(v, STATE_FIELDS.file, where);
   }
@@ -7732,12 +7811,16 @@ function stateShapeError(cwd2, v, where) {
 function stampCouldAttest(recorded, current) {
   if (!isStateObject(recorded) || !isStateObject(current)) return false;
   if (recorded.unattestable || current.unattestable) return false;
+  if (recorded.file_unattested || current.file_unattested) return false;
   if (recorded.index !== current.index) return false;
   if (!current.exists) return recorded.exists === true;
   if (!recorded.exists) return false;
   if (recorded.type !== current.type) return false;
   if (recorded.mode !== current.mode) return false;
-  if (current.type === "file") return true;
+  if (current.type === "file") {
+    if (recorded.file_unattested || current.file_unattested) return false;
+    return true;
+  }
   if (current.type === "symlink") return false;
   if (current.type === "dir") {
     if (recorded.walk_budget_exceeded || current.walk_budget_exceeded) return false;
@@ -7997,12 +8080,6 @@ function writeUnder(cwd2, rel, content) {
     writeRegularAt(parentHandle, leaf, Buffer.from(content, "base64"), rel);
   });
 }
-function removeUnder(cwd2, rel) {
-  withPinnedParent(cwd2, rel, `(B) baseline removal of '${rel}'`, {}, (parentHandle, leaf) => {
-    if (parentHandle === null) return;
-    removeFileAt(parentHandle, leaf, rel);
-  });
-}
 function parsePorcelainZ(out) {
   const tokens = out.split("\0");
   const entries = [];
@@ -8146,12 +8223,14 @@ function restoreTracked(cwd2, relRaw) {
     assertRealAncestors(cwd2, rel, `(A) tracked restore of '${rel}'`);
     const r = spawnSync("git", ["-C", cwd2, "checkout", "HEAD", "--", rel], { encoding: "utf8" });
     if (r.error || r.status !== 0) throw new Error(`checkout HEAD -- ${rel} failed: ${r.stderr || r.error}`);
-  } else {
-    withPinnedParent(cwd2, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
-      if (parentHandle === null) return;
-      removeTreeAt(parentHandle, leaf, rel);
-    });
+    return { restored: true, leftOnDisk: [] };
   }
+  if (isEnforcementSurface(rel)) return { restored: false, leftOnDisk: [rel] };
+  const leftOnDisk = withPinnedParent(cwd2, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
+    if (parentHandle === null) return [];
+    return removeTreeAt(parentHandle, leaf, rel);
+  });
+  return { restored: leftOnDisk.length === 0, leftOnDisk };
 }
 var input;
 try {
@@ -8261,6 +8340,10 @@ try {
   const preExisting = [];
   const changedPreDirty = [];
   const restoredPaths = [];
+  const unauthorizedAdditions = [];
+  const noteUnauthorizedAddition = (rel) => {
+    if (!unauthorizedAdditions.includes(rel)) unauthorizedAdditions.push(rel);
+  };
   let preDirty = /* @__PURE__ */ new Set();
   let preState = null;
   let degradedReason = null;
@@ -8428,7 +8511,11 @@ try {
         continue;
       }
       if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
-      restoreTracked(cwd, p);
+      const outcome = restoreTracked(cwd, p);
+      if (!outcome.restored) {
+        for (const kept of outcome.leftOnDisk) noteUnauthorizedAddition(kept);
+        continue;
+      }
       violations.push(rel);
       restoredPaths.push(rel);
     }
@@ -8473,6 +8560,11 @@ try {
       valid[norm] = baseline[key];
     }
     const current = collectBaseline(cwd);
+    if (Object.keys(valid).length === 0 && Object.keys(current).length > 0) {
+      deny(
+        `H17: the (B) content baseline for this call records ZERO enforcement files while ${Object.keys(current).length} exist now (${Object.keys(current).slice(0, 8).join(", ")}${Object.keys(current).length > 8 ? ", \u2026" : ""}). An initialized project always has a non-empty (B) set, so an empty baseline does not describe this project: it is UNVERIFIABLE, not evidence that the enforcement surface was empty at Pre. NOTHING WAS REMOVED \u2014 the removal arm is not entered on an unverifiable baseline, because trusting one would delete every enforcement file as an "unauthorized addition". These records live in os.tmpdir() and are writable by the audited command, so a crafted baseline is conduct, not environment; failing closed (P5). Exit contract-violated, never route around.`
+      );
+    }
     for (const [rel, content] of Object.entries(valid)) {
       if (!(rel in current)) {
         writeUnder(cwd, rel, content);
@@ -8486,8 +8578,7 @@ try {
     }
     for (const rel of Object.keys(current)) {
       if (!(rel in valid)) {
-        removeUnder(cwd, rel);
-        violations.push(rel);
+        noteUnauthorizedAddition(rel);
         baselineViolations.push(rel);
       }
     }
@@ -8522,7 +8613,7 @@ try {
       stampFailedPath = verdict.failedPath;
     }
   }
-  if (violations.length || preExisting.length || changedPreDirty.length) {
+  if (violations.length || unauthorizedAdditions.length || preExisting.length || changedPreDirty.length) {
     const parts = [];
     if (changedPreDirty.length) {
       parts.push(
@@ -8536,9 +8627,19 @@ try {
         `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. This is the post-Bash restore-and-deny design (decisions 2422e76a, f404dfb4): the bytes were deliberately rolled back to their pre-call state before the denial, not lost work or an automatic reset. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
       );
     }
+    if (unauthorizedAdditions.length) {
+      parts.push(
+        `H17: UNAUTHORIZED ADDITION(S) DETECTED in the protected (B) enforcement surface, and LEFT IN PLACE ON DISK: ${unauthorizedAdditions.join(", ")} \u2014 exit contract-violated, never route around. These path(s) hold no entry in this call's Pre-image baseline and appeared inside this command's window. The command is DENIED; the file(s) still sit on disk, BYTE-IDENTICAL to what was written there. H17 DETECTED the addition, it did not delete it: deleting is IRREVERSIBLE, and this sweep cannot tell a malicious plant from a legitimate file the conductor just created \u2014 a detector that deletes destroys real work on one false positive. A HUMAN must inspect each path above and take it off disk if it is a plant; H17 keeps denying agent Bash while it stands, so an addition left in place buys nothing but a red gate. Nothing of yours was undone.`
+      );
+    }
     if (baselineShared && baselineViolations.length) {
       parts.push(
-        `H17: DEGRADED (B) VERIFICATION \u2014 the (B)-set path(s) above (${baselineViolations.join(", ")}) were compared and restored against a SHARED PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the pre-image it restored was this call's own.`
+        // "compared and restored" was accurate while every (B) difference ended
+        // in a write or an unlink. Since the addition arm only DETECTS (user
+        // ruling 2026-08-27), `baselineViolations` mixes restored paths with
+        // additions nothing touched, so the verb narrows to what is true of all
+        // of them: they were COMPARED against the shared baseline.
+        `H17: DEGRADED (B) VERIFICATION \u2014 the (B)-set path(s) above (${baselineViolations.join(", ")}) were compared against a SHARED PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the pre-image compared against was this call's own.`
       );
     }
     if (attributionShared && restoredPaths.length) {

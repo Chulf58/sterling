@@ -51,7 +51,11 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const HOOKS = join(root, 'scripts', 'hooks');
+// Mutation seam (slice S1, board 5402a024) — mirrors h24-gate-exit-lint.test.mjs:48.
+// STERLING_HOOKS_DIR lets a clean-room mutation run point this suite at a mutant
+// bundle. Unset falls back to today's hard-coded scripts/hooks — byte-identical
+// behavior to before this seam existed.
+const HOOKS = process.env.STERLING_HOOKS_DIR || join(root, 'scripts', 'hooks');
 const HOOK_PATH = join(HOOKS, 'h27-dispatch-signatures.mjs');
 
 // --------------------------------------------------------------------------

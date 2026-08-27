@@ -449,8 +449,12 @@ test(
 // actual 0.
 //
 // SABOTAGE (two, and they are different defects):
-//   (a) delete `assertRealAncestors` from `removeUnder` — the derived child is
-//       unlinked through the linked ancestor again;
+//   (a) drop the no-follow guard from collectBaseline's ancestor walk (let it
+//       derive a child path beneath a symlinked ancestor instead of refusing
+//       to follow) — the derived child is unlinked through the linked
+//       ancestor again; [comment updated 2026-08-27: `removeUnder` was
+//       deleted per the (B)-addition ruling — collectBaseline's no-follow
+//       walk is the actual verdict carrier here, not a delete primitive]
 //   (b) restore `{recursive:true}` on the new-entry rmSync AND let a DIRECTORY
 //       leaf through — `evildir/` is then removed as a tree instead of denied,
 //       which is why the fixture carries a directory as well as a file.
@@ -533,8 +537,10 @@ test(
 // actual false (or `existsSync` is already false and `lstatSync` throws ENOENT,
 // reported as the same defect); and/or `assert.equal(post.code, 2)` fires with 0.
 //
-// SABOTAGE: drop `removeUnder`'s leaf-kind check, so a non-regular new entry is
-// unlinked like any other.
+// SABOTAGE: drop the leaf-kind check from collectBaseline's no-follow walk, so
+// a non-regular new entry is treated like any other and unlinked. [comment
+// updated 2026-08-27: `removeUnder` was deleted per the (B)-addition ruling —
+// collectBaseline's no-follow walk is the actual verdict carrier here.]
 // =========================================================================
 
 test(
@@ -1068,7 +1074,10 @@ test(
 // `kind !== 'file'` refusal would instead leave the planted link in place,
 // which is the exact regression the no-leaf-restriction design avoids (a
 // leaf-kind check is one component away from becoming the same "route
-// through the leaf" hazard PIN 3 pins for removeUnder).
+// through the leaf" hazard PIN 3 pins for collectBaseline's no-follow walk).
+// [comment updated 2026-08-27: `removeUnder` was deleted per the
+// (B)-addition ruling — collectBaseline's no-follow walk is the actual
+// verdict carrier PIN 3 targets, not a delete primitive.]
 //
 // FIXTURE reuses TRACKED_SUB_REL/TRACKED_SUB_BYTES — the same tracked path
 // PIN 4's CONTROL arm already proves restoreTracked's checkout-and-restore
