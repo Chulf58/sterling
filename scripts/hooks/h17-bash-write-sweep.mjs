@@ -112,7 +112,7 @@
 // pathname mid-operation (residual 3). (2) The procfs preflight AUTHENTICATES
 // THE FILESYSTEM with statfs PROC_SUPER_MAGIC before its fd round-trip, and
 // compares dev/ino as bigint: a decoy directory pre-seeded with numeric symlinks
-// can emulate any fd number a probe samples, but it cannot forge a kernel
+// can emulate any fd number a probe samples, but it cannot fabricate a kernel
 // filesystem magic (residual 1). (3) Residual 2 — repo-root authentication — is
 // OUT OF THE THREAT MODEL and closed by disclosure, not mechanism (decision
 // h17-repo-root-authentication-is-out-of-scope). S3 (git read-blob restore),
@@ -379,7 +379,7 @@ const UNATTESTABLE_FILE_BYTES = 'file-bytes-unstable';
 // The closure is to authenticate the FILESYSTEM instead of counting entries:
 // `statfs` reports the mounted filesystem's magic, and PROC_SUPER_MAGIC
 // (0x9fa0) is a KERNEL fact no unprivileged directory of decoy symlinks can
-// forge — arbitrary-fd mapping is a property of procfs semantics, not of any
+// fabricate — arbitrary-fd mapping is a property of procfs semantics, not of any
 // entry we could sample. The two checks are complementary and BOTH are needed:
 // the magic establishes "this is procfs" (so fd mapping is dynamic), the
 // round-trip establishes "this particular procfs location is an FD DIRECTORY"
