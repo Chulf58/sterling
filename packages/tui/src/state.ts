@@ -5,7 +5,7 @@
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
-import { KNOWLEDGE_CATEGORIES, toCard, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
+import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
 export const TABS = ['Tasks', 'Knowledge', 'Queue', 'System'] as const;
@@ -319,6 +319,48 @@ function rankTermsOf(query: string): string[] {
 }
 
 /**
+ * Reverse-edge (`inbound_supersedes`) disclosure for ONE card, board c6e3561f
+ * arm 2. Applied at the point a card is known to be RENDERED — every node-push
+ * site in nodesFor, the search branches included — and gated on that card
+ * being EXPANDED, because only an expanded card's body is ever built
+ * (buildDashboardState renders `card.body` for expanded knowledge cards only).
+ *
+
+ * THE HONEST BOUND is "one reverse-edge query per STRUCTURALLY EMITTED, EXPANDED
+ * knowledge card, per projection call" — NOT "one per tick", and NOT bounded by
+ * what the user can actually SEE. Two amplifications, both confirmed by outside-
+ * family review 2026-08-27 and deliberately NOT engineered away here:
+ * (a) hydration runs while building every emitted node, BEFORE viewport clipping,
+ *     so an expanded card scrolled far above or below the visible rows is still
+ *     queried; and
+
+ * (b) a single input event can call nodesFor() more than once — there are FOUR
+ *     call sites (reduce, buildSelf, the click path, and main.ts's redraw), so
+ *     "per tick" undercounts by whatever the event path multiplies.
+ * The pin below measures ONE direct buildDashboardState() call with an effectively
+ * unbounded viewport, so it CANNOT see either amplification: treat the bound as
+ * read-verified, not test-enforced. Stated at full strength rather than softened
+
+ * because the previous wording overclaimed and a reader trusted it.
+ *
+ * WHY N IS IRREDUCIBLE, given the above: `ui.expanded` is ADDITIVE — reduce's
+ * toggle never collapses siblings — so N simultaneously-expanded cards cost N
+ * queries, and each of those N cards is drawing a body that must carry its
+ * disclosure. What hydrating at the PUSH SITE buys is the other direction, which
+ * the earlier record-level gate got wrong: it also fired for cards sitting behind
+ * a COLLAPSED sub-category, which are never emitted at all. Those now cost zero.
+ */
+function hydrateInbound(
+  card: Card,
+  ui: UiState,
+  reader: { inboundSupersedes(id: string): unknown[] },
+): Card {
+  if (!ui.expanded.includes(card.id)) return card;
+  const inbound = reader.inboundSupersedes(card.id);
+  return inbound.length ? withInboundSupersedes(card, toInboundSupersedesEntries(inbound)) : card;
+}
+
+/**
  * The Knowledge tab is an up-to-4-level collapse/expand tree: knowledge
  * CATEGORY → SOURCE store → SUB-CATEGORY (code component) → record. The
  * sub-category level groups an expanded source's records by component
@@ -343,13 +385,17 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
   if (query) {
     const terms = rankTermsOf(query);
     if (terms.length) {
+      // SEARCH also carries the inbound_supersedes disclosure (review finding,
+      // lane A2): a card reached by search and the same card reached by the
+      // category tree must render identically — same body, same disclosure —
+      // and the query stays gated on that card being expanded.
       if (knowledge) {
-        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: 'card' as const, card, depth: 0, knowledge: true }));
+        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: 'card' as const, card: hydrateInbound(card, ui, knowledge), depth: 0, knowledge: true }));
       }
       const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
       return store
         .query({ types, rank_terms: terms, match_all: true, cap })
-        .map((r) => ({ kind: 'card' as const, card: { ...toCard(r), source: 'project' }, depth: 0, knowledge: true }));
+        .map((r) => ({ kind: 'card' as const, card: hydrateInbound({ ...toCard(r), source: 'project' }, ui, store), depth: 0, knowledge: true }));
     }
   }
 
@@ -377,6 +423,11 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
       const records = knowledge
         ? knowledge.querySource(sc.source, { types: [cat.type], cap })
         : store.query({ types: [cat.type], cap });
+      // inbound_supersedes disclosure (board c6e3561f part (2)) is hydrated
+      // per CARD at the push sites below (hydrateInbound), not per fetched
+      // record here: a record behind a COLLAPSED sub-category is fetched but
+      // never rendered, and paying a reverse-edge query for it was the false
+      // half of the old "one query for the expanded card" bound.
       // 4th level: bucket the fetched records by code COMPONENT (single-bucket,
       // dominant). A source that resolves to a single bucket SKIPS the
       // sub-category level (collapse-single-bucket, P1) — its cards sit at
@@ -385,9 +436,10 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
       // expanded. No new query — we regroup the records already fetched, so the
       // COUNT-then-fetch perf model is untouched.
       const groups = knowledgeSubgroups(records);
+      const reader = knowledge ?? store;
       if (groups.length <= 1) {
         for (const card of groups[0]?.cards ?? []) {
-          nodes.push({ kind: 'card', card: { ...card, source: sc.source }, depth: 2, knowledge: true });
+          nodes.push({ kind: 'card', card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 2, knowledge: true });
         }
         continue;
       }
@@ -395,7 +447,7 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
         nodes.push({ kind: 'subcategory', catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
         if (!ui.expanded.includes(subId(cat.type, sc.source, g.key))) continue;
         for (const card of g.cards) {
-          nodes.push({ kind: 'card', card: { ...card, source: sc.source }, depth: 3, knowledge: true });
+          nodes.push({ kind: 'card', card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 3, knowledge: true });
         }
       }
     }

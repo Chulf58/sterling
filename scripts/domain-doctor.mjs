@@ -811,6 +811,22 @@ function migrate() {
   }
   if (!apply) {
     console.log('DRY-RUN: nothing written — re-run with --apply to migrate');
+    // THE PLAN MUST NOT READ AS ALL-OR-NOTHING (board b96ebf47, hazard 4).
+    // Every OTHER outcome this tool can reach ends "Nothing was written", so a
+    // plan that lists N copies and says nothing else invites the reader to
+    // assume the batch is a unit. It is not: see the disclosure at the end of
+    // the copy loop for why, and for what a half-finished run leaves behind.
+    // Printed only for a MULTI-record plan — a single copy commits in one
+    // transaction, so there is no partial state to warn about and the warning
+    // would be noise on the commonest case (P1).
+    if (missing.length > 1) {
+      console.log(
+        `  NOT ATOMIC: --apply commits each record in its OWN transaction and there is no batch rollback, so a record the ` +
+          `validated write path rejects part-way through leaves the destination PARTIALLY migrated — the copies made before it ` +
+          `stay. Nothing here is lost (a committed id is skipped as already-present on a re-run), but the two stores can end up ` +
+          `split across a smaller set than they are now rather than merged.`
+      );
+    }
     return;
   }
   const dest = new SterlingStore(to);
@@ -830,7 +846,70 @@ function migrate() {
   }
   console.log(`MIGRATED: ${copied} record(s)`);
   for (const r of refused) console.log(`REFUSED: ${r.id} — ${r.reason}`);
-  if (refused.length) process.exit(3);
+  // THE ONE PATH THAT DID WRITE MUST SAY THAT IT WROTE (board b96ebf47, hazard
+  // 4). Every guard above ends "Nothing was written"; this branch is the only
+  // outcome where something MAY HAVE BEEN written and then stopped short, and it used to
+  // report that as two counts and exit 3 — nothing about the state of the
+  // operator's store. On a data-migration path a partial write reported only as
+  // arithmetic is a loudness defect (P5): the reader cannot tell whether the
+  // copies survived, whether the stores are still split, or what to do next.
+  //
+  // THE PARTIAL STATE IS A DESIGNED OUTCOME, NOT AN UNBUILDABLE FIX. An earlier
+  // version of this comment said a batch rollback "needs one transaction held
+  // across every create(), which needs SterlingStore's connection — a `private`
+  // field no caller outside the package can reach". THAT WAS FALSE, and a
+  // comment asserting a limitation the code does not have is exactly how a real
+  // hazard gets filed as loudness-only and then never revisited:
+  // `withTransaction<T>()` is PUBLIC (packages/store/src/index.ts:2794) and the
+  // transaction is REENTRANT (:2728-2736, :881), so
+  // `dest.withTransaction(() => { for (const r of missing) dest.create(r); })`
+  // is buildable today and would give exactly the atomicity that text called
+  // out of reach.
+  //
+  // IT IS DECLINED ON POLICY (user-ruled 2026-08-27), not on capability:
+  // all-or-nothing CONTRADICTS AC3 of the `domain-doctor` article — a
+  // schema-invalid record is REPORTED AND SKIPPED with exit 3 — because one bad
+  // record must not block a whole migration, and the resume path is wanted.
+  // withTransaction (index.ts:2794) is the route if and only if that POLICY is
+  // ever revisited, which is a decision to take rather than a repair owed (see
+  // decision [domain-doctor-migrate-goes-fail-closed-on-schema-v2-and-a-ne] for
+  // the surrounding transactional-importer scope). What IS owed to the operator
+  // meanwhile is the truth about where they now stand: which store, how far it
+  // got, that nothing was undone, and the resume path. Resumability is what
+  // makes this honest rather than alarming — a committed id is skipped as
+  // already-present, so re-running after fixing the named record(s) finishes the
+  // job instead of duplicating it.
+  //
+  // AND THE DISCLOSURE MUST MATCH WHAT ACTUALLY HAPPENED. Gated on
+  // `refused.length` ALONE this fired with copied === 0 too, announcing a
+  // partial write on a run that wrote nothing — the same lie pointing the other
+  // way, and reachable from the commonest failure of all (a single planned
+  // record that the write path rejects). The dry-run plan above already gates
+  // its warning on `missing.length > 1` for exactly this reason: a copy that
+  // cannot half-succeed must not be described as if it could. So the branch
+  // below asks BOTH questions — was anything refused, AND was anything actually
+  // committed — while the exit code (3, a per-record rejection) is the same
+  // either way.
+  if (refused.length) {
+    if (copied > 0) {
+      console.log(
+        `PARTIALLY MIGRATED — this run was NOT ATOMIC and nothing was rolled back. ${copied} of the ${missing.length} planned ` +
+          `record(s) are now COMMITTED in the destination '${to}' and ${refused.length} did not cross (named above). Each copy ` +
+          `commits its own transaction, so the ones that landed before the failure stay landed; the source is untouched, so no ` +
+          `knowledge is lost. RESUME PATH: fix or deliberately remove the named record(s) in the source, then re-run the same ` +
+          `command — every already-committed id is skipped as already-present. Until then the two stores remain split for exactly ` +
+          `the ${refused.length} record(s) named above.`
+      );
+    } else {
+      console.log(
+        `NOTHING WAS WRITTEN — all ${missing.length} planned record(s) were rejected by the validated write path (named above), ` +
+          `so no copy was committed and the destination '${to}' is exactly as it was before this run. The source is untouched ` +
+          `too, so the two stores remain split by the same record(s) as before — nothing changed in either direction. RESUME ` +
+          `PATH: fix or deliberately remove the named record(s) in the source, then re-run the same command.`
+      );
+    }
+    process.exit(3);
+  }
 }
 
 /** Every id that RESOLVES in a store: `records.id` UNION, when the table

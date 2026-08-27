@@ -67,12 +67,36 @@ interface ReferenceMaterialRec {
 /** board c6e3561f disclosure-carry: one inbound-superseder entry as surfaced by
  *  knowledge_get / knowledge_query-full / knowledge_preflight — records
  *  elsewhere holding a rel:'supersedes' edge onto this one. */
-interface InboundSupersedesEntryView {
+export interface InboundSupersedesEntryView {
   id: string;
   slug?: string;
   title?: string;
   status: string;
   superseded_by?: string;
+}
+
+/**
+ * Board c6e3561f part (2): hydrate raw holder records (as returned by
+ * SterlingStore.inboundSupersedes / MountedStores.inboundSupersedes) into the
+ * {id, slug?, title?, status, superseded_by?} entry shape
+ * inboundSupersedesSection reads. Mirrors SterlingTools.inboundSupersedesEntry
+ * (packages/mcp-server/src/tools.ts) field-for-field — the TUI has no
+ * dependency on @sterling/mcp-server, so the mapping is re-declared here
+ * rather than imported. superseded_by rides only when the holder itself is
+ * not active, same as the tool-surface original.
+ */
+export function toInboundSupersedesEntries(records: unknown[]): InboundSupersedesEntryView[] {
+  return records.map((rec) => {
+    const r = rec as { id: string; slug?: string; title?: string; question?: string; status: string; superseded_by?: string | null };
+    const title = r.title ?? r.question ?? r.slug ?? '';
+    return {
+      id: r.id,
+      ...(r.slug ? { slug: r.slug } : {}),
+      ...(title ? { title } : {}),
+      status: r.status,
+      ...(r.status !== 'active' && r.superseded_by ? { superseded_by: r.superseded_by } : {}),
+    };
+  });
 }
 
 /** Gated body section for the `inbound_supersedes` disclosure — matches the
@@ -94,6 +118,21 @@ function inboundSupersedesSection(rec: unknown): string {
 export function toCard(rec: unknown): Card {
   const card = baseCard(rec);
   const section = inboundSupersedesSection(rec);
+  return section ? { ...card, body: card.body + section } : card;
+}
+
+/**
+ * Append the `inbound_supersedes` disclosure to an ALREADY-BUILT card — the
+ * card-level counterpart of the record-level gate inside toCard, for callers
+ * that only learn the entries AFTER the card exists (state.ts hydrates the
+ * disclosure at the point a card is known to be RENDERED and EXPANDED, which
+ * is downstream of toCard; review finding, lane A2). Empty entries return the
+ * card untouched, so a record with no inbound superseders renders
+ * byte-identical to before by both routes. The section text is produced by the
+ * one builder above, so the two routes can never drift.
+ */
+export function withInboundSupersedes(card: Card, entries: InboundSupersedesEntryView[]): Card {
+  const section = inboundSupersedesSection({ inbound_supersedes: entries });
   return section ? { ...card, body: card.body + section } : card;
 }
 
