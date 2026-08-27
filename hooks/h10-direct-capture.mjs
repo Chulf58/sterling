@@ -9,11 +9,11 @@ var __export = (target, all) => {
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { readFileSync as readFileSync3, writeFileSync, rmSync as rmSync2, existsSync as existsSync4, mkdirSync as mkdirSync3, renameSync } from "node:fs";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, join, resolve } from "node:path";
+import { dirname as dirname2, join as join2, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -5182,8 +5182,8 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { mkdirSync, existsSync, realpathSync } from "node:fs";
+import { dirname, basename, join, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
@@ -5385,6 +5385,21 @@ function assertNoFieldLoss(op, before, after) {
   const type = typeof before.type === "string" ? before.type : "unknown";
   throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
 }
+function journalDemotionRequired(absPath, platform = process.platform) {
+  if (platform !== "linux")
+    return false;
+  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, "/"));
+}
+var JournalDemotionRefusedError = class extends Error {
+  dbPath;
+  returnedMode;
+  constructor(dbPath, returnedMode, options) {
+    super(options?.message ?? `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`, options?.cause !== void 0 ? { cause: options.cause } : void 0);
+    this.dbPath = dbPath;
+    this.returnedMode = returnedMode;
+    this.name = "JournalDemotionRefusedError";
+  }
+};
 var SterlingStore = class _SterlingStore {
   db;
   /**
@@ -5420,21 +5435,69 @@ var SterlingStore = class _SterlingStore {
   constructor(path) {
     this.dbPath = resolvePath(path);
     this.db = new DatabaseSync2(path);
+    let classifiedPath = this.dbPath;
+    try {
+      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
+    } catch {
+    }
     this.db.exec("PRAGMA busy_timeout=5000");
     const foundSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
     if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
       this.db.close();
       throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
+    let isFresh = false;
     if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       const objects = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n;
       if (objects > 0) {
+        if (journalDemotionRequired(classifiedPath)) {
+          let legacyMode;
+          try {
+            legacyMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+          } catch (e) {
+            this.db.close();
+            throw e;
+          }
+          if (legacyMode === "wal") {
+            this.db.close();
+            throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
+              message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
+            });
+          }
+        }
         this.legacySchemaVersion = foundSchemaVersion;
         this.openedSchemaVersion = foundSchemaVersion;
         return;
       }
+      isFresh = true;
     }
-    this.db.exec("PRAGMA journal_mode=WAL");
+    if (journalDemotionRequired(classifiedPath)) {
+      let returnedMode;
+      try {
+        returnedMode = this.db.prepare("PRAGMA journal_mode=DELETE").get().journal_mode;
+      } catch (e) {
+        this.db.close();
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new JournalDemotionRefusedError(this.dbPath, detail, {
+          cause: e,
+          message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`
+        });
+      }
+      if (returnedMode !== "delete") {
+        this.db.close();
+        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
+      }
+    } else {
+      const currentMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+      if (currentMode !== "delete") {
+        this.db.exec("PRAGMA journal_mode=WAL");
+      } else if (isFresh) {
+        const stillFresh = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n === 0;
+        if (stillFresh) {
+          this.db.exec("PRAGMA journal_mode=WAL");
+        }
+      }
+    }
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(DDL);
     try {
@@ -7032,7 +7095,7 @@ function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    if (existsSync2(join2(dir, ".sterling", "sterling.db"))) return dir;
     const parent = dirname2(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -7056,7 +7119,7 @@ function warnNonBlocking(message) {
   process.exit(1);
 }
 function loadConfig(cwd) {
-  const p = join(cwd, ".sterling", "config.json");
+  const p = join2(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 function gitIgnored(paths, cwd) {
@@ -7072,14 +7135,14 @@ function gitIgnored(paths, cwd) {
   return new Set((res.stdout || "").split("\0").filter(Boolean));
 }
 function openStore(cwd) {
-  const p = join(cwd, ".sterling", "sterling.db");
+  const p = join2(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync2, mkdirSync as mkdirSync2, rmSync, statSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
@@ -7150,7 +7213,7 @@ function parseTouchesContent(raw) {
 }
 function hashFile(root, rel) {
   try {
-    return createHash("sha256").update(readFileSync2(join2(root, rel))).digest("hex");
+    return createHash("sha256").update(readFileSync2(join3(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -7164,7 +7227,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync2(join2(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync2(join3(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -7374,7 +7437,7 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 
 // scripts/hooks/h10-direct-capture.mjs
 function computeDeadDispatchResidue(cwd, sessionId) {
-  const registerPath = join3(cwd, ".sterling", "transient", "dispatch-register.json");
+  const registerPath = join4(cwd, ".sterling", "transient", "dispatch-register.json");
   let raw = [];
   try {
     if (existsSync4(registerPath)) {
@@ -7420,9 +7483,9 @@ function computeDeadDispatchResidue(cwd, sessionId) {
           entry.residue_reported_at = nowIso;
         }
       }
-      const transient = join3(cwd, ".sterling", "transient");
+      const transient = join4(cwd, ".sterling", "transient");
       mkdirSync3(transient, { recursive: true });
-      const tmpPath = join3(transient, `dispatch-register.json.tmp-${process.pid}`);
+      const tmpPath = join4(transient, `dispatch-register.json.tmp-${process.pid}`);
       writeFileSync(tmpPath, JSON.stringify(fresh));
       renameSync(tmpPath, registerPath);
     } catch {
@@ -7443,14 +7506,14 @@ if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
   allow();
 }
-var touchesPath = join3(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join3(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join3(input.cwd, ".sterling", "transient", "capture-nagged.json");
+var touchesPath = join4(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join4(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join4(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   if (store.getRun()) allow();
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const pressureMarker = join3(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join4(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const pressure = (() => {
     try {
       const cw = config.context_watch;
@@ -7472,8 +7535,8 @@ try {
           sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
         }
       }
-      mkdirSync3(join3(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync(join3(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync(join4(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -7501,7 +7564,7 @@ try {
     }
   })();
   const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
-  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join3(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
+  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join4(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
   const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% (${pressure.window}-tok window) \u2192 finish/commit open work, delegate reads & mechanical work to subagents (P1).${boundaryLine()} Once committed: ${rotationCmd} --next-slice "<next slice>" (--objective/--risks/--pointers optional), then say READY TO CLEAR.` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
@@ -7512,7 +7575,7 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join3(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const gaugeMarker = join4(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
       return JSON.parse(readFileSync3(gaugeMarker, "utf8")).session_id === input.session_id;
@@ -7522,7 +7585,7 @@ try {
   };
   const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 measured against the ${pressure.window}-tok default (may mislead). Add context_watch.windows["${pressure.unmapped_model}"] to .sterling/config.json. (once per session)`;
-  const delegationMarker = join3(input.cwd, ".sterling", "transient", "delegation-nagged.json");
+  const delegationMarker = join4(input.cwd, ".sterling", "transient", "delegation-nagged.json");
   const delegationSpent = () => {
     try {
       return !!input.session_id && JSON.parse(readFileSync3(delegationMarker, "utf8")).session_id === input.session_id;
@@ -7530,7 +7593,7 @@ try {
       return false;
     }
   };
-  const articleWritesPath = join3(input.cwd, ".sterling", "transient", "article-writes.json");
+  const articleWritesPath = join4(input.cwd, ".sterling", "transient", "article-writes.json");
   const readArticleWrites = () => {
     try {
       const raw = JSON.parse(readFileSync3(articleWritesPath, "utf8"));
@@ -7539,10 +7602,10 @@ try {
       return 0;
     }
   };
-  const statsPath = join3(input.cwd, ".sterling", "transient", "delegation-stats.json");
+  const statsPath = join4(input.cwd, ".sterling", "transient", "delegation-stats.json");
   const writeDelegationStats = (stats) => {
     try {
-      mkdirSync3(join3(input.cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
       writeFileSync(statsPath, JSON.stringify(stats));
     } catch {
     }
@@ -7697,11 +7760,11 @@ try {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync4(join3(input.cwd, p))
+    (p) => existsSync4(join4(input.cwd, p))
   );
   let dispatchEntries = [];
   try {
-    const registerPath = join3(input.cwd, ".sterling", "transient", "dispatch-register.json");
+    const registerPath = join4(input.cwd, ".sterling", "transient", "dispatch-register.json");
     if (existsSync4(registerPath)) {
       const raw = JSON.parse(readFileSync3(registerPath, "utf8"));
       if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
@@ -7817,7 +7880,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join3(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join4(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
@@ -7931,7 +7994,7 @@ try {
   if (!input.stop_hook_active && !existsSync4(nagMarker)) {
     writeFileSync(nagMarker, JSON.stringify({ at: now }));
     const parts = [...disclosureParts];
-    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join3(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
+    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join4(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
     if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;
       const declareLine = `no_capture (${noCaptureCmd} --reason "<why>") if nothing durable, or capture_pending if riding an in-flight commit/agent \u2014 a false declaration is drift`;

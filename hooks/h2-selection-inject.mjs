@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, join, resolve } from "node:path";
+import { dirname as dirname2, join as join2, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5145,8 +5145,8 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { mkdirSync, existsSync, realpathSync } from "node:fs";
+import { dirname, basename, join, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
@@ -5348,6 +5348,21 @@ function assertNoFieldLoss(op, before, after) {
   const type = typeof before.type === "string" ? before.type : "unknown";
   throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
 }
+function journalDemotionRequired(absPath, platform = process.platform) {
+  if (platform !== "linux")
+    return false;
+  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, "/"));
+}
+var JournalDemotionRefusedError = class extends Error {
+  dbPath;
+  returnedMode;
+  constructor(dbPath, returnedMode, options) {
+    super(options?.message ?? `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`, options?.cause !== void 0 ? { cause: options.cause } : void 0);
+    this.dbPath = dbPath;
+    this.returnedMode = returnedMode;
+    this.name = "JournalDemotionRefusedError";
+  }
+};
 var SterlingStore = class _SterlingStore {
   db;
   /**
@@ -5383,21 +5398,69 @@ var SterlingStore = class _SterlingStore {
   constructor(path) {
     this.dbPath = resolvePath(path);
     this.db = new DatabaseSync2(path);
+    let classifiedPath = this.dbPath;
+    try {
+      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
+    } catch {
+    }
     this.db.exec("PRAGMA busy_timeout=5000");
     const foundSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
     if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
       this.db.close();
       throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
+    let isFresh = false;
     if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       const objects = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n;
       if (objects > 0) {
+        if (journalDemotionRequired(classifiedPath)) {
+          let legacyMode;
+          try {
+            legacyMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+          } catch (e) {
+            this.db.close();
+            throw e;
+          }
+          if (legacyMode === "wal") {
+            this.db.close();
+            throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
+              message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
+            });
+          }
+        }
         this.legacySchemaVersion = foundSchemaVersion;
         this.openedSchemaVersion = foundSchemaVersion;
         return;
       }
+      isFresh = true;
     }
-    this.db.exec("PRAGMA journal_mode=WAL");
+    if (journalDemotionRequired(classifiedPath)) {
+      let returnedMode;
+      try {
+        returnedMode = this.db.prepare("PRAGMA journal_mode=DELETE").get().journal_mode;
+      } catch (e) {
+        this.db.close();
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new JournalDemotionRefusedError(this.dbPath, detail, {
+          cause: e,
+          message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`
+        });
+      }
+      if (returnedMode !== "delete") {
+        this.db.close();
+        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
+      }
+    } else {
+      const currentMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+      if (currentMode !== "delete") {
+        this.db.exec("PRAGMA journal_mode=WAL");
+      } else if (isFresh) {
+        const stillFresh = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n === 0;
+        if (stillFresh) {
+          this.db.exec("PRAGMA journal_mode=WAL");
+        }
+      }
+    }
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(DDL);
     try {
@@ -6995,7 +7058,7 @@ function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync2(join(dir, ".sterling", "sterling.db"))) return dir;
+    if (existsSync2(join2(dir, ".sterling", "sterling.db"))) return dir;
     const parent = dirname2(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -7011,7 +7074,7 @@ function allow() {
   process.exit(0);
 }
 function openStore(cwd) {
-  const p = join(cwd, ".sterling", "sterling.db");
+  const p = join2(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
