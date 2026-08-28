@@ -58,7 +58,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSy
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
-import { lastDispatchBlocks, extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { lastDispatchBlocks, extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
 import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates } from './lib/dispatch-advisory.mjs';
 
@@ -165,6 +165,50 @@ function attributeBlocks(transcriptPath, agentType) {
 
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
+}
+
+// REVIEW-TERRITORY resolution (decision 8f137474,
+// review-territory-structured-receipt-files) — the entry-level `files`
+// source, replacing a bare candidatesFromBlocks() call at SubagentStart.
+// Per attributed block, a REVIEW-TERRITORY line (parseReviewTerritory,
+// lib/dispatch-prompt.mjs) is parsed and PREFERRED over free-prose
+// extraction for that block; a malformed declaration is never silently
+// swallowed (H22 never denies, but it never stays quiet about broken input
+// either).
+//
+// AGGREGATION ACROSS BLOCKS: any block with a WELL-FORMED declaration
+// contributes its declared array, never its free-prose extraction —
+// whether every matched block declared (the common case) or only some did
+// (mixed declared/undeclared or declared/malformed): once at least one
+// block declares, the union of declared arrays is authoritative and
+// files_source is 'review-territory'. Only when NO matched block declares
+// (all absent and/or malformed) does this fall through to the union of
+// free-prose extraction over every block's prompt, files_source
+// 'free-prose-fallback' — identical to pre-fix behavior.
+//
+// STDERR TRUTH (review-fix round): the warning states what ACTUALLY happens
+// to the malformed block's content, which depends on whether a sibling
+// declared — computed AFTER `declaredWins` is known, not before. When a
+// sibling block declared, this block's free-prose is DROPPED entirely (the
+// declared array is exclusively authoritative, per T7b) — saying "falls
+// back to free-prose for this block" there would be a lie, since no
+// free-prose from this block ever reaches `files`. When nothing declared,
+// this block's own prose DOES contribute to the free-prose union that wins.
+function resolveTerritory(blocks) {
+  const parsed = blocks.map((b) => ({ block: b, decl: parseReviewTerritory(b.prompt) }));
+  const declared = parsed.filter((p) => p.decl.present && p.decl.valid);
+  const declaredWins = declared.length > 0;
+  const warnings = parsed
+    .filter((p) => p.decl.present && !p.decl.valid)
+    .map((p) =>
+      declaredWins
+        ? `H22: malformed REVIEW-TERRITORY declaration ignored — a sibling block's valid declaration is authoritative for this dispatch, so this block's prose (including this line) is DROPPED entirely, not free-prose-extracted: ${p.decl.raw}`
+        : `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose extraction across all attributed blocks: ${p.decl.raw}`
+    );
+  if (declaredWins) {
+    return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: 'review-territory', warnings };
+  }
+  return { candidates: candidatesFromBlocks(blocks), files_source: 'free-prose-fallback', warnings };
 }
 
 // TERRITORY EXAMINED vs TERRITORY CLAIMED — the write-side half of the
@@ -360,7 +404,8 @@ try {
 
   if (event === 'SubagentStart') {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
-    const candidates = candidatesFromBlocks(matchedBlocks);
+    const { candidates, files_source: filesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
+    for (const w of territoryWarnings) process.stderr.write(w + '\n');
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
     const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
     // THE EXTRACTOR'S PERMISSIVENESS COSTS MORE HERE THAN IN H19. There a false
@@ -450,6 +495,11 @@ try {
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
       files,
+      // Provenance of `files` above (decision 8f137474): 'review-territory'
+      // when at least one attributed block carried a well-formed
+      // REVIEW-TERRITORY declaration, 'free-prose-fallback' otherwise —
+      // copied unchanged into the promoted review-ledger receipt at Stop.
+      files_source: filesSource,
       // Always present, even empty — its ABSENCE is the legacy-entry signal
       // H26 falls back on (see claimedFromBlocks above).
       claimed_files: claimedFiles,
@@ -531,6 +581,18 @@ try {
         ledger.push({
           agent_type: departing.agent_type,
           files: departing.files,
+          // Copied unchanged from the register entry (decision 8f137474):
+          // absent on a pre-migration register entry, same posture as the
+          // other always-attempted-never-required fields on this receipt.
+          files_source: departing.files_source,
+          // Same copy-if-present, never-fabricated posture as files_source
+          // above (review-fix round, pins T6a/T6b): a legacy register entry
+          // written before per-block attribution existed carries no
+          // `attribution` key, and `departing.attribution` is then
+          // `undefined` here — JSON.stringify drops an undefined-valued key
+          // entirely, so the promoted receipt genuinely lacks the key rather
+          // than carrying a fabricated default.
+          attribution: departing.attribution,
           at: departing.at,
           session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
           branch: identity.branch,

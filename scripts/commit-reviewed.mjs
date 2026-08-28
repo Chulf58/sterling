@@ -107,6 +107,11 @@ import { arg, fail } from './lib/project.mjs';
 
 const target = process.cwd();
 
+// Moved up (was declared just before its first use, near the validation
+// block below) so both the normal -m flow AND the --target-sha amend mode
+// (which branches and exits before that code runs) share one definition.
+const VALID_AGENT_TYPE = /^reviewer-[A-Za-z0-9_-]+$/;
+
 // Guard the cwd before anything else (FIX 6): a bare directory has no
 // review ledger and no meaningful contract to enforce.
 if (!existsSync(join(target, '.sterling'))) {
@@ -114,6 +119,34 @@ if (!existsSync(join(target, '.sterling'))) {
 }
 
 const message = arg('-m') ?? arg('--message');
+const targetShaArg = arg('--target-sha');
+// PRESENCE, not truthiness (review fix): `-m ""` must still be treated as
+// -m HAVING BEEN GIVEN for the contradiction check below — `if (message)`
+// would silently let `--target-sha ... -m ""` through, since an empty string
+// is falsy. The main flow's own `if (!message)` requirement further down is
+// unaffected; only the contradiction check needed this.
+const messageArgProvided = process.argv.slice(2).includes('-m') || process.argv.slice(2).includes('--message');
+
+// ===========================================================================
+// --target-sha AMEND MODE (decision post-hoc-review-receipts-target-sha-amend,
+// a899d6cc-0352-497f-ada5-f1accb643619; board 51d93c34 requirement 1). A
+// review performed AFTER a bare `git commit` is otherwise unrecordable: this
+// mode attaches current ledger receipts to an already-created UNPUSHED
+// branch-tip commit by amending it. Entirely separate code path from the -m
+// flow below (G7): it never requires -m, and its own refusals never cite
+// -m/message wording, so a caller can't confuse the two failure vocabularies.
+// See runTargetShaMode (bottom of file) for the guard-by-guard implementation.
+// ===========================================================================
+if (targetShaArg !== undefined) {
+  if (messageArgProvided) {
+    fail(
+      'commit-reviewed: --target-sha and -m/--message are contradictory — amend mode reuses the target commit\'s existing message unchanged and never accepts a new one'
+    );
+  }
+  runTargetShaMode(targetShaArg);
+  process.exit(0);
+}
+
 if (!message) {
   fail('commit-reviewed: missing required -m/--message <commit message>');
 }
@@ -177,9 +210,9 @@ if (ledger.length === 0) {
 
 // Validate BEFORE stamping (FIX 4 — single line blocks \r/\n trailer
 // smuggling): only entries whose agent_type matches the reviewer-* roster
-// shape are eligible. A rejected entry is warned about and LEFT in the
-// ledger un-consumed — never silently dropped.
-const VALID_AGENT_TYPE = /^reviewer-[A-Za-z0-9_-]+$/;
+// shape are eligible (VALID_AGENT_TYPE is declared near the top of the file,
+// shared with --target-sha amend mode). A rejected entry is warned about and
+// LEFT in the ledger un-consumed — never silently dropped.
 const validEntries = [];
 for (const e of ledger) {
   if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
@@ -890,3 +923,573 @@ console.log(
     deferred_receipts: deferredDisclosures,
   })
 );
+
+// ===========================================================================
+// --target-sha AMEND MODE — implementation (decision
+// post-hoc-review-receipts-target-sha-amend, a899d6cc). Everything below is a
+// separate code path from the -m flow above: it is called (and the process
+// exited) BEFORE any of the -m-flow code runs, so it is written to be fully
+// self-contained rather than reaching for that flow's already-consumed
+// `ledger`/`validEntries`/`stampEntries` locals. It reuses only genuinely
+// shared, dependency-free helpers declared as hoisted `function` declarations
+// elsewhere in this file (safeLabel, ageLabel, normIdentity, withLedgerLock)
+// plus the module-level VALID_AGENT_TYPE regex (moved to the top of the file
+// for exactly this reason) — never a `const` from the -m flow's body, which
+// would still be in its temporal-dead-zone when amend mode runs.
+//
+// GUARD ORDER (cheapest/most-local first, network-ish last, nothing written
+// until every guard has passed):
+//   G1 tip-only -> G2 clean index+worktree -> G3 base_sha match -> G4
+//   file-scoped partition (commit's OWN diff) -> G6 published-history guard
+//   -> G5 amend + verify + consume + report both shas.
+// ===========================================================================
+
+/** git wrapper local to amend mode: returns {status, stdout, stderr, error}.
+ *  `input` (optional) is piped to the child's stdin — used for
+ *  interpret-trailers and the `-F -` amend, so a hostile/oversized message
+ *  is never passed as a single argv entry. */
+function gitRun(args, input) {
+  return spawnSync('git', args, {
+    cwd: target,
+    encoding: 'utf8',
+    timeout: 30_000,
+    ...(input !== undefined ? { input } : {}),
+  });
+}
+
+/** Strips exactly the ONE trailing newline `git log --format=...` adds as its
+ *  own record-separator artifact — never more, so a genuine trailing blank
+ *  line that is actually part of the stored bytes survives. Shared by the
+ *  original-message recovery and the interpret-trailers output (both go
+ *  through the same "%B round trip" — see the G5 header note). */
+function stripOneTrailingNewline(s) {
+  return s.endsWith('\n') ? s.slice(0, -1) : s;
+}
+
+/** ONLY exit status 1 means the git-config key is absent (review fix D —
+ *  config trichotomy). status 0 = present (use stdout). Anything else — a
+ *  non-1 non-0 exit, or a spawn error — is a git failure, never silently
+ *  folded into "absent"; the caller must refuse regardless of any seam. */
+function readConfigValue(key) {
+  const r = gitRun(['config', '--get', '--', key]);
+  if (r.error) return { state: 'error', detail: r.error.message };
+  if (r.status === 0) return { state: 'present', value: (r.stdout ?? '').trim() };
+  if (r.status === 1) return { state: 'absent' };
+  return { state: 'error', detail: (r.stderr || '').trim() || `git config exited ${r.status}` };
+}
+
+function runTargetShaMode(targetShaArg) {
+  // ---------------------------------------------------------------------
+  // G1: <sha> must resolve to the checked-out branch TIP and HEAD. A
+  // non-tip commit is refused rather than rewritten via rebase, which would
+  // multiply the blast radius onto its descendants (decision, alternatives
+  // rejected).
+  // ---------------------------------------------------------------------
+  // NOTE (hygiene, measured): a leading `--` before a revision expression
+  // breaks `rev-parse --verify`'s own resolution here (probed empirically —
+  // `git rev-parse --verify --quiet -- <full-40-hex-sha>^{commit}` fails
+  // even for a perfectly valid sha; `--` is git's rev/path separator for
+  // this family of commands, not a generic "stop treating as option"
+  // terminator). targetShaArg is never interpolated into any OTHER
+  // argument position in this file, so there is no compounding risk; `--`
+  // IS applied below wherever git actually accepts it (ls-remote, merge-base,
+  // config --get — all verified empirically to tolerate it correctly).
+  const resolve = gitRun(['rev-parse', '--verify', '--quiet', `${targetShaArg}^{commit}`]);
+  if (resolve.status !== 0 || !(resolve.stdout ?? '').trim()) {
+    fail(`commit-reviewed: --target-sha '${targetShaArg}' does not resolve to a commit in this repository — nothing amended.`);
+  }
+  const resolvedSha = resolve.stdout.trim();
+
+  const branchResult = gitRun(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  const branch = branchResult.status === 0 ? branchResult.stdout.trim() : null;
+
+  const headResult = gitRun(['rev-parse', 'HEAD']);
+  if (headResult.status !== 0) {
+    fail(`commit-reviewed: git rev-parse HEAD failed: ${(headResult.stderr || '').trim()}`);
+  }
+  const headSha = headResult.stdout.trim();
+
+  if (!branch || resolvedSha !== headSha) {
+    fail(
+      `commit-reviewed: --target-sha must resolve to the checked-out branch TIP and HEAD — '${targetShaArg}' resolves to ${resolvedSha}, ` +
+        `but ${!branch ? 'HEAD is not on a branch (detached)' : `HEAD is ${headSha}`}. Amending a non-tip commit would rewrite its descendants, ` +
+        `which this CLI refuses to do; only the tip commit is eligible. Nothing amended.`
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // G2: refuse on a dirty index OR a dirty worktree — both checked
+  // separately, so the amended tree stays provably identical to what was
+  // reviewed.
+  // ---------------------------------------------------------------------
+  const indexCheck = gitRun(['diff', '--cached', '--quiet']);
+  if (indexCheck.error) fail(`commit-reviewed: git diff --cached --quiet failed: ${indexCheck.error.message}`);
+  if (indexCheck.status !== 0 && indexCheck.status !== 1) {
+    fail(`commit-reviewed: git diff --cached --quiet exited unexpectedly (${indexCheck.status}): ${(indexCheck.stderr || '').trim()}`);
+  }
+  const worktreeCheck = gitRun(['diff', '--quiet']);
+  if (worktreeCheck.error) fail(`commit-reviewed: git diff --quiet failed: ${worktreeCheck.error.message}`);
+  if (worktreeCheck.status !== 0 && worktreeCheck.status !== 1) {
+    fail(`commit-reviewed: git diff --quiet exited unexpectedly (${worktreeCheck.status}): ${(worktreeCheck.stderr || '').trim()}`);
+  }
+  const indexDirty = indexCheck.status === 1;
+  const worktreeDirty = worktreeCheck.status === 1;
+  if (indexDirty || worktreeDirty) {
+    fail(
+      `commit-reviewed: refusing to amend with a dirty ${indexDirty ? 'index (staged, uncommitted changes present)' : 'worktree (unstaged modifications present)'} — ` +
+        `--target-sha amend requires a clean index AND worktree, so the amended tree stays provably identical to what was reviewed. Nothing amended.`
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Load + validate the ledger (own read — self-contained, see header note).
+  // ---------------------------------------------------------------------
+  const sterlingDir = join(target, '.sterling');
+  const ledgerFilePath = join(sterlingDir, 'review-ledger.json');
+  let ledger = [];
+  try {
+    if (existsSync(ledgerFilePath)) {
+      const raw = JSON.parse(readFileSync(ledgerFilePath, 'utf8'));
+      if (Array.isArray(raw)) ledger = raw;
+    }
+  } catch {
+    ledger = []; // malformed ledger degrades to empty, same posture as the -m flow
+  }
+  const validEntries = [];
+  for (const e of ledger) {
+    if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
+      validEntries.push(e);
+    } else {
+      console.error(
+        `commit-reviewed: skipping malformed ledger entry (agent_type ${JSON.stringify(e && e.agent_type)} does not match ^reviewer-[A-Za-z0-9_-]+$) — left un-consumed in the ledger`
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // G3: eligible receipts must carry base_sha === target sha. Missing or
+  // different base_sha is a LOUD refusal naming base_sha — never a silent
+  // judgement.
+  // ---------------------------------------------------------------------
+  const baseMatchingEntries = validEntries.filter((e) => typeof e.base_sha === 'string' && e.base_sha === resolvedSha);
+  if (baseMatchingEntries.length === 0) {
+    fail(
+      `commit-reviewed: no eligible review receipt carries base_sha === the target sha (${resolvedSha}) — ${validEntries.length} valid ` +
+        `ledger entr${validEntries.length === 1 ? 'y' : 'ies'} checked, none match. A receipt earned against a different base cannot be attributed to ` +
+        `this exact commit's tree. Nothing amended, nothing consumed.`
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // G4: target file set = the commit's OWN diff (git diff-tree), then the
+  // EXISTING MATCHED/UNATTRIBUTED/DEFERRED partition applies unchanged
+  // (files:[] always stamps; a disjoint-files receipt is DEFERRED, not
+  // consumed, when some OTHER receipt matched).
+  // ---------------------------------------------------------------------
+  // --root: a root commit (no parent) must still yield its FULL file set —
+  // without it, diff-tree reports an empty diff for a parentless commit,
+  // which would misclassify every receipt as DEFERRED/no-match. -z (NUL
+  // separated) + no trim(), matching exactly how the -m flow already reads
+  // the STAGED file list, so a newline- or space-bearing filename partitions
+  // correctly instead of being mangled or split on the wrong boundary. `--`
+  // is deliberately NOT added before resolvedSha here (unlike the rev-parse
+  // call above): for diff-tree, `--` is diff-tree's OWN tree-ish/path
+  // separator, and prefixing the revision with it would misclassify
+  // resolvedSha as a pathspec instead of the tree-ish to diff. resolvedSha
+  // is already canonical 40-hex from our own `rev-parse --verify` above, so
+  // it can never be argv-injected regardless.
+  const diffTree = gitRun(['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-z', resolvedSha]);
+  if (diffTree.error) fail(`commit-reviewed: git diff-tree failed: ${diffTree.error.message}`);
+  if (diffTree.status !== 0) {
+    fail(`commit-reviewed: git diff-tree exited unexpectedly (${diffTree.status}): ${(diffTree.stderr || '').trim()}`);
+  }
+  const normalizePath = (p) => String(p).replace(/\\/g, '/').replace(/^\.\//, '');
+  const targetFiles = new Set(
+    (diffTree.stdout ?? '')
+      .split('\0')
+      .filter(Boolean)
+      .map(normalizePath)
+  );
+  const usableFiles = (e) => (Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : []);
+  const touchesTarget = (e) => usableFiles(e).some((f) => targetFiles.has(normalizePath(f)));
+  const fileScopingApplies = baseMatchingEntries.some((e) => usableFiles(e).length > 0 && touchesTarget(e));
+  const stampEntries = [];
+  const deferredEntries = [];
+  for (const e of baseMatchingEntries) {
+    if (!fileScopingApplies || usableFiles(e).length === 0 || touchesTarget(e)) stampEntries.push(e);
+    else deferredEntries.push(e);
+  }
+  if (stampEntries.length === 0) {
+    // Structurally unreachable (same invariant as the -m flow's partition),
+    // deliberately not silent — see that flow's identical guard for why.
+    fail(
+      `commit-reviewed: INTERNAL INVARIANT VIOLATED — file-scoped stamping (target-sha mode) selected ZERO receipts out of ${baseMatchingEntries.length} ` +
+        `base_sha-matching one(s), which the partition is constructed to make impossible. Refusing rather than amending with no Reviewed-By-Agent trailer ` +
+        `at all. Nothing amended, nothing consumed — report this.`
+    );
+  }
+  const deferredDisclosures = deferredEntries.map(
+    (e) =>
+      `commit-reviewed: DEFERRED RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) reviewed ` +
+      `[${usableFiles(e).join(', ')}], none of which the target commit ${resolvedSha} actually changed, while ${stampEntries.length} other receipt(s) ` +
+      `DO cover it. It stays in the ledger untouched — amend the commit that stages its territory and it will be spent there.`
+  );
+  for (const line of deferredDisclosures) console.error(line);
+
+  // ---------------------------------------------------------------------
+  // G6: PUBLISHED-HISTORY GUARD. Query the configured upstream's ACTUAL
+  // remote ref (never a stale local tracking ref). Refuse when the target is
+  // reachable from that remote sha, and ALSO when publication is unprovable
+  // (no configured upstream / unreachable remote / malformed query) — no
+  // waiver exists. STERLING_TARGET_SHA_ALLOW_NO_UPSTREAM treats "no
+  // configured upstream" as provably unpublished (test seam only); it never
+  // bypasses an actual reachability refusal or a config-query error —
+  // reachability, and any UNPROVABLE state, beat the seam.
+  //
+  // (A) UPSTREAM REF: the ref to query is branch.<name>.merge — the EXACT
+  // configured merge ref — never assumed as refs/heads/<branch name>. A
+  // local branch tracking a differently-named remote branch must not read
+  // that mismatch as "absent ref = unpublished".
+  // (D) CONFIG TRICHOTOMY: readConfigValue's state is 'absent' ONLY on git
+  // config's own exit-1 convention; 'present' on exit 0; anything else is
+  // 'error' and refuses regardless of the seam (a config-read failure is not
+  // evidence of anything).
+  // ---------------------------------------------------------------------
+  const seamOn = normIdentity(process.env.STERLING_TARGET_SHA_ALLOW_NO_UPSTREAM) !== null;
+  const remoteInfo = readConfigValue(`branch.${branch}.remote`);
+
+  if (remoteInfo.state === 'error') {
+    fail(
+      `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — could not determine the configured upstream (git config --get branch.${branch}.remote: ` +
+        `${remoteInfo.detail}); publication status is UNPROVABLE, refusing to amend regardless of the seam (no waiver flag exists). Nothing amended, nothing consumed.`
+    );
+  }
+  if (remoteInfo.state === 'absent') {
+    if (!seamOn) {
+      fail(
+        `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — no configured upstream for branch '${branch}', so publication status is UNPROVABLE; ` +
+          `refusing to amend (no waiver flag exists). Set STERLING_TARGET_SHA_ALLOW_NO_UPSTREAM=1 (test-fixture-only seam) to treat "no upstream" as ` +
+          `provably unpublished. Nothing amended, nothing consumed.`
+      );
+    }
+    // seam ON, no upstream configured at all — provably unpublished by the
+    // fixture seam's definition; fall through to the amend.
+  } else {
+    const remoteName = remoteInfo.value;
+    if (!remoteName) {
+      fail(
+        `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — branch.${branch}.remote is configured but empty; publication status is UNPROVABLE, ` +
+          `refusing to amend regardless of the seam (no waiver flag exists). Nothing amended, nothing consumed.`
+      );
+    }
+    const mergeInfo = readConfigValue(`branch.${branch}.merge`);
+    if (mergeInfo.state !== 'present' || !mergeInfo.value) {
+      fail(
+        `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — a remote ('${remoteName}') is configured for branch '${branch}' but ` +
+          `branch.${branch}.merge is ${mergeInfo.state === 'error' ? `unreadable (${mergeInfo.detail})` : 'missing or empty'} — the exact remote ref to ` +
+          `check cannot be determined. Publication status is UNPROVABLE, refusing to amend regardless of the seam (no waiver flag exists). ` +
+          `Nothing amended, nothing consumed.`
+      );
+    }
+    const mergeRef = mergeInfo.value;
+
+    // (B) LS-REMOTE HARDENING: `--` is a mandatory option terminator ahead
+    // of the remote name and ref (both can, in principle, be adversarial
+    // config values). Accept ONLY output that is exactly zero or one record
+    // shaped <40-hex>\t<the exact requested ref> — anything else (multiple
+    // refs, a malformed line, extra whitespace shape) is UNPROVABLE, never
+    // guessed at.
+    const lsRemote = gitRun(['ls-remote', '--', remoteName, mergeRef]);
+    if (lsRemote.error || lsRemote.status !== 0) {
+      fail(
+        `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — could not query the actual remote ref for '${remoteName}' ` +
+          `(git ls-remote failed: ${(lsRemote.stderr || (lsRemote.error && lsRemote.error.message) || '').trim()}); publication status is UNPROVABLE, ` +
+          `refusing to amend (no waiver flag exists). Nothing amended, nothing consumed.`
+      );
+    }
+    const lsRemoteLines = (lsRemote.stdout ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '');
+    let remoteSha = null;
+    if (lsRemoteLines.length === 1) {
+      const parts = lsRemoteLines[0].split(/\s+/);
+      if (parts.length !== 2 || !/^[0-9a-f]{40}$/i.test(parts[0]) || parts[1] !== mergeRef) {
+        fail(
+          `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — git ls-remote returned a malformed record for '${remoteName} ${mergeRef}' ` +
+            `(${JSON.stringify(lsRemoteLines[0])}); publication status is UNPROVABLE, refusing to amend (no waiver flag exists). Nothing amended, nothing consumed.`
+        );
+      }
+      remoteSha = parts[0];
+    } else if (lsRemoteLines.length > 1) {
+      fail(
+        `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — git ls-remote returned ${lsRemoteLines.length} records for a single ref ` +
+          `('${remoteName} ${mergeRef}'), which should never happen for an exact ref query; publication status is UNPROVABLE, refusing to amend ` +
+          `(no waiver flag exists). Nothing amended, nothing consumed.`
+      );
+    }
+    // lsRemoteLines.length === 0: the remote is reachable but has never seen
+    // this ref at all, which makes the target commit provably unpublished —
+    // proceed without needing the seam.
+
+    if (remoteSha) {
+      const ancestorCheck = gitRun(['merge-base', '--is-ancestor', '--', resolvedSha, remoteSha]);
+      if (ancestorCheck.status === 0) {
+        fail(
+          `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — ${resolvedSha} is reachable from the ACTUAL remote ref ${remoteName}/${mergeRef} ` +
+            `(${remoteSha}); it has already been published. Amending published history is refused unconditionally — no waiver flag exists. ` +
+            `Nothing amended, nothing consumed.`
+        );
+      }
+      if (ancestorCheck.status !== 1) {
+        fail(
+          `commit-reviewed: --target-sha PUBLISHED-HISTORY GUARD — could not determine reachability against the actual remote ref ` +
+            `(git merge-base --is-ancestor exited ${ancestorCheck.status}: ${(ancestorCheck.stderr || '').trim()}); publication status is UNPROVABLE, ` +
+            `refusing to amend (no waiver flag exists). Nothing amended, nothing consumed.`
+        );
+      }
+      // ancestorCheck.status === 1: provably NOT reachable from the actual
+      // remote ref — proceed without needing the seam.
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // G5: amend.
+  //  (1) TRAILER PARAGRAPH: use `git interpret-trailers` rather than manual
+  //      string concatenation, so a message whose final paragraph is ALREADY
+  //      trailer-shaped (round one's Reviewed-By-Agent lines from an earlier
+  //      --target-sha amend) gets the new lines appended INTO that same
+  //      paragraph — round one's trailers stay parseable by %(trailers), and
+  //      a second amend never opens a competing trailer block.
+  //  (2) MESSAGE FIDELITY: the original body is read via `%B` and used
+  //      completely unmodified (no trailing-newline stripping) as
+  //      interpret-trailers' stdin; the composed message is then passed to
+  //      `git commit --amend --cleanup=verbatim -F -` via STDIN, never `-m`
+  //      — cleanup=whitespace (the default for -m) collapses consecutive
+  //      blank lines, which would corrupt fidelity to the original body.
+  //  The trailer-survival verification below then compares against the
+  //  UNION of pre-existing Reviewed-By-Agent values (read BEFORE the amend)
+  //  plus the newly stamped ones — never the new set alone, or round one's
+  //  trailers would look "lost" on every second amend.
+  // ---------------------------------------------------------------------
+  const originalMessageResult = gitRun(['log', '-1', '--format=%B', resolvedSha]);
+  if (originalMessageResult.status !== 0) {
+    fail(`commit-reviewed: could not read the original commit message: ${(originalMessageResult.stderr || '').trim()}`);
+  }
+  // `git log --format=%B` adds exactly ONE trailing newline of its own as a
+  // record-separator artifact (measured empirically), on top of whatever the
+  // stored commit object itself ends with — strip exactly that one, never
+  // more, to recover the TRUE stored bytes (a `.replace(/\n+$/, '')` here
+  // would also eat a genuine blank line the original author put at the
+  // message's edge, which is exactly what byte-fidelity must not do).
+  const originalMessage = stripOneTrailingNewline(originalMessageResult.stdout ?? '');
+
+  const existingTrailerCheck = gitRun(['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', resolvedSha]);
+  if (existingTrailerCheck.status !== 0) {
+    fail(`commit-reviewed: could not read the original commit's existing trailers: ${(existingTrailerCheck.stderr || '').trim()}`);
+  }
+  const existingTrailerValues = (existingTrailerCheck.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '');
+
+  const trailerLines = stampEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
+  const interpretArgs = ['interpret-trailers'];
+  for (const line of trailerLines) interpretArgs.push('--trailer', line);
+  const interpret = gitRun(interpretArgs, originalMessage);
+  if (interpret.error) fail(`commit-reviewed: git interpret-trailers failed: ${interpret.error.message}`);
+  if (interpret.status !== 0) {
+    fail(`commit-reviewed: git interpret-trailers exited unexpectedly (${interpret.status}): ${(interpret.stderr || '').trim()}`);
+  }
+  // interpret-trailers echoes back its own single trailing newline (matching
+  // whatever the input ended with) — strip it here too, for the same
+  // byte-fidelity reason as originalMessage above: `-F -` with
+  // --cleanup=verbatim stores EXACTLY what it is given, with no forced
+  // trailing-newline normalization (unlike `-m`, which always appends one),
+  // so passing this through unstripped would grow the message by one
+  // newline on every single amend round.
+  const fullMessage = stripOneTrailingNewline(interpret.stdout ?? '');
+
+  // ---------------------------------------------------------------------
+  // (3) TOCTOU: the ls-remote round trip above is a long window. Re-run the
+  // HEAD==target check and BOTH dirty checks immediately before the actual
+  // mutating call, rather than trusting the checks done before the network
+  // round trip.
+  // ---------------------------------------------------------------------
+  const recheckHead = gitRun(['rev-parse', 'HEAD']);
+  if (recheckHead.status !== 0 || recheckHead.stdout.trim() !== resolvedSha) {
+    fail(
+      `commit-reviewed: --target-sha TOCTOU GUARD — HEAD changed since the initial checks (now ` +
+        `${recheckHead.status === 0 ? recheckHead.stdout.trim() : 'unreadable'}, expected ${resolvedSha}); the publication-guard round trip is a long ` +
+        `window and something moved the tip. Refusing to amend a moving target. Nothing amended, nothing consumed.`
+    );
+  }
+  const recheckIndex = gitRun(['diff', '--cached', '--quiet']);
+  if (recheckIndex.error) fail(`commit-reviewed: git diff --cached --quiet (re-check) failed: ${recheckIndex.error.message}`);
+  if (recheckIndex.status !== 0 && recheckIndex.status !== 1) {
+    fail(`commit-reviewed: git diff --cached --quiet (re-check) exited unexpectedly (${recheckIndex.status}): ${(recheckIndex.stderr || '').trim()}`);
+  }
+  const recheckWorktree = gitRun(['diff', '--quiet']);
+  if (recheckWorktree.error) fail(`commit-reviewed: git diff --quiet (re-check) failed: ${recheckWorktree.error.message}`);
+  if (recheckWorktree.status !== 0 && recheckWorktree.status !== 1) {
+    fail(`commit-reviewed: git diff --quiet (re-check) exited unexpectedly (${recheckWorktree.status}): ${(recheckWorktree.stderr || '').trim()}`);
+  }
+  if (recheckIndex.status === 1 || recheckWorktree.status === 1) {
+    fail(
+      `commit-reviewed: --target-sha TOCTOU GUARD — the ${recheckIndex.status === 1 ? 'index' : 'worktree'} became dirty since the initial checks ` +
+        `(the publication-guard round trip is a long window); refusing to amend. Nothing amended, nothing consumed.`
+    );
+  }
+
+  const amend = gitRun(['commit', '--amend', '--cleanup=verbatim', '-F', '-'], fullMessage);
+  if (amend.error) fail(`commit-reviewed: git commit --amend failed: ${amend.error.message}`);
+  if (amend.status !== 0) fail(`commit-reviewed: git commit --amend failed: ${(amend.stderr || amend.stdout || '').trim()}`);
+
+  const newShaResult = gitRun(['rev-parse', 'HEAD']);
+  if (newShaResult.status !== 0 || !(newShaResult.stdout ?? '').trim()) {
+    fail(
+      `commit-reviewed: AMEND SUCCEEDED but the new sha could not be determined (git rev-parse HEAD failed: ${(newShaResult.stderr || '').trim()}) — ` +
+        `the review-ledger entries were NOT consumed; inspect the repository directly.`
+    );
+  }
+  const newSha = newShaResult.stdout.trim();
+
+  // (3) TOCTOU, post-amend half: the amend must change ONLY the message —
+  // same tree, same parent. `^` on a root commit fails (no parent); both
+  // sides degrade to null identically in that case, so a root commit still
+  // compares equal to itself. This check runs AFTER the mutating amend, so a
+  // failure here reports the new sha and instructs manual inspection rather
+  // than silently proceeding — the amend already happened and cannot be
+  // undone by this CLI.
+  // No leading `--` here either — same measured reason as the G1 resolve
+  // call above (it turns rev-parse's echo-back/path mode on instead of
+  // resolving); both shas are already canonical 40-hex from our own earlier
+  // rev-parse output, so there is no injection surface to close with it.
+  const treeOf = (sha) => {
+    const r = gitRun(['rev-parse', `${sha}^{tree}`]);
+    return r.status === 0 ? r.stdout.trim() : null;
+  };
+  const parentOf = (sha) => {
+    const r = gitRun(['rev-parse', `${sha}^`]);
+    return r.status === 0 ? r.stdout.trim() : null;
+  };
+  const oldTree = treeOf(resolvedSha);
+  const newTree = treeOf(newSha);
+  const oldParent = parentOf(resolvedSha);
+  const newParent = parentOf(newSha);
+  if (oldTree === null || newTree !== oldTree || newParent !== oldParent) {
+    console.error(
+      `commit-reviewed: AMEND SUCCEEDED (original ${resolvedSha}, new ${newSha}) but a post-amend invariant check FAILED — tree: expected ${oldTree}, ` +
+        `got ${newTree}; parent: expected ${safeLabel(oldParent)}, got ${safeLabel(newParent)}. The amend already happened and cannot be undone by this ` +
+        `CLI — inspect the repository directly ('git show ${newSha}') before trusting this commit. The review-ledger entries were NOT consumed.`
+    );
+    process.exit(1);
+  }
+
+  // TRAILER SURVIVAL CHECK — same exact format string direct-merge.mjs's
+  // receipt-gate read uses, same posture as the -m flow's own check: never
+  // consume before this passes. Compared against the UNION of pre-existing
+  // trailer values (read before the amend, above) and the newly stamped
+  // ones — never the new set alone (see the G5 header note).
+  const trailerCheck = gitRun(['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', newSha]);
+  if (trailerCheck.error) {
+    fail(`commit-reviewed: AMEND SUCCEEDED (${newSha}) but the post-amend trailer verification could not run: ${trailerCheck.error.message}`);
+  }
+  if (trailerCheck.status !== 0) {
+    fail(
+      `commit-reviewed: AMEND SUCCEEDED (original ${resolvedSha}, new ${newSha}) but the post-amend trailer verification failed unexpectedly ` +
+        `(git log exited ${trailerCheck.status}): ${(trailerCheck.stderr || trailerCheck.stdout || '').trim()} — the review-ledger entries were NOT consumed.`
+    );
+  }
+  const expectedTrailerValues = [...existingTrailerValues, ...stampEntries.map((e) => e.agent_type)].sort();
+  const actualTrailerValues = (trailerCheck.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '')
+    .sort();
+  const trailerMatches =
+    actualTrailerValues.length === expectedTrailerValues.length && actualTrailerValues.every((v, i) => v === expectedTrailerValues[i]);
+  if (!trailerMatches) {
+    console.error(
+      `commit-reviewed: AMEND SUCCEEDED (original ${resolvedSha}, new ${newSha}) but the 'Reviewed-By-Agent' trailer is NOT readable — or does not match ` +
+        `the UNION of pre-existing plus newly stamped values — via the exact format string scripts/direct-merge.mjs's receipt-gate read uses; this ` +
+        `commit exists but is UNMERGEABLE until fixed.\nExpected: [${expectedTrailerValues.join(', ')}]\nActual:   [${actualTrailerValues.join(', ')}]\n` +
+        `The review-ledger entries were NOT consumed — they remain available for a retry.`
+    );
+    process.exit(1);
+  }
+
+  // CONSUME the stamped entries (P4) — lock-guarded, identity by value (never
+  // a serialized key — see the -m flow's identical reasoning above), RE-READ
+  // rather than reuse `ledger` so an entry promoted mid-amend survives.
+  try {
+    consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries);
+  } catch (e) {
+    console.error(
+      `commit-reviewed: AMEND SUCCEEDED (original ${resolvedSha}, new ${newSha}) but the review ledger was NOT consumed ` +
+        `(${safeLabel(e && e.message ? e.message : e)}) — ${ledgerFilePath} still carries the entries just stamped; remove them by hand.`
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    JSON.stringify({
+      amended: true,
+      original_sha: resolvedSha,
+      new_sha: newSha,
+      reviewed_by: stampEntries.map((e) => e.agent_type),
+      deferred_receipts: deferredDisclosures,
+    })
+  );
+}
+
+/** Lock-guarded read-modify-write consume, shared shape with the -m flow's
+ *  inline consume block but self-contained (own ledgerFilePath/sterlingDir
+ *  args) so --target-sha amend mode never depends on that flow's locals. */
+function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries) {
+  const IDENTITY_DEPTH_CAP = 64;
+  const boundedDeepEqual = (a, b, depth) => {
+    if (a === b) return true;
+    if (depth <= 0) return false;
+    if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const keysA = Object.keys(a);
+    if (keysA.length !== Object.keys(b).length) return false;
+    for (const k of keysA) {
+      if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+      if (!boundedDeepEqual(a[k], b[k], depth - 1)) return false;
+    }
+    return true;
+  };
+  const identityField = (e, k) => (e[k] === undefined ? null : e[k]);
+  const sameIdentity = (fresh, stamped) =>
+    typeof fresh.agent_type === 'string' &&
+    fresh.agent_type === stamped.agent_type &&
+    boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP) &&
+    ['session_id', 'branch', 'base_sha', 'files'].every((k) =>
+      boundedDeepEqual(identityField(fresh, k), identityField(stamped, k), IDENTITY_DEPTH_CAP)
+    );
+
+  withLedgerLock(sterlingDir, () => {
+    let freshLedger = [];
+    try {
+      if (existsSync(ledgerFilePath)) {
+        const raw = JSON.parse(readFileSync(ledgerFilePath, 'utf8'));
+        if (Array.isArray(raw)) freshLedger = raw;
+      }
+    } catch {
+      freshLedger = [];
+    }
+    const unclaimedStamped = [...stampEntries];
+    const survivors = freshLedger.filter((e) => {
+      if (!e || typeof e !== 'object') return true;
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
+      if (i === -1) return true;
+      unclaimedStamped.splice(i, 1);
+      return false;
+    });
+    const tmpPath = join(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
+    writeFileSync(tmpPath, JSON.stringify(survivors));
+    renameSync(tmpPath, ledgerFilePath);
+  });
+}
