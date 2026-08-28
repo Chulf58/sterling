@@ -32,6 +32,7 @@ export {
   unknownFieldsIn,
   schemaFor,
   describeZod,
+  exampleFor,
   digestRecord,
   headlineRecord,
   recordSizes,
