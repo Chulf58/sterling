@@ -5121,6 +5121,30 @@ function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
 }
+var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
+function isRepoRelativePosixShape(p) {
+  if (typeof p !== "string" || p === "") return false;
+  try {
+    return normalizeRepoPath(p) === p;
+  } catch {
+    return false;
+  }
+}
+function parseReviewTerritory(text) {
+  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
+  if (!match) return { present: false };
+  const raw = match[0];
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return { present: true, valid: false, raw };
+  }
+  if (!Array.isArray(parsed) || !parsed.every(isRepoRelativePosixShape)) {
+    return { present: true, valid: false, raw };
+  }
+  return { present: true, valid: true, files: parsed };
+}
 function lastDispatchBlocks(transcriptPath, skip = 0) {
   if (!transcriptPath || !existsSync3(transcriptPath)) return [];
   const tail = readTail(transcriptPath);
@@ -5364,6 +5388,18 @@ function attributeBlocks(transcriptPath, agentType) {
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
 }
+function resolveTerritory(blocks) {
+  const parsed = blocks.map((b) => ({ block: b, decl: parseReviewTerritory(b.prompt) }));
+  const declared = parsed.filter((p) => p.decl.present && p.decl.valid);
+  const declaredWins = declared.length > 0;
+  const warnings = parsed.filter((p) => p.decl.present && !p.decl.valid).map(
+    (p) => declaredWins ? `H22: malformed REVIEW-TERRITORY declaration ignored \u2014 a sibling block's valid declaration is authoritative for this dispatch, so this block's prose (including this line) is DROPPED entirely, not free-prose-extracted: ${p.decl.raw}` : `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose extraction across all attributed blocks: ${p.decl.raw}`
+  );
+  if (declaredWins) {
+    return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: "review-territory", warnings };
+  }
+  return { candidates: candidatesFromBlocks(blocks), files_source: "free-prose-fallback", warnings };
+}
 function claimedFromBlocks(blocks) {
   return [
     ...new Set(
@@ -5449,7 +5485,8 @@ try {
   entries = entries.filter((e) => e && e.session_id === input.session_id);
   if (event === "SubagentStart") {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
-    const candidates = candidatesFromBlocks(matchedBlocks);
+    const { candidates, files_source: filesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
+    for (const w of territoryWarnings) process.stderr.write(w + "\n");
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
     const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
     const toRegisterPaths = (cands) => [...new Set(cands.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
@@ -5477,6 +5514,11 @@ try {
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
       files,
+      // Provenance of `files` above (decision 8f137474): 'review-territory'
+      // when at least one attributed block carried a well-formed
+      // REVIEW-TERRITORY declaration, 'free-prose-fallback' otherwise —
+      // copied unchanged into the promoted review-ledger receipt at Stop.
+      files_source: filesSource,
       // Always present, even empty — its ABSENCE is the legacy-entry signal
       // H26 falls back on (see claimedFromBlocks above).
       claimed_files: claimedFiles,
@@ -5519,6 +5561,18 @@ try {
         ledger.push({
           agent_type: departing.agent_type,
           files: departing.files,
+          // Copied unchanged from the register entry (decision 8f137474):
+          // absent on a pre-migration register entry, same posture as the
+          // other always-attempted-never-required fields on this receipt.
+          files_source: departing.files_source,
+          // Same copy-if-present, never-fabricated posture as files_source
+          // above (review-fix round, pins T6a/T6b): a legacy register entry
+          // written before per-block attribution existed carries no
+          // `attribution` key, and `departing.attribution` is then
+          // `undefined` here — JSON.stringify drops an undefined-valued key
+          // entirely, so the promoted receipt genuinely lacks the key rather
+          // than carrying a fabricated default.
+          attribution: departing.attribution,
           at: departing.at,
           session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
           branch: identity.branch,
