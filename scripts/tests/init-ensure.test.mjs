@@ -24,9 +24,10 @@ const fwdPath = (p) => String(p).replace(/\\/g, '/');
 // (anti_pattern a-test-that-builds-in-place-ships-whatever-is-in-the-working-tree,
 //  severity BLOCK — knowledge_get 37b3cb0a-2e54-4ce2-99b9-45b68d6e6e0f)
 //
-// init.mjs resolves the plugin MCP config's PATH through STERLING_PLUGIN_ROOT_MATCH,
+// init resolves the plugin MCP config's PATH through STERLING_PLUGIN_ROOT_MATCH,
 // whose PRODUCTION default is the real clone (`process.env.STERLING_PLUGIN_ROOT_MATCH
-// || pluginRoot`, scripts/init.mjs:51). So a spawn that leaves the seam unset points
+// || pluginRoot`, init-impl.mjs's STERLING_PLUGIN_ROOT_MATCH resolution — moved out of
+// scripts/init.mjs by the bootstrap/impl split). So a spawn that leaves the seam unset points
 // init's ensure at THIS repo's OWN .claude-plugin/sterling-mcp.json — the live config
 // the running session's MCP client loads. It reports 'matches' today only because the
 // suite happens to run under the same interpreter recorded in that file; under nvm, CI,
@@ -769,7 +770,7 @@ test('contradicting flags on a re-run are reported, never applied; consuming .mc
 // without the :-. default the literal passes through and the server mkdirs a
 // phantom '${CLAUDE_PROJECT_DIR}/' store at its cwd (observed 2026-06-24).
 test('MCP store args: plugin config stays bare ${CLAUDE_PROJECT_DIR}; the --mcp-config win config carries the :-. default (phantom-store regression)', () => {
-  const src = readFileSync(join(root, 'scripts', 'init.mjs'), 'utf8');
+  const src = readFileSync(join(root, 'scripts', 'init-impl.mjs'), 'utf8');
   assert.ok(
     src.includes("args: [fwd(mcpServerEntry), '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db']"),
     'plugin-scope entry keeps the bare form — plugin configs substitute it unconditionally'
@@ -1061,7 +1062,9 @@ test('P5 snapshot script: refreshes over an existing snapshot — a second run r
 //     at the fixture --target lets the plugin-repo ensure logic run safely
 //     against a disposable temp dir instead of this actual working tree.
 //     CORRECTED (containment fix): this seam is no longer only a COMPARISON —
-//     init also resolves the plugin MCP config's PATH from it (init.mjs:51), so
+//     init also resolves the plugin MCP config's PATH from it (init-impl.mjs's
+//     STERLING_PLUGIN_ROOT_MATCH resolution, moved out of scripts/init.mjs by the
+//     bootstrap/impl split), so
 //     leaving it unset does not merely close a branch, it aims the ensure at the
 //     REAL clone. Every helper in this file therefore defaults it to a scratch
 //     directory; see the containment note above the helpers.
@@ -1523,7 +1526,7 @@ test('sparring-partner-win case 6: managed refresh — a pre-existing sterling-o
 // SABOTAGE (one line): delete the `isManagedCodexAddWin` branch in init.mjs's
 // native-Windows else-block so it falls straight through to the 'differs' push —
 // the codex deepEqual and the /refreshed/ match both go red. The guard carrying
-// the verdict is `isManagedCodexAddWin` in scripts/init.mjs, NOT the create-path
+// the verdict is `isManagedCodexAddWin` in scripts/init-impl.mjs, NOT the create-path
 // `withCodexEntry` call (win case 1 already covers that one, and it stays green
 // under this sabotage — which is how the two are told apart).
 
@@ -1582,7 +1585,7 @@ test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win
 // =============================================================================
 // Part F (decision ffe7c416 — host-native init with a dev-machine escape hatch,
 // USER-DECIDED 2026-08-27; boards 99f53af8 / 4c3a8e59 / 3873d33b). SPEC-ONLY:
-// scripts/init.mjs's implementation body was NOT read to author these.
+// scripts/init-impl.mjs's implementation body was NOT read to author these.
 //
 // THE RULING, in the two clauses these pins hold:
 //
@@ -1758,7 +1761,7 @@ test('ffe7c416 (1): with NO Windows node and NO opt-in, the native launcher and 
 // — the `sterling-mcp-win.json skipped` match goes red while everything else
 // stays green, so the failure names the P5 violation precisely.
 // WHICH GUARD CARRIES THE VERDICT: the Windows-node resolution order in
-// scripts/init.mjs. The artifact absences and the report wording are two
+// scripts/init-impl.mjs. The artifact absences and the report wording are two
 // INDEPENDENT layers over it — the report assertions stay green if only the
 // artifacts break and vice versa, so this pin is defense-in-depth by design and
 // a single-layer mutation reddening only part of it is the expected result, not
@@ -1998,7 +2001,7 @@ test('sparring-partner-win case 10: the MANAGED REFRESH carries the probed path 
 // green suite over them proved only that nothing BROKE; every one of them is a
 // behaviour a future edit can silently delete.
 //
-// SPEC-ONLY, and strictly so: scripts/init.mjs's implementation body was NOT
+// SPEC-ONLY, and strictly so: scripts/init-impl.mjs's implementation body was NOT
 // read to author this section (the test-writer read wall) — these pins are
 // written against the dispatch spec and the ruling. Consequence for how they are
 // written: where the spec quoted a report STRING, this file pins a TOKEN inside
@@ -2546,7 +2549,8 @@ test('H containment: the whole suite leaves THIS clone\'s live plugin MCP config
     // child received. MEASURED (conductor, this slice): deleting the
     // `STERLING_PLUGIN_ROOT_MATCH: pluginRootMatch` line from the spawn env — the
     // exact regression this Part exists to catch, after which init falls back to
-    // init.mjs:51's real clone — left the returned variable untouched and the suite
+    // init-impl.mjs's STERLING_PLUGIN_ROOT_MATCH fallback (this clone) — left the
+    // returned variable untouched and the suite
     // at 53 pass / 0 fail. The mtime layer below stayed green too, for the reason
     // already disclosed: on a machine whose interpreter matches the one recorded in
     // the live config, init reports 'matches' and writes nothing.
@@ -2588,8 +2592,8 @@ test('H containment: the whole suite leaves THIS clone\'s live plugin MCP config
   }
 });
 // SABOTAGE (the one this pin exists for): remove the containment default so the
-// seam is not delivered to the child and init falls back to init.mjs:51's real
-// clone — in EITHER of its two forms, which are not equivalent:
+// seam is not delivered to the child and init falls back to init-impl.mjs's
+// STERLING_PLUGIN_ROOT_MATCH fallback (this clone) — in EITHER of its two forms, which are not equivalent:
 //   (i)  drop `STERLING_PLUGIN_ROOT_MATCH: pluginRootMatch` from the spawn env while
 //        the helper still computes and returns the value;
 //   (ii) remove the scratch default outright.

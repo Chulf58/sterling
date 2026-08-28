@@ -60,7 +60,7 @@
 // clone) as its own slice rather than touching H15's matching path here.
 //
 // DEPENDENCY-FREE (node builtins only, no @sterling/schemas import): this
-// module is imported by BOTH scripts/init.mjs (which may import @sterling/schemas
+// module is imported by BOTH scripts/init-impl.mjs (which may import @sterling/schemas
 // freely) and scripts/lib/update.mjs, which must stay loadable on a clone where
 // the workspace packages are NOT yet built (bootstrap independence — see the
 // consumer-update-path article). ESM evaluates the whole module graph at
