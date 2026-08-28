@@ -8,7 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
-import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect } from './state.js';
+import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type MutationToggleEffect } from './state.js';
+import { applySparringToggle, applyTddToggle, applyMutationToggle } from './config-writeback.js';
 import { bannerLines } from './banner.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
@@ -135,9 +136,13 @@ function loadRoster(): AgentRosterSnapshot {
     models?: Record<string, { model: string; effort: string }>;
     models_catalog?: { staleness_days?: number };
     sparring_partner?: { enabled?: boolean; model?: string };
+    tdd?: { enabled?: boolean };
+    mutation_verification?: { enabled?: boolean };
   };
   const configModels = cfg.models ?? {};
   const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
+  const tdd = { enabled: cfg.tdd?.enabled ?? true };
+  const mutationVerification = { enabled: cfg.mutation_verification?.enabled ?? true };
   const codexWired = probeCodexWired();
   const agents: RosterAgent[] = Object.keys(AGENT_MODEL_KEY)
     .filter((name) => existsSync(join(agentsDir, `${name}.md`)))
@@ -164,21 +169,7 @@ function loadRoster(): AgentRosterSnapshot {
     // (audit finding 41/43) — surface it as a visible System-tab notice instead.
     ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
   }
-  return { agents, configModels, catalog, sparringPartner, codexWired };
-}
-
-/** Execute a sparring_toggle effect: config.sparring_partner.enabled write
- *  only (advisory-only surface, article interaction a — never gates, so
- *  there is no downstream projection or decision record the way a model swap
- *  has). Preserves the model field untouched. */
-function applySparringToggle(e: SparringToggleEffect): void {
-  try {
-    const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { sparring_partner?: { enabled?: boolean; model?: string } };
-    raw.sparring_partner = { ...raw.sparring_partner, enabled: e.enabled };
-    writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
-  } catch (err) {
-    ui = { ...ui, notice: `sparring partner toggle failed — ${(err as Error).message}` };
-  }
+  return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mutationVerification };
 }
 
 /** Execute a sparring_model effect: config.sparring_partner.model write. An
@@ -290,11 +281,18 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   // sparring-partner toggle/model writes (board a0714d0b) — same activation
   // refresh pattern as a model swap, so the row reflects the new value and
   // (for the toggle) the unchanged codexWired probe.
+  const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
   const sparringToggles = result.effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
-  for (const e of sparringToggles) applySparringToggle(e);
+  for (const e of sparringToggles) applySparringToggle(e, notice, configPath);
   const sparringModels = result.effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
   for (const e of sparringModels) applySparringModel(e);
-  if (swaps.length || sparringToggles.length || sparringModels.length) roster = loadRoster();
+  // tdd/mutation_verification toggle writes (decision 752caf98) — same
+  // activation-refresh pattern as the sparring-partner toggle.
+  const tddToggles = result.effects.filter((e): e is TddToggleEffect => e.type === 'tdd_toggle');
+  for (const e of tddToggles) applyTddToggle(e, notice, configPath);
+  const mutationToggles = result.effects.filter((e): e is MutationToggleEffect => e.type === 'mutation_toggle');
+  for (const e of mutationToggles) applyMutationToggle(e, notice, configPath);
+  if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || mutationToggles.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {
     restoreTerminal();
     process.exit(0);
