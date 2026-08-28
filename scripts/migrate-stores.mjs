@@ -83,10 +83,10 @@
 //     honestly. A surviving record with NO fts row therefore REFUSES (its text
 //     cannot be synthesized) rather than silently becoming unrankable.
 //
-// EXIT CODES: --db: 0 success / already-migrated · 1 verification failed
-// (nothing bumped) · 2 refusal before work · 3 unimplemented mode.
+// EXIT CODES: --db: 0 success / already-migrated - 1 verification failed
+// (nothing bumped) - 2 refusal before work - 3 unimplemented mode.
 // --all-stores: 0 every enumerated store succeeded (migrated/already/missing
-// only) · 1 at least one store failed. STDOUT carries exactly one JSON-Lines
+// only) - 1 at least one store failed. STDOUT carries exactly one JSON-Lines
 // record per enumerated store (the --db JSON shape, plus store/origin); the
 // {total, migrated, already, failed, missing} summary and the advisory
 // close-your-sessions warning both go to STDERR, deliberately kept OUT of the
@@ -1079,7 +1079,7 @@ function main() {
     const relationRows = []; // { source_id, rel, target_id }
     const seenRelation = new Set();
     const addRelation = (sourceId, rel, targetId) => {
-      const key = `${sourceId} ${rel} ${targetId}`;
+      const key = `${sourceId}\x1F${rel}\x1F${targetId}`;
       if (seenRelation.has(key)) return;
       seenRelation.add(key);
       relationRows.push({ source_id: sourceId, rel, target_id: targetId });
