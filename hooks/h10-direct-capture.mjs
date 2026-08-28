@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { readFileSync as readFileSync3, writeFileSync, rmSync as rmSync2, existsSync as existsSync4, mkdirSync as mkdirSync3, renameSync } from "node:fs";
-import { join as join4 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync as rmSync3, existsSync as existsSync4, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
+import { join as join5 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -7139,10 +7139,84 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
-// scripts/hooks/lib/settlement.mjs
-import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync2, mkdirSync as mkdirSync2, rmSync, statSync } from "node:fs";
+// scripts/hooks/lib/dispatch-register-lock.mjs
+import { mkdirSync as mkdirSync2, rmSync, renameSync, statSync, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
 import { join as join3 } from "node:path";
+import { randomUUID as randomUUID2 } from "node:crypto";
+var DEFAULT_RETRY_MS = 1e3;
+var DEFAULT_STALE_MS = 1e4;
+var POLL_MS = 20;
+var OWNER_FILE = "owner";
+function registerLockDir(projectRoot2) {
+  return join3(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
+}
+function sleep(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
+}
+function readOwnerNonce(lockDir) {
+  try {
+    return readFileSync2(join3(lockDir, OWNER_FILE), "utf8");
+  } catch {
+    return null;
+  }
+}
+function tombAndRemove(lockDir) {
+  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID2()}`;
+  renameSync(lockDir, tomb);
+  try {
+    rmSync(tomb, { recursive: true, force: true });
+  } catch {
+  }
+}
+function makeLock(lockDir, nonce) {
+  return {
+    nonce,
+    release() {
+      try {
+        if (readOwnerNonce(lockDir) !== nonce) return;
+        tombAndRemove(lockDir);
+      } catch {
+      }
+    }
+  };
+}
+async function acquireLock(lockDir, opts = {}) {
+  const retryMs = Number.isFinite(opts.retryMs) ? opts.retryMs : DEFAULT_RETRY_MS;
+  const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_MS;
+  const nonce = randomUUID2();
+  const deadline = Date.now() + retryMs;
+  const ownerPath = join3(lockDir, OWNER_FILE);
+  for (; ; ) {
+    mkdirSync2(lockDir, { recursive: true });
+    try {
+      writeFileSync(ownerPath, nonce, { flag: "wx" });
+      return makeLock(lockDir, nonce);
+    } catch (e) {
+      if (e.code === "ENOENT") continue;
+      if (e.code !== "EEXIST") throw e;
+    }
+    let ageMs = null;
+    try {
+      ageMs = Date.now() - statSync(ownerPath).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (ageMs >= staleMs) {
+      try {
+        tombAndRemove(lockDir);
+      } catch {
+      }
+      continue;
+    }
+    if (Date.now() >= deadline) return null;
+    await sleep(POLL_MS);
+  }
+}
+
+// scripts/hooks/lib/settlement.mjs
+import { createHash, randomUUID as randomUUID3 } from "node:crypto";
+import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import { join as join4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
@@ -7155,15 +7229,15 @@ function withFileLock(targetPath, fn, { onTimeout } = {}) {
   let acquired = false;
   while (Date.now() < deadline) {
     try {
-      mkdirSync2(lockPath);
+      mkdirSync3(lockPath);
       acquired = true;
       break;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
           console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
-          rmSync(lockPath, { recursive: true, force: true });
+          rmSync2(lockPath, { recursive: true, force: true });
           continue;
         }
       } catch {
@@ -7183,7 +7257,7 @@ function withFileLock(targetPath, fn, { onTimeout } = {}) {
   } finally {
     if (acquired) {
       try {
-        rmSync(lockPath, { recursive: true, force: true });
+        rmSync2(lockPath, { recursive: true, force: true });
       } catch {
       }
     }
@@ -7213,7 +7287,7 @@ function parseTouchesContent(raw) {
 }
 function hashFile(root, rel) {
   try {
-    return createHash("sha256").update(readFileSync2(join3(root, rel))).digest("hex");
+    return createHash("sha256").update(readFileSync3(join4(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -7227,7 +7301,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync2(join3(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync3(join4(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -7237,7 +7311,7 @@ function loadGeneratedProjections(root) {
 }
 function buildReconcileItem(article, fileKeys, now) {
   return {
-    id: randomUUID2(),
+    id: randomUUID3(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -7297,7 +7371,7 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync as statSync2, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync as statSync3, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync3(path)) return null;
@@ -7334,7 +7408,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync2(path).size > TAIL_BYTES;
+  const exhausted = statSync3(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
@@ -7436,12 +7510,12 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 }
 
 // scripts/hooks/h10-direct-capture.mjs
-function computeDeadDispatchResidue(cwd, sessionId) {
-  const registerPath = join4(cwd, ".sterling", "transient", "dispatch-register.json");
+async function computeDeadDispatchResidue(cwd, sessionId) {
+  const registerPath = join5(cwd, ".sterling", "transient", "dispatch-register.json");
   let raw = [];
   try {
     if (existsSync4(registerPath)) {
-      const parsed = JSON.parse(readFileSync3(registerPath, "utf8"));
+      const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
       if (Array.isArray(parsed)) raw = parsed;
     }
   } catch {
@@ -7468,35 +7542,48 @@ function computeDeadDispatchResidue(cwd, sessionId) {
     stampIds.add(entry.agent_id);
   }
   if (stampIds.size) {
+    const lockDir = registerLockDir(cwd);
     try {
-      let fresh = [];
-      try {
-        if (existsSync4(registerPath)) {
-          const parsed = JSON.parse(readFileSync3(registerPath, "utf8"));
-          if (Array.isArray(parsed)) fresh = parsed;
+      mkdirSync4(join5(cwd, ".sterling", "transient"), { recursive: true });
+      const lock = await acquireLock(lockDir, { retryMs: 1e3, staleMs: 1e4 });
+      if (!lock) {
+        process.stderr.write(
+          "H10: register lock timed out \u2014 SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop\n"
+        );
+      } else {
+        try {
+          let fresh = [];
+          try {
+            if (existsSync4(registerPath)) {
+              const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
+              if (Array.isArray(parsed)) fresh = parsed;
+            }
+          } catch {
+            fresh = [];
+          }
+          for (const entry of fresh) {
+            if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
+              entry.residue_reported_at = nowIso;
+            }
+          }
+          const transient = join5(cwd, ".sterling", "transient");
+          mkdirSync4(transient, { recursive: true });
+          const tmpPath = join5(transient, `dispatch-register.json.tmp-${process.pid}`);
+          writeFileSync2(tmpPath, JSON.stringify(fresh));
+          renameSync2(tmpPath, registerPath);
+        } finally {
+          lock.release();
         }
-      } catch {
-        fresh = [];
       }
-      for (const entry of fresh) {
-        if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
-          entry.residue_reported_at = nowIso;
-        }
-      }
-      const transient = join4(cwd, ".sterling", "transient");
-      mkdirSync3(transient, { recursive: true });
-      const tmpPath = join4(transient, `dispatch-register.json.tmp-${process.pid}`);
-      writeFileSync(tmpPath, JSON.stringify(fresh));
-      renameSync(tmpPath, registerPath);
     } catch {
     }
   }
   return lines;
 }
 var input = readStdin();
-var residueLines = (() => {
+var residueLines = await (async () => {
   try {
-    return computeDeadDispatchResidue(input.cwd, input.session_id);
+    return await computeDeadDispatchResidue(input.cwd, input.session_id);
   } catch {
     return [];
   }
@@ -7506,14 +7593,14 @@ if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
   allow();
 }
-var touchesPath = join4(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join4(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join4(input.cwd, ".sterling", "transient", "capture-nagged.json");
+var touchesPath = join5(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join5(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join5(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   if (store.getRun()) allow();
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const pressureMarker = join4(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join5(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const pressure = (() => {
     try {
       const cw = config.context_watch;
@@ -7535,8 +7622,8 @@ try {
           sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
         }
       }
-      mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync(join4(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync4(join5(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync2(join5(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -7564,49 +7651,49 @@ try {
     }
   })();
   const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
-  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join4(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
+  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join5(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
   const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% (${pressure.window}-tok window) \u2192 finish/commit open work, delegate reads & mechanical work to subagents (P1).${boundaryLine()} Once committed: ${rotationCmd} --next-slice "<next slice>" (--objective/--risks/--pointers optional), then say READY TO CLEAR.` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync3(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync4(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
     }
   };
-  const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join4(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const spendPressureMarker = (level) => writeFileSync2(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  const gaugeMarker = join5(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync3(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync4(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const spendGaugeMarker = () => writeFileSync2(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 measured against the ${pressure.window}-tok default (may mislead). Add context_watch.windows["${pressure.unmapped_model}"] to .sterling/config.json. (once per session)`;
-  const delegationMarker = join4(input.cwd, ".sterling", "transient", "delegation-nagged.json");
+  const delegationMarker = join5(input.cwd, ".sterling", "transient", "delegation-nagged.json");
   const delegationSpent = () => {
     try {
-      return !!input.session_id && JSON.parse(readFileSync3(delegationMarker, "utf8")).session_id === input.session_id;
+      return !!input.session_id && JSON.parse(readFileSync4(delegationMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const articleWritesPath = join4(input.cwd, ".sterling", "transient", "article-writes.json");
+  const articleWritesPath = join5(input.cwd, ".sterling", "transient", "article-writes.json");
   const readArticleWrites = () => {
     try {
-      const raw = JSON.parse(readFileSync3(articleWritesPath, "utf8"));
+      const raw = JSON.parse(readFileSync4(articleWritesPath, "utf8"));
       return raw.session_id === input.session_id && Number.isFinite(raw.count) ? raw.count : 0;
     } catch {
       return 0;
     }
   };
-  const statsPath = join4(input.cwd, ".sterling", "transient", "delegation-stats.json");
+  const statsPath = join5(input.cwd, ".sterling", "transient", "delegation-stats.json");
   const writeDelegationStats = (stats) => {
     try {
-      mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync(statsPath, JSON.stringify(stats));
+      mkdirSync4(join5(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync2(statsPath, JSON.stringify(stats));
     } catch {
     }
   };
@@ -7626,7 +7713,7 @@ try {
       let soloDispatches = 0;
       let assistantEntries = 0;
       let contentArrays = 0;
-      for (const line of readFileSync3(tPath, "utf8").split("\n")) {
+      for (const line of readFileSync4(tPath, "utf8").split("\n")) {
         if (!line.trim()) continue;
         let entry;
         try {
@@ -7682,7 +7769,7 @@ try {
       return null;
     }
   })();
-  const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const spendDelegationMarker = () => writeFileSync2(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const delegationPart = () => `H10 delegation watch: hand-read ${delegation.hand_reads} file(s), ${delegation.searches} search(es), ${delegation.dispatches} dispatch(es) (max batch ${delegation.max_batch}, solo ${delegation.solo_dispatches}), ${delegation.article_writes} hand-run article write(s) \u2192 delegate reads/sweeps/mechanical work (opus judgment / sonnet mechanical). (once per session)`;
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
@@ -7716,27 +7803,27 @@ try {
       let orphanedTouches = [];
       if (existsSync4(touchesClaimPath)) {
         try {
-          orphanedTouches = parseTouchesContent(readFileSync3(touchesClaimPath, "utf8"));
+          orphanedTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
         } catch {
           orphanedTouches = [];
         }
       }
       let freshTouches = [];
       try {
-        renameSync(touchesPath, touchesClaimPath);
-        freshTouches = parseTouchesContent(readFileSync3(touchesClaimPath, "utf8"));
+        renameSync2(touchesPath, touchesClaimPath);
+        freshTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
       } catch (e) {
         if (e && e.code !== "ENOENT") throw e;
       }
       touches = [...orphanedTouches, ...freshTouches];
-      if (orphanedTouches.length) writeFileSync(touchesClaimPath, JSON.stringify(touches));
+      if (orphanedTouches.length) writeFileSync2(touchesClaimPath, JSON.stringify(touches));
     },
     { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
   );
   const discardTouchesClaim = () => {
     withFileLock(
       touchesPath,
-      () => rmSync2(touchesClaimPath, { force: true }),
+      () => rmSync3(touchesClaimPath, { force: true }),
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
   };
@@ -7744,7 +7831,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync4(touchesClaimPath) && !existsSync4(touchesPath)) renameSync(touchesClaimPath, touchesPath);
+        if (existsSync4(touchesClaimPath) && !existsSync4(touchesPath)) renameSync2(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -7753,20 +7840,20 @@ try {
   let sessionEvents = [];
   try {
     if (existsSync4(eventsPath)) {
-      const raw = JSON.parse(readFileSync3(eventsPath, "utf8"));
+      const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync4(join4(input.cwd, p))
+    (p) => existsSync4(join5(input.cwd, p))
   );
   let dispatchEntries = [];
   try {
-    const registerPath = join4(input.cwd, ".sterling", "transient", "dispatch-register.json");
+    const registerPath = join5(input.cwd, ".sterling", "transient", "dispatch-register.json");
     if (existsSync4(registerPath)) {
-      const raw = JSON.parse(readFileSync3(registerPath, "utf8"));
+      const raw = JSON.parse(readFileSync4(registerPath, "utf8"));
       if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
     }
   } catch {
@@ -7820,9 +7907,9 @@ try {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
-      rmSync2(eventsPath, { force: true });
+      rmSync3(eventsPath, { force: true });
     }
-    rmSync2(nagMarker, { force: true });
+    rmSync3(nagMarker, { force: true });
   };
   const runSettlement = () => {
     try {
@@ -7880,7 +7967,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join4(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join5(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
@@ -7954,14 +8041,14 @@ try {
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     if (!existsSync4(nagMarker)) {
-      writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+      writeFileSync2(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
       releaseTouchesClaim();
       releaseWithPressure();
     }
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -7992,9 +8079,9 @@ try {
   }
   const H10_HEADER = "H10 \u25B8 duties before this session ends \u2014 act, then Stop again:";
   if (!input.stop_hook_active && !existsSync4(nagMarker)) {
-    writeFileSync(nagMarker, JSON.stringify({ at: now }));
+    writeFileSync2(nagMarker, JSON.stringify({ at: now }));
     const parts = [...disclosureParts];
-    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join4(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
+    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join5(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
     if (hasCaptureDuty && !captured && !pendingDetail) {
       const hasDebug = activeDebugEvents.length > 0;
       const declareLine = `no_capture (${noCaptureCmd} --reason "<why>") if nothing durable, or capture_pending if riding an in-flight commit/agent \u2014 a false declaration is drift`;
@@ -8041,7 +8128,7 @@ ${parts.join("\n\n")}`);
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8061,7 +8148,7 @@ ${parts.join("\n\n")}`);
   if (articleDemand) {
     const overlapping = store.query({ types: ["todo"], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
     store.enqueueSystemTodo({
-      id: randomUUID3(),
+      id: randomUUID4(),
       type: "todo",
       created_at: now,
       updated_at: now,
@@ -8080,7 +8167,7 @@ ${parts.join("\n\n")}`);
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8101,7 +8188,7 @@ ${parts.join("\n\n")}`);
     if (!open) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,

@@ -12,9 +12,51 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
+import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths } from '../lib/agent-distribution.mjs';
+
+// IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
+// register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
+// H22's Start/Stop/prune and H10's residue stamp, so its unconditional
+// session-boundary delete takes the SAME mkdir-mutex lock rather than a
+// blind rmSync race against a concurrent H22/H10 fire. TIMEOUT POSTURE
+// DIFFERS FROM H22/H10's skip-loud: on timeout this WARNS and LEAVES THE
+// REGISTER INTACT — never blindly deletes the lock directory itself, and
+// never deletes the register unlocked either — because the next locked H22
+// fire prunes this (by now foreign-session) register's entries anyway, so
+// over-deferral here is bounded exactly the way the decision describes.
+async function deleteRegisterUnderLock(cwd) {
+  const transientDir = join(cwd, '.sterling', 'transient');
+  const lockDir = registerLockDir(cwd);
+  try {
+    mkdirSync(transientDir, { recursive: true });
+    const lock = await acquireLock(lockDir, { retryMs: 1000, staleMs: 10_000 });
+    if (!lock) {
+      // Names BOTH skipped effects (LOW, review-fix round): the register
+      // delete AND the orphaned .tmp-* staging-file sweep that would
+      // otherwise have run in the same critical section — a reader of this
+      // line should not have to infer the tmp-file cleanup was skipped too.
+      process.stderr.write(
+        'H1: register lock timed out — LEAVING the dispatch register intact and SKIPPING its orphaned .tmp-* staging-file cleanup (never deleting unlocked); the next locked H22 fire prunes this session\'s foreign entries\n'
+      );
+      return;
+    }
+    try {
+      rmSync(join(transientDir, 'dispatch-register.json'), { force: true });
+      // Orphaned atomic-write staging files (a crash between write and rename
+      // in H22/H10) die at the same boundary (P4).
+      for (const f of readdirSync(transientDir)) {
+        if (f.startsWith('dispatch-register.json.tmp-')) rmSync(join(transientDir, f), { force: true });
+      }
+    } finally {
+      lock.release();
+    }
+  } catch {
+    // fail-open — a failed delete costs deferral precision, never this hook (P1)
+  }
+}
 
 // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): the
 // delegation bullet below states config.delegation.max_concurrent, never a
@@ -366,15 +408,7 @@ if (!store) {
   // computeH1DeadDispatchResidue's own gate above — resume/compact stay
   // untouched on this branch too, same as the store-present path below.
   if (input.source === 'startup' || input.source === 'clear') {
-    try {
-      const transientDir = join(input.cwd, '.sterling', 'transient');
-      rmSync(join(transientDir, 'dispatch-register.json'), { force: true });
-      for (const f of readdirSync(transientDir)) {
-        if (f.startsWith('dispatch-register.json.tmp-')) rmSync(join(transientDir, f), { force: true });
-      }
-    } catch {
-      // fail-open — a failed delete costs deferral precision, never this early exit
-    }
+    await deleteRegisterUnderLock(input.cwd);
   }
   allow(); // not a Sterling project — no further ceremony (P1)
 }
@@ -612,18 +646,12 @@ const dispatchResidueContext = dispatchResidueLines.length
 // that cannot survive a session boundary, so at ANY SessionStart every entry is
 // dead by definition (P4). Leaving one would defer a real duty on behalf of an
 // agent that no longer exists, which is exactly the silent duty hole the
-// staleness TTL exists to bound. Fail-open like every H1 read.
-try {
-  const transientDir = join(input.cwd, '.sterling', 'transient');
-  rmSync(join(transientDir, 'dispatch-register.json'), { force: true });
-  // Orphaned atomic-write staging files (a crash between write and rename in
-  // H22) die at the same boundary (P4; review LOW, 2026-08-21).
-  for (const f of readdirSync(transientDir)) {
-    if (f.startsWith('dispatch-register.json.tmp-')) rmSync(join(transientDir, f), { force: true });
-  }
-} catch {
-  // fail-open — a failed delete costs deferral precision, never the injection
-}
+// staleness TTL exists to bound. COOPERATING WRITER (decision
+// register-writers-cooperating-lock, 1e0ba0d0): see deleteRegisterUnderLock
+// above — on a lock timeout this warns and leaves the register intact rather
+// than deleting it unlocked; the next locked H22 fire prunes this session's
+// foreign entries anyway. Fail-open like every H1 read.
+await deleteRegisterUnderLock(input.cwd);
 
 // CONDUCTOR-ATTESTED ENFORCEMENT STAMP (decision h17-enforcement-stamp-
 // conductor-attested-dirt, 6e132e19): deleted UNCONDITIONALLY — every source,

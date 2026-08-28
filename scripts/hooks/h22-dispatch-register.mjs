@@ -61,6 +61,25 @@ import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/co
 import { lastDispatchBlocks, extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
 import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates } from './lib/dispatch-advisory.mjs';
+import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
+
+// REGISTER LOCK (decision register-writers-cooperating-lock, 1e0ba0d0, board
+// 673ca3f6) — guards the register's whole-array read-modify-write on BOTH
+// SubagentStart (append) and SubagentStop (remove + the prune pass). Unlike
+// the ledger lock above, TIMEOUT POSTURE HERE IS SKIP, NEVER UNLOCKED: an
+// unlocked whole-array rewrite can erase every concurrent sibling's
+// mutation, while skipping loses at most THIS ONE fire's mutation, bounded
+// and disclosed. The lock PATH comes from the shared registerLockDir()
+// (review-fix round) — every writer (this hook, H10, H1) derives it from the
+// ONE spelling in lib/dispatch-register-lock.mjs, never a locally respelled
+// literal a typo could silently unlock. It is never blindly deleted —
+// stale-steal (10s) is the only recovery for a crashed holder.
+const REGISTER_RETRY_MS = 1000;
+const REGISTER_STALE_MS = 10_000;
+async function acquireRegisterLock(cwd) {
+  mkdirSync(join(cwd, '.sterling', 'transient'), { recursive: true });
+  return acquireLock(registerLockDir(cwd), { retryMs: REGISTER_RETRY_MS, staleMs: REGISTER_STALE_MS });
+}
 
 // SPEC B: .sterling/config.json's top-level `exclusive_resources: string[]`
 // (absent/malformed -> none, soft posture — this hook never gates on config).
@@ -386,21 +405,31 @@ try {
   }
 
   const registerPath = join(input.cwd, '.sterling', 'transient', 'dispatch-register.json');
-  let entries = [];
-  try {
-    if (existsSync(registerPath)) {
-      const raw = JSON.parse(readFileSync(registerPath, 'utf8'));
-      if (Array.isArray(raw)) entries = raw;
+
+  // Plain, unlocked READ helper — reads never need the lock (H22's own header
+  // comment: the register's atomic tmp+rename publish means a reader sees the
+  // previous register or the current one, never a torn file). Only the
+  // read-MODIFY-write below is lock-guarded.
+  function readEntriesRaw() {
+    try {
+      if (existsSync(registerPath)) {
+        const raw = JSON.parse(readFileSync(registerPath, 'utf8'));
+        if (Array.isArray(raw)) return raw;
+      }
+    } catch {
+      // corrupt bytes degrade to empty (session-events posture) and are
+      // replaced by the valid register written by whichever writer next
+      // acquires the lock
     }
-  } catch {
-    entries = []; // corrupt bytes degrade to empty (session-events posture) and
-    // are replaced by the valid register written below
+    return [];
   }
 
   // Foreign-session entries are pruned on EVERY fire, start or stop: a dispatch
   // cannot outlive its own session, so another session_id's entry is residue
-  // that would otherwise defer this session's duties forever.
-  entries = entries.filter((e) => e && e.session_id === input.session_id);
+  // that would otherwise defer this session's duties forever. Applied to
+  // whichever read feeds the LOCKED write below, never to a read used only
+  // for the unlocked, non-mutating lookups (residue/ledger) above it.
+  const pruneForeign = (raw) => raw.filter((e) => e && e.session_id === input.session_id);
 
   if (event === 'SubagentStart') {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
@@ -464,33 +493,7 @@ try {
         ? claimedResources(matchedBlocks.map((b) => b.prompt).join('\n'), configuredResources)
         : [];
 
-    // SPEC B (6): "you do not hold <resource>" notice — computed against
-    // `entries` BEFORE this spawn's own entry is appended below, so a
-    // sole/first claimant structurally never sees itself (self-exclusion is
-    // not a filter to get wrong, it is simply not in the list yet).
-    const notices = [];
-    for (const name of configuredResources) {
-      const holder = entries.find((e) => Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
-      if (holder) {
-        notices.push(`You do not hold '${name}' — it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
-      }
-    }
-    // Emitted through the documented SubagentStart injection channel
-    // (hookSpecificOutput.additionalContext — same shape h19-dispatch-staging.mjs
-    // uses), not a raw stdout write: a raw write is not guaranteed to reach the
-    // spawned agent at all. Each hook on this event path writes its OWN
-    // hookSpecificOutput object and the platform composes them — h28-return-contract.mjs
-    // is a second, independent SubagentStart writer (measured 2026-08-26,
-    // research_finding 2b67ba97) — so the shape here is built so this hook's own
-    // addition joins into one payload, never a second competing write within
-    // THIS hook.
-    if (notices.length) {
-      process.stdout.write(
-        JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: notices.join('\n') } })
-      );
-    }
-
-    const newEntry = {
+    const newEntryBase = {
       agent_id: input.agent_id,
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
@@ -511,8 +514,77 @@ try {
       at: new Date().toISOString(),
       attribution,
     };
-    if (claimed.length) newEntry.exclusive_resources = claimed;
-    entries.push(newEntry);
+    if (claimed.length) newEntryBase.exclusive_resources = claimed;
+
+    // REGISTER LOCK, APPEND SIDE (decision register-writers-cooperating-lock,
+    // 1e0ba0d0). Everything above (transcript reads, prompt parsing, git-free
+    // candidate extraction) is the "expensive work" the decision keeps OUTSIDE
+    // the critical section; only the read-modify-write below is guarded.
+    // TIMEOUT POSTURE: SKIP-LOUD, never an unlocked write — an unlocked
+    // whole-array rewrite can erase every concurrent sibling's mutation,
+    // while skipping loses at most this one fire's append, bounded and
+    // disclosed (D2).
+    const registerLock = await acquireRegisterLock(input.cwd);
+    if (!registerLock) {
+      // A raw stderr write, NOT warnNonBlocking — this timeout is disclosed
+      // but never denies the spawn (exit 0), whereas warnNonBlocking exits 1.
+      // Names the exclusive-resource "you do not hold X" notice too (LOW,
+      // review-fix round): that notice is computed from the locked read
+      // below, so a timeout silently drops it as well — a reader must not
+      // have to infer that from the append-only framing.
+      process.stderr.write(
+        `H22: register lock timed out — SKIPPING SubagentStart append for '${input.agent_id}' (never writing the register unlocked), including any "you do not hold <resource>" exclusive-resource notice this spawn would have received — ${consequence}\n`
+      );
+    } else {
+      try {
+        // Fresh read, taken only now that the lock is held — never the
+        // pre-lock snapshot, so a sibling's mutation that landed while we
+        // were waiting is never clobbered.
+        const entries = pruneForeign(readEntriesRaw());
+
+        // SPEC B (6): "you do not hold <resource>" notice — computed against
+        // the freshly-read `entries` BEFORE this spawn's own entry is
+        // appended below, so a sole/first claimant structurally never sees
+        // itself (self-exclusion is not a filter to get wrong, it is simply
+        // not in the list yet).
+        const notices = [];
+        for (const name of configuredResources) {
+          const holder = entries.find((e) => Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
+          if (holder) {
+            notices.push(`You do not hold '${name}' — it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
+          }
+        }
+        // Emitted through the documented SubagentStart injection channel
+        // (hookSpecificOutput.additionalContext — same shape h19-dispatch-staging.mjs
+        // uses), not a raw stdout write: a raw write is not guaranteed to reach the
+        // spawned agent at all. Each hook on this event path writes its OWN
+        // hookSpecificOutput object and the platform composes them — h28-return-contract.mjs
+        // is a second, independent SubagentStart writer (measured 2026-08-26,
+        // research_finding 2b67ba97) — so the shape here is built so this hook's own
+        // addition joins into one payload, never a second competing write within
+        // THIS hook.
+        if (notices.length) {
+          process.stdout.write(
+            JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: notices.join('\n') } })
+          );
+        }
+
+        entries.push(newEntryBase);
+
+        // ATOMIC publish: a reader (H10 at Stop, or a sibling fire) either
+        // sees the previous register or this one, never a half-written file.
+        // The tmp name carries the pid so two simultaneous fires cannot
+        // clobber each other's staging file.
+        const transient = join(input.cwd, '.sterling', 'transient');
+        mkdirSync(transient, { recursive: true });
+        const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
+        writeFileSync(tmpPath, JSON.stringify(entries));
+        renameSync(tmpPath, registerPath);
+      } finally {
+        registerLock.release();
+      }
+    }
+    allow();
   } else {
     // Stop: promote a reviewer-class entry into the durable review ledger
     // (decision 12a26ca6-a301-466d-a45c-5e1eeff36694, slug
@@ -521,7 +593,15 @@ try {
     // reviewer's evidence must survive to be stamped into a later commit by
     // scripts/commit-reviewed.mjs. Non-reviewer entries keep the exact
     // delete-only path from before: the ledger is never created or touched.
-    const departing = entries.find((e) => e.agent_id === input.agent_id);
+    //
+    // LOOKED UP VIA A PLAIN, UNLOCKED READ (decision point: "read the entry
+    // before/without the register lock if needed") — deliberately NOT behind
+    // the register lock, because the residue probe and the ledger promotion
+    // below are exactly the "expensive work (transcript reads, git probes)"
+    // the decision keeps OUTSIDE the critical section. This is what makes D3
+    // possible: even when the register lock is held elsewhere and the
+    // removal below has to be skipped, the receipt still gets promoted.
+    const departing = pruneForeign(readEntriesRaw()).find((e) => e.agent_id === input.agent_id);
 
     // SPEC A (6): kill-detection at H22's own SubagentStop — no TTL wait
     // needed, since a kill is detectable immediately via the real stdin field
@@ -569,56 +649,106 @@ try {
           ledger = []; // malformed ledger degrades to empty (same posture as the
           // register above) and is rewritten valid below — never exit 2 for this
         }
-        // session_id comes from the REGISTER entry, not from stdin: it is the
-        // session that dispatched the reviewer. (The prune above already
-        // guarantees the two are equal — the fallback exists so a hand-written
-        // or pre-expiry register entry still yields a total shape rather than
-        // a missing key, since commit-reviewed treats a MISSING identity as
-        // unjudgeable and an identity that is merely null as the same.)
-        // Both candidates go through normIdentity, so an empty-string session_id
-        // on the register entry falls through to stdin's rather than being
-        // written as a meaningless '' the reader must then interpret.
-        ledger.push({
-          agent_type: departing.agent_type,
-          files: departing.files,
-          // Copied unchanged from the register entry (decision 8f137474):
-          // absent on a pre-migration register entry, same posture as the
-          // other always-attempted-never-required fields on this receipt.
-          files_source: departing.files_source,
-          // Same copy-if-present, never-fabricated posture as files_source
-          // above (review-fix round, pins T6a/T6b): a legacy register entry
-          // written before per-block attribution existed carries no
-          // `attribution` key, and `departing.attribution` is then
-          // `undefined` here — JSON.stringify drops an undefined-valued key
-          // entirely, so the promoted receipt genuinely lacks the key rather
-          // than carrying a fabricated default.
-          attribution: departing.attribution,
-          at: departing.at,
-          session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
-          branch: identity.branch,
-          base_sha: identity.base_sha,
-        });
+        // LEDGER IDEMPOTENCY (review-fix round, MEDIUM). The register-lock
+        // timeout path (D3) means a Stop whose register removal was skipped
+        // leaves the entry behind for a LATER Stop-shaped fire to find again
+        // — this closes that double-promotion window. DELIBERATELY NOT a new
+        // `agent_id` field on the receipt: h22-review-ledger.test.mjs and
+        // h22-receipt-expiry.test.mjs both pin the promoted entry's key set
+        // to EXACTLY ['agent_type','at','base_sha','branch','files',
+        // 'session_id'] via Object.keys(entry).sort() — a 7th key (agent_id
+        // is always a defined string, so it always survives the JSON
+        // round-trip unlike the conditionally-undefined files_source/
+        // attribution fields) fails that frozen pin outright. `agent_type` +
+        // `at` are ALREADY two of the six pinned keys, both copied verbatim
+        // from the register entry and therefore stable across repeated
+        // promotion attempts for the SAME dispatch (the same convention the
+        // concurrency pin file's own C2 arm uses to identify a receipt: `key
+        // = (e) => \`${e.agent_type}::${e.at}\``) — a lightweight, no-new-field
+        // idempotency key. Never touches commit-reviewed's OWN consume
+        // identity (agent_type/at/session_id/branch/base_sha/files, per its
+        // sameIdentity()) — this is a read-before-push guard on the SAME
+        // ledger-locked append, not a new field for that matcher to see.
+        if (ledger.some((e) => e && e.agent_type === departing.agent_type && e.at === departing.at)) {
+          process.stderr.write(
+            `H22: a review receipt for agent_type '${departing.agent_type}' at '${departing.at}' is already present in .sterling/review-ledger.json — skipping duplicate promotion\n`
+          );
+        } else {
+          // session_id comes from the REGISTER entry, not from stdin: it is the
+          // session that dispatched the reviewer. (The prune above already
+          // guarantees the two are equal — the fallback exists so a hand-written
+          // or pre-expiry register entry still yields a total shape rather than
+          // a missing key, since commit-reviewed treats a MISSING identity as
+          // unjudgeable and an identity that is merely null as the same.)
+          // Both candidates go through normIdentity, so an empty-string session_id
+          // on the register entry falls through to stdin's rather than being
+          // written as a meaningless '' the reader must then interpret.
+          ledger.push({
+            agent_type: departing.agent_type,
+            files: departing.files,
+            // Copied unchanged from the register entry (decision 8f137474):
+            // absent on a pre-migration register entry, same posture as the
+            // other always-attempted-never-required fields on this receipt.
+            files_source: departing.files_source,
+            // Same copy-if-present, never-fabricated posture as files_source
+            // above (review-fix round, pins T6a/T6b): a legacy register entry
+            // written before per-block attribution existed carries no
+            // `attribution` key, and `departing.attribution` is then
+            // `undefined` here — JSON.stringify drops an undefined-valued key
+            // entirely, so the promoted receipt genuinely lacks the key rather
+            // than carrying a fabricated default.
+            attribution: departing.attribution,
+            at: departing.at,
+            session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
+            branch: identity.branch,
+            base_sha: identity.base_sha,
+          });
+        }
         const ledgerTmpPath = join(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
         writeFileSync(ledgerTmpPath, JSON.stringify(ledger));
         renameSync(ledgerTmpPath, ledgerPath);
       });
     }
-    // Remove the matching entry. No match is a clean no-op (the pruning
-    // above still lands) — a stop for an entry H1 already swept, or for a
-    // dispatch started before this register existed, is not a defect.
-    entries = entries.filter((e) => e.agent_id !== input.agent_id);
-  }
+    // REGISTER LOCK, REMOVE SIDE (decision register-writers-cooperating-lock,
+    // 1e0ba0d0). Everything expensive (the residue probe, the git-backed
+    // ledger promotion above) already ran OUTSIDE this critical section — the
+    // lock below guards only the read-modify-write that removes the matching
+    // entry and applies the foreign-session prune pass.
+    // TIMEOUT POSTURE: SKIP-LOUD — the register is left exactly as read
+    // above (D3): the entry stays behind, a bounded over-deferral, never a
+    // lost promotion (that already happened, unconditionally, above).
+    const registerLock = await acquireRegisterLock(input.cwd);
+    if (!registerLock) {
+      // A raw stderr write, NOT warnNonBlocking — this timeout is disclosed
+      // but never denies the spawn/stop (exit 0), whereas warnNonBlocking
+      // exits 1. The ledger promotion above already happened unconditionally
+      // (D3) — this skip costs only the register removal.
+      process.stderr.write(
+        `H22: register lock timed out — SKIPPING SubagentStop removal for '${input.agent_id}' (never writing the register unlocked) — ${consequence}\n`
+      );
+    } else {
+      try {
+        // Fresh read, taken only now that the lock is held.
+        let entries = pruneForeign(readEntriesRaw());
+        // Remove the matching entry. No match is a clean no-op (the pruning
+        // above still lands) — a stop for an entry H1 already swept, or for a
+        // dispatch started before this register existed, is not a defect.
+        entries = entries.filter((e) => e.agent_id !== input.agent_id);
 
-  // ATOMIC publish: a reader (H10 at Stop, or a sibling fire) either sees the
-  // previous register or this one, never a half-written file — a torn read
-  // degrades to EMPTY, which would drop every live entry precisely when fan-out
-  // traffic makes a concurrent read most likely. The tmp name carries the pid so
-  // two simultaneous fires cannot clobber each other's staging file.
-  const transient = join(input.cwd, '.sterling', 'transient');
-  mkdirSync(transient, { recursive: true });
-  const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
-  writeFileSync(tmpPath, JSON.stringify(entries));
-  renameSync(tmpPath, registerPath);
+        // ATOMIC publish: a reader (H10 at Stop, or a sibling fire) either
+        // sees the previous register or this one, never a half-written file.
+        // The tmp name carries the pid so two simultaneous fires cannot
+        // clobber each other's staging file.
+        const transient = join(input.cwd, '.sterling', 'transient');
+        mkdirSync(transient, { recursive: true });
+        const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
+        writeFileSync(tmpPath, JSON.stringify(entries));
+        renameSync(tmpPath, registerPath);
+      } finally {
+        registerLock.release();
+      }
+    }
+  }
   allow();
 } catch (e) {
   // The register is an aid to H10's deferral, never a gate: a failure here

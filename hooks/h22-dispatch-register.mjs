@@ -6,9 +6,9 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync4, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, rmdirSync, rmSync, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2, renameSync as renameSync2, rmdirSync, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5338,7 +5338,87 @@ function claimedResources(promptText, configuredNames) {
   return claimed;
 }
 
+// scripts/hooks/lib/dispatch-register-lock.mjs
+import { mkdirSync, rmSync, renameSync, statSync as statSync2, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+import { randomUUID } from "node:crypto";
+var DEFAULT_RETRY_MS = 1e3;
+var DEFAULT_STALE_MS = 1e4;
+var POLL_MS = 20;
+var OWNER_FILE = "owner";
+function registerLockDir(projectRoot2) {
+  return join2(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
+}
+function sleep(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
+}
+function readOwnerNonce(lockDir) {
+  try {
+    return readFileSync2(join2(lockDir, OWNER_FILE), "utf8");
+  } catch {
+    return null;
+  }
+}
+function tombAndRemove(lockDir) {
+  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID()}`;
+  renameSync(lockDir, tomb);
+  try {
+    rmSync(tomb, { recursive: true, force: true });
+  } catch {
+  }
+}
+function makeLock(lockDir, nonce) {
+  return {
+    nonce,
+    release() {
+      try {
+        if (readOwnerNonce(lockDir) !== nonce) return;
+        tombAndRemove(lockDir);
+      } catch {
+      }
+    }
+  };
+}
+async function acquireLock(lockDir, opts = {}) {
+  const retryMs = Number.isFinite(opts.retryMs) ? opts.retryMs : DEFAULT_RETRY_MS;
+  const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_MS;
+  const nonce = randomUUID();
+  const deadline = Date.now() + retryMs;
+  const ownerPath = join2(lockDir, OWNER_FILE);
+  for (; ; ) {
+    mkdirSync(lockDir, { recursive: true });
+    try {
+      writeFileSync(ownerPath, nonce, { flag: "wx" });
+      return makeLock(lockDir, nonce);
+    } catch (e) {
+      if (e.code === "ENOENT") continue;
+      if (e.code !== "EEXIST") throw e;
+    }
+    let ageMs = null;
+    try {
+      ageMs = Date.now() - statSync2(ownerPath).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (ageMs >= staleMs) {
+      try {
+        tombAndRemove(lockDir);
+      } catch {
+      }
+      continue;
+    }
+    if (Date.now() >= deadline) return null;
+    await sleep(POLL_MS);
+  }
+}
+
 // scripts/hooks/h22-dispatch-register.mjs
+var REGISTER_RETRY_MS = 1e3;
+var REGISTER_STALE_MS = 1e4;
+async function acquireRegisterLock(cwd) {
+  mkdirSync2(join3(cwd, ".sterling", "transient"), { recursive: true });
+  return acquireLock(registerLockDir(cwd), { retryMs: REGISTER_RETRY_MS, staleMs: REGISTER_STALE_MS });
+}
 function loadExclusiveResourceNames(cwd) {
   try {
     const names = loadConfig(cwd)?.exclusive_resources;
@@ -5432,17 +5512,17 @@ function globPrefixesFromBlocks(blocks) {
   ];
 }
 function withLedgerLock(sterlingDir, run) {
-  const lockPath = join2(sterlingDir, "review-ledger.lock");
+  const lockPath = join3(sterlingDir, "review-ledger.lock");
   let acquired = false;
   for (let i = 0; i < 200 && !acquired; i++) {
     try {
-      mkdirSync(lockPath);
+      mkdirSync2(lockPath);
       acquired = true;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync2(lockPath).mtimeMs > 1e4) {
-          rmSync(lockPath, { recursive: true, force: true });
+        if (Date.now() - statSync3(lockPath).mtimeMs > 1e4) {
+          rmSync2(lockPath, { recursive: true, force: true });
           continue;
         }
       } catch {
@@ -5463,7 +5543,17 @@ function withLedgerLock(sterlingDir, run) {
 }
 var input = readStdin();
 try {
-  if (!existsSync4(join2(input.cwd, ".sterling", "config.json"))) allow();
+  let readEntriesRaw = function() {
+    try {
+      if (existsSync4(registerPath)) {
+        const raw = JSON.parse(readFileSync3(registerPath, "utf8"));
+        if (Array.isArray(raw)) return raw;
+      }
+    } catch {
+    }
+    return [];
+  };
+  if (!existsSync4(join3(input.cwd, ".sterling", "config.json"))) allow();
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;
   if (event !== "SubagentStart" && event !== "SubagentStop") {
@@ -5472,17 +5562,8 @@ try {
   if (!input.agent_id) {
     warnNonBlocking(`H22: ${event} carried no agent_id (entries are keyed by agent_id) \u2014 ${consequence}`);
   }
-  const registerPath = join2(input.cwd, ".sterling", "transient", "dispatch-register.json");
-  let entries = [];
-  try {
-    if (existsSync4(registerPath)) {
-      const raw = JSON.parse(readFileSync2(registerPath, "utf8"));
-      if (Array.isArray(raw)) entries = raw;
-    }
-  } catch {
-    entries = [];
-  }
-  entries = entries.filter((e) => e && e.session_id === input.session_id);
+  const registerPath = join3(input.cwd, ".sterling", "transient", "dispatch-register.json");
+  const pruneForeign = (raw) => raw.filter((e) => e && e.session_id === input.session_id);
   if (event === "SubagentStart") {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
     const { candidates, files_source: filesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
@@ -5497,19 +5578,7 @@ try {
     const claimedGlobPrefixes = toRegisterPaths(globPrefixCandidates);
     const configuredResources = loadExclusiveResourceNames(input.cwd);
     const claimed = attribution === "block" && configuredResources.length ? claimedResources(matchedBlocks.map((b) => b.prompt).join("\n"), configuredResources) : [];
-    const notices = [];
-    for (const name of configuredResources) {
-      const holder = entries.find((e) => Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
-      if (holder) {
-        notices.push(`You do not hold '${name}' \u2014 it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
-      }
-    }
-    if (notices.length) {
-      process.stdout.write(
-        JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: notices.join("\n") } })
-      );
-    }
-    const newEntry = {
+    const newEntryBase = {
       agent_id: input.agent_id,
       agent_type: input.agent_type ?? null,
       session_id: input.session_id,
@@ -5530,10 +5599,41 @@ try {
       at: (/* @__PURE__ */ new Date()).toISOString(),
       attribution
     };
-    if (claimed.length) newEntry.exclusive_resources = claimed;
-    entries.push(newEntry);
+    if (claimed.length) newEntryBase.exclusive_resources = claimed;
+    const registerLock = await acquireRegisterLock(input.cwd);
+    if (!registerLock) {
+      process.stderr.write(
+        `H22: register lock timed out \u2014 SKIPPING SubagentStart append for '${input.agent_id}' (never writing the register unlocked), including any "you do not hold <resource>" exclusive-resource notice this spawn would have received \u2014 ${consequence}
+`
+      );
+    } else {
+      try {
+        const entries = pruneForeign(readEntriesRaw());
+        const notices = [];
+        for (const name of configuredResources) {
+          const holder = entries.find((e) => Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
+          if (holder) {
+            notices.push(`You do not hold '${name}' \u2014 it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
+          }
+        }
+        if (notices.length) {
+          process.stdout.write(
+            JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: notices.join("\n") } })
+          );
+        }
+        entries.push(newEntryBase);
+        const transient = join3(input.cwd, ".sterling", "transient");
+        mkdirSync2(transient, { recursive: true });
+        const tmpPath = join3(transient, `dispatch-register.json.tmp-${process.pid}`);
+        writeFileSync2(tmpPath, JSON.stringify(entries));
+        renameSync2(tmpPath, registerPath);
+      } finally {
+        registerLock.release();
+      }
+    }
+    allow();
   } else {
-    const departing = entries.find((e) => e.agent_id === input.agent_id);
+    const departing = pruneForeign(readEntriesRaw()).find((e) => e.agent_id === input.agent_id);
     if (departing && !departing.residue_reported_at) {
       const lastMsg = input.last_assistant_message;
       const noFinalMessage = typeof lastMsg !== "string" || lastMsg === "";
@@ -5545,51 +5645,71 @@ try {
       }
     }
     if (departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-")) {
-      const sterlingDir = join2(input.cwd, ".sterling");
+      const sterlingDir = join3(input.cwd, ".sterling");
       const identity = gitReceiptIdentity(input.cwd);
       withLedgerLock(sterlingDir, () => {
-        const ledgerPath = join2(sterlingDir, "review-ledger.json");
+        const ledgerPath = join3(sterlingDir, "review-ledger.json");
         let ledger = [];
         try {
           if (existsSync4(ledgerPath)) {
-            const raw = JSON.parse(readFileSync2(ledgerPath, "utf8"));
+            const raw = JSON.parse(readFileSync3(ledgerPath, "utf8"));
             if (Array.isArray(raw)) ledger = raw;
           }
         } catch {
           ledger = [];
         }
-        ledger.push({
-          agent_type: departing.agent_type,
-          files: departing.files,
-          // Copied unchanged from the register entry (decision 8f137474):
-          // absent on a pre-migration register entry, same posture as the
-          // other always-attempted-never-required fields on this receipt.
-          files_source: departing.files_source,
-          // Same copy-if-present, never-fabricated posture as files_source
-          // above (review-fix round, pins T6a/T6b): a legacy register entry
-          // written before per-block attribution existed carries no
-          // `attribution` key, and `departing.attribution` is then
-          // `undefined` here — JSON.stringify drops an undefined-valued key
-          // entirely, so the promoted receipt genuinely lacks the key rather
-          // than carrying a fabricated default.
-          attribution: departing.attribution,
-          at: departing.at,
-          session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
-          branch: identity.branch,
-          base_sha: identity.base_sha
-        });
-        const ledgerTmpPath = join2(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
-        writeFileSync(ledgerTmpPath, JSON.stringify(ledger));
-        renameSync(ledgerTmpPath, ledgerPath);
+        if (ledger.some((e) => e && e.agent_type === departing.agent_type && e.at === departing.at)) {
+          process.stderr.write(
+            `H22: a review receipt for agent_type '${departing.agent_type}' at '${departing.at}' is already present in .sterling/review-ledger.json \u2014 skipping duplicate promotion
+`
+          );
+        } else {
+          ledger.push({
+            agent_type: departing.agent_type,
+            files: departing.files,
+            // Copied unchanged from the register entry (decision 8f137474):
+            // absent on a pre-migration register entry, same posture as the
+            // other always-attempted-never-required fields on this receipt.
+            files_source: departing.files_source,
+            // Same copy-if-present, never-fabricated posture as files_source
+            // above (review-fix round, pins T6a/T6b): a legacy register entry
+            // written before per-block attribution existed carries no
+            // `attribution` key, and `departing.attribution` is then
+            // `undefined` here — JSON.stringify drops an undefined-valued key
+            // entirely, so the promoted receipt genuinely lacks the key rather
+            // than carrying a fabricated default.
+            attribution: departing.attribution,
+            at: departing.at,
+            session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
+            branch: identity.branch,
+            base_sha: identity.base_sha
+          });
+        }
+        const ledgerTmpPath = join3(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
+        writeFileSync2(ledgerTmpPath, JSON.stringify(ledger));
+        renameSync2(ledgerTmpPath, ledgerPath);
       });
     }
-    entries = entries.filter((e) => e.agent_id !== input.agent_id);
+    const registerLock = await acquireRegisterLock(input.cwd);
+    if (!registerLock) {
+      process.stderr.write(
+        `H22: register lock timed out \u2014 SKIPPING SubagentStop removal for '${input.agent_id}' (never writing the register unlocked) \u2014 ${consequence}
+`
+      );
+    } else {
+      try {
+        let entries = pruneForeign(readEntriesRaw());
+        entries = entries.filter((e) => e.agent_id !== input.agent_id);
+        const transient = join3(input.cwd, ".sterling", "transient");
+        mkdirSync2(transient, { recursive: true });
+        const tmpPath = join3(transient, `dispatch-register.json.tmp-${process.pid}`);
+        writeFileSync2(tmpPath, JSON.stringify(entries));
+        renameSync2(tmpPath, registerPath);
+      } finally {
+        registerLock.release();
+      }
+    }
   }
-  const transient = join2(input.cwd, ".sterling", "transient");
-  mkdirSync(transient, { recursive: true });
-  const tmpPath = join2(transient, `dispatch-register.json.tmp-${process.pid}`);
-  writeFileSync(tmpPath, JSON.stringify(entries));
-  renameSync(tmpPath, registerPath);
   allow();
 } catch (e) {
   const consequence = input.hook_event_name === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start \u2014 and if this was a reviewer-class dispatch, its receipt may never have reached the durable review ledger, so a later scripts/commit-reviewed.mjs invocation may wrongly refuse for lack of review evidence` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;

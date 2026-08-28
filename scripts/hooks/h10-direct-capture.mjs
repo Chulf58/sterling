@@ -32,6 +32,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking, gitIgnored } from './lib/common.mjs';
+import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent } from './lib/settlement.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
@@ -53,7 +54,7 @@ import { matchesGlob, parseConfig } from '@sterling/schemas';
  * existing "H10 never mutates the register" deferral pin (a LIVE entry, never
  * an orphan) stays true.
  */
-function computeDeadDispatchResidue(cwd, sessionId) {
+async function computeDeadDispatchResidue(cwd, sessionId) {
   const registerPath = join(cwd, '.sterling', 'transient', 'dispatch-register.json');
   let raw = [];
   try {
@@ -86,38 +87,55 @@ function computeDeadDispatchResidue(cwd, sessionId) {
     stampIds.add(entry.agent_id);
   }
   if (stampIds.size) {
-    // FRESH-READ MERGE, matching H22's own register-write discipline exactly
-    // (tmp-${pid} + renameSync atomic publish) rather than inventing a new
-    // cross-hook lock: H22 itself does NOT lock the register's
-    // read-modify-write (only its durable review-ledger write is
-    // lock-guarded — see its header comment), accepting a bounded lost
-    // update there. What this fixes is narrower and load-bearing: re-reading
-    // immediately before persisting and stamping ONLY entries still present
-    // (by agent_id) means an entry a concurrent H22 SubagentStop removed
-    // between our first read and now is simply left unstamped, never
-    // resurrected by writing back a stale copy of it — and a torn concurrent
-    // read degrading to [] here costs only this stamp, never the live
-    // register (we write back the FRESH read, not our own stale `raw`).
+    // FRESH-READ MERGE UNDER THE COOPERATING REGISTER LOCK (decision
+    // register-writers-cooperating-lock, 1e0ba0d0) — H10 is a register writer
+    // like H22's Start/Stop/prune and H1's session-boundary delete, so it
+    // takes the SAME mkdir-mutex lock (scripts/hooks/lib/dispatch-register-lock.mjs)
+    // rather than a second divergent cross-hook lock. TIMEOUT POSTURE: SKIP
+    // THE STAMP, LOUD, never an unlocked write — an unlocked whole-array
+    // rewrite here could erase a concurrent H22 SubagentStart/Stop's
+    // mutation, while skipping only costs this print-once stamp (the residue
+    // line may then print again on a later Stop — bounded, disclosed, and
+    // accepted per the decision). Re-reading immediately before persisting
+    // and stamping ONLY entries still present (by agent_id) means an entry a
+    // concurrent H22 SubagentStop removed between our first read and now is
+    // simply left unstamped, never resurrected by writing back a stale copy
+    // of it — and a torn concurrent read degrading to [] here costs only
+    // this stamp, never the live register (we write back the FRESH read, not
+    // our own stale `raw`).
+    const lockDir = registerLockDir(cwd);
     try {
-      let fresh = [];
-      try {
-        if (existsSync(registerPath)) {
-          const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
-          if (Array.isArray(parsed)) fresh = parsed;
+      mkdirSync(join(cwd, '.sterling', 'transient'), { recursive: true });
+      const lock = await acquireLock(lockDir, { retryMs: 1000, staleMs: 10_000 });
+      if (!lock) {
+        process.stderr.write(
+          'H10: register lock timed out — SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop\n'
+        );
+      } else {
+        try {
+          let fresh = [];
+          try {
+            if (existsSync(registerPath)) {
+              const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
+              if (Array.isArray(parsed)) fresh = parsed;
+            }
+          } catch {
+            fresh = []; // a torn/corrupt read degrades to empty — nothing to stamp, never a re-add
+          }
+          for (const entry of fresh) {
+            if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
+              entry.residue_reported_at = nowIso;
+            }
+          }
+          const transient = join(cwd, '.sterling', 'transient');
+          mkdirSync(transient, { recursive: true });
+          const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
+          writeFileSync(tmpPath, JSON.stringify(fresh));
+          renameSync(tmpPath, registerPath);
+        } finally {
+          lock.release();
         }
-      } catch {
-        fresh = []; // a torn/corrupt read degrades to empty — nothing to stamp, never a re-add
       }
-      for (const entry of fresh) {
-        if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
-          entry.residue_reported_at = nowIso;
-        }
-      }
-      const transient = join(cwd, '.sterling', 'transient');
-      mkdirSync(transient, { recursive: true });
-      const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
-      writeFileSync(tmpPath, JSON.stringify(fresh));
-      renameSync(tmpPath, registerPath);
     } catch {
       // best-effort — a failed stamp costs only print-once across Stops, never this report
     }
@@ -126,9 +144,9 @@ function computeDeadDispatchResidue(cwd, sessionId) {
 }
 
 const input = readStdin();
-const residueLines = (() => {
+const residueLines = await (async () => {
   try {
-    return computeDeadDispatchResidue(input.cwd, input.session_id);
+    return await computeDeadDispatchResidue(input.cwd, input.session_id);
   } catch {
     return [];
   }
