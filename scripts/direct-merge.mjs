@@ -16,6 +16,7 @@ import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBr
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
 import { matchesGlob } from '@sterling/schemas';
+import { SterlingStore } from '@sterling/store';
 
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
@@ -418,6 +419,76 @@ try {
 } catch (e) {
   fail(`direct-merge: ${e?.message ?? e}`);
 }
+
+// BOARD-PAYMENT NUDGE (board-payment-nudge-at-merge-gate, user-directed
+// 2026-08-27): the merge just landed, so any open USER-source board item
+// naming a file this branch changed may now be PAID work nobody closed —
+// measured 2026-08-27, 15 of 55 board items were exactly this. Advisory only
+// (never a refusal, P1: a gate here would add closure ceremony to every
+// merge) — stdout stays the machine-readable JSON report, so this prints to
+// stderr, only when non-empty (no noise on a clean merge), and NEVER refuses
+// the merge on its own failure. Placed immediately after the merge lands and
+// BEFORE the sweep/rebuild/stale-bundle blocks below, each of which can print
+// "THE MERGE SUCCEEDED" and exit early — the nudge must still have run by then.
+// Self-contained: builds its own query at print time rather than reusing the
+// settlement-region query above, so a nudge-only failure can never surface as
+// settlementError and refuse the merge (the advisory contract must never
+// invert into a gate). Passing file_keys into the query lets the store
+// intersect BEFORE the cap:1000 — the shared cap's recency window would
+// otherwise silently drop older matching user items.
+// KNOWN ACCEPTED LIMITATION: rename SOURCE paths are not nudged — `changed` is
+// a --name-only diff, which reports only destinations for a detected rename;
+// deliberate, so the reconcile set's own path semantics stay untouched here.
+try {
+  // An EMPTY file_keys array disables the store's file-key filter entirely
+  // (it does not mean match-nothing) — an empty-commit / edit-then-revert
+  // branch would otherwise pull in recent, unrelated todos. Skip outright.
+  if (changed.size > 0) {
+    // openProject() can itself fail()/process.exit (missing db, malformed
+    // config) — fine pre-merge, but fatal here: the merge has ALREADY landed,
+    // so this block must be exit-proof end-to-end and route any failure
+    // through the catch below instead. Construct the store directly, the same
+    // guard resolveProject uses, but throwing instead of exiting.
+    const dbPath = join(target, '.sterling', 'sterling.db');
+    if (!existsSync(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
+    const nudgeStore = new SterlingStore(dbPath);
+    let items;
+    try {
+      // source:'user' passed INTO the query (filters before the cap:1000,
+      // packages/store/src/index.ts QueryOptions.source) rather than a
+      // post-query .filter — an intersecting system item can no longer crowd
+      // a user item out of the capped window.
+      items = nudgeStore.query({ types: ['todo'], file_keys: [...changed], source: 'user', cap: 1000 });
+    } finally {
+      nudgeStore.close();
+    }
+    if (items.length > 0) {
+      console.error(
+        [
+          '',
+          `direct-merge: BOARD-PAYMENT NUDGE — ${items.length} open board item(s) name files this branch changed; the merged work may PAY them.`,
+          `Re-verify each against HEAD: close what this merge pays (board_remove), rewrite what it half-pays (board_update) — an item that outlives its payment rots invisibly (15 of 55 measured 2026-08-27).`,
+          ...items.map((t) => {
+            const keys = (t.file_keys ?? []).filter((k) => changed.has(k));
+            // Sanitize before printing: C0 controls, DEL and C1 controls
+            // (\x7f-\x9f, incl. 8-bit CSI/DCS/OSC lead-ins) in stored todo
+            // text could otherwise forge stderr lines. Full ids are
+            // server-minted uuids and stay unsanitized/unclipped.
+            const clip = String(t.text ?? '')
+              .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 100);
+            return `  - ${t.id}  ${clip}  [${keys.join(', ')}]`;
+          }),
+        ].join('\n')
+      );
+    }
+  }
+} catch (e) {
+  console.error(`direct-merge: board-payment nudge did not run (${e?.message ?? e}) — advisory only, the merge stands.`);
+}
+
 // The sweep runs in its OWN try: once the merge has landed, a sweep failure must
 // not be reported as "the merge failed". That misreading is what teaches an
 // operator to hand-merge, which is the whole point of board f37e1dae.
