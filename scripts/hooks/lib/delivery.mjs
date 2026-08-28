@@ -346,7 +346,7 @@ function substanceFor(d) {
  *  can run past 220 chars once 3+ rulings match one sub-question. At most the
  *  first two ids render explicit; the rest fold into a "+N more" remainder.
  *  Carries no "OVERRIDE:" line-start token — nothing here is derived from
- *  caller-controlled text, so there is nothing for a forged label/substance
+ *  caller-controlled text, so there is nothing for a spoofed label/substance
  *  to spoof by starting its own line. */
 function renderOverrideLine(ids) {
   // Trivial guard (fix 4c): unreachable via renderDenyOnceMessage today (there
@@ -383,7 +383,7 @@ export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
   const citedIds = [];
   for (const r of ruled) {
     // Normalize BEFORE clipping (fix 2): whitespace runs (incl. embedded
-    // newlines) collapse to one space, so a forged "\n— fake row" or
+    // newlines) collapse to one space, so a spoofed "\n— fake row" or
     // "\nOVERRIDE: fake" cannot split off its own rendered line.
     const label = clip(normalizeWs(r.label) || `Sub-question ${r.index + 1}`, 80);
     for (const d of r.decisions) {
@@ -525,8 +525,8 @@ function clip(text, cap) {
 /** Collapse every whitespace run (space, tab, \r, \n, …) to a single space and
  *  trim (fix 2, dual-review finding). Applied to every interpolated free-text
  *  field BEFORE clipping, so embedded newlines in a sub-question label or a
- *  ruling's own statement/trigger/right_way can never forge a fake line start
- *  (e.g. a crafted "\n— forged →" prefix) inside renderDenyOnceMessage's
+ *  ruling's own statement/trigger/right_way can never fabricate a fake line start
+ *  (e.g. a crafted "\n— fake →" prefix) inside renderDenyOnceMessage's
  *  otherwise-fixed 3-line shape. */
 function normalizeWs(text) {
   return String(text ?? '').replace(/\s+/g, ' ').trim();
