@@ -431,3 +431,144 @@ test('toggles 6: buildDashboardState honors ui.scroll on the System tab — the 
     cleanup();
   }
 });
+
+// ===========================================================================
+// Item 7 — regression pin, board 8fc765e2: SPEC-ONLY, written blind to the
+// concurrent fix in state.ts. systemDashboardState prepends view.banner
+// row(s) before the selectable rows; the reported defect is that revealAt
+// computes its scroll target against a row index that ignores this banner
+// offset, so the reveal window lands banner.length rows too early and the
+// selected row can sit just below the fold. Asserted at the OBSERVABLE
+// level — is the selected row actually inside the revealed (clickable)
+// window — via the same screenLineToRow hit-test mechanism state.test.ts
+// uses for click-clipping, never a hardcoded scroll/index literal.
+//
+// CONTROL-DESIGN CORRECTION (this pin's second revision): a first attempt
+// used 'fresh catalog' as a 'no banner' control. A sabotage run
+// (bannerOffset forced to 0 in state.ts) broke BOTH arms identically,
+// proving the control was mislabeled — a fresh, populated catalog carries a
+// nonzero banner row too (system-tab.test.ts's own CONTRACT names three
+// CONTENTS of one always-rendered catalog-status line — 'absent / fresh /
+// stale-with-date' — not three presence states). MEASURED below, not
+// assumed: no reachable System-tab catalog state is bannerless, so the
+// control cannot be built on banner ABSENCE. It is instead built on CODE-PATH
+// independence: revealAt only runs inside reduce()'s cursor-movement
+// handling (toggles 6: buildDashboardState only mirrors whatever ui.scroll
+// it is given, it does not itself invoke revealAt), so a UI state built
+// directly at cursor 0 / scroll 0 — never routed through reduce()'s DOWN/UP
+// handling — cannot possibly be affected by a bannerOffset mutation inside
+// revealAt, regardless of how many banner rows the roster actually carries.
+// ===========================================================================
+
+test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row below the revealed viewport window', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    assert.strictEqual(typeof stateMod.buildDashboardState, 'function', 'buildDashboardState must be exported');
+    assert.strictEqual(typeof stateMod.screenLineToRow, 'function', 'screenLineToRow must be exported');
+
+    const numKeys = Object.keys(baseSnapshot().configModels).length;
+    const totalSelectableRows = numKeys + 4; // config rows + 2 sparring + 1 tdd + 1 mutation (frozen: toggles 1-6)
+    const maxBodyLines = 2; // total SYS_TAB rows exceed this — the roster is taller than the viewport
+    const vp = { maxBodyLines, width: 80 };
+    const lastRowCursor = numKeys + 3; // the mutation row — the last selectable row on the tab
+
+    interface DashRow { selected?: boolean }
+    interface Dash { rows: DashRow[]; bodyTop: number; scroll?: number }
+    const buildDashboardState = stateMod.buildDashboardState as unknown as (
+      store: SterlingStore,
+      ui: UiState,
+      width?: number,
+      maxBodyLines?: number,
+      projectName?: string,
+      bannerShown?: boolean,
+      knowledge?: unknown,
+      roster?: AgentRosterSnapshot,
+    ) => Dash;
+    const screenLineToRow = stateMod.screenLineToRow as unknown as (dash: Dash, line: number, maxBodyLines?: number) => number;
+
+    // MEASURE the banner-row count for a given roster: build at a stationary
+    // cursor (no reduce call — see the CONTROL-DESIGN CORRECTION note above)
+    // and diff the returned row count against the known selectable-row count.
+    function bannerRowCount(snap: AgentRosterSnapshot): number {
+      const dash = buildDashboardState(store, st({ tab: SYS_TAB, cursor: 0, scroll: 0 }), 80, maxBodyLines, undefined, undefined, undefined, snap);
+      return dash.rows.length - totalSelectableRows;
+    }
+
+    // Confirms in-pin (not just in a code comment) that 'fresh catalog' is
+    // NOT a bannerless scenario — this is why it is not used as the control.
+    const freshBannerCount = bannerRowCount(baseSnapshot({ catalog: freshCatalog() }));
+    assert.ok(
+      freshBannerCount > 0,
+      `precondition: even a fresh, populated catalog must carry a nonzero banner row (measured ${freshBannerCount}) — ` +
+        'if this is 0, no bannerless System-tab state exists via this route and the CONTROL below still holds on code-path grounds alone',
+    );
+
+    // The banner arm's own scenario: an ABSENT catalog raises a notice
+    // banner (system-tab.test.ts: 'catalog banner: an ABSENT catalog is
+    // announced'). MEASURED nonzero, not assumed.
+    const bannerSnap = baseSnapshot({ catalog: { present: false, stale: false, staleDate: null, entries: [] } });
+    const bannerCount = bannerRowCount(bannerSnap);
+    assert.ok(bannerCount > 0, `the absent-catalog scenario must actually raise a notice banner row (measured ${bannerCount})`);
+    assert.ok(
+      bannerCount < maxBodyLines,
+      `sanity precondition for the CONTROL arm below: the banner row count (${bannerCount}) must be smaller than ` +
+        `maxBodyLines (${maxBodyLines}) so row 0 is trivially visible at scroll 0 without needing any reveal computation`,
+    );
+
+    // The observable property: is the selected row inside the window the
+    // renderer would actually draw (and a click could actually hit)?
+    // Computed via screenLineToRow, never via a hardcoded scroll value or
+    // index arithmetic of our own — that would just re-implement the bug
+    // under test rather than observe it.
+    //
+    // COORDINATE SPACE: screenLineToRow returns the row's POSITION in
+    // dash.rows (an array index — state.test.ts: a 2-line expanded row at
+    // lines 4-5 and the next row at line 6 both map to consecutive indices
+    // 0, 1, never to a cumulative line offset), not any per-row starting-line
+    // field. Locate the selected row the same way — by its POSITION in
+    // dash.rows — so both sides of the comparison live in the same space.
+    function assertSelectedRowVisible(dash: Dash, label: string): void {
+      const selectedIndex = dash.rows.findIndex((r) => r.selected);
+      assert.notEqual(selectedIndex, -1, `${label}: a selected row is present in the built DashboardState`);
+      const visibleIndices = new Set<number>();
+      for (let line = dash.bodyTop + 1; line <= dash.bodyTop + maxBodyLines; line++) {
+        const idx = screenLineToRow(dash, line, maxBodyLines);
+        if (idx !== -1) visibleIndices.add(idx);
+      }
+      assert.ok(
+        visibleIndices.has(selectedIndex),
+        `${label}: selected row (rows[] index ${selectedIndex}) must be inside the revealed window ` +
+          `(visible indices: [${[...visibleIndices].join(',')}], scroll=${dash.scroll})`,
+      );
+    }
+
+    // CONTROL ARM FIRST — SAME banner-present roster as the treatment arm
+    // below, but the cursor is never moved: built directly at cursor 0 /
+    // scroll 0, bypassing reduce()'s DOWN handling entirely, so revealAt is
+    // never invoked. This must pass for a DIFFERENT reason than the
+    // treatment arm: not because the banner offset was computed correctly,
+    // but because nothing here ever asks revealAt a question — a
+    // bannerOffset mutation inside revealAt has no code path to reach this
+    // arm at all.
+    const controlUi = st({ tab: SYS_TAB, cursor: 0, scroll: 0 });
+    const controlDash = buildDashboardState(store, controlUi, 80, maxBodyLines, undefined, undefined, undefined, bannerSnap);
+    assert.equal(controlDash.scroll, 0, 'CONTROL: no cursor movement occurred, so scroll was never touched by revealAt');
+    assertSelectedRowVisible(controlDash, 'CONTROL (stationary cursor, revealAt never invoked)');
+
+    // TREATMENT ARM — the same bannerSnap, DOWN-walked from the top onto the
+    // mutation row (the last selectable row), exactly like toggles 6. This
+    // is the arm that actually exercises revealAt's banner-offset arithmetic.
+    function driveToLastRow(snap: AgentRosterSnapshot): UiState {
+      let cur = st({ tab: SYS_TAB, cursor: 0, scroll: 0 });
+      for (let i = 0; i < lastRowCursor; i++) {
+        cur = SR.reduce(store, cur, key('DOWN'), vp, undefined, snap).ui;
+      }
+      assert.equal(cur.cursor, lastRowCursor, 'DOWN-walked onto the mutation row (the last selectable row on the tab)');
+      return cur;
+    }
+    const treatmentDash = buildDashboardState(store, driveToLastRow(bannerSnap), 80, maxBodyLines, undefined, undefined, undefined, bannerSnap);
+    assertSelectedRowVisible(treatmentDash, 'banner present, cursor DOWN-walked past the fold');
+  } finally {
+    cleanup();
+  }
+});

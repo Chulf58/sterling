@@ -985,7 +985,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
     const max = Math.max(0, total - maxBodyLines);
     let scroll = ui.scroll ?? 0;
-    const row = st.rows[cursor];
+    // ui.cursor addresses only the SELECTABLE rows (config.models roster +
+    // sparring/tdd/mutation toggles) — systemDashboardState prepends the
+    // notice/catalog banner rows (view.banner) ahead of them in st.rows, so on
+    // the System tab the cursor's row sits `bannerOffset` positions later than
+    // its own index. Non-system tabs carry no such leading rows (offset 0).
+    const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === 'system-banner').length : 0;
+    const row = st.rows[cursor + bannerOffset];
     if (row) {
       const top = row.screenRow;
       const bottom = row.screenRow + row.lines.length;
