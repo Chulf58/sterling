@@ -335,7 +335,7 @@ const BASELINE = {
   ],
   'h10-direct-capture.mjs': [
     { statement: 'const input = readStdin();' },
-    { statement: 'const residueLines = (() => { try { return computeDeadDispatchResidue(input.cwd, input.session_id); … #573422d4' },
+    { statement: 'const residueLines = await (async () => { try { return await computeDeadDispatchResidue(input.cwd, i … #f5de6cfe' },
     { statement: 'const store = openStore(input.cwd);' },
     { statement: "if (!store) { if (residueLines.length) process.stderr.write(residueLines.join('\\n\\n')); allow(); }" },
     { statement: "const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');" },
