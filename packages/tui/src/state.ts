@@ -112,6 +112,13 @@ export interface AgentRosterSnapshot {
    *  that flipping the toggle must never hide. Additive-optional, same reason
    *  as sparringPartner above. */
   codexWired?: boolean;
+  /** config.tdd (decision 752caf98, tdd-and-mutation-toggles-in-system-tab):
+   *  the TDD-by-default posture toggle. Additive-optional, same idiom as
+   *  sparringPartner — absent → the buildSystemTab default below applies. */
+  tdd?: { enabled: boolean };
+  /** config.mutation_verification (decision 752caf98): the verify-by-mutation
+   *  posture toggle, independent of tdd. Additive-optional, same idiom. */
+  mutationVerification?: { enabled: boolean };
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -138,6 +145,13 @@ export interface SystemTabView {
    *  order; hidden while a config.models picker (ui.selector) is open, same
    *  focus rule as the roster rows. */
   sparringRows: SystemRow[];
+  /** tdd/mutation_verification toggle rows (decision 752caf98): two SEPARATE
+   *  single-entry lists, each mirroring sparringRows[0]'s toggle-only shape
+   *  (neither field carries a model, so there is no second row). Appended
+   *  after sparringRows in cursor order; hidden while a config.models picker
+   *  is open, same focus rule as sparringRows/rows. */
+  tddRows: SystemRow[];
+  mutationRows: SystemRow[];
 }
 
 const EMPTY_ROSTER: AgentRosterSnapshot = {
@@ -146,6 +160,8 @@ const EMPTY_ROSTER: AgentRosterSnapshot = {
   catalog: { present: false, stale: false, staleDate: null, entries: [] },
   sparringPartner: { enabled: true },
   codexWired: false,
+  tdd: { enabled: true },
+  mutationVerification: { enabled: true },
 };
 
 /** Pure scalar drift check: true iff the installed value differs from config. */
@@ -271,7 +287,28 @@ export interface SparringModelEffect {
   type: 'sparring_model';
   model: string;
 }
-export type Effect = SelectEffect | QuitEffect | ModelSwapEffect | SparringToggleEffect | SparringModelEffect;
+/** System tab, tdd toggle row (decision 752caf98): flips config.tdd.enabled.
+ *  OFF silences the automatic default posture only — H5/H18 test protection
+ *  is untouched, and an explicit user ask still fires TDD. */
+export interface TddToggleEffect {
+  type: 'tdd_toggle';
+  enabled: boolean;
+}
+/** System tab, mutation_verification toggle row (decision 752caf98): flips
+ *  config.mutation_verification.enabled. Same silences-the-default-only
+ *  semantics as TddToggleEffect. */
+export interface MutationToggleEffect {
+  type: 'mutation_toggle';
+  enabled: boolean;
+}
+export type Effect =
+  | SelectEffect
+  | QuitEffect
+  | ModelSwapEffect
+  | SparringToggleEffect
+  | SparringModelEffect
+  | TddToggleEffect
+  | MutationToggleEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' }
@@ -569,7 +606,11 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   // (cursorBase = keys.length); hidden while a config.models picker focuses the
   // view, same rule as the roster rows above.
   const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
-  return { rows: shown, banner, sparringRows };
+  // tdd/mutation rows continue past the two sparring rows (keys.length,
+  // keys.length + 1) at keys.length + 2 and keys.length + 3.
+  const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
+  const mutationRows = selector ? [] : [mutationToggleRow(snap, ui, width, keys.length + 3)];
+  return { rows: shown, banner, sparringRows, tddRows, mutationRows };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -623,6 +664,28 @@ function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: numb
     lines: [{ text: clip(`${modelMarker}Model: ${modelText}`), kind: 'title', selected: modelSelected }],
   };
   return [toggleRow, modelRow];
+}
+
+/** tdd toggle row (decision 752caf98): ON/OFF from tdd.enabled, one row, no
+ *  model sibling. Mirrors sparringPartnerRows' toggle-row shape exactly. */
+function tddToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const tdd = snap.tdd ?? { enabled: true };
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? '› ' : '  ';
+  const onOff = tdd.enabled ? 'ON' : 'OFF';
+  return { id: 'sys:tdd_enabled', lines: [{ text: clip(`${marker}TDD: ${onOff}`), kind: 'title', selected }] };
+}
+
+/** mutation_verification toggle row (decision 752caf98): ON/OFF from
+ *  mutationVerification.enabled, one row, no model sibling. */
+function mutationToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const mv = snap.mutationVerification ?? { enabled: true };
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? '› ' : '  ';
+  const onOff = mv.enabled ? 'ON' : 'OFF';
+  return { id: 'sys:mutation_enabled', lines: [{ text: clip(`${marker}Mutation verification: ${onOff}`), kind: 'title', selected }] };
 }
 
 /** Bridge the pure System projection into a DashboardState the renderer draws:
@@ -684,6 +747,7 @@ function systemDashboardState(
   projectName: string,
   bodyTop: number,
   tabs: { label: string; active: boolean }[],
+  maxBodyLines: number,
   roster?: AgentRosterSnapshot
 ): DashboardState {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
@@ -714,6 +778,23 @@ function systemDashboardState(
     rows.push({ id: sr.id, type: 'system', selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
+  // tdd/mutation_verification toggle rows (decision 752caf98): drawn after the
+  // sparring-partner rows, same row shape — separate lists, never merged.
+  for (const sr of [...view.tddRows, ...view.mutationRows]) {
+    const lines: RowLine[] = sr.lines.map((l) => ({
+      text: l.text,
+      kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
+    }));
+    rows.push({ id: sr.id, type: 'system', selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
+    screenRow += lines.length;
+  }
+  // body scroll: the System tab honors ui.scroll the way the card tabs do
+  // (clamp discipline mirrored from buildDashboardState below) — an unbounded
+  // viewport (maxBodyLines = Infinity, e.g. tests) yields maxScroll 0 → scroll
+  // 0, so every existing test stays green.
+  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
+  const scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
   return {
     tabs,
     rows,
@@ -722,7 +803,7 @@ function systemDashboardState(
     banner,
     projectName,
     bodyTop,
-    scroll: 0,
+    scroll,
   };
 }
 
@@ -733,7 +814,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
   // and the widths the hit-test measures can never come from two places.
   const tabs = tabsFor(store, ui.tab);
   // System tab (run r-f9a7): its own projection, not a card/knowledge list.
-  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, roster);
+  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster);
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
@@ -950,10 +1031,12 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // tab-switch / quit keys fall through to the generic handler below.
       if (ui.tab === SYSTEM_TAB && roster) {
         const sysKeys = Object.keys(roster.configModels);
-        // + 2: the sparring-partner toggle row (index sysKeys.length) and its
+        // + 4: the sparring-partner toggle row (index sysKeys.length) and its
         // model row (sysKeys.length + 1), appended after the config.models
-        // roster (board a0714d0b) — cursor addressing composes over both.
-        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 2 - 1)));
+        // roster (board a0714d0b) — then the tdd toggle row (sysKeys.length + 2)
+        // and the mutation_verification toggle row (sysKeys.length + 3),
+        // decision 752caf98 — cursor addressing composes over all four.
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 4 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== undefined;
         switch (event.name) {
@@ -994,6 +1077,17 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
             if (cursor === sysKeys.length + 1) {
               // sparring-partner model row: open the free-text edit
               return { ui: { ...ui, cursor, sparringModelEdit: roster.sparringPartner?.model ?? '', notice: undefined }, effects };
+            }
+            if (cursor === sysKeys.length + 2) {
+              // tdd toggle row (decision 752caf98): an immediate flip, no picker
+              effects.push({ type: 'tdd_toggle', enabled: !(roster.tdd?.enabled ?? true) });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            }
+            if (cursor === sysKeys.length + 3) {
+              // mutation_verification toggle row (decision 752caf98): an
+              // immediate flip, no picker
+              effects.push({ type: 'mutation_toggle', enabled: !(roster.mutationVerification?.enabled ?? true) });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
             }
             const key = sysKeys[cursor];
             if (!key) return { ui, effects };

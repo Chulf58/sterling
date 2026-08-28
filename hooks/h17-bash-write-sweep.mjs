@@ -5161,6 +5161,26 @@ var configSchema = external_exports.object({
     // codex validates model names server-side with a loud 400, so a client-
     // side allowlist would only drift from what the CLI actually accepts.
     model: external_exports.string().optional()
+  }).default({}),
+  // TDD-by-default posture toggle (decision 752caf98,
+  // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
+  // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
+  // Mirrors sparring_partner's additive-optional shape exactly — an absent
+  // block still parses with {enabled: true}, and an unknown field inside the
+  // block strips silently rather than refusing (forward-compat, non-strict).
+  // OFF silences only the automatic default posture: an explicit user ask
+  // still works, and H5 (frozen tests)/H18 (write wall) are untouched — no
+  // gate or hook arm keys on this toggle.
+  tdd: external_exports.object({
+    enabled: external_exports.boolean().default(true)
+  }).default({}),
+  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // tdd above: whether "verify a ruling change by mutation, not by a green
+  // suite alone" (measured 2026-08-22) fires automatically. Same additive-
+  // optional, default-true shape as tdd — the two toggles are deliberately
+  // separate fields, not one combined toggle (rejected in 752caf98).
+  mutation_verification: external_exports.object({
+    enabled: external_exports.boolean().default(true)
   }).default({})
 });
 

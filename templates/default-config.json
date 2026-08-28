@@ -84,5 +84,11 @@
   "article_history_genesis_entries": 2,
   "sparring_partner": {
     "enabled": true
+  },
+  "tdd": {
+    "enabled": true
+  },
+  "mutation_verification": {
+    "enabled": true
   }
 }

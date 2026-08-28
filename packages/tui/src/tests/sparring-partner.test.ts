@@ -261,7 +261,7 @@ test('sparring 3: model row shows the configured value when sparring_partner.mod
 // Item 4 — cursor traversal past config.models keys onto the sparring rows
 // ===========================================================================
 
-test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle row then the model row, and clamp at the bottom', () => {
+test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle row then the model row, and clamp at the tab\'s true bottom (moved off the model row by decision 752caf98)', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
@@ -273,10 +273,16 @@ test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle r
     r = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
     assert.equal(r.ui.cursor, numKeys + 1, 'DOWN again lands on the model row');
 
-    const clamped = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 1, 'DOWN past the model row clamps — it is the last row on the tab');
+    // The model row is no longer the tab's last row: decision 752caf98 added
+    // the tdd/mutation rows below it (traversal onto/through those rows is
+    // pinned by tdd-mutation-toggles.test.ts's 'toggles 3'). The true-bottom
+    // clamp is re-pinned here via a directly-placed cursor at the tab's real
+    // last row, rather than re-walking the intermediate tdd row that file
+    // already owns.
+    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 3 }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(clamped.ui.cursor, numKeys + 3, "DOWN clamps at the tab's true last row (the mutation row), not the model row");
 
-    let up = SR.reduce(store, clamped.ui, key('UP'), undefined, undefined, snap);
+    let up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, numKeys, 'UP from the model row returns to the toggle row');
 
     up = SR.reduce(store, up.ui, key('UP'), undefined, undefined, snap);
