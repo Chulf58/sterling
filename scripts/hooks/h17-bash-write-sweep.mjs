@@ -571,11 +571,17 @@ function openLeafNoFollow(abs, extraFlags = 0) {
 // bare LEAF NAME. On Linux the handle is `/proc/self/fd/<fd>` for a descriptor
 // this process holds, so `<handle>/<leaf>` is Node's stand-in for openat: the
 // prefix cannot be re-aimed by any swap, because it is a descriptor, not a name.
-// On native Windows the handle is the plain absolute directory path — Node
-// cannot hold a directory descriptor there, so this is the SAME disclosed
-// detection-only arm 2a69a8d7 already accepted for the leaf (lstat/fstat bigint
-// identity across the open), applied unchanged. One code path, two guarantees,
-// stated rather than blurred.
+// On native Windows the handle is the plain absolute directory path —
+// `withPinnedDir` just returns it (`if (IS_WIN32) return fn(dirPath);`), with NO
+// identity check of its own. This is the SAME disclosed envelope 2a69a8d7
+// accepted (detection, not prevention), but it is NOT the same MECHANISM as the
+// leaf's lstat/fstat bigint identity check: that check lives in
+// `openLeafNoFollow` and fires only on the byte-read path a 'file' leaf reaches.
+// A DIRECTORY handed through `withPinnedDir` gets no such re-verification —
+// `classifyLeafAt`'s win32 arm decides 'dir' from the lstat KIND alone, and
+// nothing downstream re-checks that the directory this walk descends into is
+// the object lstat classified. One code path, two DIFFERENT guarantees by kind
+// (file: identity-verified; directory: kind-only), stated rather than blurred.
 //
 // WHY /proc/self/fd/<fd>/<name> IS ALLOWED TO CARRY MUTATIONS. Node exposes no
 // openat/unlinkat/renameat and invariant 4 forbids a native addon (already
@@ -1471,9 +1477,12 @@ function indexEntriesFor(cwd, rels) {
 // digest is over the WHOLE file's RAW bytes, never a prefix and never a decoded
 // string: two different invalid-UTF-8 sequences decode to the same U+FFFD, so a
 // text snapshot is lossy exactly where tampering hides, and a raw-byte digest
-// keeps that escape visible. A symlink's target is read with readlink and NEVER
-// followed. An unsupported file type (fifo, socket, device) throws -> AC9
-// fail-closed, never a silent "unchanged".
+// keeps that escape visible. A symlink's target is NEVER read at all (Ruling B,
+// 532a4383): the state records only the mode bits plus the UNATTESTABLE_SYMLINK
+// marker, so the target itself never enters this comparison — see
+// pathStateAt's symlink arm and symlinkModeAt below, which says the same thing
+// at the call site. An unsupported file type (fifo, socket, device) throws ->
+// AC9 fail-closed, never a silent "unchanged".
 // BOUNDED (board 55fcccac): the BYTES term is STREAMED (constant memory, no
 // size cap — a legitimately huge dirty file must never deny by itself) and the
 // DIRECTORY term is walked INCREMENTALLY against a cumulative structural budget

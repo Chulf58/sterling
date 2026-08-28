@@ -816,13 +816,23 @@ export interface FieldShape {
    */
   element_fields?: FieldShape[];
   /**
-   * A concrete value satisfying this field's constraint, present only where
-   * describeZod can derive one with confidence (a closed enum's first value,
-   * a literal's own value, an ISO-instant string) — board be5e1d04. A format
-   * constraint stated in prose ('string (ISO datetime)') is still abstract;
-   * one worked value is what a writer actually copies. Never populated for a
-   * plain unconstrained string, and never guessed for an arbitrary regex —
-   * a wrong example is worse than none.
+   * A concrete, correctly-SHAPED value for this field, DERIVED from the field's
+   * own zod node and then PROVEN by it (board 89672420, extending be5e1d04's
+   * scalar examples to every field kind). Scalars render bare ('fast',
+   * '2026-08-24T00:00:00.000Z'); composites render as JSON text, so
+   * `alternatives_rejected` answers with `[{"option":"<option>","reason":
+   * "<reason>"}]` instead of leaving a writer to discover by rejection that it
+   * is not string[] — the single most-reported schema failure from consuming
+   * projects, and the reason CLAUDE.md carried that fact in prose.
+   *
+   * DERIVED, NEVER HAND-WRITTEN: there is no per-type example table anywhere —
+   * exampleFor walks the same registered schema knownFieldsFor/schemaFor walk,
+   * so a new field is exemplified the moment it is defined and there is no
+   * second registry to drift (invariant 1). Every candidate is run through the
+   * node's OWN safeParse before it is reported, so an example is never a guess:
+   * be5e1d04's rule ('a wrong example is worse than none') is kept by PROOF
+   * rather than by abstention. Absent when nothing derivable validates — an
+   * unsamplable pattern gets no example, never a wrong one.
    */
   example?: string;
 }
@@ -833,12 +843,14 @@ export interface FieldShape {
  * degrades to 'unknown' rather than throwing, because a SCHEMA READ must never
  * be why a call fails.
  *
- * Internal — carries the full descriptor (enum_values/element_fields/example)
- * that schemaFor/describeElementFields need. The exported `describeZod`
- * below is the thin public projection (just the type string) board be5e1d04
- * pins directly.
+ * Internal — carries the full descriptor (enum_values/element_fields) that
+ * schemaFor/describeElementFields need. The exported `describeZod` below is
+ * the thin public projection (just the type string) board be5e1d04 pins
+ * directly. EXAMPLE VALUES ARE NOT COMPUTED HERE: they come from the one
+ * derivation `exampleFor` owns (board 89672420), so the type projection and
+ * the value projection cannot answer differently about the same node.
  */
-function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[]; example?: string } {
+function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[] } {
   if (!node || typeof node !== 'object' || depth > 6) return { type: 'unknown' };
   const def = (node as { _def?: Record<string, unknown> })._def;
   const name = def?.typeName as string | undefined;
@@ -864,15 +876,7 @@ function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_val
       if (datetimeCheck) annotations.push('ISO datetime');
       if (uuidCheck) annotations.push('uuid');
       const base = annotations.length ? `string (${annotations.join(', ')})` : 'string';
-      // No generic example for a regex: a wrong guess at a value satisfying
-      // an arbitrary pattern is worse than no example at all. Precedence for
-      // the OTHER two stays as before: datetime's example wins over uuid's
-      // when both are present.
-      const example = !regexCheck && datetimeCheck ? '2026-08-24T00:00:00.000Z' : !regexCheck && uuidCheck ? '00000000-0000-0000-0000-000000000000' : undefined;
-      return {
-        type: regexCheck?.regex ? `${base} matching ${regexCheck.regex}` : base,
-        ...(example ? { example } : {}),
-      };
+      return { type: regexCheck?.regex ? `${base} matching ${regexCheck.regex}` : base };
     }
     case 'ZodNumber':
       return { type: 'number' };
@@ -885,12 +889,12 @@ function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_val
       return { type: 'any' };
     case 'ZodEnum': {
       const values = (def?.values as string[] | undefined) ?? [];
-      return { type: 'enum', enum_values: values, ...(values.length ? { example: values[0] } : {}) };
+      return { type: 'enum', enum_values: values };
     }
     case 'ZodNativeEnum':
       return { type: 'enum' };
     case 'ZodLiteral':
-      return { type: `literal ${JSON.stringify(def?.value)}`, example: String(def?.value) };
+      return { type: `literal ${JSON.stringify(def?.value)}` };
     case 'ZodArray': {
       const inner = describeZodDetailed(def?.type, depth + 1);
       const elementFields = describeElementFields(def?.type, depth + 1);
@@ -942,6 +946,265 @@ export function describeZod(node: unknown): string {
   return describeZodDetailed(node).type;
 }
 
+/** Hard ceilings for the example walk — a schema READ must never hang or explode. */
+const EXAMPLE_MAX_DEPTH = 6;
+const EXAMPLE_MAX_CHARS = 256;
+
+/**
+ * The smallest string matching a regex SOURCE, or undefined when the pattern
+ * uses a construct this cannot sample honestly (lookaround, backreference,
+ * negated class). Supported: anchors, literals, escapes, `.`, `\d`/`\w`/`\s`,
+ * character classes and ranges, groups, alternation (first branch), and the
+ * `* + ? {n} {n,m} {n,}` quantifiers.
+ *
+ * This is NOT a guess: whatever it returns is handed to the node's own
+ * safeParse before it can be reported (deriveExampleValue), so an unsupported
+ * or wrongly-sampled pattern yields NO example rather than a wrong one. It
+ * exists because the alternative for regex-constrained fields — author
+ * (`user|conductor|system|agent:<role>`), scope, measured_at_head's 40-hex sha
+ * — is a hand-written per-field table, i.e. a second registry that would rot.
+ */
+function sampleFromRegex(source: string): string | undefined {
+  if (/\(\?[=!<]/.test(source)) return undefined; // lookaround
+  if (/\\[1-9]/.test(source)) return undefined; // backreference
+  let i = 0;
+  let failed = false;
+
+  const classChar = (): string | undefined => {
+    // at '[': take the first concrete member (a range contributes its start)
+    i++; // consume '['
+    if (source[i] === '^') return undefined; // negated: no honest first member
+    let first: string | undefined;
+    while (i < source.length && source[i] !== ']') {
+      const c = source[i];
+      if (c === '\\') {
+        const esc = source[i + 1];
+        i += 2;
+        if (first === undefined) first = escapeChar(esc);
+      } else {
+        i++;
+        if (first === undefined) first = c;
+      }
+    }
+    if (source[i] !== ']') return undefined;
+    i++; // consume ']'
+    return first;
+  };
+
+  const escapeChar = (c: string | undefined): string | undefined => {
+    if (c === undefined) return undefined;
+    if (c === 'd') return '0';
+    if (c === 'w') return 'a';
+    if (c === 's') return ' ';
+    if ('DWSbB'.includes(c)) return undefined; // negated/boundary classes: not sampled
+    if (c === 'n') return '\n';
+    if (c === 't') return '\t';
+    return c;
+  };
+
+  const quantifier = (): number => {
+    const c = source[i];
+    if (c === '*' || c === '?') {
+      i++;
+      if (source[i] === '?') i++; // lazy marker
+      return 0;
+    }
+    if (c === '+') {
+      i++;
+      if (source[i] === '?') i++;
+      return 1;
+    }
+    if (c === '{') {
+      const close = source.indexOf('}', i);
+      if (close === -1) return 1;
+      const body = source.slice(i + 1, close);
+      const m = /^(\d+)(,(\d+)?)?$/.exec(body);
+      if (!m) return 1; // not a quantifier, a literal '{' handled as an atom
+      i = close + 1;
+      if (source[i] === '?') i++;
+      return Number(m[1]);
+    }
+    return 1;
+  };
+
+  const sequence = (): string => {
+    let out = '';
+    while (i < source.length && source[i] !== '|' && source[i] !== ')' && !failed) {
+      const c = source[i];
+      let atom: string | undefined;
+      if (c === '^' || c === '$') {
+        i++;
+        continue;
+      } else if (c === '(') {
+        i++;
+        if (source.startsWith('?:', i)) i += 2;
+        atom = alternation();
+        if (source[i] !== ')') {
+          failed = true;
+          return out;
+        }
+        i++; // consume ')'
+      } else if (c === '[') {
+        atom = classChar();
+        if (atom === undefined) {
+          failed = true;
+          return out;
+        }
+      } else if (c === '\\') {
+        atom = escapeChar(source[i + 1]);
+        i += 2;
+        if (atom === undefined) {
+          failed = true;
+          return out;
+        }
+      } else if (c === '.') {
+        i++;
+        atom = 'x';
+      } else {
+        i++;
+        atom = c;
+      }
+      const times = quantifier();
+      if (atom.length * times > EXAMPLE_MAX_CHARS) {
+        failed = true;
+        return out;
+      }
+      out += atom.repeat(times);
+      if (out.length > EXAMPLE_MAX_CHARS) {
+        failed = true;
+        return out;
+      }
+    }
+    return out;
+  };
+
+  // First branch only — one worked value is what a writer copies, and the
+  // remaining branches are still visible in the projected type string.
+  const alternation = (): string => {
+    const first = sequence();
+    while (i < source.length && source[i] === '|' && !failed) {
+      i++;
+      sequence(); // consume, discard
+    }
+    return first;
+  };
+
+  const sampled = alternation();
+  return failed || i < source.length ? undefined : sampled;
+}
+
+/** Does `value` actually satisfy `node`? The proof step — never skipped. */
+function satisfies(node: unknown, value: unknown): boolean {
+  const parse = (node as { safeParse?: (v: unknown) => { success: boolean } })?.safeParse;
+  if (typeof parse !== 'function') return false;
+  try {
+    return parse.call(node, value).success === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ordered candidate values for a zod node, most informative first, derived from
+ * the node's own structure and its sub-fields' own NAMES (a plain string
+ * becomes `<name>`, so `{option, reason}[]` exemplifies as
+ * `[{"option":"<option>","reason":"<reason>"}]`). Composites are built from
+ * their REQUIRED members only — the minimum valid shape, since every member,
+ * optional included, is already enumerated in element_fields.
+ */
+function exampleCandidates(node: unknown, name: string | undefined, depth: number): unknown[] {
+  if (!node || typeof node !== 'object' || depth > EXAMPLE_MAX_DEPTH) return [];
+  const def = (node as { _def?: Record<string, unknown> })._def;
+  const placeholder = `<${name ?? 'string'}>`;
+  switch (def?.typeName as string | undefined) {
+    case 'ZodString': {
+      const checks = (def?.checks as Array<{ kind?: string; regex?: RegExp }> | undefined) ?? [];
+      const out: unknown[] = [];
+      if (checks.some((c) => c.kind === 'datetime')) out.push('2026-08-24T00:00:00.000Z');
+      if (checks.some((c) => c.kind === 'uuid')) out.push('00000000-0000-0000-0000-000000000000');
+      for (const c of checks) {
+        if (c.kind === 'regex' && c.regex) {
+          const sampled = sampleFromRegex(c.regex.source);
+          if (sampled !== undefined) out.push(sampled);
+        }
+      }
+      out.push(placeholder);
+      return out;
+    }
+    case 'ZodNumber':
+      return [1, 0];
+    case 'ZodBoolean':
+      return [true];
+    case 'ZodNull':
+      return [null];
+    case 'ZodAny':
+    case 'ZodUnknown':
+      return [placeholder];
+    case 'ZodEnum':
+      return ((def?.values as unknown[] | undefined) ?? []).slice();
+    case 'ZodNativeEnum':
+      return Object.values((def?.values as Record<string, unknown> | undefined) ?? {});
+    case 'ZodLiteral':
+      return [def?.value];
+    case 'ZodArray': {
+      const element = deriveExampleValue(def?.type, name, depth + 1);
+      return element ? [[element.value], []] : [[]];
+    }
+    case 'ZodObject': {
+      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
+      const built: Record<string, unknown> = {};
+      for (const [key, sub] of Object.entries(shape)) {
+        if ((sub as { isOptional?: () => boolean }).isOptional?.() === true) continue;
+        const subExample = deriveExampleValue(sub, key, depth + 1);
+        if (!subExample) return []; // a required member we cannot fill honestly
+        built[key] = subExample.value;
+      }
+      return [built];
+    }
+    case 'ZodRecord': {
+      const value = deriveExampleValue(def?.valueType, 'value', depth + 1);
+      return value ? [{ '<key>': value.value }, {}] : [{}];
+    }
+    case 'ZodUnion':
+      return ((def?.options as unknown[] | undefined) ?? []).flatMap((o) => exampleCandidates(o, name, depth + 1));
+    // Wrappers contribute their inner candidates, but the PROOF still runs
+    // against the outer node, so a refinement the wrapper adds still rules.
+    case 'ZodOptional':
+    case 'ZodNullable':
+    case 'ZodDefault':
+      return exampleCandidates(def?.innerType, name, depth + 1);
+    case 'ZodEffects':
+      return exampleCandidates(def?.schema, name, depth + 1);
+    default:
+      return [];
+  }
+}
+
+/** The first candidate the node itself accepts, or nothing. */
+function deriveExampleValue(node: unknown, name: string | undefined, depth: number): { value: unknown } | undefined {
+  for (const candidate of exampleCandidates(node, name, depth)) {
+    if (satisfies(node, candidate)) return { value: candidate };
+  }
+  return undefined;
+}
+
+/**
+ * Public projection: a worked example VALUE for a zod node, as a string — the
+ * value-shaped sibling of describeZod (board 89672420). Scalars render bare
+ * (so an enum's example is literally one of its enum_values, and a datetime's
+ * is a pasteable instant); arrays/objects/records render as JSON text, which is
+ * the form a caller pastes into a write.
+ *
+ * `name` only decorates placeholders for otherwise-unconstrained values; it
+ * never changes whether an example exists.
+ */
+export function exampleFor(node: unknown, name?: string): string | undefined {
+  const derived = deriveExampleValue(node, name, 0);
+  if (!derived) return undefined;
+  const rendered = typeof derived.value === 'string' ? derived.value : JSON.stringify(derived.value);
+  return rendered === undefined || rendered.length === 0 ? undefined : rendered;
+}
+
 /**
  * An array field's ELEMENT sub-fields, one level deep, when the element is an
  * object (board db0e2799) — e.g. files[]'s {path, role}, current_ac[]'s
@@ -962,12 +1225,13 @@ function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefin
       return Object.entries(shape).map(([fieldName, fieldNode]) => {
         const described = describeZodDetailed(fieldNode, depth + 1);
         const required = !(fieldNode as { isOptional?: () => boolean }).isOptional?.();
+        const example = exampleFor(fieldNode, fieldName);
         return {
           name: fieldName,
           required,
           type: described.type,
           ...(described.enum_values ? { enum_values: described.enum_values } : {}),
-          ...(described.example ? { example: described.example } : {}),
+          ...(example ? { example } : {}),
         };
       });
     }
@@ -1008,13 +1272,18 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
   const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
     const described = describeZodDetailed(node);
     const required = !(node as { isOptional?: () => boolean }).isOptional?.();
+    // One worked value per field, derived and proven by the field's own node —
+    // the SHAPE half of the answer (board 89672420). Four of six schema
+    // rejections a consuming project hit were shape errors, not missing-field
+    // errors: {option, reason}[] written as string[] is the canonical one.
+    const example = exampleFor(node, name);
     return {
       name,
       required,
       type: described.type,
       ...(described.enum_values ? { enum_values: described.enum_values } : {}),
       ...(described.element_fields ? { element_fields: described.element_fields } : {}),
-      ...(described.example ? { example: described.example } : {}),
+      ...(example ? { example } : {}),
     };
   });
   return { type, fields };
