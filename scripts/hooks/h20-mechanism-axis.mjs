@@ -213,7 +213,11 @@ try {
             hasDiscriminatingHit(x.hits) &&
             hasRecordCentralityHit(x.record, subText, { minTerms: STRICT_MIN_RECORD_TERMS })
         );
-      return { index, label: q?.header ?? q?.question, subText, subTerms, strict };
+      // Truthy fallback, not nullish (fix 3, dual-review finding): header:''
+      // is falsy but not nullish, so `??` let an empty-string header win over
+      // the question text — `||` falls through to the question whenever the
+      // header is absent OR empty, while staying undefined-safe via `?.`.
+      return { index, label: q?.header || q?.question, subText, subTerms, strict };
     });
 
     const ledgerPath = denyLedgerPath(input.cwd, input.agent_id);

@@ -7452,44 +7452,69 @@ function idCitedIn(text, id) {
   const prefix = full.split("-")[0];
   return prefix.length >= 8 && boundaried(prefix);
 }
+function substanceFor(d) {
+  if (d.type === "anti_pattern") {
+    const trigger = typeof d.trigger === "string" ? d.trigger.trim() : "";
+    const rightWay = typeof d.right_way === "string" ? d.right_way.trim() : "";
+    if (trigger && rightWay) return { text: `${trigger} \u2014 ${rightWay}`, marker: "" };
+    if (trigger) return { text: trigger, marker: `\u27E8right_way missing \u2014 knowledge_get ${d.id}\u27E9` };
+    if (rightWay) return { text: rightWay, marker: `\u27E8trigger missing \u2014 knowledge_get ${d.id}\u27E9` };
+    return { text: "", marker: `\u27E8no substance recorded \u2014 knowledge_get ${d.id}\u27E9` };
+  }
+  const statement = typeof d.statement === "string" ? d.statement.trim() : "";
+  return statement ? { text: statement, marker: "" } : { text: "", marker: `\u27E8no substance recorded \u2014 knowledge_get ${d.id}\u27E9` };
+}
+function renderOverrideLine(ids) {
+  if (!ids.length) {
+    return "Cite the ruling id + the unresolved delta or it stays denied \u2014 a re-ask with no delta is denied again, and every override is logged.";
+  }
+  const EXPLICIT_CAP = 2;
+  const shown = ids.slice(0, EXPLICIT_CAP);
+  const rest = ids.length - shown.length;
+  const idsText = ids.length > 1 ? `one of ${shown.join(", ")}${rest > 0 ? ` +${rest} more` : ""}` : shown.join(", ");
+  return `Cite ${idsText} + the unresolved delta or it stays denied \u2014 a re-ask with no delta is denied again, and every override is logged.`;
+}
 function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
   const lines = [
-    "STERLING DENY-ONCE (H20, decision 68332e4b) \u2014 this question is DENIED before it reaches the user: its subject strongly matches a settled store ruling.",
-    "The store already decides this; asking again spends the user's attention on a resolved question and risks minting a competing ruling."
+    "STERLING DENY-ONCE (H20, decision 68332e4b) \u2014 this question was NOT shown to the user; read the settled ruling(s) below, then act on them before resubmitting."
   ];
   if (totalQuestions > 1) {
+    const openLabel = open.length ? open.map((o) => `"${clip(normalizeWs(o.label) || `Sub-question ${o.index + 1}`, 40)}"`).join(", ") : "none \u2014 every sub-question is settled";
     lines.push(
-      `This form has ${totalQuestions} sub-question(s); ${ruled.length} of them are SETTLED by the store below \u2014 resubmit ONLY the open sub-question(s) named here:`
+      `${totalQuestions} sub-question(s) total, ${ruled.length} settled by the store below \u2014 resubmit only the open sub-question(s): ${openLabel}`
     );
   }
+  const citedIds = [];
   for (const r of ruled) {
-    lines.push(`\u2014 Sub-question ${r.index + 1}${r.label ? ` ("${clip(r.label, 80)}")` : ""} is SETTLED:`);
+    const label = clip(normalizeWs(r.label) || `Sub-question ${r.index + 1}`, 80);
     for (const d of r.decisions) {
+      citedIds.push(d.id);
       const kind = d.type === "anti_pattern" ? "anti_pattern" : "decision";
-      const substance = d.type === "anti_pattern" ? `${d.trigger ?? ""} \u2014 ${d.right_way ?? ""}` : d.statement ?? "";
-      lines.push(
-        `  \u25B8 ${kind} [${d.id}] (status: ${d.status ?? "unknown"}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ""}, scope: ${d.scope ?? "unknown"}): ${clip(substance, 300)}`
-      );
+      const { text, marker } = substanceFor(d);
+      const clippedText = clip(normalizeWs(text), 160);
+      const normalizedMarker = normalizeWs(marker);
+      const substance = normalizedMarker ? `${clippedText}${clippedText ? " " : ""}${normalizedMarker}` : clippedText;
+      const bracket = `${d.status ?? "unknown"}\xB7${d.scope ?? "unknown"}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ""}`;
+      lines.push(`\u2014 "${label}" \u2192 ${kind} [${d.id}] [${bracket}]: ${substance}`);
     }
   }
-  if (totalQuestions > 1) {
-    if (open.length) {
-      lines.push("\u2014 OPEN (resubmit only these):");
-      for (const o of open) {
-        lines.push(`  \u25B8 Sub-question ${o.index + 1}${o.label ? ` ("${clip(o.label, 80)}")` : ""}`);
-      }
-    } else {
-      lines.push("\u2014 OPEN (resubmit only these): none \u2014 every sub-question in this form is settled.");
-    }
-  }
-  lines.push(
-    "TO OVERRIDE: resubmit this exact sub-question citing one of the ruling ids above AND stating the UNRESOLVED DELTA \u2014 what this ask needs that the cited ruling does not already settle. A resubmission that neither cites an id nor introduces new substance beyond the first attempt is denied again; repeated overrides are logged."
-  );
+  const idList = [...new Set(citedIds)];
+  lines.push(renderOverrideLine(idList));
   return lines.join("\n");
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
-  return s2.length > cap ? `${s2.slice(0, cap)}\u2026` : s2;
+  let out = "";
+  let count = 0;
+  for (const ch of s2) {
+    if (count === cap) return `${out}\u2026`;
+    out += ch;
+    count++;
+  }
+  return out;
+}
+function normalizeWs(text) {
+  return String(text ?? "").replace(/\s+/g, " ").trim();
 }
 var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
 var HAZARD_CAP = 3;
@@ -7603,7 +7628,7 @@ try {
       const strict = candidates.filter((r) => DENY_RULING_TYPES.includes(r.type)).map((r) => ({ record: r, hits: axisHits(r, subTerms) })).filter(
         (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, subText, { minTerms: STRICT_MIN_RECORD_TERMS })
       );
-      return { index, label: q?.header ?? q?.question, subText, subTerms, strict };
+      return { index, label: q?.header || q?.question, subText, subTerms, strict };
     });
     const ledgerPath = denyLedgerPath(input.cwd, input.agent_id);
     const ledger = readDenyLedger(ledgerPath);

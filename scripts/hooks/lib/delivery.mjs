@@ -286,50 +286,123 @@ export function idCitedIn(text, id) {
   return prefix.length >= 8 && boundaried(prefix);
 }
 
-/** The denial payload: substance (not a bare sentence) for every SETTLED
- *  sub-question, naming which are settled and NAMING (not just counting) the
- *  open ones so only they need resubmission on a multi-question form
- *  (amendment 2), plus the override contract (amendment 1). `ruled` is
- *  `{index, label, decisions}[]` — `decisions` the matched ruling records
- *  themselves (status/superseded_by/scope disclosed, never just their title,
- *  so a laundered re-ask cannot hide behind a summary that dropped the
- *  ruling's status). `open` is `{index, label}[]` — the sub-questions that did
- *  NOT strongly match anything; naming them (not merely their count) is what
- *  lets the reader resubmit exactly the right slice of a form instead of
- *  re-deriving it. */
+/** The denial payload, COMPACTED per decision 80d0ab62 (deny-once-message-
+ *  compaction, amending PRESENTATION ONLY of decision 68332e4b — eligibility,
+ *  the ledger/override mechanics and whole-form denial are untouched). One
+ *  header line names the mechanism, decision 68332e4b, and instructs
+ *  read-then-act, disclosing that the question was withheld from the user
+ *  (the old second "lecture" line is gone). Each SETTLED sub-question renders
+ *  as ONE row starting with an em-dash: label → kind + full ruling id +
+ *  compact bracketed [status·scope] disclosure (", superseded_by: <id>"
+ *  folded into the bracket only when the record carries one) + substance
+ *  clipped to ~160 chars — still substance, never a bare sentence, so
+ *  68332e4b's applicability-laundering guard is preserved. A multi-question
+ *  form's preamble/OPEN block folds into ONE line (open sub-question labels
+ *  inline, clipped). The override contract compresses to ONE line citing the
+ *  matched ruling id(s), the unresolved-delta requirement, and the
+ *  denied-again/logged consequence. `ruled` is `{index, label, decisions}[]`
+ *  — `decisions` the matched ruling records themselves (status/superseded_by/
+ *  scope disclosed, never just their title). `open` is `{index, label}[]` —
+ *  the sub-questions that did NOT strongly match anything; naming them (not
+ *  merely their count) is what lets the reader resubmit exactly the right
+ *  slice of a form instead of re-deriving it. */
+/** Resolved substance for one matched ruling, never silently empty (fix 1,
+ *  dual-review HIGH finding): a decision with no statement, or an anti_pattern
+ *  with neither trigger nor right_way, used to render as a bare/empty clip —
+ *  indistinguishable from "nothing to disclose" and exactly the applicability-
+ *  laundering shape 68332e4b's guard exists to prevent. Falls back to a loud
+ *  explicit marker naming the record id as the read target instead.
+ *
+ *  Returns `{text, marker}` rather than one pre-joined string (fix 7,
+ *  outside-family review MED finding): the marker is RENDERER CHROME, not
+ *  record content, so it must survive clipping regardless of how long the
+ *  present free-text half is. The old single-string return concatenated
+ *  `presentText + marker` and let the CALLER's `clip(substance, 160)` cut the
+ *  combined result — a 200+ char trigger with a missing right_way pushed the
+ *  whole incompleteness marker (knowledge_get + id + which-half-missing) past
+ *  the clip window, silently reproducing the applicability-laundering shape
+ *  fix 1 exists to prevent, just triggered by length instead of absence. The
+ *  caller now clips ONLY `text` and appends `marker` (never clipped) after. */
+function substanceFor(d) {
+  if (d.type === 'anti_pattern') {
+    const trigger = typeof d.trigger === 'string' ? d.trigger.trim() : '';
+    const rightWay = typeof d.right_way === 'string' ? d.right_way.trim() : '';
+    // Both present: the original "trigger — right_way" pairing, all of it
+    // clippable free text, no marker. Exactly ONE present (fix 6, dual-review
+    // MED finding): the present half is the clippable text; the incompleteness
+    // marker naming which half is missing and where to read it rides outside
+    // the clip window. Neither present: no free text at all, only the marker.
+    if (trigger && rightWay) return { text: `${trigger} — ${rightWay}`, marker: '' };
+    if (trigger) return { text: trigger, marker: `⟨right_way missing — knowledge_get ${d.id}⟩` };
+    if (rightWay) return { text: rightWay, marker: `⟨trigger missing — knowledge_get ${d.id}⟩` };
+    return { text: '', marker: `⟨no substance recorded — knowledge_get ${d.id}⟩` };
+  }
+  const statement = typeof d.statement === 'string' ? d.statement.trim() : '';
+  return statement ? { text: statement, marker: '' } : { text: '', marker: `⟨no substance recorded — knowledge_get ${d.id}⟩` };
+}
+
+/** The override line, ONE line regardless of matched-ruling count (fix 4,
+ *  dual-review LOW finding): interpolating every matched id unconditionally
+ *  can run past 220 chars once 3+ rulings match one sub-question. At most the
+ *  first two ids render explicit; the rest fold into a "+N more" remainder.
+ *  Carries no "OVERRIDE:" line-start token — nothing here is derived from
+ *  caller-controlled text, so there is nothing for a forged label/substance
+ *  to spoof by starting its own line. */
+function renderOverrideLine(ids) {
+  // Trivial guard (fix 4c): unreachable via renderDenyOnceMessage today (there
+  // is always at least one matched ruling on the deny path), but a defensive
+  // caller-facing function should never emit a double-space "Cite  +" for an
+  // empty list — render the generic single-ruling phrasing instead.
+  if (!ids.length) {
+    return 'Cite the ruling id + the unresolved delta or it stays denied — a re-ask with no delta is denied again, and every override is logged.';
+  }
+  const EXPLICIT_CAP = 2;
+  const shown = ids.slice(0, EXPLICIT_CAP);
+  const rest = ids.length - shown.length;
+  // "one of" whenever MORE THAN ONE ruling matched (fix 3c) — not gated at 3+:
+  // at exactly two matches the gate still accepts citing either one, so the
+  // phrasing must say so even though both ids fit explicit with no "+N more"
+  // remainder. The single-ruling case (ids.length === 1) never says "one of".
+  const idsText =
+    ids.length > 1 ? `one of ${shown.join(', ')}${rest > 0 ? ` +${rest} more` : ''}` : shown.join(', ');
+  return `Cite ${idsText} + the unresolved delta or it stays denied — a re-ask with no delta is denied again, and every override is logged.`;
+}
+
 export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
   const lines = [
-    'STERLING DENY-ONCE (H20, decision 68332e4b) — this question is DENIED before it reaches the user: its subject strongly matches a settled store ruling.',
-    'The store already decides this; asking again spends the user\'s attention on a resolved question and risks minting a competing ruling.',
+    'STERLING DENY-ONCE (H20, decision 68332e4b) — this question was NOT shown to the user; read the settled ruling(s) below, then act on them before resubmitting.',
   ];
   if (totalQuestions > 1) {
+    const openLabel = open.length
+      ? open.map((o) => `"${clip(normalizeWs(o.label) || `Sub-question ${o.index + 1}`, 40)}"`).join(', ')
+      : 'none — every sub-question is settled';
     lines.push(
-      `This form has ${totalQuestions} sub-question(s); ${ruled.length} of them are SETTLED by the store below — resubmit ONLY the open sub-question(s) named here:`
+      `${totalQuestions} sub-question(s) total, ${ruled.length} settled by the store below — resubmit only the open sub-question(s): ${openLabel}`
     );
   }
+  const citedIds = [];
   for (const r of ruled) {
-    lines.push(`— Sub-question ${r.index + 1}${r.label ? ` ("${clip(r.label, 80)}")` : ''} is SETTLED:`);
+    // Normalize BEFORE clipping (fix 2): whitespace runs (incl. embedded
+    // newlines) collapse to one space, so a forged "\n— fake row" or
+    // "\nOVERRIDE: fake" cannot split off its own rendered line.
+    const label = clip(normalizeWs(r.label) || `Sub-question ${r.index + 1}`, 80);
     for (const d of r.decisions) {
+      citedIds.push(d.id);
       const kind = d.type === 'anti_pattern' ? 'anti_pattern' : 'decision';
-      const substance = d.type === 'anti_pattern' ? `${d.trigger ?? ''} — ${d.right_way ?? ''}` : d.statement ?? '';
-      lines.push(
-        `  ▸ ${kind} [${d.id}] (status: ${d.status ?? 'unknown'}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ''}, scope: ${d.scope ?? 'unknown'}): ${clip(substance, 300)}`
-      );
+      // Composition site for fix 7: clip the free TEXT alone, then append the
+      // marker (renderer chrome) OUTSIDE the clip window — clipping the
+      // already-joined text+marker string (the old shape) can cut the marker
+      // off entirely when the free text alone exceeds the clip budget.
+      const { text, marker } = substanceFor(d);
+      const clippedText = clip(normalizeWs(text), 160);
+      const normalizedMarker = normalizeWs(marker);
+      const substance = normalizedMarker ? `${clippedText}${clippedText ? ' ' : ''}${normalizedMarker}` : clippedText;
+      const bracket = `${d.status ?? 'unknown'}·${d.scope ?? 'unknown'}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ''}`;
+      lines.push(`— "${label}" → ${kind} [${d.id}] [${bracket}]: ${substance}`);
     }
   }
-  if (totalQuestions > 1) {
-    if (open.length) {
-      lines.push('— OPEN (resubmit only these):');
-      for (const o of open) {
-        lines.push(`  ▸ Sub-question ${o.index + 1}${o.label ? ` ("${clip(o.label, 80)}")` : ''}`);
-      }
-    } else {
-      lines.push('— OPEN (resubmit only these): none — every sub-question in this form is settled.');
-    }
-  }
-  lines.push(
-    'TO OVERRIDE: resubmit this exact sub-question citing one of the ruling ids above AND stating the UNRESOLVED DELTA — what this ask needs that the cited ruling does not already settle. A resubmission that neither cites an id nor introduces new substance beyond the first attempt is denied again; repeated overrides are logged.'
-  );
+  const idList = [...new Set(citedIds)];
+  lines.push(renderOverrideLine(idList));
   return lines.join('\n');
 }
 
@@ -427,7 +500,36 @@ export function drainPending(path) {
 
 function clip(text, cap) {
   const s = String(text ?? '');
-  return s.length > cap ? `${s.slice(0, cap)}…` : s;
+  // Code-point safe AND early-stopping (fix 5b, deny-once compaction round 2,
+  // decision 80d0ab62): the old `Array.from(s)` splits by code point (so a
+  // surrogate pair is never cut) but still MATERIALIZES THE ENTIRE INPUT as an
+  // array before applying a small cap — shared consumers here pass unbounded
+  // record fields (an oversized article body can be hundreds of KB), so that
+  // allocation cost scaled with the full input, not the cap. This walks the
+  // string by code point via the string iterator protocol (which yields whole
+  // code points one at a time, same surrogate-pair safety as Array.from) and
+  // stops the instant it has collected `cap` of them plus confirmed there is
+  // at least one more — so it never reads past `cap + 1` code points in, no
+  // matter how long `s` is. Cap semantics unchanged: cap counts code points;
+  // ellipsis appended only when the input actually exceeds it.
+  let out = '';
+  let count = 0;
+  for (const ch of s) {
+    if (count === cap) return `${out}…`;
+    out += ch;
+    count++;
+  }
+  return out;
+}
+
+/** Collapse every whitespace run (space, tab, \r, \n, …) to a single space and
+ *  trim (fix 2, dual-review finding). Applied to every interpolated free-text
+ *  field BEFORE clipping, so embedded newlines in a sub-question label or a
+ *  ruling's own statement/trigger/right_way can never forge a fake line start
+ *  (e.g. a crafted "\n— forged →" prefix) inside renderDenyOnceMessage's
+ *  otherwise-fixed 3-line shape. */
+function normalizeWs(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim();
 }
 
 /** One-hop pointer line for a sibling slug: resolved from the store when the
