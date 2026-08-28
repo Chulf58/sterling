@@ -7239,7 +7239,14 @@ function enqueuePending(path, entry) {
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
-  return s2.length > cap ? `${s2.slice(0, cap)}\u2026` : s2;
+  let out = "";
+  let count = 0;
+  for (const ch of s2) {
+    if (count === cap) return `${out}\u2026`;
+    out += ch;
+    count++;
+  }
+  return out;
 }
 function pointerLine(store2, kind, slug) {
   let head = "(not in store)";
