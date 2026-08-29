@@ -56,14 +56,27 @@
 //     non-continuity, detached-directory publication, unauthenticated published
 //     CONTENT, and the native-Windows arm — are stated at those two functions and
 //     are NOT covered by the paragraph below.
-//   * THE BYTE-READING PATH IS ONLY lstat-CLASSIFIED, WHICH IS WEAKER, AND IS AN
-//     OPEN RESIDUAL. The emission loop calls `classifyPathComponents` and then
-//     `readFileSync(abs)` as TWO independent absolute-pathname resolutions, so a
-//     component or the leaf can be replaced between them — including with a
-//     symlink `readFileSync` then follows, which is exactly the poisoned-exemption
-//     shape above. The classification narrows the window; it does not bind the
-//     bytes. Tracked as board 19c43670, deliberately OUT OF SCOPE here (one
-//     concern per change) — a live gap, not a closed one.
+//   * THE BYTE-READING PATH IS DESCRIPTOR-PINNED TOO (board 19c43670, 2026-08-29).
+//     It USED TO BE lstat-classification only: the emission loop called
+//     `classifyPathComponents` and then `readFileSync(abs)` as TWO independent
+//     absolute-pathname resolutions, so a component or the leaf could be replaced
+//     between them — including with a symlink `readFileSync` then followed, which
+//     is exactly the poisoned-exemption shape above. The bytes are now read from a
+//     descriptor opened RELATIVE to the same walked, pinned parent chain the write
+//     path uses (`withPinnedStampParent` + `readRegularAt`), never from a
+//     re-resolved absolute pathname. It therefore INHERITS the residuals named at
+//     `withPinnedStampParent` — root-anchor authentication, component-identity
+//     non-continuity, and the native-Windows arm — and repairs none of them.
+//   * PATH DISCOVERY IS STILL ABSOLUTE-PATHNAME WALKED, and that is a REMAINING
+//     residual, named rather than covered by the bullet above: `listFilesUnder`
+//     and `baselineSetPaths` enumerate with `readdirSync(join(cwd, rel))`. It is
+//     NAME discovery only — every discovered name's BYTES are then read through
+//     the pinned walk against the real tree — so a steered enumeration can produce
+//     a `deleted:true` entry for a name that is absent, or omit a name entirely.
+//     Both directions are fail-CLOSED (H17 honours `deleted:true` only while the
+//     path is STILL absent, and an omitted entry grants no exemption at all), so
+//     it cannot attribute attacker-chosen bytes to a path — which is why it is
+//     disclosed here rather than fixed in the same change (one concern).
 // THE DISPOSITION ON ANY TYPE AMBIGUITY IS UNCHANGED AND APPLIES TO BOTH: the CLI
 // REFUSES loudly and stamps nothing (never a partial stamp, never a followed
 // link) — the conductor resolves the anomaly, which is exactly the audience that
@@ -290,38 +303,12 @@ if (dirty.length === 0) {
   );
 }
 
-const at = new Date().toISOString();
-const stamp = dirty.map((path) => {
-  const abs = join(target, path);
-  // EVERY COMPONENT lstat-classified before the file is read (board 128fedb7
-  // site 4): the old `existsSync` + `readFileSync` pair followed a link at the
-  // path ITSELF *and* at any ancestor, so a symlinked `.sterling`, `hooks/`, or
-  // a linked subdirectory inside a dirty untracked tree got out-of-repo bytes
-  // stamped as that repo path's own — and H17 would then exempt whatever the
-  // link pointed at.
-  const kind = classifyPathComponents(target, path, `refusing to attest the dirty path '${path}'`);
-  // FIX L1: a deleted dirty path has no bytes to hash — stamp it as a
-  // deletion rather than crashing readFileSync on an absent file. H17's
-  // verifyStampAttestation accepts a listed deleted:true entry iff the path
-  // is STILL absent; the path reappearing, or a hash expectation going
-  // unmet, still denies exactly as today (no partial credit).
-  if (kind === 'absent') {
-    return { path, deleted: true, at };
-  }
-  if (kind !== 'file') {
-    // A stamp entry is only {path, sha256} or {path, deleted:true} — it cannot
-    // express a link target, a directory or a device, so a non-regular dirty
-    // path is UNATTESTABLE by construction. Refuse the whole stamp rather than
-    // emit an entry that means something other than it says (P5, and never
-    // partial credit).
-    fail(
-      `enforcement-stamp: dirty path '${path}' is not a regular file (lstat kind: ${kind}) — a {path, sha256} stamp cannot attest a symlink, ` +
-        `directory or device, and its bytes are never read through a link. Nothing was stamped. Resolve '${path}' and re-run.`
-    );
-  }
-  const bytes = readFileSync(abs);
-  return { path, sha256: createHash('sha256').update(bytes).digest('hex'), at };
-});
+// THE EMISSION LOOP IS FURTHER DOWN THE FILE NOW (board 19c43670). It hashes
+// bytes read through the pinned component walk, so it must run AFTER the
+// module-scope constants that walk depends on (`IS_WIN32`, `PROCFS_FD_DIR`) have
+// been evaluated — a `const` is in its temporal dead zone until then, and a loop
+// left here would die with a ReferenceError on its first attested path. Function
+// declarations hoist; consts do not.
 
 const IS_WIN32 = process.platform === 'win32';
 const PROCFS_FD_DIR = '/proc/self/fd';
@@ -468,20 +455,52 @@ function assertSecureIoAvailable(cwd) {
 // Windows: the HARDLINK-THROUGH-THE-LEAF truncation is genuinely not
 // reintroduced — nothing opens the existing leaf for writing at all; a planted
 // hardlink is replaced by the rename, never truncated through.
-function withPinnedStampParent(cwd, relDir, fn) {
+// TWO CALLERS, ONE WALK (board 19c43670). The byte-READING path uses this same
+// function rather than a second component walk of its own: two walks in one file
+// is how one of them rots out of step with the other, and the reader needs
+// EXACTLY the guarantee the writer needs — every component below the anchor
+// resolved through a held descriptor. The read caller differs in two ways only,
+// both expressed as options rather than as a fork:
+//   * `createMissing: false` — a reader must never CREATE a component it was only
+//     asked to read through. The `mkdirSync` branch below is the writer's alone.
+//   * `onAbsent` — for a reader an absent component is a legitimate ANSWER ('the
+//     path is gone', stamped as a deletion), not an error, so it needs a way to
+//     say so that is distinct from `fn`'s own return. It is REQUIRED whenever
+//     `createMissing` is false; a missing handler is a programming error and is
+//     refused loudly rather than defaulted, because defaulting it would silently
+//     turn a vanished component into whatever `undefined` means downstream.
+// The reader inherits every residual documented above WITHOUT EXCEPTION, and adds
+// none: the anchor is still resolved by name, component identity is still not
+// continuous, and the win32 arm below is still path-addressed.
+function withPinnedStampParent(cwd, relDir, fn, options = {}) {
+  const createMissing = options.createMissing !== false;
+  const onAbsent = options.onAbsent;
+  // The refusals below name WHAT the walk was heading for. It defaults to the
+  // stamp file because the writer was the only caller when they were written, and
+  // the reader overrides it: a message telling the conductor an ancestor of "the
+  // stamp file" is bad, when the offending ancestor is actually above an attested
+  // path, sends them to inspect the wrong directory.
+  const what = options.what || 'the stamp file';
+  if (!createMissing && typeof onAbsent !== 'function') {
+    fail('enforcement-stamp: internal error — a non-creating pinned walk was requested without an onAbsent handler, so a vanished component could not be reported. Nothing was stamped.');
+  }
   if (IS_WIN32) {
     // DISCLOSED win32 arm: path-addressed throughout, no parent binding — the
     // `{recursive: true}` create is part of the same residual named above, not an
     // oversight, because there is no descriptor to create relative to.
+    // A READER creates nothing here either: it is handed the absolute directory
+    // path whether or not it exists, and the ENOENT its own leaf open then raises
+    // is what reports the absence — the same disposition the Linux arm reaches
+    // through `onAbsent`, by a different route.
     const dirAbs = join(cwd, relDir);
-    mkdirSync(dirAbs, { recursive: true });
+    if (createMissing) mkdirSync(dirAbs, { recursive: true });
     return fn(dirAbs);
   }
   assertSecureIoAvailable(cwd);
   const segments = relDir.split('/').filter(Boolean);
   for (const name of segments) {
     if (name === '.' || name === '..' || name.includes('\0')) {
-      fail(`enforcement-stamp: refusing to write the stamp — the component '${name}' of '${relDir}' is not a plain resolvable name. Nothing was stamped.`);
+      fail(`enforcement-stamp: refusing to walk to ${what} — the component '${name}' of '${relDir}' is not a plain resolvable name. Nothing was stamped.`);
     }
   }
   // Open ONE child directory relative to an already-pinned parent. Returns null
@@ -495,8 +514,8 @@ function withPinnedStampParent(cwd, relDir, fn) {
       if (code === 'ENOENT') return null;
       if (code === 'ELOOP' || code === 'ENOTDIR' || code === 'ENXIO' || code === 'ENODEV' || code === 'EOPNOTSUPP') {
         fail(
-          `enforcement-stamp: path component '${soFar}' (an ancestor of the stamp file) is not a real directory (no-follow open failed: ${code}) — ` +
-            `refusing to create or write the stamp through a symlink or other non-regular ancestor. Nothing was stamped. Resolve '${soFar}' and re-run.`
+          `enforcement-stamp: path component '${soFar}' (an ancestor of ${what}) is not a real directory (no-follow open failed: ${code}) — ` +
+            `refusing to resolve through a symlink or other non-regular ancestor. Nothing was stamped. Resolve '${soFar}' and re-run.`
         );
       }
       throw e;
@@ -515,6 +534,10 @@ function withPinnedStampParent(cwd, relDir, fn) {
       const anchored = `${handle}/${name}`;
       let fd = openChild(anchored, soFar);
       if (fd === null) {
+        // READER: the component is absent, so nothing below it can exist either —
+        // report absence and stop walking. Inside the `try`, so the `finally`
+        // still closes every descriptor pinned up to this point.
+        if (!createMissing) return onAbsent();
         try {
           mkdirSync(anchored); // ONE component, through the pinned parent — never {recursive: true}
         } catch (e) {
@@ -561,6 +584,103 @@ function withPinnedStampParent(cwd, relDir, fn) {
       } catch {}
     }
   }
+}
+
+// READ THE ATTESTED BYTES THROUGH THE PINNED PARENT (board 19c43670) — the fix
+// for the read-side half of the acquisition class anti_pattern 7760c328 records.
+// WHAT WAS WRONG. The emission loop ran `classifyPathComponents(target, path)`
+// and then `readFileSync(join(target, path))`. Those are TWO INDEPENDENT
+// RESOLUTIONS of the same absolute string, and nothing carries the first one's
+// verdict into the second: an actor who replaces an intermediate component
+// between them makes the producer hash bytes from a directory of their choosing
+// and write them into the stamp UNDER THE ORIGINAL PATH'S NAME. That matters more
+// than an ordinary TOCTOU because the stamp is H17's ATTESTATION INPUT — H17
+// exempts a changed enforcement path whose current bytes match a stamp entry — so
+// a poisoned read buys an exemption for bytes that were never at that path.
+// WHAT PROTECTS NOW, STATED AS BEHAVIOUR: the leaf is opened
+// `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` RELATIVE to a directory descriptor
+// `withPinnedStampParent` walked component by component, and the bytes are read
+// FROM THAT DESCRIPTOR (`readFileSync(fd)`), never from a name resolved again.
+// The classification that still runs at the call site is an EARLY LEGIBLE
+// REFUSAL, exactly as it is on the write side — nothing here trusts its verdict.
+// WHAT IS DELIBERATELY NOT CLAIMED. Every residual of the walk is inherited
+// unrepaired (no component-identity continuity, no parent binding on native
+// Windows), and the enumeration that DISCOVERED this path is still
+// absolute-pathname walked — both are named in the file header.
+// THE ANCHOR IS THE ONE COMPONENT STILL RESOLVED BY NAME, and it deliberately
+// FOLLOWS: `~/proj -> /mnt/data/proj` is an ordinary arrangement and a no-follow
+// open of a symlinked project root would refuse every legitimate run. THIS IS THE
+// PRE-EXISTING ACCEPTED LIMIT, not a new one laundered through a citation, and the
+// check was made rather than asserted: the reader anchors on `target`
+// (`process.cwd()`) — the SAME anchor, in the SAME process, through the SAME
+// `withPinnedStampParent` the write path already used — and what it REPLACES
+// resolved every component from `/` on every read. So the change strictly NARROWS
+// what is resolved by name and makes no path reachable that was not reachable
+// before. The governing ruling is decision h17-repo-root-authentication-is-out-of-
+// scope (knowledge_get f36eb854): root identity is out of the threat model and
+// discharged by disclosure, on the grounds that an actor who can replace the
+// workspace root already owns `.git`, the store and the config. That ruling was
+// written for H17's own anchor; it is cited here because this CLI shares the anchor
+// SHAPE and the same reasoning, not because the record names this file.
+// O_NONBLOCK is carried for the reason the writer's openers state: a fifo or
+// device swapped in must not BLOCK the open and hang a CLI the conductor waits on.
+// NOT PROVEN BY THE SUITE, AND SAID PLAINLY (anti_pattern 7760c328's own closing
+// paragraph): the defect needs a component swapped MID-FLIGHT, and the
+// deterministic stand-in — statically planting a symlink at an intermediate
+// component — is refused by `classifyPathComponents` too, so it passes against the
+// BROKEN code as well and pins nothing. This guard ships verified by reading and
+// independent review, not by a green bar that cannot see it.
+function readRegularAt(parentHandle, leaf, rel) {
+  let fd;
+  try {
+    fd = openSync(`${parentHandle}/${leaf}`, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
+  } catch (e) {
+    const code = e && e.code;
+    // Gone between discovery and the read. The caller stamps a deletion — the same
+    // disposition the old `classifyPathComponents(...) === 'absent'` arm reached.
+    if (code === 'ENOENT') return null;
+    if (code === 'ELOOP' || code === 'ENOTDIR' || code === 'ENXIO' || code === 'ENODEV' || code === 'EOPNOTSUPP') {
+      fail(
+        `enforcement-stamp: dirty path '${rel}' is not a regular file (no-follow open through its pinned parent failed: ${code}) — a {path, sha256} ` +
+          `stamp cannot attest a symlink, directory or device, and its bytes are never read through a link. Nothing was stamped. Resolve '${rel}' and re-run.`
+      );
+    }
+    throw e;
+  }
+  try {
+    // THE TYPE VERDICT COMES FROM THE DESCRIPTOR THIS CALL HOLDS, not from an
+    // lstat of a name that could since have changed. `O_NOFOLLOW` already refused
+    // a symlink AT THE LEAF; this rejects the shapes it cannot see — a directory,
+    // fifo, socket or device — before any of their bytes reach the hash.
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      fail(
+        `enforcement-stamp: dirty path '${rel}' is not a regular file (the descriptor this run opened for it is not one) — a {path, sha256} stamp ` +
+          `cannot attest a directory, fifo or device. Nothing was stamped. Resolve '${rel}' and re-run.`
+      );
+    }
+    return readFileSync(fd);
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {}
+  }
+}
+
+// Read one repo-relative attested path's bytes through the pinned walk. Returns
+// the bytes, or null when the path (or any component of it) is ABSENT — which the
+// caller stamps as a deletion rather than a hash.
+function readAttestedFile(cwd, rel) {
+  const segments = rel.split('/').filter(Boolean);
+  const leaf = segments[segments.length - 1];
+  if (!leaf || leaf === '.' || leaf === '..' || leaf.includes('\0')) {
+    fail(`enforcement-stamp: refusing to attest '${rel}' — its final component is not a plain resolvable name. Nothing was stamped.`);
+  }
+  return withPinnedStampParent(cwd, segments.slice(0, -1).join('/'), (parentHandle) => readRegularAt(parentHandle, leaf, rel), {
+    createMissing: false,
+    onAbsent: () => null, // a component above the leaf is gone — the path is absent
+    what: `the attested path '${rel}'`,
+  });
 }
 
 // THE STAMP WRITE IS CREATE-ONLY (defect (i) / Ruling 5 of decision
@@ -816,6 +936,45 @@ function writeStampAt(parentHandle, leaf, buf) {
     }
   }
 }
+
+const at = new Date().toISOString();
+const stamp = dirty.map((path) => {
+  // AN EARLY, LEGIBLE REFUSAL — NOT THE GUARANTEE (board 19c43670, matching what
+  // the write path's two classifications below already say about themselves).
+  // This turns the ordinary "someone left a symlink, directory or device on a
+  // dirty path" case into a message naming the offending path and its kind,
+  // instead of an ELOOP surfacing from inside the reader. NOTHING BELOW TRUSTS
+  // ITS VERDICT: a classification is a snapshot of one resolution, and the read
+  // resolves again. What actually binds the bytes is `readAttestedFile`, which
+  // opens the leaf through a walked, pinned parent chain and hashes the
+  // descriptor's contents.
+  const kind = classifyPathComponents(target, path, `refusing to attest the dirty path '${path}'`);
+  if (kind !== 'file' && kind !== 'absent') {
+    // A stamp entry is only {path, sha256} or {path, deleted:true} — it cannot
+    // express a link target, a directory or a device, so a non-regular dirty
+    // path is UNATTESTABLE by construction. Refuse the whole stamp rather than
+    // emit an entry that means something other than it says (P5, and never
+    // partial credit). `readRegularAt` refuses the same shapes again, from the
+    // descriptor, for the paths that get past this snapshot.
+    fail(
+      `enforcement-stamp: dirty path '${path}' is not a regular file (lstat kind: ${kind}) — a {path, sha256} stamp cannot attest a symlink, ` +
+        `directory or device, and its bytes are never read through a link. Nothing was stamped. Resolve '${path}' and re-run.`
+    );
+  }
+  const bytes = readAttestedFile(target, path);
+  // FIX L1: a deleted dirty path has no bytes to hash — stamp it as a deletion
+  // rather than crashing the read on an absent file. H17's
+  // verifyStampAttestation accepts a listed deleted:true entry iff the path is
+  // STILL absent; the path reappearing, or a hash expectation going unmet, still
+  // denies exactly as today (no partial credit). THE ABSENCE VERDICT IS THE
+  // READ'S, not the classification's: the two can disagree (a path can vanish, or
+  // reappear, between them) and the resolution that actually produced — or failed
+  // to produce — the bytes is the one that gets to say.
+  if (bytes === null) {
+    return { path, deleted: true, at };
+  }
+  return { path, sha256: createHash('sha256').update(bytes).digest('hex'), at };
+});
 
 // The stamp WRITE takes the same walk (board 128fedb7 site 4): mkdirSync
 // {recursive:true} traverses every ancestor, so a symlinked `.sterling` or

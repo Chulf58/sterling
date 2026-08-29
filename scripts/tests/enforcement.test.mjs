@@ -1464,10 +1464,56 @@ test('H17 AC5: no agent_id (conductor) → exit 0, nothing touched, short-circui
 //     inverted from the prior restore-on-modify behaviour).
 //   sterling.db change NOT flagged (unchanged — explicitly excluded from the (B)
 //     set per decision fac9a69b / the h17 article).
+//
+// SPLIT INTO FRESH-FIXTURE ARMS 2026-08-29 — decision `b-surface-adoption-point-
+// closes-with-an-incident-bound-taint-latch-not-a-persisted-manifest` (bcd2cc09),
+// RULINGS 7-11. These four behaviours used to run SEQUENTIALLY inside ONE project
+// fixture. Under the taint latch that is no longer a valid oracle: the FIRST arm's
+// denial creates a durable latch at `.sterling/enforcement-taint.json`, and WHILE
+// IT EXISTS every subsequent agent tool call is denied BEFORE execution — so arms
+// 2 and 3 would be denied by the latch instead of by the no-restore rule they were
+// written to check, and arm 4 (the excluded-DB control) could not observe its
+// ALLOW at all. Each behaviour now owns a FRESH project dir with no inherited
+// latch, and every existing byte-survival / denial-wording assertion is preserved
+// verbatim. Also anti-pattern f1d66bef (an early assertion failure aborts the whole
+// test and hides every later assertion) — the settings arm below carried a comment
+// recording that exactly that had happened to it.
+//
+// The excluded-DB control is placed FIRST deliberately: it is the arm that must
+// pass for the OPPOSITE reason (ALLOW), so a DENY in any arm below cannot be
+// explained by "this fixture denies everything".
+//
+// The LAST test in this block pins the latch's cross-call consequence for these
+// arms; the full latch ruling (set points, fail-closed shapes, clearance) is
+// pinned in scripts/tests/h17-b-taint-latch.test.mjs.
 // ---------------------------------------------------------------------------
 
-test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+left in place, modified files denied+left as written (no restore); sterling.db NOT flagged', { skip: GIT_SKIP }, () => {
+// THE LATCH — decision bcd2cc09 Ruling 7: `.sterling/enforcement-taint.json`, a
+// plain file, deliberately outside the sealed DB and outside BASELINE_GLOBS.
+function latchPath(dir) {
+  return join(dir, '.sterling', 'enforcement-taint.json');
+}
+
+test('H17 AC8-DB-CONTROL: a sterling.db change is NOT in the (B) set and is NOT flagged (the ALLOW control for every AC8 arm below)', { skip: GIT_SKIP }, () => {
   const { dir, store, cleanup } = makeGitProject();
+  try {
+    // --- sterling.db change is NOT in the (B) set and git is blind to it → NOT flagged ---
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    store.create(briefRecord()); // a legit store write mutates sterling.db between Pre and Post
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(r.code, 0, `a sterling.db change must NOT be flagged (${oneLine(r.stderr)})`);
+    // Sabotage: add `.sterling/sterling.db` (or a `.sterling/**` catch-all) to the
+    // (B) BASELINE_GLOBS → this ALLOW flips to a DENY, and every ordinary store
+    // write during an agent call becomes an incident that latches the surface.
+    assert.equal(existsSync(latchPath(dir)), false, 'and no taint latch is created by an ordinary, allowed call');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC8-ADDITION: a new gitignored .claude/agents file is DENIED + REPORTED and left ON DISK byte-identical', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
   try {
     // --- .claude/agents/evil.md : NEW → DENIED, file SURVIVES byte-identical on disk ---
     const evilAgent = join(dir, '.claude', 'agents', 'evil.md');
@@ -1475,7 +1521,7 @@ test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+l
     const plantedBytes = Buffer.from('# smuggled agent (hooks stripped)\n');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
     writeFileSync(evilAgent, plantedBytes);
-    let r = h17(dir, 'PostToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `new gitignored agent file must deny — ${oneLine(r.stderr)}`);
     // Verdict carrier for this arm: SURVIVAL + BYTE-IDENTITY, not the exit code above.
     // Measured on this exact file: an exit-code-only assertion stayed GREEN even with
@@ -1506,14 +1552,21 @@ test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+l
     // message (e.g. revert to a generic "denied" with no disposition stated) →
     // this assertion goes red.
     assert.ok(existsSync(legitAgent), 'a legit pre-existing agent file is left untouched');
+  } finally {
+    cleanup();
+  }
+});
 
+test('H17 AC8-CONFIG: a modified .sterling/config.json is DENIED and left byte-identical to what the command wrote (no restore)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
     // --- .sterling/config.json : MODIFIED → DENIED, bytes LEFT AS WRITTEN (Ruling D: no restore) ---
     const configPath = join(dir, '.sterling', 'config.json');
     const origConfig = readFileSync(configPath, 'utf8');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
     const hackedConfig = JSON.stringify({ ...CONFIG, HACKED: true });
     writeFileSync(configPath, hackedConfig);
-    r = h17(dir, 'PostToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `modified gitignored config must deny — ${oneLine(r.stderr)}`);
     // Sabotage: reintroduce a restore-to-baseline write on this (B) arm (e.g. call
     // the old writeUnder-to-HEAD/baseline routine for .sterling/config.json before
@@ -1521,19 +1574,27 @@ test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+l
     // origConfig instead of staying as the command wrote them.
     assert.equal(readFileSync(configPath, 'utf8'), hackedConfig, '.sterling/config.json is DENIED but left byte-identical to what the command wrote — never restored (Ruling D, decision 532a4383/fac9a69b)');
     assert.notEqual(readFileSync(configPath, 'utf8'), origConfig, 'and specifically NOT reverted to the pre-write baseline');
+  } finally {
+    cleanup();
+  }
+});
 
+test('H17 AC8-SETTINGS: a modified .claude/settings.local.json is DENIED and left byte-identical to what the command wrote (no restore)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
     // --- .claude/settings.local.json (the GITIGNORED hook-disable file): MODIFIED →
-    // DENIED, bytes LEFT AS WRITTEN (Ruling D: no restore). PREDICTED inversion, not
-    // yet observed — this section sits behind the config.json abort above and never
-    // ran under the old suite; settings.local.json is named in the same (B) set as
-    // config.json in both 532a4383 and fac9a69b, so the same no-restore rule should
-    // apply, but confirm on the real run rather than trusting this by analogy alone. ---
+    // DENIED, bytes LEFT AS WRITTEN (Ruling D: no restore). This arm used to sit
+    // BEHIND the config.json arm inside one shared fixture and never ran once that
+    // arm's first assertion aborted the chain (anti-pattern f1d66bef); it now owns
+    // its own fresh fixture and reports its own verdict. settings.local.json is
+    // named in the same (B) set as config.json in both 532a4383 and fac9a69b, so
+    // the same no-restore rule applies. ---
     const settingsLocal = join(dir, '.claude', 'settings.local.json');
     const origSettings = readFileSync(settingsLocal, 'utf8');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
     const hackedSettings = JSON.stringify({ hooks: 'DISABLED' });
     writeFileSync(settingsLocal, hackedSettings);
-    r = h17(dir, 'PostToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1);
     assert.equal(r.code, 2, `gitignored settings.local.json write must deny — ${oneLine(r.stderr)}`);
     // Sabotage: reintroduce a restore-to-baseline write on this (B) arm → this
@@ -1541,12 +1602,67 @@ test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+l
     // staying as the command wrote them.
     assert.equal(readFileSync(settingsLocal, 'utf8'), hackedSettings, 'settings.local.json is DENIED but left byte-identical to what the command wrote — never restored (Ruling D)');
     assert.notEqual(readFileSync(settingsLocal, 'utf8'), origSettings, 'and specifically NOT reverted to the pre-write baseline');
+  } finally {
+    cleanup();
+  }
+});
 
-    // --- sterling.db change is NOT in the (B) set and git is blind to it → NOT flagged ---
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    store.create(briefRecord()); // a legit store write mutates sterling.db between Pre and Post
-    r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 0, `a sterling.db change must NOT be flagged (${oneLine(r.stderr)})`);
+// The cross-call half of the AC8 arms above (decision bcd2cc09, RULINGS 7-11).
+// Each arm above ends at its own denial; NONE of them shows what the next call
+// sees. That gap IS the defect bcd2cc09 was ruled to close: the bytes are
+// deliberately left on disk, so the NEXT call's Pre re-collected them as its own
+// legitimate baseline and allowed — one denial bought a permanent edit to the
+// agent GRANT DEFINITIONS. The latch closes it: while
+// `.sterling/enforcement-taint.json` exists, EVERY subsequent agent tool call is
+// denied BEFORE execution, and only a separate conductor reconciliation clears it
+// (never an ordinary call, never the stamp producer).
+//
+// Lanes carry a tool_use_id here (`tu`), unlike the A1 arms above, so the two
+// calls are genuinely distinct windows rather than the degraded-loud fallback.
+test('H17 AC8-LATCH: after a latching (B) arm, the NEXT call is DENIED AT PRE by the taint latch — the adoption point is closed', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const configPath = join(dir, '.sterling', 'config.json');
+    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch exists before call N');
+
+    // CONTROL, PLACED FIRST, passing for the OPPOSITE reason: on this same
+    // fixture with no incident on record, Pre ALLOWS. Without it, call N+1's
+    // denial below could equally be explained by "this fixture/mode denies every
+    // Pre" — a green that carries no evidence.
+    const L1 = tu('ac8-latch-calln');
+    const pre1 = h17(dir, 'PreToolUse', L1);
+    assert.notEqual(pre1.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(pre1.code, 0, `CONTROL: with no incident on record, Pre must ALLOW — actual ${pre1.code}, stderr: ${oneLine(pre1.stderr)}`);
+
+    // --- call N: the config.json arm again, this time only as the LATCHING event ---
+    const hackedConfig = JSON.stringify({ ...CONFIG, HACKED: true });
+    writeFileSync(configPath, hackedConfig);
+    const r1 = h17(dir, 'PostToolUse', L1);
+    assert.notEqual(r1.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(r1.code, 2, `call N: the unattested (B) modify must deny — actual ${r1.code}, stderr: ${oneLine(r1.stderr)}`);
+    // Sabotage: remove the latch-creation call from the (B)-denial branch (leaving
+    // the denial itself intact) → this assertion flips from true to false.
+    assert.equal(existsSync(latchPath(dir)), true, 'call N: the denial creates the durable taint latch at .sterling/enforcement-taint.json');
+
+    // --- call N+1: a different window that changes NOTHING of its own ---
+    const L2 = tu('ac8-latch-calln1');
+    const pre2 = h17(dir, 'PreToolUse', L2);
+    assert.notEqual(pre2.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    // Sabotage: with the latch still created, drop the latch consult at Pre (the
+    // "deny before execution while latched" check) → this flips from 2 back to 0,
+    // reproducing the adoption bug exactly while the latch-creation guard above
+    // stays green. THIS assertion is the one that carries the verdict.
+    assert.equal(
+      pre2.code,
+      2,
+      `THE ADOPTION CLOSURE: while the latch stands, the NEXT agent call is denied BEFORE execution even though nothing changed in its own window — actual ${pre2.code}, stderr: ${oneLine(pre2.stderr)}`
+    );
+    assert.match(oneLine(pre2.stderr), /taint|latch/i, 'the denial names the ONGOING taint, not a fresh in-window violation (there is none in this window)');
+
+    // Deliberately NO Post for call N+1: a denied Pre means the command never ran,
+    // so simulating its execution would assert against a state production cannot reach.
+    assert.equal(readFileSync(configPath, 'utf8'), hackedConfig, "the (B) bytes still sit exactly as call N's command wrote them — never restored, and never adopted as a fresh baseline");
+    assert.equal(existsSync(latchPath(dir)), true, 'an ordinary call never clears the latch — only a separate conductor reconciliation does (Rulings 3/5/10)');
   } finally {
     cleanup();
   }

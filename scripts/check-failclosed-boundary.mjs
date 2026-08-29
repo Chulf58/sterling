@@ -470,7 +470,7 @@ const BASELINE = {
     { statement: 'const secureIoReason = secureIoUnavailableReason(cwd);' },
     { statement: "if (secureIoReason) { deny( environmentDefectDenial( 'H17', `${secureIoReason} — this hook's descrip … #25b0f89d" },
     { statement: 'const event = input.hook_event_name;' },
-    { statement: "if (event === 'PreToolUse') { try { const store = openStore(cwd); let runId = NO_RUN; try { const ru … #10429a2d" },
+    { statement: "if (event === 'PreToolUse') { try { // THE TAINT LATCH IS CONSULTED FIRST — before the store, before … #a98386cd" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H17', `[stdin] hook input could not be read or parsed (${(e && e.mes … #9c89b8db" },
     { statement: "deny-arg: deny( environmentDefectDenial('H17', `Enforcement verification failed (${(e && e.message) || e}) — f … #3c876005" },
   ],

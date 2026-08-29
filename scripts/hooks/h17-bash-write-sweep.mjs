@@ -252,10 +252,29 @@ import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
 const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 // The conductor's attestation input (scripts/enforcement-stamp.mjs writes it).
-// NAMED ONCE, because since S4 it is read, witnessed AND invalidated from three
-// different places, and three copies of a security-relevant path string is three
+// NAMED ONCE, because since S4 it is read, witnessed AND invalidated from
+// several different places, and copies of a security-relevant path string are
 // chances for one of them to drift out of step with the others.
-const STAMP_REL = '.sterling/transient/enforcement-stamp.json';
+//
+// A FUNCTION, NOT A `const`, AND THAT PLACEMENT IS LOAD-BEARING RATHER THAN
+// STYLISTIC. A module-scope STATEMENT runs at IMPORT — before the deny decision
+// and outside any try whose catch reaches deny() — so
+// scripts/check-failclosed-boundary.mjs counts it as a hole: if it threw, the
+// hook would exit 1, the runner reads non-2 as NON-BLOCKING, and the gate is
+// voided. A string literal cannot realistically throw, but that baseline is a
+// RATCHET THAT ONLY SHRINKS, and its two growth doors are deliberately narrow:
+// raise the exact, test-pinned founding total (reserved for UNJUSTIFIED
+// entries), or add an `admitted` entry REPRINTED ON EVERY RUN FOREVER.
+//
+// The sibling fix in a5a8e81 moved two constants into their sole consuming
+// functions, but THAT REMEDY IS WRONG HERE: this one has five consumers across
+// distant functions, so inlining it would reintroduce exactly the multi-copy
+// drift the single naming exists to prevent. A hoisted function declaration
+// keeps ONE definition, stays visible everywhere, and is not a top-level
+// statement — so the ratchet stays at 107 and no permanent-noise entry is added.
+function stampRel() {
+  return '.sterling/transient/enforcement-stamp.json';
+}
 
 // ---------------------------------------------------------------------------
 // THE SHARED SECURE-I/O LAYER — SLICE 1: READ + CLASSIFY (decision 532a4383
@@ -2287,7 +2306,7 @@ function isDirectoryAt(cwd, rel) {
 // read is a stamp no consult can read either, and it exempts nothing.
 function readStampSnapshot(cwd) {
   try {
-    return withPinnedParent(cwd, STAMP_REL, 'enforcement stamp', {}, (parentHandle, leaf) =>
+    return withPinnedParent(cwd, stampRel(), 'enforcement stamp', {}, (parentHandle, leaf) =>
       parentHandle === null ? { kind: 'absent', sha256: null, present: false, entries: null } : readStampAt(parentHandle, leaf)
     );
   } catch {
@@ -2354,7 +2373,7 @@ function stampWitness(cwd) {
 // gone, and a failure to remove it never changes the denial that is already owed.
 function invalidateStamp(cwd) {
   try {
-    return withPinnedParent(cwd, STAMP_REL, 'enforcement stamp invalidation', {}, (parentHandle, leaf) => {
+    return withPinnedParent(cwd, stampRel(), 'enforcement stamp invalidation', {}, (parentHandle, leaf) => {
       if (parentHandle === null) return true; // no '.sterling/transient' at all — nothing to invalidate
       rmSync(`${parentHandle}/${leaf}`, { force: true });
       return true;
@@ -2362,6 +2381,318 @@ function invalidateStamp(cwd) {
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// THE (B) SURFACE TAINT LATCH — decision b-surface-adoption-point-closes-with-
+// an-incident-bound-taint-latch-not-a-persisted-manifest (bcd2cc09), RULINGS
+// 7-11, refining fac9a69b and Ruling D of 532a4383.
+//
+// WHAT IT CLOSES, stated here because a mechanism stripped of its reason gets
+// re-opened: Pre re-collects the (B) baseline from CURRENT DISK STATE on every
+// call (`collectBaseline` at the Pre arm below), so an unattested (B) change is
+// denied EXACTLY ONCE — the bytes are deliberately LEFT ON DISK (fac9a69b) —
+// and the NEXT call's Pre adopts those tampered bytes as its own legitimate
+// baseline, sees no difference, and ALLOWS. Forever, silently. ONE DENIAL BOUGHT
+// A PERMANENT EDIT TO LIVE ENFORCEMENT CONFIG, and `.claude/agents/**` IS the
+// agent GRANT DEFINITIONS. The irony that names the bug: this file already
+// applied exactly this reasoning to the STAMP (`invalidateStamp` above: "a
+// denial with no cross-call consequence turns the next Pre into an adoption
+// point") and never applied it to the SURFACE the stamp exists to protect.
+//
+// WHAT IS PERSISTED IS THE UNRESOLVED INCIDENT, NEVER A SOURCE OF TRUTH
+// (RULING 2), AND THE ASYMMETRY IS THE WHOLE DESIGN. A persisted last-known-good
+// (B) manifest — the conductor's own first proposal — would AUTHORIZE, so on a
+// same-UID machine (research_finding 79942bda) it would have to be defended
+// exactly like the stamp, reproducing the forgeable-plain-file problem it was
+// meant to solve. THE LATCH AUTHORIZES NOTHING: forging it can only produce a
+// LOUD DENIAL (a self-inflicted DoS), never a false allow. That is why PRESENCE
+// ALONE IS THE VERDICT and why NO FIELD INSIDE THE FILE MAY REDUCE ENFORCEMENT
+// (RULING 7) — no `cleared`, no `trusted`, no expiry, no session key, no boolean
+// of any kind. The JSON body is DIAGNOSTIC ONLY and is parsed strictly AFTER
+// presence has already decided the verdict.
+//
+// DELIBERATELY NOT IN `BASELINE_GLOBS` (RULING 7): the incident marker must not
+// become part of the surface whose incident it records.
+// DELIBERATELY NOT IN THE SQLITE STORE (RULING 7): the latch must be readable
+// BEFORE this hook trusts the store, and `openStore()` returns null on an absent
+// DB (lib/common.mjs:241) — so making the DB both the protected object AND the
+// sole record that protecting it failed is circular. A hook writing the DB would
+// also violate the MCP-only store-write rule and invariant 4, and SQLite is
+// same-UID forgeable anyway.
+// NOTHING HERE CLEARS IT (RULING 5, which overturned the conductor's own round-1
+// answer as fatal): clearance is a SEPARATE, EXPLICIT conductor action that
+// re-enumerates and re-hashes the whole (B) set. `scripts/enforcement-stamp.mjs`
+// must NEVER clear it either — that hands a laundering route to a background
+// child that outlives the audited Bash call (a threat this file already
+// recognises at `readStampSnapshot`). There is no clearer in this file by design.
+//
+// THE PATHS ARE NAMED ONCE, and named by a FUNCTION rather than module-scope
+// consts, for a mechanical reason: a top-level `const` WITH AN INITIALIZER in a
+// blocking hook is a fail-closed-boundary finding (scripts/check-failclosed-
+// boundary.mjs), and its ratchet only shrinks. Same disposition the other S3
+// constants already took.
+function taintLatchPaths() {
+  return {
+    sterlingDir: '.sterling',
+    dbLeaf: 'sterling.db',
+    leaf: 'enforcement-taint.json',
+    rel: '.sterling/enforcement-taint.json',
+    // The diagnostic body is bounded like every other record this hook reads
+    // (board 55fcccac clause 4). It is never allowed to change a verdict, so the
+    // bound can be small: an oversize or torn read simply yields no explanation.
+    maxDiagnosticBytes: 64 * 1024,
+  };
+}
+
+// RULING 11 — FAIL-CLOSED READ, DECIDED BY SHAPE BEFORE CONTENTS, classified
+// through a PINNED PARENT. Returns `{ tainted, environmentDefect, reason }`.
+//
+// THE SHAPE TABLE, verbatim from the ruling:
+//   * regular file at the latch path        -> TAINTED, regardless of contents
+//   * symlink / directory / FIFO / device /
+//     socket / unreadable / classify error  -> TAINTED (environment defect)
+//   * absent leaf under a VERIFIED REAL
+//     `.sterling` directory                 -> UNLATCHED
+//   * `.sterling` itself a symlink, a
+//     non-directory, or unreadable          -> FAIL CLOSED
+//   * `.sterling` present but `sterling.db`
+//     ABSENT                                -> BROKEN STATE, fail closed, and
+//                                              NEVER worded "not a Sterling
+//                                              project" — `.sterling` exists,
+//                                              only the DB is missing.
+//
+// NAMED LIMIT, NOT SOLVED (the ruling requires this be disclosed rather than
+// papered over): a WHOLLY ABSENT `.sterling/` cannot be mechanically told apart
+// from a genuine non-Sterling project, because project discovery itself defines
+// non-Sterling as "no ancestor containing .sterling/sterling.db"
+// (lib/common.mjs:62). For H17's PER-AGENT invocation the disposition is FAIL
+// CLOSED: this hook only ever runs from a spawned agent's frontmatter inside a
+// Sterling project, so an absent `.sterling` here is broken state, not a
+// neighbouring repository. A future GLOBAL `PreToolUse "*"` registration needs
+// an explicit project-recognition rule, and this reader must not be claimed to
+// supply one.
+//
+// THE PIN IS ACQUIRED BY WALKING, NEVER BY AN ABSOLUTE-PATH OPEN (anti-pattern
+// descriptor-pin-defeated-at-acquisition-when-the-directory-fd-is-opened-by-
+// absolute-path, severity BLOCK): `withClassifiedDir` -> `withPinnedParent`
+// starts at the one retained root anchor and resolves `.sterling` THROUGH it,
+// then both leaves are addressed as `<pinnedHandle>/<leaf>`. No pathname in this
+// function is ever re-resolved from the root, and a prior lstat is never treated
+// as though it still binds across a later open.
+function readTaintLatch(cwd) {
+  const P = taintLatchPaths();
+  try {
+    return withClassifiedDir(cwd, P.sterlingDir, (kind, dirHandle) => {
+      if (kind === 'absent') {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason:
+            `'${P.sterlingDir}/' is absent, so the (B) surface taint latch at '${P.rel}' cannot be read at all. This hook runs only from a spawned ` +
+            `agent's frontmatter INSIDE a Sterling project, so an absent '${P.sterlingDir}/' here is broken state — and it is a NAMED, UNSOLVED LIMIT that ` +
+            `it cannot be mechanically distinguished from a directory that was never a Sterling project (project discovery defines non-Sterling as "no ` +
+            `ancestor holding ${P.sterlingDir}/${P.dbLeaf}"). Failing closed rather than guessing`,
+        };
+      }
+      if (kind !== 'dir') {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason:
+            `'${P.sterlingDir}' is not a directory (kind: ${kind}) — the (B) surface taint latch at '${P.rel}' cannot be classified through it. A symlink or ` +
+            `other non-regular entry standing in for '${P.sterlingDir}' is denied on sight, never followed`,
+        };
+      }
+      // BROKEN STATE, AND SPECIFICALLY NOT "not a Sterling project": the
+      // directory the latch lives in exists, so the project IS one — only its
+      // store is gone. Wording the two the same way would tell a human to ignore
+      // a gate that is in fact reporting a damaged installation.
+      const dbKind = lstatKind(`${dirHandle}/${P.dbLeaf}`);
+      if (dbKind !== 'file') {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason:
+            `'${P.sterlingDir}/' exists but '${P.sterlingDir}/${P.dbLeaf}' is ${dbKind} — BROKEN STATE. The (B) surface taint latch is read before this hook ` +
+            `trusts the store precisely so a damaged store cannot silence it, and a half-present '${P.sterlingDir}/' is exactly the state in which the ` +
+            `enforcement surface is least verifiable. Failing closed`,
+        };
+      }
+      const h = classifyLeafAt(dirHandle, P.leaf);
+      let primary;
+      try {
+        // ABSENT UNDER A VERIFIED REAL DIRECTORY IS THE ONLY UNLATCHED VERDICT.
+        if (h.kind === 'absent') return { tainted: false, environmentDefect: false, reason: null };
+        if (h.kind !== 'file') {
+          return {
+            tainted: true,
+            environmentDefect: true,
+            reason:
+              `'${P.rel}' exists but is ${h.kind}, not a regular file — an abnormal shape at the latch path is TAINTED, exactly as a normal one is. ` +
+              `H17 took no action on it: it was neither read through, replaced, nor removed`,
+          };
+        }
+        // PRESENCE HAS NOW DECIDED. The body is read ONLY to enrich the
+        // explanation, and every failure inside `taintLatchDiagnostic` yields
+        // null — malformed content changes the EXPLANATION, never the DENIAL.
+        const diagnostic = taintLatchDiagnostic(h, P);
+        return {
+          tainted: true,
+          environmentDefect: false,
+          reason: `'${P.rel}' is present${diagnostic ? ` (diagnostic body: ${diagnostic})` : ' (its body carries no readable diagnostic, which changes nothing)'}`,
+        };
+      } catch (e) {
+        primary = e;
+        throw e;
+      } finally {
+        closePinned(h.fd, primary);
+      }
+    });
+  } catch (e) {
+    // A CLASSIFICATION ERROR IS TAINTED, never "no latch". An unreadable leaf
+    // (EACCES), an unresolvable ancestor, a walk refusal — every one of them is a
+    // state in which this gate cannot establish that the surface is clean, and
+    // "cannot establish" is fail-closed here (P5).
+    return {
+      tainted: true,
+      environmentDefect: true,
+      reason: `the (B) surface taint latch at '${P.rel}' could not be classified (${(e && e.message) || e}) — an unclassifiable latch path is TAINTED, never "unlatched"`,
+    };
+  }
+}
+
+// The latch's diagnostic body, read THROUGH THE DESCRIPTOR IT WAS CLASSIFIED BY
+// and strictly AFTER the verdict is already fixed. Returns a short clipped
+// string, or null. It can only ever change the WORDING of a denial that is
+// already owed — there is no path from this function to an allow, which is what
+// makes "no field inside the file may reduce enforcement" (RULING 7) structural
+// rather than a promise.
+function taintLatchDiagnostic(h, P) {
+  try {
+    const bytes = readClassifiedBytes(h, P.maxDiagnosticBytes, 'enforcement taint latch', h.anchored);
+    if (bytes.length === 0) return null;
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    const text = JSON.stringify(parsed);
+    return typeof text === 'string' ? text.slice(0, 400) : null;
+  } catch {
+    return null; // unreadable, oversize, torn, or unparseable — the verdict stands
+  }
+}
+
+// RULING 8 — THE SET PRIMITIVE IS CREATE-ONLY, or latching becomes its own
+// truncate primitive: the very class S1 removed from the producer and the S4
+// slice removed from the (B) restore (`writeUnder`'s gravestone). ONE
+// `O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW` open through a PINNED parent is the whole
+// gate — there is no pre-open, no lstat screen and no truncate arm to reach, so
+// a hardlink planted at the latch name resolves to EEXIST rather than to a write
+// through a shared inode at a victim outside the repository.
+// IF THE LEAF EXISTS IN ANY SHAPE THE LATCH IS ALREADY SET. EEXIST covers a
+// regular file, a directory, a FIFO and a hardlink; ELOOP covers a symlink
+// (O_NOFOLLOW refuses to follow it). Both mean "an object already stands at the
+// incident marker's name", which is exactly what `readTaintLatch` calls TAINTED —
+// so returning `set: true` here is not optimism, it is the same verdict the
+// reader will reach.
+// A CRASH AFTER CREATION BUT BEFORE THE BODY FINISHES leaves a partial file that
+// still reads as PRESENT, hence still TAINTED: fail-safe by construction, which
+// is why the write failure below is deliberately not an error.
+// THE PIN IS ACQUIRED BY WALKING (`withPinnedParent` from the retained root
+// anchor), never by `openSync` on an absolute pathname and never by
+// `mkdirSync(abs, {recursive:true})` — see the BLOCK-severity anti-pattern cited
+// at `readTaintLatch`.
+function setTaintLatch(cwd, incidents) {
+  const P = taintLatchPaths();
+  try {
+    const payload = Buffer.from(
+      JSON.stringify(
+        {
+          // A NOTE, NOT A CONTROL. Nothing in this object is ever read back as
+          // authority — `readTaintLatch` decides on PRESENCE and parses this
+          // only to quote it.
+          note: 'DIAGNOSTIC ONLY. Presence of this file is the verdict; no field in it can reduce enforcement, and H17 never clears it.',
+          at: new Date().toISOString(),
+          incident: incidents,
+        },
+        null,
+        2
+      ) + '\n',
+      'utf8'
+    );
+    return withPinnedParent(cwd, P.rel, '(B) surface taint latch', {}, (parentHandle, leaf) => {
+      if (parentHandle === null) {
+        return { set: false, error: `'${P.sterlingDir}' is absent, so there is no pinned directory to create '${P.rel}' in` };
+      }
+      let fd = null;
+      try {
+        fd = openSync(`${parentHandle}/${leaf}`, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o600);
+      } catch (e) {
+        const code = e && e.code;
+        if (code === 'EEXIST' || code === 'ELOOP') return { set: true, error: null }; // already latched, in whatever shape
+        return { set: false, error: `${code || 'error'} — ${(e && e.message) || e}` };
+      }
+      try {
+        writeSync(fd, payload);
+      } catch {
+        /* the leaf EXISTS and therefore already reads as TAINTED; a missing body only costs the explanation */
+      } finally {
+        try {
+          closeSync(fd);
+        } catch {
+          /* a leaked fd in a process that is about to exit(2) cannot change the verdict already owed */
+        }
+      }
+      return { set: true, error: null };
+    });
+  } catch (e) {
+    return { set: false, error: `${(e && e.message) || e}` };
+  }
+}
+
+// THE GATE. RULING 10: THE LATCH ALWAYS WINS, WITH NO EXCEPTION — it is
+// consulted before the store, before git, before the baseline and before the
+// stamp, and a matching exact stamp is evidence that reconciliation MAY proceed,
+// never proof that the outstanding incident was discharged. Called from BOTH
+// arms, because Post is where the incident is detected and PRE is where the
+// adoption used to happen: denying at Pre is what makes "the adoption point is
+// closed" true rather than merely claimed.
+// THE CONDUCTOR IS ALREADY EXEMPT — this hook short-circuits to `allow()` on an
+// absent `agent_id` before either call site — which is what keeps the recovery
+// path open: the conductor can run the producer and the reconciler while every
+// spawned agent stays denied, and is never required to hand-edit the latch.
+function denyIfTainted(cwd, agentId) {
+  const P = taintLatchPaths();
+  const verdict = readTaintLatch(cwd);
+  if (!verdict.tainted) return;
+  if (verdict.environmentDefect) {
+    deny(
+      environmentDefectDenial(
+        'H17',
+        `(B) SURFACE TAINT LATCH — FAIL-CLOSED READ: ${verdict.reason}. The latch is decided by SHAPE before contents, and every abnormal shape is TAINTED ` +
+          `(decision b-surface-adoption-point-closes-with-an-incident-bound-taint-latch-not-a-persisted-manifest, RULING 11). Nothing at '${P.rel}' was ` +
+          `written, replaced or removed by this hook.`,
+        { agentId }
+      )
+    );
+  }
+  // SCOPE STATED EXACTLY, NOT OVERSTATED (fd9d24af, security review). This used
+  // to say "and so is every spawned-agent call", which is false today: H17 rides
+  // the agent's OWN FRONTMATTER on Bash and is absent from hooks/hooks.json, so
+  // while latched it denies spawned-agent BASH and not an agent's Edit, Write or
+  // Task calls. The global PreToolUse '*' registration that would make the wider
+  // claim true is a later slice and has not landed. A security surface that
+  // claims a protection it does not implement is anti-pattern 586bccdc — the
+  // false claim is worse than the gap, because it stops the next reader looking.
+  deny(
+    `H17: THE (B) ENFORCEMENT SURFACE IS TAINTED — this tool call is DENIED BEFORE EXECUTION, and so is every spawned-agent BASH call that H17 gates ` +
+      `(it is registered on Bash in agent frontmatter, not globally in hooks/hooks.json, so it does not gate an agent's Edit, Write or Task calls), ` +
+      `until the taint is cleared by a conductor. ${verdict.reason}. An earlier audited command changed the protected (B) enforcement surface (\`.claude/agents/**\`, ` +
+      `\`.claude/settings*.json\`, \`.sterling/config.json\`) with no conductor attestation, or wrote the enforcement stamp inside its own window, and the ` +
+      `bytes were deliberately LEFT ON DISK. Without this latch the very next PreToolUse would re-collect those tampered bytes as its own legitimate ` +
+      `baseline and allow them forever — one denial would buy a permanent edit to the agent GRANT DEFINITIONS. PRESENCE OF THE LATCH IS THE VERDICT: no ` +
+      `field inside it can reduce enforcement, and H17 never clears it. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE — exit \`blocked\`, citing this ` +
+      `message VERBATIM. A CONDUCTOR clears it with a deliberate reconciliation that re-enumerates and re-hashes the whole current (B) set, verifies it ` +
+      `against the stamp exactly, and only then removes '${P.rel}'. Re-running the command will not help; routing around it is never sanctioned.`
+  );
 }
 
 // SLICE 2 (review finding B): CLASSIFIED BY THE OPEN, not by an lstat followed
@@ -2824,7 +3155,8 @@ function validateBaselineKey(key) {
 // stage now holds NO write primitive and NO delete primitive at all — there is
 // nothing left in that scope for a future edit to re-aim, and no comment standing
 // in for a guard (anti-pattern 586bccdc). Its two callers were the modify and
-// delete arms it served, and both are now `baselineDenied.push(rel)`.
+// delete arms it served, and both are now `noteBaselineDenied(rel)` (which
+// records the finding and latches; it is the ONLY writer of `baselineDenied`).
 // `writeRegularAt` DELIBERATELY SURVIVES and this is not an oversight: it has a
 // separate, legitimate (A) caller — the read-blob restore of a TRACKED path, whose
 // bytes come from HEAD (Ruling A) — and that caller uses the `createOnly`
@@ -2834,7 +3166,7 @@ function validateBaselineKey(key) {
 // SABOTAGE TABLE for this ruling (specified, never run in-place — mutation runs are
 // conductor-only, decision 02e03ed8, and in-place mutation of scripts/hooks/** is
 // anti-pattern 37b3cb0a):
-//   S1: restore `writeUnder` and call it where `baselineDenied.push(rel)` now sits.
+//   S1: restore `writeUnder` and call it where `noteBaselineDenied(rel)` now sits.
 //       REAL CARRIER: the BYTE-IDENTITY assertions in AC1/AC6-DENY of
 //       scripts/tests/h17-b-detect-and-deny.test.mjs (`deepEqual(readFileSync(coder),
 //       newBytes)`). NOT the exit code — the same trap the `removeUnder` gravestone
@@ -2894,7 +3226,8 @@ function validateBaselineKey(key) {
 // are conductor-only, decision 02e03ed8, and in-place mutation of
 // scripts/hooks/** is anti-pattern 37b3cb0a):
 //   S1: reintroduce an unlink on the addition arm (restore removeUnder and call
-//       it where `unauthorizedAdditions.push(rel)` now sits).
+//       it where `noteUnauthorizedAddition(rel)` now sits — that helper is the
+//       ONLY writer of `unauthorizedAdditions`, and it latches).
 //       REAL CARRIER: enforcement.test.mjs AC8's SURVIVAL + BYTE-IDENTITY
 //       assertions (`existsSync(evilAgent)` + `deepEqual(readFileSync(...),
 //       plantedBytes)`). NOT the exit code — MEASURED ON THIS EXACT FILE: an
@@ -3061,6 +3394,47 @@ function stampAttestsCurrentBytes(cwd, rel, stamp) {
   } catch {
     return false;
   }
+}
+
+// RULING 4 of decision bcd2cc09 — WHERE A STAMP EXISTS, ITS (B) ENTRIES ARE AN
+// EXACT MANIFEST. TIGHTENED CONSUMER VALIDATION FIRST, which the ruling requires
+// BEFORE the comparison: validate the (B) paths, the entry shape and duplicates
+// rather than relying on `stampAttestsCurrentBytes`'s `entries.find()`. A
+// `find()` lookup silently takes the FIRST of two entries claiming one path, so
+// a stamp carrying `[{p, goodHash}, {p, forgedHash}]` reads as attesting
+// whichever happened to be emitted first — an ambiguity no exact-set comparison
+// can be built on.
+//
+// Returns `{ usable, byPath, reason }`. NON-(B) ENTRIES ARE SKIPPED, NOT
+// REJECTED: the same stamp legitimately attests the (A) tracked surface, whose
+// paths are not (B) paths and are validated by `verifyStampAttestation` /
+// `stampAttestsCurrentBytes` on their own terms. `validateBaselineKey` is reused
+// as the ONE definition of "is a (B) path" so a second notion cannot drift from
+// the first.
+// A MALFORMED (B) ENTRY OR A DUPLICATED (B) PATH IS `usable: false`, which the
+// caller turns into a DENIAL — fail-closed, never "skip the bad entry and trust
+// the rest", because the rest is what the bad entry would be written to launder.
+function stampBaselineManifest(entries) {
+  if (!Array.isArray(entries)) return { usable: false, byPath: null, reason: 'the stamp does not parse to a JSON array of entries' };
+  const byPath = new Map();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue; // not an entry at all; (A) validation owns its own refusals
+    if (typeof entry.path !== 'string') continue;
+    const rel = validateBaselineKey(entry.path);
+    if (!rel) continue; // not a (B) path — the (A) surface's business, not this manifest's
+    if (byPath.has(rel)) {
+      return { usable: false, byPath: null, reason: `two entries claim the (B) path '${rel}' — a duplicated claim has no single meaning, so the stamp is refused whole` };
+    }
+    if (entry.deleted !== true && typeof entry.sha256 !== 'string') {
+      return {
+        usable: false,
+        byPath: null,
+        reason: `the entry for the (B) path '${rel}' carries neither a string sha256 nor deleted:true — it attests nothing and cannot stand in an exact manifest`,
+      };
+    }
+    byPath.set(rel, entry);
+  }
+  return { usable: true, byPath, reason: null };
 }
 
 // Review fix 6 (h17-stamp-honor-loud-restore adjudication): an untracked
@@ -3775,6 +4149,14 @@ const event = input.hook_event_name;
 // ---------------------------------------------------------------------------
 if (event === 'PreToolUse') {
   try {
+    // THE TAINT LATCH IS CONSULTED FIRST — before the store, before git, before
+    // the baseline, before the stamp (decision bcd2cc09, RULING 10: the latch
+    // ALWAYS wins). THIS POSITION IS THE MECHANISM, not tidiness: PRE IS THE
+    // ADOPTION POINT. `collectBaseline` two dozen lines below reads CURRENT DISK
+    // STATE as the pre-image, so a Pre that runs at all over a tainted surface
+    // records the tamper as legitimate and every later call compares equal. The
+    // deny has to land BEFORE that snapshot or the latch closes nothing.
+    denyIfTainted(cwd, input.agent_id);
     const store = openStore(cwd);
     let runId = NO_RUN;
     try {
@@ -3897,6 +4279,12 @@ try {
   // per-call records (the (A) Pre-STATE snapshot and the (B) content baseline,
   // board 11609d1f) are addressed by it, and both degrade LOUDLY — never
   // silently — when it is unusable.
+  // THE TAINT LATCH IS CONSULTED FIRST HERE TOO (decision bcd2cc09, RULING 10 —
+  // the latch ALWAYS wins over the stamp, with no exception). A surface with an
+  // outstanding, undischarged incident is not verifiable by this sweep, and a
+  // matching exact stamp is evidence that reconciliation MAY proceed, never
+  // proof that the incident was discharged.
+  denyIfTainted(cwd, input.agent_id);
   const callId = callKey(input.tool_use_id);
   let storeErr = null;
   let store = null;
@@ -3969,6 +4357,94 @@ try {
   // message that claimed an index mismatch where none exists would be the
   // mirror defect.
   const indexUnrepaired = [];
+
+  // -------------------------------------------------------------------------
+  // THE (B) TAINT LATCH IS SET EAGERLY, AT EACH DETECTION SITE — decision
+  // taint-latch-persists-eagerly-at-detection-because-deny-is-a-hard-exit
+  // (fd9d24af), RULING A, correcting RULING 9 of bcd2cc09.
+  //
+  // WHY, and the reason travels with the rule because the previous placement
+  // carried a comment claiming it saw every trigger while it did not
+  // (anti-pattern 886cc903): `deny()` is `process.stderr.write(message);
+  // process.exit(2)` (scripts/hooks/lib/common.mjs:108) — A HARD EXIT, NOT A
+  // THROW. Fourteen unconditional `deny()` sites and two throws sit between the
+  // earliest detection (the stamp integrity check below) and the end of the (B)
+  // stage, so ANY of them could end the process with the incident detected and
+  // NOTHING on disk. Call N+1's Pre then re-collected the tampered bytes as its
+  // own legitimate baseline — one denial bought a permanent edit to the agent
+  // GRANT DEFINITIONS, which is the adoption point the latch exists to close.
+  // WHAT EAGER LATCHING DOES **NOT** CLOSE — STATED HERE BECAUSE AN EARLIER
+  // VERSION OF THIS COMMENT CLAIMED OTHERWISE AND A REVIEWER CAUGHT IT
+  // (anti-pattern 886cc903, the third instance in this objective). The
+  // motivating exploit — append to an agent template, then `rm` the
+  // os.tmpdir() records — IS NOT FIXED BY EAGER PLACEMENT. It does not evade
+  // the latch; it DESTROYS THE EVIDENCE THE DETECTION DEPENDS ON, and a latch
+  // at the detection site cannot fire for a detection that never happens. All
+  // four Pre record classes share one `sterling-enforce-<tag>` prefix, so one
+  // glob removes the attribution record AND the `.stamp.json` witness, and
+  // `stampTampered` is only ever set when a usable witness survives to compare
+  // against. Post then exits at the "nothing attributable" deny, ~540 lines
+  // before the (B) stage below. THAT IS THE STILL-OPEN `baselineAuditUnavailable`
+  // FOURTH-TRIGGER FAMILY, ruled in decision
+  // an-a-audit-failure-must-not-abort-the-b-audit-unverifiable-b-latches and
+  // assigned to SLICE S2, not here — the fix is that an (A)-audit failure must
+  // not ABORT the (B) audit, plus latching an unverifiable (B) baseline.
+  //
+  // SO WHAT EAGER PLACEMENT ACTUALLY BUYS, precisely: a detection that DID
+  // occur survives an unrelated later hard exit. Pinned by AC-L12, whose
+  // fixture corrupts ONLY the `.dirty.json` attribution record so the
+  // `.stamp.json` witness lives and the stamp tamper is still detected.
+  //
+  // THE PRINCIPLE: the latch records THAT AN INCIDENT WAS OBSERVED, so the
+  // OBSERVATION SITE is the only correct persistence point — nothing downstream
+  // may un-observe it. `observeStampTamper`, `noteUnauthorizedAddition` and
+  // `noteBaselineDenied` below are therefore the ONLY producers of
+  // `stampTampered`, `unauthorizedAdditions` and `baselineDenied`; a direct write
+  // to any of the three would reintroduce exactly this loss.
+  //
+  // NO LATCH-AWARE `deny()` WRAPPER (RULING C — considered and REJECTED): it
+  // would duplicate the invariant across every existing and future exit, still
+  // miss a direct `process.exit` and fatal termination, and make ordinary
+  // environment-denial plumbing responsible for incident persistence.
+  //
+  // NO LOCAL "already latched?" CACHE, deliberately: RULING 8's set primitive is
+  // create-only (`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`) and treats an existing
+  // leaf in ANY shape as already-set, so a repeat call is a cheap EEXIST no-op.
+  // A cache here would be a second source of truth that can itself be wrong.
+  // -------------------------------------------------------------------------
+  let latchOutcome = null; // the FIRST meaningful set/failure outcome, kept for the composed denial below
+  const latchOnDetection = (why) => {
+    // NEVER THROWS (RULING A). A helper that threw would convert a detection into
+    // an exception and reintroduce the same class of loss this design closes.
+    let outcome;
+    try {
+      outcome = setTaintLatch(cwd, [why]);
+    } catch (e) {
+      outcome = { set: false, error: `${(e && e.message) || e}` };
+    }
+    // FIRST MEANINGFUL OUTCOME WINS, IN BOTH DIRECTIONS: a later successful set
+    // must not erase an earlier failure, and a later failure must not erase an
+    // earlier success. The first call is the one that decided what is on disk.
+    if (latchOutcome === null) latchOutcome = outcome;
+    if (!outcome.set) {
+      // IMMEDIATE, BEST-EFFORT WARNING. A hard exit further down can mean the
+      // composed final message is never printed at all, and a conductor told only
+      // "attribution record missing" would never learn that cross-call protection
+      // was not established. Deliberately avoids the SET path's vocabulary —
+      // nothing here may read as "repeated denial established".
+      try {
+        process.stderr.write(
+          `H17: THE CROSS-CALL (B) TAINT LATCH COULD NOT BE PERSISTED (${taintLatchPaths().rel}: ${outcome.error}) at the moment the incident was ` +
+            `observed (${why}). Whatever denial this call ends with is therefore a ONE-CALL denial only: without the latch on disk, the next ` +
+            `PreToolUse re-collects the bytes this command left behind as its own legitimate baseline and allows them from then on. THE (B) SURFACE ` +
+            `MUST BE TREATED AS TAINTED BY HAND until a conductor has inspected it and re-attested it.\n`
+        );
+      } catch {
+        /* best-effort trace — a failed stderr write must never change the verdict already owed */
+      }
+    }
+  };
+
   // UNEXPECTED ADDITIONS in the (B) enforcement surface — live files with no
   // entry in this call's Pre baseline (user ruling 2026-08-27; see the
   // `removeUnder` gravestone). DELIBERATELY A SEPARATE LIST FROM `violations`,
@@ -3984,8 +4460,15 @@ try {
   // ONE finding; naming it twice in the denial makes the report look like two
   // plants.
   const unauthorizedAdditions = [];
+  // THE ONLY PRODUCER OF `unauthorizedAdditions` (fd9d24af RULING A): it records
+  // the finding and IMMEDIATELY persists the incident, before any caller can
+  // reach a `deny()` that would exit the process. The dedup guard also skips the
+  // latch call for a path already met — the first sighting already latched, and
+  // the set primitive is create-only anyway.
   const noteUnauthorizedAddition = (rel) => {
-    if (!unauthorizedAdditions.includes(rel)) unauthorizedAdditions.push(rel);
+    if (unauthorizedAdditions.includes(rel)) return;
+    unauthorizedAdditions.push(rel);
+    latchOnDetection(`unauthorized (B) addition: ${rel}`);
   };
   // (B) paths MODIFIED or DELETED in-window with no attesting stamp entry (S4,
   // RULING D of 532a4383 as refined by fac9a69b). A SEPARATE LIST FROM `violations`
@@ -3998,6 +4481,40 @@ try {
   // when it is sitting on their disk, and it stops the next reader from looking.
   // These paths are DENIED, REPORTED, and LEFT EXACTLY AS THE COMMAND LEFT THEM.
   const baselineDenied = [];
+  // THE ONLY PRODUCER OF `baselineDenied` (fd9d24af RULING A + RULING B). No
+  // `deny()` sits between this list's push and the composed denial TODAY, and it
+  // latches eagerly anyway: excluding it because of the current control flow
+  // would make a security invariant depend on the shape of the code below it,
+  // which is the dependency the eager design exists to remove.
+  const noteBaselineDenied = (rel) => {
+    baselineDenied.push(rel);
+    latchOnDetection(`unattested (B) change: ${rel}`);
+  };
+  // EXACT-MANIFEST violations (RULING 4 of decision bcd2cc09), each already a
+  // full sentence naming the path AND what was wrong with it. A SEPARATE LIST
+  // FROM `baselineDenied` for the same reason `baselineDenied` is separate from
+  // `violations`, and the reason is truthfulness, not tidiness: the
+  // `baselineDenied` denial says the named paths "CHANGED IN THIS COMMAND'S
+  // WINDOW", which is exactly what a manifest violation typically is NOT — the
+  // whole point of Ruling 4 is that it fires on a call in which nothing changed
+  // at all. Borrowing that wording would assert an in-window change that did not
+  // happen (anti-pattern 586bccdc).
+  // DELIBERATELY NOT A LATCH TRIGGER: RULING 9 names exactly three
+  // (`baselineDenied`, `unauthorizedAdditions`, `stampTampered`), and that
+  // enumeration is unchanged — a manifest-only mismatch commonly PREDATES this
+  // window and may be a legitimate conductor or automatic writer, so latching it
+  // would turn every stale stamp into a persistent, reconciliation-required DoS.
+  // WHAT THIS COMMENT USED TO CLAIM AND WHICH WAS FALSE (fd9d24af RULING F):
+  // that a manifest violation "needs no latch because it is already durable by
+  // construction". It is not durable. This arm re-fires only while all three of
+  // these hold — the SESSION lives (H1 deletes the stamp at every SessionStart),
+  // the STAMP is still on disk, and the STORE is healthy (the whole (B) stage
+  // sits inside `if (!storeErr)` below). It is session-bound, stamp-present,
+  // store-healthy protection, which is strictly weaker than the cross-call
+  // persistence the latch supplies for the other three. Whether an observed
+  // manifest contradiction should latch anyway is boarded as its own design
+  // question, with its legitimate-writer DoS cost stated.
+  const manifestDenied = [];
 
   // -------------------------------------------------------------------------
   // STAMP INTEGRITY — RULING 2 of decision h17-ruling-d-needs-a-b-enumerating-
@@ -4030,6 +4547,24 @@ try {
   let stampTrusted = true;
   let stampTampered = false;
   let stampInvalidated = false;
+  // THE ONLY PRODUCER OF `stampTampered` (fd9d24af RULING A), and THE ORDER
+  // INSIDE IT IS THE WHOLE POINT: the incident is persisted BEFORE
+  // `invalidateStamp` runs, so there is no reachable window between "tamper
+  // observed" and "latch set" for a crash, a throw or a downstream `deny()` to
+  // fall into. Invalidation stays best-effort AFTERWARDS, exactly as before —
+  // it returns a boolean and never throws (its own try/catch returns false), so
+  // this helper does not throw either.
+  // THE INCIDENT SENTENCE OMITS THE INVALIDATION RESULT, and that omission is
+  // deliberate rather than an oversight: at the moment the latch is written the
+  // deletion has not been attempted yet, so naming its outcome here would assert
+  // something not yet known (anti-pattern 886cc903). The composed denial below
+  // still reports it, because by then it IS known.
+  const observeStampTamper = () => {
+    stampTampered = true;
+    stampTrusted = false;
+    latchOnDetection(`the enforcement stamp (${stampRel()}) was written inside this command's window`);
+    stampInvalidated = invalidateStamp(cwd);
+  };
   // THE SWEEP'S ONE AND ONLY READ OF THE STAMP FILE (S4 review, TOCTOU fix).
   // Everything downstream — the integrity comparison AND every exemption consult —
   // is served from this object. Nothing below re-opens the path, which is what
@@ -4064,9 +4599,7 @@ try {
     if (!preWitness || typeof preWitness.kind !== 'string') {
       stampTrusted = false;
     } else if (preWitness.kind !== nowWitness.kind || (preWitness.sha256 ?? null) !== (nowWitness.sha256 ?? null)) {
-      stampTampered = true;
-      stampTrusted = false;
-      stampInvalidated = invalidateStamp(cwd);
+      observeStampTamper(); // records the finding, LATCHES, then invalidates — in that order
     }
   }
 
@@ -4683,7 +5216,7 @@ try {
       // (2) conductor-attested. `stampAttestsCurrentBytes` resolves the DELETED case
       // too: an absent path attests iff the stamp carries `deleted:true` for it.
       if (stampAttestsPath(rel)) continue;
-      baselineDenied.push(rel); // (3) denied, and deliberately NOT restored
+      noteBaselineDenied(rel); // (3) denied, deliberately NOT restored, and latched at this detection site
       baselineViolations.push(rel);
     }
     for (const rel of Object.keys(current)) {
@@ -4696,6 +5229,85 @@ try {
         // the ruling, its justification, and the sabotage table.
         noteUnauthorizedAddition(rel); // deduped: the (A) sweep may have met it first
         baselineViolations.push(rel);
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // RULING 4 of decision bcd2cc09 — WHERE A STAMP EXISTS, TREAT ITS (B)
+    // ENTRIES AS AN EXACT MANIFEST, ON EVERY CALL.
+    //
+    // WHAT WAS WRONG BEFORE, and it is one line up from here: the loop above
+    // takes an early `continue` the moment `current[rel] === valid[rel]`, so the
+    // stamp is consulted ONLY AFTER an in-window difference is detected. A stamp
+    // that survives across a quiet call boundary was therefore never re-checked
+    // against the surface it claims to describe, and a claim nobody re-checks is
+    // not an attestation. The comparison below is SET-EXACT and runs regardless
+    // of whether this window changed anything:
+    //   * a stamped (B) path MISSING from the live surface           -> DENY
+    //   * a stamped (B) path whose CURRENT BYTES differ from its hash -> DENY
+    //   * a live (B) path with NO entry in the stamp                  -> DENY
+    //   * exact match                                                 -> attested
+    // ITS DURABILITY, STATED EXACTLY (corrected per fd9d24af RULING F — the
+    // previous wording, "re-fires indefinitely while the stamp survives", was
+    // false in two ways and both are checkable one screen from here): this arm
+    // lives inside `if (!storeErr)` above, so a broken store SUSPENDS it
+    // entirely; and the stamp is transient — H1 deletes it at every
+    // SessionStart. So the re-firing is SESSION-BOUND, STAMP-PRESENT and
+    // STORE-HEALTHY, not unconditional, and it persists no new state of its own.
+    // That is exactly why it is weaker than the taint latch and why the latch
+    // was needed for the other three triggers.
+    //
+    // THE HASH COMES FROM `current`, NOT FROM A FRESH DISK READ. `current` is
+    // this sweep's own `collectBaseline` result — base64 of bytes already read
+    // through a pinned, no-follow, classified-by-the-open descriptor. Hashing it
+    // here reuses that single read instead of opening every (B) path a second
+    // time, which would reintroduce exactly the classify->use window the S2 layer
+    // exists to close (and, at consult time, the TOCTOU the single stamp read
+    // closes on the other side).
+    //
+    // GATED ON `stampTrusted`: a stamp written inside this window attests
+    // nothing anywhere in this sweep (the integrity check runs before every
+    // consult), and it must not be promoted into a manifest either — it is
+    // already denied and invalidated on its own terms.
+    //
+    // DELIBERATE NARROWING, DISCLOSED RATHER THAN BURIED: a stamp whose (B)
+    // SUBSET IS EMPTY makes no (B) claim at all and is skipped instead of
+    // denying every live (B) path. The producer enumerates every existing (B)
+    // member, so a genuine stamp is never in this state; an (A)-only stamp is,
+    // and treating "attests no (B) path" as "contradicts every (B) path" would
+    // deny on a claim that was never made. This is a narrowing of the DENY
+    // surface, and the cost is bounded: it exempts nothing, because a (B) path
+    // that actually changed is still caught by the in-window arm above.
+    {
+      const entries = stampSnapshot.entries;
+      if (stampTrusted && stampSnapshot.present && Array.isArray(entries)) {
+        const manifest = stampBaselineManifest(entries);
+        if (!manifest.usable) {
+          manifestDenied.push(`the stamp's (B) manifest is unusable — ${manifest.reason}`);
+        } else if (manifest.byPath.size > 0) {
+          for (const [rel, entry] of manifest.byPath) {
+            if (entry.deleted === true) {
+              // A stamped DELETION attests iff the path is STILL absent —
+              // mirrors both existing deleted arms; a resurrected path is not
+              // the attested state and gets no partial credit.
+              if (rel in current) manifestDenied.push(`the stamp attests '${rel}' as DELETED, but it exists on the live (B) surface now`);
+              continue;
+            }
+            if (!(rel in current)) {
+              manifestDenied.push(`the stamp attests '${rel}', but that path is MISSING from the live (B) surface`);
+              continue;
+            }
+            const currentHash = createHash('sha256').update(Buffer.from(current[rel], 'base64')).digest('hex');
+            if (currentHash !== entry.sha256) {
+              manifestDenied.push(`the stamp attests '${rel}' as ${entry.sha256}, but its CURRENT bytes hash to ${currentHash}`);
+            }
+          }
+          for (const rel of Object.keys(current)) {
+            if (!manifest.byPath.has(rel)) {
+              manifestDenied.push(`'${rel}' exists on the live (B) surface but has NO entry in the stamp — the stamp is not an exact manifest of the surface it claims to attest`);
+            }
+          }
+        }
       }
     }
     // DEGRADED-LOUD ON EVERY PATH (board 11609d1f, reviewer F1). The deny-path
@@ -4727,6 +5339,69 @@ try {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // COMPOSE THE (B) TAINT LATCH CLAUSE — decision bcd2cc09 RULING 9, as
+  // corrected by fd9d24af RULING A.
+  //
+  // THIS BLOCK PERSISTS NOTHING. By the time control reaches here the latch is
+  // already on disk (or its failure is already recorded AND already on stderr):
+  // every trigger latches at its own detection site through
+  // `observeStampTamper`, `noteUnauthorizedAddition` and `noteBaselineDenied`.
+  // All that is left is to turn the FIRST recorded outcome into the clause the
+  // composed denial carries, so a denial that exits below still tells the reader
+  // what the cross-call consequence is. THE OLD SINGLE-BLOCK PLACEMENT WAS THE
+  // DEFECT: `deny()` is a hard `process.exit(2)`, so any of the fourteen earlier
+  // denial sites discarded a detection that had already happened. The comment
+  // that used to stand here asserted this position "sees every trigger"; it did
+  // not, and the assertion is what made the placement feel checked.
+  //
+  // THE THREE TRIGGERS ARE NAMED BY THE RULING AND ARE NOT INTERCHANGEABLE:
+  // `baselineDenied` OR `unauthorizedAdditions` OR `stampTampered`. Explicitly
+  // NOT `baselineViolations`, which is populated ONLY inside the normal (B)
+  // stage above and so misses the earlier force-added route — the (A) sweep's
+  // `noteUnauthorizedAddition` for a protected path it met first, which is the
+  // only route that survives a broken store (the whole (B) stage is skipped
+  // under `storeErr`).
+  //
+  // EVERY `stampTampered` LATCHES, not only a failed invalidation.
+  // `invalidateStamp` is best-effort by construction and says so, so a FAILED
+  // deletion leaves a forged stamp standing for the next Pre to adopt — the same
+  // adoption defect one level over. And on SUCCESS it still latches, because a
+  // command that tried to manufacture its own attestation IS an incident whether
+  // or not the cleanup worked.
+  //
+  // THE CLAUSE IS STILL COMPOSED BEFORE the `storeErr` deny below, so a broken
+  // store cannot swallow the REPORT of an incident the (A) sweep already
+  // detected and already latched.
+  let latchNote = null;
+  if (latchOutcome !== null) {
+    latchNote = latchOutcome.set
+      ? // SCOPE STATED EXACTLY, NOT OVERSTATED (fd9d24af, security review): this
+        // used to say "every spawned-agent tool call is now denied BEFORE
+        // EXECUTION", which is false today. H17 is registered in AGENT
+        // FRONTMATTER on Bash only and is absent from hooks/hooks.json, so while
+        // the latch stands it denies the agent's BASH calls and nothing else —
+        // an agent's Edit, Write and Task calls are not gated by it. The global
+        // PreToolUse '*' registration that would make the broader claim true is
+        // a later slice and has not landed. Claiming coverage the code does not
+        // have is anti-pattern 586bccdc at the user-facing surface: it stops the
+        // next reader from looking.
+        `H17: THE (B) SURFACE TAINT LATCH IS SET (${taintLatchPaths().rel}). Repeated denial is established: every spawned-agent BASH call that H17 ` +
+        `gates is now denied BEFORE EXECUTION until a CONDUCTOR clears it deliberately, because the bytes this sweep denied are still on disk and the ` +
+        `next PreToolUse would otherwise adopt them as its own legitimate baseline. SCOPE, STATED EXACTLY SO IT IS NOT MISREAD AS MORE: H17 is ` +
+        `registered on Bash in agent frontmatter and is NOT in hooks/hooks.json, so this latch gates spawned-agent Bash — it does not gate an agent's ` +
+        `Edit, Write or Task calls. Presence of that file is the whole verdict — no field inside it can reduce enforcement, and H17 never clears it. ` +
+        `Clearing is a separate conductor action that re-enumerates and re-hashes the entire current (B) set and verifies it against the stamp exactly.`
+      : environmentDefectDenial(
+          'H17',
+          `THE CROSS-CALL (B) TAINT LATCH COULD NOT BE PERSISTED (${taintLatchPaths().rel}: ${latchOutcome.error}). The denial above stands and is ` +
+            `UNCHANGED — but it is now a ONE-CALL denial only: without the latch on disk, the next PreToolUse re-collects the bytes this command left ` +
+            `behind as its own legitimate baseline and allows them from then on. THE (B) SURFACE MUST BE TREATED AS TAINTED BY HAND until a conductor ` +
+            `has inspected every path named above and re-attested the surface.`,
+          { agentId: input.agent_id }
+        );
+  }
+
   // A store that failed to open/resolve earlier still owes its original deny
   // — but only now, AFTER the tracked-restore sweep (and its mint attempt)
   // ran on whatever git alone could tell it. Denying any earlier is exactly
@@ -4738,10 +5413,15 @@ try {
     const restoredNote = restoredPaths.length
       ? ` NOTE: ${restoredPaths.length} enforcement path(s) were HEAD-restored during this sweep despite the broken store: ${restoredPaths.join(', ')} — verify none were conductor work-in-flight.`
       : '';
+    // The latch clause rides ALONG this denial rather than replacing it (RULING
+    // 9: keep the original denial and ADD the clause). A broken store is the one
+    // route on which an incident is detected and the (B) stage never runs, so
+    // dropping the clause here would make exactly that case silent.
+    const latchTail = latchNote ? `\n${latchNote}` : '';
     deny(
       environmentDefectDenial(
         'H17',
-        `Enforcement verification failed (${(storeErr && storeErr.message) || storeErr}) — failing closed (P5).${restoredNote}`,
+        `Enforcement verification failed (${(storeErr && storeErr.message) || storeErr}) — failing closed (P5).${restoredNote}${latchTail}`,
         {
           agentId: input.agent_id,
         }
@@ -4779,7 +5459,20 @@ try {
   // frequently changes nothing else on disk at all (that is exactly the two-call
   // laundering setup — call N plants ONLY a stamp). Drop either from this condition
   // and the corresponding attack allows silently.
-  if (violations.length || unauthorizedAdditions.length || baselineDenied.length || stampTampered || preExisting.length || changedPreDirty.length) {
+  // `manifestDenied.length` is a FIRST-CLASS deny trigger for the same reason
+  // the three above it are: a stamp that has stopped describing the surface it
+  // claims to attest typically changes NOTHING in this window, so it leaves no
+  // other trace at all. Drop it from this condition and the exact-manifest check
+  // computes a finding nobody ever sees.
+  if (
+    violations.length ||
+    unauthorizedAdditions.length ||
+    baselineDenied.length ||
+    manifestDenied.length ||
+    stampTampered ||
+    preExisting.length ||
+    changedPreDirty.length
+  ) {
     const parts = [];
     if (changedPreDirty.length) {
       // Decision 7021526c step 3. NOT the environment-defect class: the state
@@ -4853,13 +5546,33 @@ try {
           `conductor-run \`node scripts/enforcement-stamp.mjs\` BETWEEN Bash calls, never inside one. A HUMAN must inspect each path above.`
       );
     }
+    if (manifestDenied.length) {
+      // WORDING IS LOAD-BEARING, and it deliberately does NOT borrow the
+      // in-window vocabulary of the two arms above: the ordinary case for this
+      // arm is a call in which NOTHING changed, so "changed in this command's
+      // window" would be a plain falsehood about the agent's own command
+      // (anti-pattern 586bccdc). What is wrong here is the STAMP's claim, not
+      // (necessarily) anything this command did.
+      parts.push(
+        `H17: THE ENFORCEMENT STAMP (${stampRel()}) IS NOT AN EXACT MANIFEST OF THE LIVE (B) SURFACE — DENIED, AND NOTHING WAS WRITTEN, RESTORED OR ` +
+          `REMOVED: ${manifestDenied.join('; ')}. — exit contract-violated, never route around. Where a stamp exists, its (B) entries are compared against ` +
+          `the whole current (B) set on EVERY call, not only when this window changed something (decision b-surface-adoption-point-closes-with-an-incident-` +
+          `bound-taint-latch-not-a-persisted-manifest, RULING 4): a stamped path missing or hash-different denies, a live (B) path absent from the stamp ` +
+          `denies, and only an exact match attests. THIS DENIAL RE-FIRES ON EVERY CALL WHILE THE STAMP SURVIVES, THE STORE IS HEALTHY AND THE SESSION ` +
+          `LASTS — three real limits, stated rather than glossed: the comparison sits behind the store check, so a broken store suspends it; and H1 ` +
+          `DELETES the stamp at every SessionStart, so this protection is session-bound and does NOT persist an unexplained mismatch past that point ` +
+          `(decision taint-latch-persists-eagerly-at-detection-because-deny-is-a-hard-exit, RULING F). Within those bounds re-firing is the point — an ` +
+          `attestation nobody re-checks is not an attestation. The sanctioned route is a conductor-run \`node scripts/enforcement-stamp.mjs\` BETWEEN Bash ` +
+          `calls, which re-enumerates and re-hashes the entire (B) set; the agent must not write, repair or delete the stamp.`
+      );
+    }
     if (stampTampered) {
       // The stamp is the conductor's ATTESTATION INPUT, so a command that writes it
       // is trying to authorize itself. Stated plainly, including the one action H17
       // DID take here — the deletion — because an invalidation the reader does not
       // know about looks like a vanished file next time they go to use it.
       parts.push(
-        `H17: THE ENFORCEMENT STAMP (${STAMP_REL}) CHANGED INSIDE THIS COMMAND'S WINDOW — DENIED, and the stamp has been ` +
+        `H17: THE ENFORCEMENT STAMP (${stampRel()}) CHANGED INSIDE THIS COMMAND'S WINDOW — DENIED, and the stamp has been ` +
           `${stampInvalidated ? 'INVALIDATED (DELETED)' : 'left in place ONLY because deleting it FAILED — treat it as untrusted and remove it by hand'}` +
           `. — exit contract-violated, never route around. The stamp is the CONDUCTOR'S ATTESTATION INPUT: H17 exempts a changed enforcement path whose ` +
           `current bytes match a stamp entry, so a command that writes the stamp is authorizing its own tamper. It was recorded at PreToolUse and ` +
@@ -4934,6 +5647,14 @@ try {
         )
       );
     }
+    // THE LATCH CLAUSE IS LAST AND IS NEVER OMITTED WHEN IT EXISTS (RULING 9).
+    // On the SET path it tells the reader that the denial now has a cross-call
+    // consequence; on the FAILED-SET path it is an environment-defect clause
+    // saying the latch could NOT be persisted and the surface must be treated as
+    // tainted by hand. Never the reverse — claiming repeated denial was
+    // established when it was not is precisely the false-action-claim the ruling
+    // forbids here.
+    if (latchNote) parts.push(latchNote);
     deny(parts.join('\n'));
   }
   allow();
