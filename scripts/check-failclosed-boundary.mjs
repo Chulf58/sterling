@@ -341,7 +341,39 @@ const BASELINE = {
     { statement: "const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');" },
     { statement: "const eventsPath = join(input.cwd, '.sterling', 'transient', 'session-events.json');" },
     { statement: "const nagMarker = join(input.cwd, '.sterling', 'transient', 'capture-nagged.json');" },
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #e0daca4c" },
+    // HASH ROTATED 2026-08-29 (#22429406 -> #0c537996) — the THIRD rotation of
+    // this one entry in a single session, which is itself worth noticing: each
+    // was a separate reviewed fix landing inside the same founding statement,
+    // because H10's whole body is one top-level try and ANY interior edit
+    // re-digests it. Chain: #e0daca4c -> #3201ee83 (capture_pending carry, board
+    // cb457cbd) -> #22429406 (carry hardened to WHOLE-TOKEN agent_id identity
+    // after review found an unanchored free-text substring match over
+    // {agent_id, agent_type, declared files} — anti-pattern
+    // unanchored-substring-allowlist-in-command-guard) -> #0c537996 (this one:
+    // the article_missing item is now recomputed LIVE each Stop as
+    // union(live-unowned, still-unowned carried names) instead of re-supplying
+    // its own stale file_keys, board ef206eca).
+    // The header's instruction to RE-EXAMINE on edit was followed for this
+    // rotation specifically: the underlying debt is unchanged (this try's own
+    // catch still does not reach deny()), the edit added no unguarded top-level
+    // statement, and the count stays 107. NOTE FOR THE REVIEWER: a rotation is
+    // exactly how a genuine fail-closed regression gets waved through, so this
+    // entry is to be treated as guilty until the guarded region is read.
+    //
+    // ROTATED A FOURTH TIME 2026-08-29 (#0c537996 -> #d024bd0b) when two
+    // independent reviews BLOCKED the article_missing recompute above and the
+    // fix landed: the persisted key list is now uncapped (the 20-key cap was
+    // silently EVICTING still-unowned names — permanent loss on a lane that
+    // never auto-drains), overlapping items consolidate into one survivor, the
+    // read/decide/write runs under one BEGIN IMMEDIATE with expected_version,
+    // and the recompute was hoisted above the no-duty terminal release.
+    // WORTH RECORDING because it is the lesson of this entry: the fixer
+    // reported "no baseline rotation was needed" and explicitly marked that
+    // UNVERIFIED because the check never ran in its sandbox. It was wrong. Any
+    // edit inside this founding try re-digests it — the question is never
+    // whether the change FEELS structural, only whether it is inside. Verify by
+    // running the check, never by reasoning about the edit's shape.
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #d024bd0b" },
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },

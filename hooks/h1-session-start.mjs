@@ -6,11 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3, createHash } from "node:crypto";
-import { readFileSync as readFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync4, readdirSync, renameSync as renameSync2, statSync as statSync2, writeFileSync as writeFileSync2, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
+import { randomUUID as randomUUID3, createHash as createHash2 } from "node:crypto";
+import { readFileSync as readFileSync4, existsSync as existsSync4, mkdirSync as mkdirSync5, readdirSync as readdirSync2, renameSync as renameSync2, statSync as statSync3, writeFileSync as writeFileSync3, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname as dirname5, join as join6 } from "node:path";
+import { basename as basename2, dirname as dirname5, join as join6 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -4412,6 +4412,21 @@ var SYSTEM_REASONS = [
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
+  // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
+  // the same stable handle decision/anti_pattern/research_finding gained in
+  // de1a7329, extended to `todo` because a board item otherwise has only a
+  // uuid and a multi-KB text blob, and a user asked to rule on "board
+  // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
+  // (knowledgeCreate) from the item's opening headline LINE for source:'user'
+  // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
+  // needed no migration. Uniqueness spans EVERY slug-bearing type — one
+  // namespace, because that is what knowledge_get/board_get resolve.
+  //
+  // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
+  // board_update and REFUSED by board_remove/maintenance_remove, which keep
+  // demanding the exact full uuid (anti-pattern
+  // no-bounded-trail-guard-for-destructive-addressing, severity block).
+  slug: external_exports.string().min(1).optional(),
   text: external_exports.string().min(1),
   source: external_exports.enum(["user", "system"]),
   file_keys: external_exports.array(repoPath).optional(),
@@ -5401,7 +5416,7 @@ var SchemaMigrationRequiredError = class extends Error {
 var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
-  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.id;
+  const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
   return raw.slice(0, 80);
 }
 function deepReplaceString(value, from, to) {
@@ -7328,13 +7343,22 @@ async function acquireLock(lockDir, opts = {}) {
 }
 
 // scripts/lib/agent-distribution.mjs
+import { createHash } from "node:crypto";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync4, statSync as statSync2 } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
+function sha256(text) {
+  return createHash("sha256").update(normalize(text), "utf8").digest("hex");
+}
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 function parseInstalledHeader(content) {
   const m = normalize(content).match(HEADER_RE);
   if (!m) return null;
   const [line, pluginVersion2, template, templateHash, contentHash, installedAt] = m;
   return { headerLine: line, pluginVersion: pluginVersion2, template, templateHash, contentHash, installedAt };
+}
+function isLocallyModified(content, header) {
+  const withoutHeader = normalize(content).replace(header.headerLine + "\n", "");
+  return sha256(withoutHeader) !== header.contentHash;
 }
 function extractHookCommandLines(content) {
   const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
@@ -7347,6 +7371,13 @@ function extractBakedCommandPaths(content) {
     for (const m of line.matchAll(/"([^"]+)"/g)) paths.add(m[1]);
   }
   return [...paths];
+}
+function loadRegistry(registryPath2) {
+  const registry = JSON.parse(readFileSync3(registryPath2, "utf8"));
+  if (registry.version !== 1 || !Array.isArray(registry.agents)) {
+    throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
+  }
+  return registry;
 }
 var RESTART_INSTRUCTION = [
   "================================================================",
@@ -7363,7 +7394,7 @@ async function deleteRegisterUnderLock(cwd) {
   const transientDir = join6(cwd, ".sterling", "transient");
   const lockDir = registerLockDir(cwd);
   try {
-    mkdirSync4(transientDir, { recursive: true });
+    mkdirSync5(transientDir, { recursive: true });
     const lock = await acquireLock(lockDir, { retryMs: 1e3, staleMs: 1e4 });
     if (!lock) {
       process.stderr.write(
@@ -7373,7 +7404,7 @@ async function deleteRegisterUnderLock(cwd) {
     }
     try {
       rmSync2(join6(transientDir, "dispatch-register.json"), { force: true });
-      for (const f of readdirSync(transientDir)) {
+      for (const f of readdirSync2(transientDir)) {
         if (f.startsWith("dispatch-register.json.tmp-")) rmSync2(join6(transientDir, f), { force: true });
       }
     } finally {
@@ -7467,7 +7498,7 @@ function pluginRoot() {
   if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
   let dir = dirname5(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
-    if (existsSync3(join6(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync4(join6(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname5(dir);
   }
   return null;
@@ -7480,7 +7511,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot();
     if (!root) return null;
-    const v = JSON.parse(readFileSync3(join6(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync4(join6(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -7491,8 +7522,8 @@ function computeH1DeadDispatchResidue(cwd, source) {
   const registerPath = join6(cwd, ".sterling", "transient", "dispatch-register.json");
   let raw = [];
   try {
-    if (existsSync3(registerPath)) {
-      const parsed = JSON.parse(readFileSync3(registerPath, "utf8"));
+    if (existsSync4(registerPath)) {
+      const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
       if (Array.isArray(parsed)) raw = parsed;
     }
   } catch {
@@ -7520,10 +7551,10 @@ function safeReceiptField(v) {
 }
 function reviewReceiptLines(cwd) {
   const ledgerPath = join6(cwd, ".sterling", "review-ledger.json");
-  if (!existsSync3(ledgerPath)) return [];
+  if (!existsSync4(ledgerPath)) return [];
   let entries = [];
   try {
-    const parsed = JSON.parse(readFileSync3(ledgerPath, "utf8"));
+    const parsed = JSON.parse(readFileSync4(ledgerPath, "utf8"));
     if (Array.isArray(parsed)) entries = parsed;
   } catch {
     return [];
@@ -7543,9 +7574,9 @@ var input = readStdin();
 var sessionMarkerPath = join6(input.cwd, ".sterling", "transient", "session.json");
 var sessionMarkerTmp = join6(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync3(join6(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync4(join6(input.cwd, ".sterling", "transient"), { recursive: true });
-    writeFileSync2(
+  if (existsSync4(join6(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync5(join6(input.cwd, ".sterling", "transient"), { recursive: true });
+    writeFileSync3(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
@@ -7619,10 +7650,10 @@ var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
   const gitDir = root ? join6(root, ".git") : null;
-  if (gitDir && existsSync3(gitDir) && statSync2(gitDir).isDirectory()) {
+  if (gitDir && existsSync4(gitDir) && statSync3(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync3(join6(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync4(join6(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
@@ -7638,13 +7669,13 @@ try {
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
-          fresh = Date.now() - Date.parse(JSON.parse(readFileSync3(cachePath, "utf8")).checked_at) < ttl;
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync4(cachePath, "utf8")).checked_at) < ttl;
         } catch {
         }
         if (!fresh) {
           spawnSync2("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
-            writeFileSync2(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+            writeFileSync3(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
           }
         }
@@ -7664,8 +7695,8 @@ var rotationContext = "";
 try {
   if (input.source === "clear") {
     const notePath = join6(input.cwd, ".sterling", "transient", "rotation-note.json");
-    if (existsSync3(notePath)) {
-      const note = JSON.parse(readFileSync3(notePath, "utf8"));
+    if (existsSync4(notePath)) {
+      const note = JSON.parse(readFileSync4(notePath, "utf8"));
       rmSync2(notePath, { force: true });
       const head = (() => {
         try {
@@ -7739,17 +7770,17 @@ try {
     tagRoot = realpathSync2(input.cwd);
   } catch {
   }
-  const projectTag = createHash("sha256").update(tagRoot).digest("hex").slice(0, 16);
+  const projectTag = createHash2("sha256").update(tagRoot).digest("hex").slice(0, 16);
   const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
   const tmp = tmpdir();
   const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
   let removed = 0;
-  for (const name of readdirSync(tmp)) {
+  for (const name of readdirSync2(tmp)) {
     if (removed >= PERCALL_TMP_SWEEP_CAP) break;
     if (!percallRe.test(name)) continue;
     const p = join6(tmp, name);
     try {
-      if (statSync2(p).mtimeMs >= cutoff) continue;
+      if (statSync3(p).mtimeMs >= cutoff) continue;
       rmSync2(p, { force: true });
       removed++;
     } catch {
@@ -7763,13 +7794,13 @@ try {
     const transient = join6(input.cwd, ".sterling", "transient");
     const regPaths = [join6(transient, "touches.json"), join6(transient, "session-events.json"), join6(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
-    if (regPaths.some((p) => existsSync3(p))) {
+    if (regPaths.some((p) => existsSync4(p))) {
       let touches = [];
       let events = [];
       let malformed = false;
       try {
-        if (existsSync3(touchesPath)) {
-          const raw = JSON.parse(readFileSync3(touchesPath, "utf8"));
+        if (existsSync4(touchesPath)) {
+          const raw = JSON.parse(readFileSync4(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
         }
@@ -7777,8 +7808,8 @@ try {
         malformed = true;
       }
       try {
-        if (existsSync3(eventsPath)) {
-          const raw = JSON.parse(readFileSync3(eventsPath, "utf8"));
+        if (existsSync4(eventsPath)) {
+          const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
         }
@@ -7873,12 +7904,12 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
   queueContext += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
 }
 var registryContext = "";
-if (existsSync3(registryPath())) {
+if (existsSync4(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
   const registry = new ProjectRegistry(registryPath());
   try {
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync3(p.repo_path));
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync4(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
@@ -7896,7 +7927,7 @@ function markerWriterAlive(pid) {
   }
   if (process.platform !== "linux") return true;
   try {
-    const cmdline = readFileSync3(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    const cmdline = readFileSync4(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
     if (cmdline && !cmdline.includes("mcp-server")) return false;
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
@@ -7907,11 +7938,11 @@ var staleWarning = "";
 try {
   const root = pluginRoot();
   const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join6(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync3(buildIdPath(serverDist)) ? readFileSync3(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const currentBuildId = serverDist && existsSync4(buildIdPath(serverDist)) ? readFileSync4(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
   const markerPath = runtimeMarkerPath(join6(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync3(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync3(markerPath, "utf8")));
+  if (existsSync4(markerPath)) {
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync4(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
@@ -7924,12 +7955,12 @@ var machineWarning = "";
 var machineContext = "";
 try {
   const agentsDir = join6(input.cwd, ".claude", "agents");
-  if (existsSync3(agentsDir)) {
+  if (existsSync4(agentsDir)) {
     const dead = [];
-    for (const f of readdirSync(agentsDir).filter((n) => n.endsWith(".md"))) {
-      const content = readFileSync3(join6(agentsDir, f), "utf8");
+    for (const f of readdirSync2(agentsDir).filter((n) => n.endsWith(".md"))) {
+      const content = readFileSync4(join6(agentsDir, f), "utf8");
       if (!parseInstalledHeader(content)) continue;
-      const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync3(p));
+      const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync4(p));
       if (unresolved) dead.push({ agent: f, node: unresolved });
     }
     if (dead.length) {
@@ -7937,6 +7968,108 @@ try {
       machineContext = `
 
 MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on this machine (${dead.map((d) => d.agent).join(", ")}). Every hook of those agents fails non-blocking \u2014 the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work until scripts/check-agents-visible.mjs passes.`;
+    }
+  }
+} catch {
+}
+var agentCurrencyWarning = "";
+var agentCurrencyContext = "";
+try {
+  const agentsDir = join6(input.cwd, ".claude", "agents");
+  const installed = [];
+  const unknown = [];
+  let dirEntries = null;
+  try {
+    dirEntries = readdirSync2(agentsDir);
+  } catch (err) {
+    if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") {
+      unknown.push(
+        `- .claude/agents/ \u2014 currency UNKNOWN for EVERY agent in this project: the installed-agent directory could not be enumerated (${err?.code ?? err?.message ?? err})`
+      );
+    }
+  }
+  for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
+    let content = null;
+    try {
+      content = readFileSync4(join6(agentsDir, n), "utf8");
+    } catch (err) {
+      unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
+      continue;
+    }
+    const header = parseInstalledHeader(content);
+    if (header) {
+      installed.push({ file: n, content, header });
+      continue;
+    }
+    if (content.includes("sterling-generated") || content.trim() === "") {
+      unknown.push(
+        `- ${n} \u2014 currency UNKNOWN: no readable sterling-generated header (damaged, truncated or empty), so its currency cannot be determined \u2014 delete it and re-install rather than assume it is current`
+      );
+    }
+  }
+  const unreadableBeforeClassification = unknown.length;
+  if (installed.length || unknown.length) {
+    const root = pluginRoot();
+    const templatesDir = root ? join6(root, "agent-templates") : null;
+    let templateFor = null;
+    let cloneProblem = null;
+    try {
+      templateFor = new Map(loadRegistry(join6(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+    } catch (err) {
+      cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
+    }
+    const stale = [];
+    const modified = [];
+    for (const { file, content, header } of installed) {
+      if (!templateFor) {
+        unknown.push(`- ${file} \u2014 currency UNKNOWN: ${cloneProblem}`);
+        continue;
+      }
+      const templateFile = templateFor.get(header.template);
+      if (!templateFile) {
+        unknown.push(
+          `- ${file} \u2014 currency UNKNOWN: '${header.template}' is not in the clone's current agent roster (agent-templates/registry.json), so sync never visits it \u2014 it is unmaintained here, which is not the same as current`
+        );
+        continue;
+      }
+      if (templateFile !== basename2(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
+        unknown.push(
+          `- ${file} \u2014 currency UNKNOWN: its template '${templateFile}' does not name a plain .md file inside agent-templates/, so nothing outside that directory is allowed to certify it`
+        );
+        continue;
+      }
+      let templateContent = null;
+      try {
+        templateContent = readFileSync4(join6(templatesDir, templateFile), "utf8");
+      } catch (err) {
+        unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
+        continue;
+      }
+      const templateCurrent = header.templateHash === sha256(templateContent);
+      const locallyModified = isLocallyModified(content, header);
+      if (templateCurrent && !locallyModified) continue;
+      if (locallyModified) {
+        modified.push(
+          templateCurrent ? `- ${file} \u2014 locally MODIFIED: its body no longer matches its own header content_hash, so a hand edit is what governs dispatch here; sync records it as locally_modified_up_to_date and never refreshes it (re-apply the edit on a fresh install, or delete the file and re-install)` : `- ${file} \u2014 locally MODIFIED and behind the clone template: sync re-renders it only if its body byte-matches the fresh template (header_repaired) and REFUSES otherwise (refused_local_modification), so it may never refresh on its own (re-apply your edits on the fresh template, or delete the file and re-install)`
+        );
+      } else {
+        stale.push(`- ${file} \u2014 STALE: installed ${String(header.installedAt).slice(0, 10)}, the clone template has changed since (an unmodified install refreshes on sight)`);
+      }
+    }
+    if (stale.length || modified.length || unknown.length) {
+      const inspected = installed.length + unreadableBeforeClassification;
+      const parts = [
+        stale.length ? `${stale.length} stale` : null,
+        modified.length ? `${modified.length} locally modified` : null,
+        unknown.length ? `${unknown.length} of UNKNOWN currency` : null
+      ].filter(Boolean);
+      const named = [...stale, ...modified, ...unknown];
+      agentCurrencyWarning = `\u26A0 AGENT CURRENCY: ${parts.join(", ")} of ${inspected} installed Sterling agent file(s) \u2014 run /sterling:sync-agents in this project, then restart. `;
+      agentCurrencyContext = `
+
+AGENT CURRENCY (H1, research_finding 0038af7c): of ${inspected} Sterling-generated agent file(s) in .claude/agents/, ${parts.join(", ")} against the clone's templates (${templatesDir ?? "(plugin root unresolved)"}).
+` + named.join("\n") + `
+The agent sync only visits projects in the SHARED PROJECT REGISTRY, so a project the registry does not know is never refreshed however current the clone is. Run scripts/sync-agents.mjs --target ${input.cwd} from this context, tell the user a RESTART is required (project subagents load at session start), and check /sterling:projects \u2014 an absence there is the root cause, not a symptom.`;
     }
   }
 } catch {
@@ -7956,8 +8089,8 @@ try {
 }
 var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
-  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext }
+  systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

@@ -4422,6 +4422,21 @@ var SYSTEM_REASONS = [
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
+  // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
+  // the same stable handle decision/anti_pattern/research_finding gained in
+  // de1a7329, extended to `todo` because a board item otherwise has only a
+  // uuid and a multi-KB text blob, and a user asked to rule on "board
+  // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
+  // (knowledgeCreate) from the item's opening headline LINE for source:'user'
+  // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
+  // needed no migration. Uniqueness spans EVERY slug-bearing type — one
+  // namespace, because that is what knowledge_get/board_get resolve.
+  //
+  // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
+  // board_update and REFUSED by board_remove/maintenance_remove, which keep
+  // demanding the exact full uuid (anti-pattern
+  // no-bounded-trail-guard-for-destructive-addressing, severity block).
+  slug: external_exports.string().min(1).optional(),
   text: external_exports.string().min(1),
   source: external_exports.enum(["user", "system"]),
   file_keys: external_exports.array(repoPath).optional(),
@@ -5285,6 +5300,35 @@ function claimedResources(promptText, configuredNames) {
 }
 
 // scripts/hooks/h26-dispatch-overlap.mjs
+var EXECUTABLE_EXT_RE = /\.(?:exe|dll|so|dylib)$/i;
+var RUNNER_HEAD_RE = /^(?:node|npm|npx|pnpm|yarn|deno|bun|python3?|bash|sh|zsh|pwsh|powershell|dotnet|cargo)$/i;
+var COMMAND_SEPARATOR_RE = /^(?:&&|\|\||[|;])$/;
+var FLAG_TOKEN_RE = /^-{1,2}[A-Za-z0-9]/;
+function isRunMention(text, index) {
+  const lineStart = text.lastIndexOf("\n", Math.max(index - 1, 0)) + 1;
+  const tokens = text.slice(lineStart, index).split(/\s+/).filter(Boolean);
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const token = tokens[i].replace(/^[`'"([]+/, "").replace(/[`'")\]]+$/, "");
+    if (!token || token === ".") continue;
+    if (COMMAND_SEPARATOR_RE.test(token)) return false;
+    if (EXECUTABLE_EXT_RE.test(token) || RUNNER_HEAD_RE.test(token)) return true;
+    if (token.startsWith("-")) continue;
+    return false;
+  }
+  const rest = text.slice(index).split("\n", 1)[0];
+  const nextToken = rest.split(/\s+/).filter(Boolean)[1];
+  return Boolean(nextToken) && FLAG_TOKEN_RE.test(nextToken);
+}
+function hasNonRunMention(prompt, raw) {
+  const text = String(prompt ?? "");
+  const re = new RegExp(escapeRe(raw), "g");
+  let m;
+  while (m = re.exec(text)) {
+    if (!isRunMention(text, m.index)) return true;
+    if (m.index === re.lastIndex) re.lastIndex++;
+  }
+  return false;
+}
 function buildResourceAdvisory(contested) {
   const resourceList = [...new Set(contested.map((c) => c.name))].map((n) => `'${n}'`).join(", ");
   const holderList = [...new Set(contested.map((c) => `${c.agentType}:${c.agentId}`))].join(", ");
@@ -5337,7 +5381,7 @@ try {
   );
   const files = [
     ...new Set(
-      normalized.filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false })).map((p) => p.norm)
+      normalized.filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false })).filter((p) => !EXECUTABLE_EXT_RE.test(p.norm)).filter((p) => hasNonRunMention(prompt, p.raw)).map((p) => p.norm)
     )
   ];
   if (!files.length) finish();

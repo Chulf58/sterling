@@ -20,7 +20,7 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 // builtins-only module — safe at load time on an unbuilt clone (see the
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
@@ -443,6 +443,77 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     }
   };
 
+  // REGISTRY COVERAGE (board 6ce18724, research_finding 0038af7c): the agent
+  // fan-out reports what it synced and CANNOT report what it does not know
+  // about — a project carrying Sterling agents but ABSENT from the shared
+  // registry is never visited, so its agents freeze at install date while this
+  // clone updates perfectly (measured 2026-08-28: two such projects, 43 and 80
+  // days). Scan the roots that already hold known projects and NAME the gaps.
+  //
+  // A CLOSURE, called from BOTH the already-current path and the full path, for
+  // the same reason the sibling-config sweep above became one (board 52c1d504):
+  // the state this exists to expose — a machine whose clone is CURRENT while two
+  // of its projects are invisible to the registry — is precisely the state that
+  // takes the early `return`, so a report sitting only on the fast-forward path
+  // would never run on the machine that needs it. One call site, two callers.
+  //
+  // A REPORT, NEVER AN ACTION: nothing is registered, synced or written here
+  // (registry self-heal was ruled OUT for this build, user 2026-08-29), and
+  // nothing here can change report.exit.
+  const reportCoverage = async (list) => {
+    if (opts.projects === false) return;
+    try {
+      // Imported DYNAMICALLY on purpose: this module is builtins-only at load
+      // time (it must load on a clone where nothing is built), while
+      // agent-coverage.mjs reaches @sterling/schemas through
+      // agent-distribution.mjs.
+      const { scanAgentCoverage, dedupeRoots } = await import('./agent-coverage.mjs');
+      // THE KNOWN ROOTS are the directories that already contain projects
+      // Sterling knows about: every registered project's parent, plus the
+      // clone's own. The clone itself counts as REGISTERED — the CLI
+      // deliberately drops it from the fan-out list (its agents are synced by
+      // the init ensure pass), so it is not a blind spot. Deduped by NORMALIZED
+      // identity, not raw string: two legal spellings of one directory would
+      // otherwise be walked twice and every finding listed twice.
+      const roots = dedupeRoots([dirname(cwd), ...list.map((p) => dirname(p.repo_path))]);
+      const coverage = scanAgentCoverage({
+        roots,
+        registeredProjects: [cwd, ...list.map((p) => p.repo_path)],
+      });
+      report.coverage = coverage;
+      log(`\n▸ registry coverage — inspected ${coverage.scanned} candidate project director(y|ies) holding .claude/agents/ under ${roots.length} known root(s)`);
+      for (const u of coverage.unreadable_roots) {
+        log(`  ⚠ could not read the known root '${u.root}' — NO project under it was inspected (${u.error})`);
+      }
+      for (const u of coverage.unreadable_projects) {
+        log(`  ⚠ could not fully inspect '${u.path}' — that ONE project's coverage is UNKNOWN; every other project was still inspected (${u.error})`);
+      }
+      const incomplete = coverage.unreadable_roots.length + coverage.unreadable_projects.length;
+      if (coverage.unregistered.length) {
+        log(
+          `  ⚠ ${coverage.unregistered.length} project(s) carry Sterling agents but are NOT in the shared project registry, so the agent sync never visits them — their agents are frozen at install date:\n` +
+            coverage.unregistered.map((u) => `      ${u.path} (${u.agents.join(', ')})`).join('\n') +
+            `\n    Register each by running /sterling:init in that project, or refresh one now:` +
+            `\n      node ${join(cwd, 'scripts', 'sync-agents.mjs')} --target <path>   (then restart Claude Code there — subagents load at session start)`
+        );
+      } else if (incomplete) {
+        // AN AFFIRMATIVE "ok" IS UNREACHABLE AFTER A PARTIAL SCAN (02a1ed39 at
+        // the REPORT layer): "0 unregistered" out of a walk that could not read
+        // part of what it was asked to read is not a clean bill of health, and
+        // printing one is the same lie as nine consecutive `up_to_date`.
+        log(`  ⚠ PARTIAL — nothing unregistered was found in what could be read, but ${incomplete} item(s) above could NOT be inspected, so coverage under these known roots is UNKNOWN, not clean`);
+      } else {
+        log('  ok — under these known roots, every project with installed Sterling agents is registered (a project under a root that no registered project shares is outside this scan by design)');
+      }
+    } catch (err) {
+      // LOUD BUT NONFATAL, the same contract as the stamps above: the update
+      // itself has already succeeded, so a coverage REPORT must never make it
+      // look failed. Never silent — an unreported blind spot is the defect
+      // this whole scan exists to close.
+      log(`\n⚠ registry coverage scan FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
+    }
+  };
+
   if (before.behind === 0 && !opts.force) {
     // A no-op fast-forward still repairs config reach (board 52c1d504,
     // decision bc0f81e3): a consumer already ON the fixed revision but carrying
@@ -460,8 +531,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       const noopProjectList =
         opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
       stampSiblingSanctioned(noopProjectList);
+      // The blind spot this reports is INDEPENDENT of clone lag — an
+      // already-current clone with two unregistered projects is the measured
+      // 2026-08-28 state exactly — so the report belongs on this path too.
+      await reportCoverage(noopProjectList);
     } catch (err) {
-      log(`\n⚠ sibling sanctioned-script reach skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
+      log(`\n⚠ sibling sanctioned-script reach and registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
     }
     log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
     return report;
@@ -637,6 +712,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   } else if (opts.projects === false) {
     log('\n▸ project agent sync — SKIPPED (--no-projects)');
   }
+
+  // Registry coverage — the SAME call the already-current path makes above.
+  await reportCoverage(projectList);
 
   // Read-only: reports CLAUDE.md contract drift in sibling projects without
   // touching them (--apply stays a deliberate act — it rewrites seven repos).

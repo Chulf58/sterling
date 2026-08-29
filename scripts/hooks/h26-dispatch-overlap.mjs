@@ -48,6 +48,123 @@ import { liveDispatches } from '../lib/dispatch-register.mjs';
 import { hasUnsuppressedMatch, escapeRe, isReadOnlyDispatchType } from './lib/dispatch-advisory.mjs';
 import { claimedResources } from './lib/dispatch-residue.mjs';
 
+// A PATH NAMED AS A THING TO RUN IS NOT A PATH THE LANE WILL WRITE (board
+// 8f43e6b5, the EXTRACTION half only — the larger redesign toward a declared
+// territory field on the dispatch is explicitly NOT built here). Measured at
+// ~100% false-positive across two consumer sessions: every brief must spell
+// its gate command out verbatim (H14 matches literal command prefixes), so
+// every brief names the gate binary and the gate runner, and every concurrent
+// pair "overlapped" on them — real firings named
+// 'tools/godot/Godot_v4.6.3-stable_win64_console.exe' and
+// 'addons/gdUnit4/bin/GdUnitCmdTool.gd'. The cost was not the noise but the
+// MISS: a genuine overlap on a source file was nearly buried, and one consumer
+// stopped reading H26 entirely.
+//
+// LOCAL TO H26, NOT THE SHARED MODULES. lib/dispatch-prompt.mjs must stay
+// permissive (h19-dispatch-staging deliberately wants over-capture —
+// research_finding 289cd172's standing constraint), and lib/dispatch-advisory
+// is shared with H22's write side and H25's capability check, neither of which
+// is in this fix's scope. This is a READ-side territory filter on the OUTGOING
+// dispatch's own candidates only.
+//
+// (1) EXECUTABLES ARE EXCLUDED UNCONDITIONALLY — in a command line or in
+// prose alike: no lane contends over an invoked/linked artifact as write
+// territory, and the measured briefs name the binary in both shapes. The
+// family is EXTENSION-matched, never a substring ('scripts/executor.mjs' is
+// ordinary source). The family is COMPILED/LINKED ARTIFACTS ONLY — never
+// hand-edited source on any platform.
+// '.sh', '.bat' and '.cmd' are deliberately NOT members (user-ruled 2026-08-29):
+// a shell script is editable repo source, and a `.bat`/`.cmd` is editable repo
+// source on WINDOWS exactly as `.sh` is on Linux. Dropping them unconditionally
+// made the hook silently omit a genuinely-written `.bat` from overlap warnings
+// on Windows while warning correctly for the same file role on Linux — a 1:1
+// Windows/Linux parity violation, in the silent-under-warn direction this board
+// item calls worse than the noise it replaces. All three are suppressed by the
+// COMMAND-CONTEXT rule (2) when they are invoked, and stay territory when a lane
+// rewrites them.
+const EXECUTABLE_EXT_RE = /\.(?:exe|dll|so|dylib)$/i;
+
+// (2) NON-EXECUTABLES ARE EXCLUDED PER MENTION, NOT PER PATH. A gate runner
+// passed as an argument ('… -s addons/gdUnit4/bin/GdUnitCmdTool.gd', 'node
+// --test scripts/tests/x.test.mjs') is invoked, not written; but the SAME path
+// named anywhere else in the brief as an edit target ('then rewrite
+// tools/bin/report_writer.gd') is territory again. Under-reporting is the
+// expensive failure for this advisory, so any non-command mention keeps the
+// path. The test is USAGE, never path shape — a 'bin/' or 'tools/' blanket
+// would drop source files the lane genuinely writes.
+//
+// A mention is command-shaped when walking back through the tokens BEFORE it
+// on its own line reaches a COMMAND HEAD (an executable-extension token, or an
+// interpreter/runner word) across nothing but flags — the first prose word, or
+// a shell separator, ends the walk and the mention stays territory. That
+// bound is what keeps the two mentions in "First run X … then rewrite X"
+// distinguishable: an unbounded reach from 'run' would swallow the second one.
+// EVERY MEMBER MUST BE A WORD THAT IS NOT ALSO AN ORDINARY ENGLISH VERB IN THIS
+// POSITION. 'make' and 'go' were members and are REMOVED (review, 2026-08-29):
+// a brief line "- make src/parser.mjs handle CRLF" — often the ONLY mention of
+// that path — walked back onto 'make', classified the mention as a command
+// argument, and dropped a genuine live-lane overlap SILENTLY; same for "go
+// through src/x.mjs". Under-warning is the expensive failure for this advisory,
+// so a runner word that doubles as a verb costs more than the build-tool
+// invocations it suppresses (those name their target as a TASK, not a path).
+const RUNNER_HEAD_RE = /^(?:node|npm|npx|pnpm|yarn|deno|bun|python3?|bash|sh|zsh|pwsh|powershell|dotnet|cargo)$/i;
+const COMMAND_SEPARATOR_RE = /^(?:&&|\|\||[|;])$/;
+
+// A REAL FLAG, not a bullet or a dash of punctuation: '--headless', '-a'. Used
+// only by the command-HEAD rule below, so a list item ('- src/x.mjs …') and an
+// em dash never read as a command argument.
+const FLAG_TOKEN_RE = /^-{1,2}[A-Za-z0-9]/;
+
+/** True when the mention at `index` sits in the argument position of a command
+ *  line, OR is itself the HEAD of one — see (2) above. Never throws: every token
+ *  is coerced and the walk terminates at the line start (this hook may not fail
+ *  internally). */
+function isRunMention(text, index) {
+  const lineStart = text.lastIndexOf('\n', Math.max(index - 1, 0)) + 1;
+  const tokens = text.slice(lineStart, index).split(/\s+/).filter(Boolean);
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    // Strip shell/prose decoration so a backticked or quoted command head is
+    // still recognized ('`node' -> 'node').
+    const token = tokens[i].replace(/^[`'"([]+/, '').replace(/[`'")\]]+$/, '');
+    if (!token || token === '.') continue; // decoration only, or '--path .'
+    if (COMMAND_SEPARATOR_RE.test(token)) return false; // a previous command does not govern this one
+    if (EXECUTABLE_EXT_RE.test(token) || RUNNER_HEAD_RE.test(token)) return true;
+    if (token.startsWith('-')) continue; // a flag — keep walking toward the head
+    return false; // prose: this mention is not an argument of anything
+  }
+  // COMMAND-HEAD POSITION. The walk reached the line start across nothing but
+  // decoration and flags, so this mention is the FIRST word of its line — it is
+  // not an argument of anything, but it may BE the command. A script is invoked
+  // by naming it directly ('tools/bin/gate.bat --headless', './gate.sh -a x'):
+  // no interpreter precedes it, so the argument rule above can never see it, and
+  // before this the whole shape was classified as write territory. That was
+  // invisible while `.bat`/`.cmd` rode the unconditional executable family and
+  // `.sh` was the lone (silently mis-suppressed) case; with the family narrowed
+  // to compiled artifacts (user ruling 2026-08-29) it governs all three
+  // editable script extensions, which is what makes 'suppressed by the
+  // COMMAND-CONTEXT rule when invoked' true rather than aspirational.
+  // NARROW ON PURPOSE: only a following REAL FLAG counts as evidence of
+  // invocation. 'src/parser.mjs needs a CRLF fix' and '- src/parser.mjs — do X'
+  // both stay territory, because under-warning is this advisory's expensive
+  // failure; a head mention followed by prose is a sentence, not a command.
+  const rest = text.slice(index).split('\n', 1)[0];
+  const nextToken = rest.split(/\s+/).filter(Boolean)[1];
+  return Boolean(nextToken) && FLAG_TOKEN_RE.test(nextToken);
+}
+
+/** True when at least ONE mention of `raw` in the prompt is not command-shaped
+ *  — the mention-level unit of exclusion from (2). */
+function hasNonRunMention(prompt, raw) {
+  const text = String(prompt ?? '');
+  const re = new RegExp(escapeRe(raw), 'g');
+  let m;
+  while ((m = re.exec(text))) {
+    if (!isRunMention(text, m.index)) return true;
+    if (m.index === re.lastIndex) re.lastIndex++; // guard a zero-width match
+  }
+  return false;
+}
+
 /**
  * SPEC B advisory text for a claimed resource already held by a live
  * dispatch — flat, uncaveated (no hedging tokens; SPEC B (5)), names every
@@ -176,10 +293,20 @@ try {
   // legitimate territory declaration for a FILE candidate, not a
   // subject-of-change mention to discount (that guard is for H25's tool
   // mentions only); only an actual negation suppresses a path here.
+  // Then RUN-NOT-WRITE (board 8f43e6b5, see the two rules at the top of this
+  // file): the executable family drops unconditionally, and a non-executable
+  // whose every mention is an argument of a command line drops too. DISCLOSED
+  // RESIDUAL: this filter and the negation check above are independent
+  // any-occurrence tests, so a path whose only unsuppressed mention is
+  // command-shaped and whose only non-command mention is negated survives both
+  // — over-warning, the direction this family already accepts (P1), never a
+  // silently dropped lane.
   const files = [
     ...new Set(
       normalized
         .filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false }))
+        .filter((p) => !EXECUTABLE_EXT_RE.test(p.norm))
+        .filter((p) => hasNonRunMention(prompt, p.raw))
         .map((p) => p.norm)
     ),
   ];
