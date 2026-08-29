@@ -4408,6 +4408,21 @@ var SYSTEM_REASONS = [
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
+  // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
+  // the same stable handle decision/anti_pattern/research_finding gained in
+  // de1a7329, extended to `todo` because a board item otherwise has only a
+  // uuid and a multi-KB text blob, and a user asked to rule on "board
+  // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
+  // (knowledgeCreate) from the item's opening headline LINE for source:'user'
+  // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
+  // needed no migration. Uniqueness spans EVERY slug-bearing type — one
+  // namespace, because that is what knowledge_get/board_get resolve.
+  //
+  // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
+  // board_update and REFUSED by board_remove/maintenance_remove, which keep
+  // demanding the exact full uuid (anti-pattern
+  // no-bounded-trail-guard-for-destructive-addressing, severity block).
+  slug: external_exports.string().min(1).optional(),
   text: external_exports.string().min(1),
   source: external_exports.enum(["user", "system"]),
   file_keys: external_exports.array(repoPath).optional(),
@@ -5110,6 +5125,29 @@ function loadConfig(cwd) {
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 
+// scripts/lib/store-remediation.mjs
+var SANCTIONED_SCRIPTS = Object.freeze([
+  "scripts/dispose-run.mjs",
+  "scripts/init.mjs",
+  "scripts/consume-exit.mjs",
+  "scripts/architecture-projection.mjs",
+  "scripts/domain-doctor.mjs",
+  "scripts/commit-reviewed.mjs",
+  "scripts/migration-preflight.mjs",
+  "scripts/migrate-stores.mjs",
+  "packages/tui/bundle/sterling-tui.mjs"
+]);
+function appendMissingSanctioned(allowScripts2) {
+  if (!Array.isArray(allowScripts2)) {
+    throw new Error(
+      `appendMissingSanctioned: allow_scripts must be an array, got ${allowScripts2 === null ? "null" : typeof allowScripts2}`
+    );
+  }
+  const existing = allowScripts2;
+  const added = SANCTIONED_SCRIPTS.filter((s) => !existing.includes(s));
+  return { next: added.length ? [...existing, ...added] : existing, added };
+}
+
 // scripts/hooks/h15-store-guard.mjs
 var input;
 try {
@@ -5164,7 +5202,10 @@ try {
 if (!mentionsStore) allow();
 var allowScripts;
 try {
-  allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;
+  const raw = loadConfig(input.cwd) ?? {};
+  const declared = raw?.store_guard?.allow_scripts;
+  const configured = parseConfig(raw).store_guard.allow_scripts;
+  allowScripts = Array.isArray(declared) && declared.length === 0 ? [] : appendMissingSanctioned(configured).next;
 } catch (e) {
   deny(
     environmentDefectDenial("H15", `Store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {

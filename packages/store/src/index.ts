@@ -264,12 +264,20 @@ export function catalogStatus(
  * Board 39d6462d activity feed: the "title-or-slug clipped" the record is
  * shown under on the Queue tab's activity section. Most types carry `title`;
  * feature_article also carries `slug` but title wins when both exist; todo
- * carries neither and falls back to its first text line. Clipped to 80
+ * carries no title and falls back to its first text line. Clipped to 80
  * chars — the same clip the card titles use (viewmodel.ts).
+ *
+ * TEXT BEATS SLUG (S1, decision human-readable-ids-for-board-items): since
+ * `todo` gained an auto-minted slug, a slug-first order would have quietly
+ * replaced the feed's readable headline ("EXPORT THE BOARD AS CSV.") with its
+ * kebab handle ("export-the-board-as-csv") — a downgrade for the one surface
+ * whose whole job is readability. Types that carry a title are unaffected
+ * (title still wins), and slug stays ahead of the raw id for anything carrying
+ * neither.
  */
 function activityTitleOf(record: DurableRecord): string {
   const r = record as unknown as { title?: string; slug?: string; text?: string; id: string };
-  const raw = r.title ?? r.slug ?? r.text?.split('\n')[0] ?? r.id;
+  const raw = r.title ?? r.text?.split('\n')[0] ?? r.slug ?? r.id;
   return raw.slice(0, 80);
 }
 

@@ -74,6 +74,13 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 import { parseConfig } from '@sterling/schemas';
+// THE shipped sanctioned list, imported rather than copied — decision 77c5b85a
+// makes SANCTIONED_SCRIPTS and the config.ts `allow_scripts` default
+// element-identical and holds that with a bidirectional drift pin in
+// scripts/tests/store-remediation.test.mjs. A second literal here would be a
+// third copy with no pin holding it. The module is dependency-free by contract
+// (node builtins only), so it costs this bundle nothing.
+import { appendMissingSanctioned } from '../lib/store-remediation.mjs';
 
 // THE INPUT BOUNDARY IS ITSELF A GATE — same F5 class as the preprocessing
 // wrap below (board 01afa03e; the fix H17 already carries for its own
@@ -205,11 +212,58 @@ try {
 }
 if (!mentionsStore) allow(); // no store path anywhere in the command — irrelevant
 
+// ── THE EFFECTIVE ALLOWLIST: a project's array EXTENDS the shipped list ──────
+// (decision `allow-scripts-unions-empty-array-is-lockdown`, 00867be9, user-ruled
+// 2026-08-29; board 94d6368a.) A zod `.default([...])` applies ONLY when the key
+// is ABSENT, so an explicit `store_guard.allow_scripts` used to SHADOW the
+// shipped sanctioned list entirely: a project that named one script of its own
+// silently lost all nine shipped entries, and every script Sterling sanctioned
+// afterwards stayed unreachable there — silently, and indistinguishably from
+// "never allowlisted". Measured casualties: packages/tui/bundle/sterling-tui.mjs
+// in every consuming project (77c5b85a), and — the trap that must never spring —
+// scripts/migrate-stores.mjs, the ONLY exit from a refuse-until-migrated store
+// (bc0f81e3). Decision 77c5b85a already fixes this in CONFIG SPACE (init/update
+// append the shipped entries into a consumer's array), but that reaches only a
+// project that RUNS update; the GUARD itself must not read a list as a
+// replacement in the meantime. The union is ADDITIVE-ONLY: naming some shipped
+// entries never subtracts the unnamed ones, because "they wrote a list, honour
+// exactly that list" is the very reading that produced this defect.
+//
+// ABSENT IS NOT PRESENT-AND-EMPTY, AND THAT DISTINCTION IS THE SECURITY QUESTION
+// HERE. This change makes an allowlist STRICTLY LARGER, and the naive shape —
+// `[...SANCTIONED_SCRIPTS, ...(allow_scripts ?? [])]` — satisfies every other
+// requirement above while SILENTLY RE-OPENING a project that deliberately
+// revoked shell write access to its store. `allow_scripts: []` is a policy
+// statement — TRUST NOTHING — and an upgrade must never undo it. So PRESENCE is
+// read off the RAW config before the parsed value is unioned:
+//   key ABSENT            -> the shipped default applies, project entries union
+//                            on top (there are none — that is what absent means);
+//   key PRESENT, NON-EMPTY -> the project's entries UNION with the shipped list;
+//   key PRESENT AND EMPTY  -> deliberate lockdown: no union, nothing sanctioned.
+// Under that lockdown the migration scripts are denied WITH everything else
+// (00867be9 part 3 — HEAD's behaviour, preserved deliberately): recovery is one
+// config line, whereas the hardcoded remediation floor that would have rescued
+// them was BUILT and REVERTED before commit after three outside-family review
+// rounds each found a distinct bypass. A permanently-allowed script path is the
+// surface those bypasses exploited; it is not reinstated here.
+//
 // a malformed config must fail CLOSED on the protected branch — an uncaught
 // throw exits non-2, which the platform treats as non-blocking (a voided gate)
 let allowScripts;
 try {
-  allowScripts = parseConfig(loadConfig(input.cwd) ?? {}).store_guard.allow_scripts;
+  const raw = loadConfig(input.cwd) ?? {};
+  // The RAW value answers PRESENCE, which the parsed value cannot: after
+  // parseConfig an absent key and an explicit `[]` are indistinguishable from
+  // the shipped default and an empty list respectively — the default has already
+  // been substituted, and collapsing the two cases is the bug described above.
+  const declared = raw?.store_guard?.allow_scripts;
+  // parseConfig still owns VALIDATION (a non-array `declared` throws here and
+  // fails closed) and still supplies the shipped default when the key is absent.
+  const configured = parseConfig(raw).store_guard.allow_scripts;
+  allowScripts =
+    Array.isArray(declared) && declared.length === 0
+      ? [] // explicit lockdown — no union, no shipped defaults, no exemptions
+      : appendMissingSanctioned(configured).next; // additive: listing never subtracts
 } catch (e) {
   deny(
     environmentDefectDenial('H15', `Store access denied — .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {

@@ -1343,7 +1343,17 @@ export class SterlingTools {
     // 2026-08-21): it has no title/question headline, so nothing auto-mints —
     // but an explicit slug colliding with a live record would brick slug
     // addressing of that record for every reader (the 1e639f32 incident shape).
-    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding' || type === 'attestation') {
+    //
+    // `todo` JOINS THE SAME ONE NAMESPACE (S1, decision
+    // human-readable-ids-for-board-items) — deliberately through THIS branch
+    // rather than a private check on board_add, because board_add funnels here
+    // and recordsBySlug is type-agnostic, so both directions are covered by one
+    // rule: a board item cannot take a live ruling's handle, and a ruling
+    // cannot take a live board item's. A private per-surface check would give
+    // `todo` a namespace of its own, which is exactly the read-time ambiguity
+    // de1a7329 rejected. Its headline comes from mintHeadlineOf (a board item
+    // has no title field; see todoHeadline).
+    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding' || type === 'attestation' || type === 'todo') {
       const explicit = (parsed as { slug?: string }).slug;
       if (explicit) {
         if (this.store.recordsBySlug(explicit).length) {
@@ -1353,7 +1363,7 @@ export class SterlingTools {
           );
         }
       } else {
-        const headline = ((parsed as { title?: string; question?: string }).title ?? (parsed as { question?: string }).question ?? '') as string;
+        const headline = SterlingTools.mintHeadlineOf(type, parsed as Record<string, unknown>);
         const minted = this.mintSlug(headline);
         if (minted) {
           // store.create persists `candidate` (parsed is the dedup-comparison
@@ -2588,12 +2598,76 @@ export class SterlingTools {
 
   /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
   private static slugify(text: string): string {
-    return text
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60)
-      .replace(/-+$/, '');
+    return (
+      text
+        // TRANSLITERATE non-ASCII letters, never strip them (S1 design call,
+        // decision human-readable-ids-for-board-items): NFD splits an accented
+        // letter into its base plus a combining mark, so dropping the marks
+        // gives café -> cafe and naïve -> naive. Dropping the whole letter
+        // instead would give 'caf'/'nave' — a handle nobody recognises, which
+        // defeats what a human-readable handle is FOR. Applied in the shared
+        // slugify rather than a todo-only copy: one concept, one implementation
+        // (every slug-bearing type mints the same way, canonical-naming).
+        .normalize('NFD')
+        .replace(/\p{M}/gu, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60)
+        .replace(/-+$/, '')
+    );
+  }
+
+  /**
+   * A BOARD ITEM'S HEADLINE — what its slug is minted from (S1, decision
+   * human-readable-ids-for-board-items). `todo` is the one slug-bearing type
+   * with no headline FIELD: the precedent (de1a7329) mints from `title`, or
+   * `question` on a research_finding, and a board item has only a multi-KB
+   * `text`.
+   *
+   * FIRST LINE, NOT FIRST SENTENCE. Board items are written with an ALL-CAPS
+   * opening headline on its own line, and real headlines carry internal
+   * punctuation ("S1 (FIRST — S2 AND S3 BOTH CONSUME IT) — MINT A SLUG ON
+   * `todo`, REUSING de1a7329."), so a first-SENTENCE rule would cut some
+   * headlines mid-thought and swallow body prose whenever the headline has no
+   * terminal period. The first non-blank line is the unit the convention
+   * actually writes.
+   *
+   * A PARENTHETICAL ASIDE IS DROPPED, because real items lead with one and it
+   * eats the whole 60-char budget: the item above would otherwise mint
+   * 's1-first-s2-and-s3-both-consume-it-mint-a-slug-on-todo', naming the
+   * sequencing note instead of the task. An aside is by definition not the main
+   * clause. Fallback: a headline that is ENTIRELY parenthetical keeps its full
+   * line, so dropping asides can never mint nothing.
+   */
+  private static todoHeadline(text: string): string {
+    const line = text.split('\n').find((l) => l.trim().length > 0) ?? '';
+    const withoutAsides = line.replace(/\([^)]*\)/g, ' ');
+    return SterlingTools.slugify(withoutAsides) ? withoutAsides : line;
+  }
+
+  /**
+   * The headline an auto-mint derives from, per type — the ONE place the
+   * per-type answer lives, so the mint and any future caller cannot disagree.
+   *
+   * `attestation` returns '' deliberately: it has no headline field, so nothing
+   * auto-mints and its slug stays explicit-only (review finding 1, 2026-08-21).
+   *
+   * A SYSTEM `todo` (a maintenance-queue item) likewise returns '' and mints no
+   * handle (S1 design call; arm E3 of the frozen pin accepts either). Three
+   * reasons: queue items are addressed by mechanisms, never cited by a human,
+   * so a handle buys nothing there; their texts are near-identical by
+   * construction ("reconcile article 'x' — owned file y changed"), so every
+   * enqueue would walk a -2/-3/-4… suffix chain, one store query per step; and
+   * a lane that mints thousands of handles would flood the one namespace the
+   * cross-type collision refusal protects. Queue items still read back a
+   * DISPLAY name through board_get (withDisplaySlug).
+   */
+  private static mintHeadlineOf(type: string, rec: Record<string, unknown>): string {
+    if (type === 'todo') {
+      return rec.source === 'user' ? SterlingTools.todoHeadline(String(rec.text ?? '')) : '';
+    }
+    return (rec.title as string | undefined) ?? (rec.question as string | undefined) ?? '';
   }
 
   /**
@@ -2604,6 +2678,14 @@ export class SterlingTools {
    * knowledge_supersede (F4 review finding: a slugless old record — e.g. a
    * pre-slug legacy row — must not silently produce a slugless new head; it
    * mints exactly the same way a brand-new create would).
+   *
+   * THE ≤60 CLAMP GOVERNS THE DERIVED BASE, NOT THE DISAMBIGUATOR (S1 design
+   * call — de1a7329 pins "kebab-case, ≤60 chars" and says nothing about the
+   * two interacting). A clash on a 60-char base therefore yields a 62-char
+   * '<base>-2'. Reserving room by clamping the base shorter would shorten
+   * EVERY handle to guard against a rare clash, and would break the rule that
+   * the second item's handle is exactly the first's plus '-2'. The suffix is a
+   * uniqueness marker, not headline text, so it is not what the budget is for.
    */
   private mintSlug(headline: string): string | undefined {
     const base = SterlingTools.slugify(headline);
@@ -4649,15 +4731,38 @@ export class SterlingTools {
       ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
       ...rest,
     });
+    const notices: string[] = [];
     if (source === 'user' && objective === undefined) {
       // Never a throw on the capture path — the item is saved; the default is
       // disclosed loudly with its remedy (decision a8d2ce6c: the server has no
       // caller identity, so a refusal could lose a user-stated task).
-      return {
-        ...res,
-        notice: `objective undeclared — saved as standalone; if this task is a slice of a larger objective, set it via board_update {objective: "<name>"}`,
-      };
+      notices.push(
+        `objective undeclared — saved as standalone; if this task is a slice of a larger objective, set it via board_update {objective: "<name>"}`
+      );
     }
+    // NO HANDLE COULD BE DERIVED — SAY SO (review finding 3, 2026-08-29). The
+    // mint is silent by construction: slugify keeps ASCII alphanumerics, so a
+    // headline written entirely in CJK, Cyrillic or emoji ('日本語のタスク')
+    // slugifies to '', mintSlug returns undefined, and the item is saved with
+    // no handle at all and no word said. The item LEAST readable to the slug
+    // machinery is exactly the one a human most needs a name for, so a silent
+    // no-mint is the worst possible place for silence (P5).
+    //
+    // A NOTICE, NOT TRANSLITERATION: romanising a non-Latin script is a
+    // language-specific judgment (は is 'ha' or 'wa' by grammatical role), and
+    // a wrong romanisation is a handle nobody recognises — the same failure the
+    // notice exists to report, wearing a costume. Latin-script accents are a
+    // different case and ARE handled, by the NFD pass in slugify.
+    //
+    // USER ITEMS ONLY: a system maintenance item mints nothing BY DESIGN (see
+    // mintHeadlineOf), so noticing it would fire on every enqueue and say
+    // nothing true.
+    if (source === 'user' && !(res.record as unknown as { slug?: string }).slug) {
+      notices.push(
+        `no handle could be derived from this item's headline — it slugifies to nothing (non-Latin script, digits or symbols only), so this item has no readable name and can be cited only by its id; give it one via board_add {slug: "<handle>"} on a re-add, or lead the text with a Latin-script headline line`
+      );
+    }
+    if (notices.length) return { ...res, notice: notices.join(' | ') };
     return res;
   }
 
@@ -4933,7 +5038,62 @@ export class SterlingTools {
         `board_get: '${id}' resolves to a ${record.type}, not a board/queue item — board_get reads board_add/maintenance_enqueue items only; use knowledge_get for other record types`
       );
     }
-    return record;
+    return this.withDisplaySlug(record);
+  }
+
+  /**
+   * DERIVE-ON-READ, NOT BACKFILL (S1 design call, decision
+   * human-readable-ids-for-board-items). Items created before the mint — and
+   * maintenance-queue items, which mint nothing (see mintHeadlineOf) — carry no
+   * stored slug. Rather than migrate every legacy row, board_get derives a
+   * display NAME from the item's own headline, so no surface has to print bare
+   * hex for an item that predates S1. de1a7329 set the migration-free
+   * precedent, and a backfill would also rewrite every legacy row's updated_at,
+   * reordering the board and the activity feed for a purely cosmetic gain.
+   *
+   * THE DERIVED NAME IS DISPLAY-ONLY AND NOT ADDRESSABLE, and this asymmetry is
+   * deliberate: nothing is persisted, so a legacy item is addressed by its uuid
+   * or 8-char prefix exactly as before (the migration-free round-trip). Making
+   * it addressable would mean deriving over every todo on every lookup and
+   * inventing a tie-break when a derived name shadows a REAL minted slug —
+   * paying a permanent ambiguity for items that already resolve fine.
+   *
+   * SUPPRESSED WHEN THE DERIVED NAME IS ALREADY A LIVE HANDLE (review finding
+   * 1, 2026-08-29). "Not addressable" is a property of the name, not of the
+   * derive: a derived name is a bare kebab string, byte-identical in shape to a
+   * minted handle, so a reader handed one cites it — and if some OTHER record
+   * already owns that exact string, the citation resolves through
+   * resolveRecordId to THAT record and the reader reads (or board_updates) the
+   * wrong item, silently. It is reachable: legacy item A opens "EXPORT THE
+   * BOARD AS CSV.", the same task is later re-boarded as item B, and B MINTS
+   * 'export-the-board-as-csv'. That defeats the whole point of the feature —
+   * readable-ids exists so a citation names the thing the reader means
+   * (decision human-readable-ids-for-board-items).
+   *
+   * THE CHECK IS THE RESOLVER'S OWN LOOKUP, not an approximation of it:
+   * resolveRecordId's slug rung is store.recordsBySlug(id) — one hit resolves,
+   * several refuse — so a derived name is unsafe to hand out exactly when
+   * recordsBySlug(derived) is non-empty, and this suppression set equals the
+   * resolution set by construction. It lives INSIDE the one derive path (which
+   * is why this is an instance method now): there is no unchecked derive for a
+   * future call site to reach for, so the guard cannot be forgotten the way a
+   * per-call-site check could.
+   *
+   * A SUPPRESSED ITEM READS BACK WITH NO NAME — the pre-S1 bare-hex state for
+   * that one shadowed item, which is the honest degradation: an absent name is
+   * a visible gap, while a name that means a different record is a silent wrong
+   * answer (P5, and the disclose-never-silently-serve posture of decision
+   * falsified-slug-handling-supersede-disclose-user-decided-2026).
+   *
+   * Never applied to a record with a stored slug: a minted handle always wins.
+   */
+  private withDisplaySlug(record: DurableRecord): DurableRecord {
+    const r = record as unknown as { slug?: string; text?: string };
+    if (r.slug) return record;
+    const derived = SterlingTools.slugify(SterlingTools.todoHeadline(r.text ?? ''));
+    if (!derived) return record;
+    if (this.store.recordsBySlug(derived).length) return record;
+    return { ...record, slug: derived } as DurableRecord;
   }
 
   /**
@@ -5484,8 +5644,15 @@ export class SterlingTools {
       // so a replacement of a legacy record gains the stable handle it never
       // had, exactly as if it were freshly created.
       if (slug === undefined) {
-        const headline = ((body as { title?: string; question?: string }).title ?? (body as { question?: string }).question ?? '') as string;
-        slug = this.mintSlug(headline);
+        // THROUGH mintHeadlineOf, not a second inlined `title ?? question`
+        // (review finding 2, 2026-08-29): that helper's contract is to be the
+        // ONE place the per-type answer lives, and a copy here made the claim
+        // false as shipped. The two agree for every type SUPERSEDE_ALLOWED_TYPES
+        // currently admits, so this is a latent divergence rather than a live
+        // defect — it would become one the moment a headline-less type (todo,
+        // attestation) joined that list and this site kept minting from a
+        // `title` those types do not have.
+        slug = this.mintSlug(SterlingTools.mintHeadlineOf(type, body));
       }
     }
 

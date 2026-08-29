@@ -4438,6 +4438,21 @@ var SYSTEM_REASONS = [
 ];
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
+  // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
+  // the same stable handle decision/anti_pattern/research_finding gained in
+  // de1a7329, extended to `todo` because a board item otherwise has only a
+  // uuid and a multi-KB text blob, and a user asked to rule on "board
+  // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
+  // (knowledgeCreate) from the item's opening headline LINE for source:'user'
+  // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
+  // needed no migration. Uniqueness spans EVERY slug-bearing type — one
+  // namespace, because that is what knowledge_get/board_get resolve.
+  //
+  // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
+  // board_update and REFUSED by board_remove/maintenance_remove, which keep
+  // demanding the exact full uuid (anti-pattern
+  // no-bounded-trail-guard-for-destructive-addressing, severity block).
+  slug: external_exports.string().min(1).optional(),
   text: external_exports.string().min(1),
   source: external_exports.enum(["user", "system"]),
   file_keys: external_exports.array(repoPath).optional(),
@@ -5352,7 +5367,7 @@ var SchemaMigrationRequiredError = class extends Error {
 var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
-  const raw = r.title ?? r.slug ?? r.text?.split("\n")[0] ?? r.id;
+  const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
   return raw.slice(0, 80);
 }
 function deepReplaceString(value, from, to) {
@@ -7154,6 +7169,23 @@ function gitIgnored(paths, cwd) {
   if (res.status !== 0 && res.status !== 1) return null;
   return new Set((res.stdout || "").split("\0").filter(Boolean));
 }
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withRetry(fn) {
+  let last;
+  for (let i = 0; i < 5; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (!/SQLITE_BUSY|database is locked|is locked|busy/i.test(msg)) throw e;
+      last = e;
+      sleepMs(25 * (i + 1));
+    }
+  }
+  throw last;
+}
 function openStore(cwd) {
   const p = join2(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -7240,7 +7272,7 @@ import { join as join4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
-function sleepMs(ms) {
+function sleepMs2(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 function withFileLock(targetPath, fn, { onTimeout } = {}) {
@@ -7263,7 +7295,7 @@ function withFileLock(targetPath, fn, { onTimeout } = {}) {
       } catch {
         continue;
       }
-      sleepMs(LOCK_POLL_MS);
+      sleepMs2(LOCK_POLL_MS);
     }
   }
   if (!acquired && onTimeout) {
@@ -7983,6 +8015,11 @@ try {
   const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
+  const pendingTokens = new Set(
+    String(pendingDetail ?? "").split(/\s+/).map((t) => t.replace(/^[`'"([{<]+/, "").replace(/[`'")\]}>,;:.]+$/, "").trim().toLowerCase()).filter(Boolean)
+  );
+  const namesLiveTarget = (e) => typeof e.agent_id === "string" && e.agent_id.trim().length >= 3 && pendingTokens.has(e.agent_id.trim().toLowerCase());
+  const pendingTargetLive = Boolean(pendingDetail) && liveDispatches.some(namesLiveTarget);
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -7993,6 +8030,45 @@ try {
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
+  const isUnowned = (p) => !store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 25 }).some((r) => !r.working_tree);
+  let unowned = paths.filter(isUnowned);
+  if (unowned.length) {
+    const ignored = gitIgnored(unowned, input.cwd);
+    if (ignored === null) store.recordCheckSkipped("article-demand-gitignore", "no_git", void 0, now);
+    else unowned = unowned.filter((p) => !ignored.has(p));
+  }
+  const articleMissingOpen = () => store.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "article_missing");
+  const reachedMissing = articleMissingOpen().filter((t) => (t.file_keys ?? []).some((k) => paths.includes(k))).sort((a, b) => a.created_at === b.created_at ? a.id < b.id ? -1 : 1 : a.created_at < b.created_at ? -1 : 1);
+  if (reachedMissing.length) {
+    const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
+    const carriedIgnored = gitIgnored(carriedAll, input.cwd);
+    if (carriedIgnored === null) store.recordCheckSkipped("article-demand-carried-gitignore", "no_git", void 0, now);
+    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync4(join5(input.cwd, p))));
+    const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+    withRetry(
+      () => store.withTransaction(() => {
+        const fresh = reachedMissing.map((t) => store.get(t.id)).filter(Boolean);
+        if (!fresh.length) return;
+        const stillOwed = (p) => !prunable.has(p) && isUnowned(p);
+        const healed = [.../* @__PURE__ */ new Set([...unowned, ...fresh.flatMap((t) => (t.file_keys ?? []).filter(stillOwed))])].sort();
+        if (!healed.length) {
+          for (const t of fresh) store.remove(t.id, now);
+          return;
+        }
+        const freshIds = new Set(fresh.map((t) => t.id));
+        const outsider = articleMissingOpen().find((t) => !freshIds.has(t.id) && sameSet(t.file_keys ?? [], healed));
+        if (outsider) {
+          for (const t of fresh) store.remove(t.id, now);
+          return;
+        }
+        const [survivor, ...others] = fresh;
+        for (const t of others) store.remove(t.id, now);
+        const prior = [...survivor.file_keys ?? []].sort();
+        if (JSON.stringify(prior) === JSON.stringify(healed)) return;
+        store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
+      })
+    );
+  }
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     runSettlement();
     clearRegisters();
@@ -8030,14 +8106,6 @@ try {
     }).map(([family]) => family);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
-  let unowned = paths.filter(
-    (p) => !store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 25 }).some((r) => !r.working_tree)
-  );
-  if (unowned.length) {
-    const ignored = gitIgnored(unowned, input.cwd);
-    if (ignored === null) store.recordCheckSkipped("article-demand-gitignore", "no_git", void 0, now);
-    else unowned = unowned.filter((p) => !ignored.has(p));
-  }
   let newUnowned = [];
   if (unowned.length) {
     const head = spawnSync4("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
@@ -8062,6 +8130,10 @@ try {
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     if (!existsSync4(nagMarker)) {
       writeFileSync2(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+      releaseTouchesClaim();
+      releaseWithPressure();
+    }
+    if (pendingTargetLive) {
       releaseTouchesClaim();
       releaseWithPressure();
     }
@@ -8167,6 +8239,7 @@ ${parts.join("\n\n")}`);
   }
   if (articleDemand) {
     const overlapping = store.query({ types: ["todo"], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
+    const demandKeys = overlapping ? overlapping.file_keys ?? [] : unowned;
     store.enqueueSystemTodo({
       id: randomUUID4(),
       type: "todo",
@@ -8178,10 +8251,10 @@ ${parts.join("\n\n")}`);
       links: [],
       scope: "project",
       stack_tags: [],
-      text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
+      text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
       source: "system",
       system_reason: "article_missing",
-      file_keys: overlapping ? overlapping.file_keys : unowned.slice(0, 20)
+      file_keys: demandKeys
     });
   }
   if (!conceptSatisfied) {

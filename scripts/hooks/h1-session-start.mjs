@@ -8,14 +8,14 @@ import { randomUUID, createHash } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
-import { parseInstalledHeader, extractBakedCommandPaths } from '../lib/agent-distribution.mjs';
+import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -1092,6 +1092,176 @@ try {
   // still blocks pipeline dispatch on the same condition.
 }
 
+// AGENT CURRENCY (board 6ce18724, research_finding 0038af7c). The machine-
+// activation guard above asks "do these agents' hooks RUN here?"; this asks
+// "are these agents the CURRENT ones?" — a different silent failure, measured
+// 2026-08-28: /sterling:update's agent sync only visits projects in the SHARED
+// PROJECT REGISTRY, so a project absent from it keeps its installed agents
+// frozen at install date forever while its clone updates perfectly (two
+// projects on this machine at 43 and 80 days, state `stale` and never
+// REFUSED — never VISITED). H1 already reads the project at SessionStart, so
+// the detection lands where the failure actually lives, registry membership or
+// not. Distinct from the CLONE-currency signal further up (decision 558895a9),
+// which is correctly SILENT in the failing case because the clone is not
+// behind — another clone-currency banner would close nothing.
+//
+// WARN ONLY, on BOTH surfaces, exactly as the 946125ff (c) precedent does:
+// never a block, never a dispatch gate, and never a rewrite of an installed
+// file (user-ruled 2026-08-29 — fixes (a) and (c) only).
+//
+// DEGRADE LOUD, NEVER SILENT: a clone template that cannot be read is reported
+// as UNKNOWN currency, never omitted. anti_pattern 02a1ed39 is precisely this
+// check's failure mode — a staleness check that answered `up_to_date` NINE
+// times while the agents were dead — so a per-agent `catch` that swallows an
+// unreadable template is the defect here, not the safety net. Only the
+// outermost catch stays silent, because without an installed set there is
+// nothing to report on at all.
+let agentCurrencyWarning = '';
+let agentCurrencyContext = '';
+try {
+  const agentsDir = join(input.cwd, '.claude', 'agents');
+  const installed = [];
+  // UNKNOWN lines are seeded HERE, before any classification: a per-file failure
+  // must degrade loud and must never suppress the agents that WERE readable. The
+  // enumeration and the per-file read used to sit inside the outer catch alone,
+  // so one subdirectory named `x.md` (EISDIR), one EACCES file or one race
+  // deletion turned "nine agents 80 days stale" into COMPLETE SILENCE — a partial
+  // failure reported as a total absence, which is 02a1ed39 exactly.
+  const unknown = [];
+  let dirEntries = null;
+  try {
+    dirEntries = readdirSync(agentsDir);
+  } catch (err) {
+    // ENOENT/ENOTDIR: the project simply has no installed agents — nothing to
+    // report. Anything else (EACCES, ELOOP, EIO) means we COULD NOT LOOK, and
+    // existsSync would have answered `false` to exactly that, silently.
+    if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') {
+      unknown.push(
+        `- .claude/agents/ — currency UNKNOWN for EVERY agent in this project: the installed-agent directory could not be enumerated (${err?.code ?? err?.message ?? err})`
+      );
+    }
+  }
+  for (const n of (dirEntries ?? []).filter((x) => x.endsWith('.md'))) {
+    let content = null;
+    try {
+      content = readFileSync(join(agentsDir, n), 'utf8');
+    } catch (err) {
+      unknown.push(`- ${n} — currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
+      continue;
+    }
+    const header = parseInstalledHeader(content);
+    if (header) {
+      installed.push({ file: n, content, header });
+      continue;
+    }
+    // No parseable header. A genuinely FOREIGN file is not Sterling's to judge
+    // (syncAgents' foreign_file rule) and stays silent — but "unparseable" must
+    // never be read as "not ours": a file that still CARRIES the generated
+    // marker, or one that is empty/truncated, is a DAMAGED Sterling install and
+    // is reported UNKNOWN rather than vanishing into the foreign bucket.
+    if (content.includes('sterling-generated') || content.trim() === '') {
+      unknown.push(
+        `- ${n} — currency UNKNOWN: no readable sterling-generated header (damaged, truncated or empty), so its currency cannot be determined — delete it and re-install rather than assume it is current`
+      );
+    }
+  }
+  const unreadableBeforeClassification = unknown.length;
+  if (installed.length || unknown.length) {
+    const root = pluginRoot();
+    const templatesDir = root ? join(root, 'agent-templates') : null;
+    // The clone's roster IS its registry (the same one installAgents/syncAgents
+    // read). A registry that cannot be loaded — a half-updated or broken clone —
+    // cannot certify anything, so every installed agent becomes UNKNOWN rather
+    // than silently current.
+    let templateFor = null;
+    let cloneProblem = null;
+    try {
+      templateFor = new Map(loadRegistry(join(templatesDir, 'registry.json')).agents.map((a) => [a.name, a.file]));
+    } catch (err) {
+      cloneProblem = `the clone's agent templates at ${templatesDir ?? '(plugin root unresolved)'} could not be read: ${err?.message ?? err}`;
+    }
+    const stale = [];
+    const modified = [];
+    for (const { file, content, header } of installed) {
+      if (!templateFor) {
+        unknown.push(`- ${file} — currency UNKNOWN: ${cloneProblem}`);
+        continue;
+      }
+      const templateFile = templateFor.get(header.template);
+      if (!templateFile) {
+        // The old fallback read `<template>.md` when the roster did not name the
+        // agent. An ORPHAN template left behind by a roster change would then
+        // match its own old hash and certify a RETIRED agent as current — silence
+        // about an agent sync no longer visits at all.
+        unknown.push(
+          `- ${file} — currency UNKNOWN: '${header.template}' is not in the clone's current agent roster (agent-templates/registry.json), so sync never visits it — it is unmaintained here, which is not the same as current`
+        );
+        continue;
+      }
+      // CONTAINMENT before the read: neither the header's `template` nor the
+      // registry's `file` is constrained to a basename, so a value like
+      // '../some-file' would escape agent-templates/ and let unrelated clone
+      // bytes certify an install as CURRENT. Refuse loudly instead of certifying.
+      if (templateFile !== basename(templateFile) || templateFile.includes('/') || templateFile.includes('\\') || !templateFile.endsWith('.md')) {
+        unknown.push(
+          `- ${file} — currency UNKNOWN: its template '${templateFile}' does not name a plain .md file inside agent-templates/, so nothing outside that directory is allowed to certify it`
+        );
+        continue;
+      }
+      let templateContent = null;
+      try {
+        templateContent = readFileSync(join(templatesDir, templateFile), 'utf8');
+      } catch (err) {
+        unknown.push(`- ${file} — currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
+        continue;
+      }
+      // BOTH questions, independently. The template-hash equality used to `continue`
+      // before local modification was ever consulted, so a CURRENT-but-hand-edited
+      // agent was invisible while a STALE-and-edited one was reported. The two arms
+      // that must stay silent (machine_rebaked, config/model divergence) are both
+      // isLocallyModified === false, so they are untouched by asking.
+      const templateCurrent = header.templateHash === sha256(templateContent);
+      const locallyModified = isLocallyModified(content, header);
+      if (templateCurrent && !locallyModified) continue; // current and untouched — say nothing (P1)
+      if (locallyModified) {
+        // Word it as sync actually behaves: an edited install that is template-
+        // current is left alone (locally_modified_up_to_date); an edited install
+        // that is ALSO behind is re-rendered when its body byte-matches the fresh
+        // template (header_repaired) and refused otherwise. "sync REFUSES it" was
+        // true of only one of those three outcomes.
+        modified.push(
+          templateCurrent
+            ? `- ${file} — locally MODIFIED: its body no longer matches its own header content_hash, so a hand edit is what governs dispatch here; sync records it as locally_modified_up_to_date and never refreshes it (re-apply the edit on a fresh install, or delete the file and re-install)`
+            : `- ${file} — locally MODIFIED and behind the clone template: sync re-renders it only if its body byte-matches the fresh template (header_repaired) and REFUSES otherwise (refused_local_modification), so it may never refresh on its own (re-apply your edits on the fresh template, or delete the file and re-install)`
+        );
+      } else {
+        stale.push(`- ${file} — STALE: installed ${String(header.installedAt).slice(0, 10)}, the clone template has changed since (an unmodified install refreshes on sight)`);
+      }
+    }
+    if (stale.length || modified.length || unknown.length) {
+      const inspected = installed.length + unreadableBeforeClassification;
+      const parts = [
+        stale.length ? `${stale.length} stale` : null,
+        modified.length ? `${modified.length} locally modified` : null,
+        unknown.length ? `${unknown.length} of UNKNOWN currency` : null,
+      ].filter(Boolean);
+      const named = [...stale, ...modified, ...unknown];
+      agentCurrencyWarning =
+        `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
+        `run /sterling:sync-agents in this project, then restart. `;
+      agentCurrencyContext =
+        `\n\nAGENT CURRENCY (H1, research_finding 0038af7c): of ${inspected} Sterling-generated agent file(s) in .claude/agents/, ${parts.join(', ')} against the clone's templates (${templatesDir ?? '(plugin root unresolved)'}).\n` +
+        named.join('\n') +
+        `\nThe agent sync only visits projects in the SHARED PROJECT REGISTRY, so a project the registry does not know is never refreshed however current the clone is. Run scripts/sync-agents.mjs --target ${input.cwd} from this context, tell the user a RESTART is required (project subagents load at session start), and check /sterling:projects — an absence there is the root cause, not a symptom.`;
+    }
+  }
+} catch {
+  // fail-open — never break SessionStart (P1). This is now a LAST RESORT only:
+  // the directory enumeration, every per-file read, every damaged header, every
+  // per-agent template read and the clone-registry load each carry their own
+  // catch and each degrades LOUD. Nothing routine reaches here (02a1ed39).
+}
+
 if (process.env.STERLING_NO_BANNER !== '1') {
   const width = Math.max(...BANNER_ROWS.map((r) => r.length));
   const version = pluginVersion();
@@ -1126,8 +1296,8 @@ try {
 const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurrent);
 
 const output = {
-  systemMessage: `${staleWarning}${machineWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + queueContext },
+  systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

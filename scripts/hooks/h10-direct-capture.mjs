@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking, gitIgnored } from './lib/common.mjs';
+import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent } from './lib/settlement.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
@@ -896,6 +896,67 @@ try {
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
 
+  // IS THE NAMED TARGET STILL A LIVE DISPATCH? (board cb457cbd, built on the
+  // fan-out-aware deferral ec9eacaa.) The declaration names a target, and whether
+  // that target is still running is a fact THIS hook already holds in the H22
+  // register — so the conductor was hand-supplying it, re-typing an unchanged
+  // declaration on every Stop (measured twice: three declarations in one session,
+  // the last two restating the same in-flight lanes with no new substance). A
+  // declaration that must be repeated verbatim is a declaration that stops being
+  // read. The file lanes already re-arm on liveness; the capture lane never
+  // inherited it. Consumed by the deferral block below.
+  //
+  // The detail is conductor FREE TEXT ('<target> — <reason>'), not a structured
+  // reference, so the carry is decided by IDENTITY MATCHED EXACTLY, never by text
+  // search. THE DETAIL IS TOKENIZED ONCE (whitespace split, surrounding shell/prose
+  // decoration stripped) and an entry counts as the named target only when its
+  // AGENT_ID — the one value that identifies a dispatch and nothing else — EQUALS
+  // a whole token of the declaration.
+  //
+  // TWO REVIEWERS, 2026-08-29, one of them outside-family: the previous
+  // `haystack.includes(t)` form over {agent_id, agent_type, declared files} was an
+  // UNANCHORED SUBSTRING test on free text — the exact shape of the block-severity
+  // anti-pattern `unanchored-substring-allowlist-in-command-guard` (a suppression
+  // granted because a name APPEARS IN text rather than IS the referent). All three
+  // keys were broken, each in its own way:
+  //   - AGENT_TYPE names a CLASS, not a target, so ANY live same-type entry
+  //     impersonated the landed one ('coder' also matching 'encoder'/'decoder',
+  //     which no length floor can help with — the false positives are ordinary
+  //     5-9 character words). REMOVED: no matching form turns a class into an
+  //     identity.
+  //   - AGENT_ID matched by substring, so unrelated sequential lane ids collide
+  //     in both directions (sub-lane-1 and sub-lane-104 vs sub-lane-10). KEPT,
+  //     but compared as a WHOLE TOKEN: a prefix relation is not identity.
+  //   - A DECLARED FILE matched when its path merely appeared in the reason —
+  //     and a capture_pending reason routinely names the file the capture is
+  //     about while an unrelated lane legitimately holds it open. REMOVED: a
+  //     file named in a reason is SUBJECT MATTER, not an owner. (The file
+  //     deferral above still joins touched paths to live entries; that is a
+  //     different question — who owns this file — asked of the register, not of
+  //     conductor prose.)
+  // THE KILL SCENARIO that made this silent knowledge loss: detail
+  // 'coder sub-target — capture auth findings'; sub-target LANDS and H22 removes
+  // its entry; an unrelated live {agent_id:'sub-other', agent_type:'coder'}
+  // remains; the substring 'coder' still matched, pendingTargetLive stayed true,
+  // the carry branch released non-terminally, and NO capture_owed was ever minted.
+  // Rolling replacement lanes defeat the TTL indefinitely — there is no background
+  // sweep — so the declaration was carried forever and the debt never recorded.
+  // A declaration that names no live agent_id simply falls back to the prior
+  // two-Stop cadence: a missed match costs one queue item (the safe direction),
+  // a false match MUTES a real duty. Tokens under 3 chars are ignored so a
+  // degenerate agent_id cannot match an ordinary short word.
+  const pendingTokens = new Set(
+    String(pendingDetail ?? '')
+      .split(/\s+/)
+      .map((t) => t.replace(/^[`'"([{<]+/, '').replace(/[`'")\]}>,;:.]+$/, '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const namesLiveTarget = (e) =>
+    typeof e.agent_id === 'string' &&
+    e.agent_id.trim().length >= 3 &&
+    pendingTokens.has(e.agent_id.trim().toLowerCase());
+  const pendingTargetLive = Boolean(pendingDetail) && liveDispatches.some(namesLiveTarget);
+
   // Test-repair evidence (decision frozen-test-repair-signatures-plus-visible-repair):
   // scripts/test-repair.mjs records that the conductor repaired a demonstrably
   // buggy frozen test, with evidence, at a named path. The event SATISFIES the
@@ -951,6 +1012,168 @@ try {
   const hasResearchDuty = activeResearchEvents.length > 0;
   // Concept duty: a settled design must produce/refresh its concept article.
   const hasConceptDuty = conceptFamilies.size > 0;
+
+  // §6 H10 ownership predicate — hoisted ABOVE the no-duty terminal release
+  // below, because the live recompute that follows it must run on that release
+  // too (review finding D, 2026-08-29). The release is reached whenever every
+  // capture touch was discharged (a valid no_capture) with no research/concept
+  // duty outstanding — a Stop that still TOUCHED files an open article_missing
+  // item names. Recomputing below that release left exactly those Stops
+  // re-stamping a stale item, so the earlier rationale comment ("reaches a
+  // non-firing Stop") was describing a placement it did not have.
+  // SCOPE, stated so the comment cannot overclaim: only the RECOMPUTE moves up.
+  // The article DEMAND itself (newUnowned/articleDemand, still computed below)
+  // stays muted on that release — that mute is PRE-EXISTING, predates this
+  // lane's change, and is deliberately left alone here rather than widened into
+  // a drive-by behavior change.
+  //
+  // Ownership joins feature_article AND repo-located reference docs (§3.2.5) —
+  // same join as H7; a governing document's owner is its reference_material
+  // record, never a forced feature article (adjudicated 2026-06-12).
+  // A record declaring a working_tree owns files in a DIFFERENT tree — it never
+  // grants ownership of this root's same-named path (comsoft-juiced 2026-07-17).
+  // ONE predicate, named because the live recompute below re-asks the SAME
+  // question of an already-persisted item's file keys (board ef206eca): the
+  // demand and the item it leaves behind must never be able to disagree about
+  // what "owned" means.
+  const isUnowned = (p) => !store.query({ types: ['feature_article', 'reference_material'], file_keys: [p], cap: 25 }).some((r) => !r.working_tree);
+  let unowned = paths.filter(isUnowned);
+  // A gitignored path is never governed territory (board 1de3653b) — it cannot
+  // be owned, so demanding an article for it is a false demand. A failed ignore
+  // check degrades to the unfiltered list (toward signaling), recorded loudly.
+  if (unowned.length) {
+    const ignored = gitIgnored(unowned, input.cwd);
+    if (ignored === null) store.recordCheckSkipped('article-demand-gitignore', 'no_git', undefined, now);
+    else unowned = unowned.filter((p) => !ignored.has(p));
+  }
+
+  // LIVE RECOMPUTE of the open article_missing item(s) this session's territory
+  // covers (board ef206eca, reported by a consuming project). The ownership
+  // question above is answered LIVE and flips the instant an owning article
+  // lands — but the persisted ITEM did not follow: the mint below re-supplied
+  // the matched item's OWN file_keys forward, and nothing else ever re-verified
+  // them (article_missing sits outside UPDATE_RESOLVABLE_LANES, never
+  // auto-drains, and H1 only COUNTS open items per lane). A stale snapshot was
+  // therefore actively re-stamped, and it failed in BOTH directions off that one
+  // line:
+  //   OVER-REPORT — a file that has since gained an owning article kept being
+  //     named, and this lane's prescribed remedy is "create the owning article":
+  //     acting on it writes exactly the duplicate the reconcile discipline
+  //     exists to prevent (a colliding SLUG is refused at knowledge_create; a
+  //     DIFFERENT slug describing the same file is what a believing session
+  //     would naturally write, and nothing refuses that).
+  //   UNDER-REPORT — a genuinely unowned file that surfaced after the mint was
+  //     silently dropped. This is the WORSE half: an over-report costs
+  //     attention, an under-report costs the debt itself, because no other
+  //     mechanism will ever raise that file again. A shrink-only fix passes the
+  //     reported half and is a suppression, not a fix.
+  //
+  // UNION, NOT REPLACE (the semantics the frozen spec deliberately left open —
+  // decided here): a file this item already names that is STILL unowned but was
+  // NOT touched this session is KEPT. Replace would drop it the moment a session
+  // touched only its neighbours — the under-report direction, the one that loses
+  // the record for good.
+  //
+  // NO CAP ON THE PERSISTED SET (review finding A, 2026-08-29 — the fix's own
+  // regression). A `.slice(0, 20)` over union(live, carried) EVICTS still-unowned
+  // CARRIED names: an item carrying c1..c20 that a later session reaches with
+  // live-unowned [c1, n1] heals to [c1, n1, c2..c19] and c20 vanishes while still
+  // unowned, outside that session's paths, in the one lane that never auto-drains.
+  // Ordering the live keys first does not fix it — it only chooses WHICH debt to
+  // destroy. The cap's original purpose was mint-time NOISE control, and noise is
+  // capped where it belongs: at the RENDERED list (capList, in the nag below),
+  // never in what is persisted. The schema puts no cap on file_keys.
+  // A name therefore leaves this item for exactly three RULING-BACKED reasons,
+  // each of which means the debt is gone rather than lost — never for want of room:
+  //   1. it gained an owning article/reference doc (isUnowned flips — the point);
+  //   2. it is gitignored, i.e. never governed territory by ruling (board
+  //      1de3653b), so demanding an article for it is a FALSE demand whose
+  //      remedy is a bogus article (review finding E — the earlier "a drop can
+  //      only push toward under-report" justification was right about the
+  //      under-report axis and wrong about this lane's over-report axis);
+  //   3. it no longer exists on disk — a deleted/renamed path cannot be given an
+  //      owning article, and this is also the only thing bounding union growth.
+  // When the gitignore probe itself fails, reasons 2 is skipped and the name is
+  // KEPT (toward signaling), recorded loudly — the same degradation the demand uses.
+  //
+  // CONSOLIDATION, not per-item healing (review finding B, 2026-08-29). Healing
+  // each reached item against its own keys MANUFACTURES overlap: I1=[a,b] and
+  // I2=[c] with session paths [a,c] leave I1 healed to [a,c] beside a standing
+  // I2=[c]; A=[x] and B=[x,y] with y newly owned leave A and B on the IDENTICAL
+  // key set, which IS enqueueSystemTodo's dedup key — the choke breaks at the
+  // first match and the second stands open forever, and store.updateTodo runs no
+  // key-collision check of its own. Every open item this session's paths reach is
+  // therefore merged into ONE survivor carrying the union, the rest removed. The
+  // outsider guard below extends that to an item OUTSIDE this session's reach
+  // that already carries the healed set. This is what ENFORCES the invariant the
+  // prior comment merely asserted: two items are never left on one key set.
+  //
+  // READ AND ACT UNDER ONE WRITE LOCK (review finding C, 2026-08-29). Emptiness
+  // was computed from a snapshot read outside any transaction and acted on with
+  // a hard `store.remove` — a concurrent Stop or board_update adding a genuinely
+  // unowned key between the read and the remove had its item deleted, and the
+  // UPDATE branch had the same stale-overwrite shape. store.withTransaction opens
+  // BEGIN IMMEDIATE and every store write primitive joins it reentrantly, so the
+  // re-read below cannot be overtaken; expected_version rides the update as the
+  // documented CAS backstop. The gitignore/existence probes deliberately run
+  // BEFORE the transaction — they spawn git and hit the filesystem, and neither
+  // may run while the store's write lock is held. A key that appears only in the
+  // re-read (added concurrently) was never probed, so it is KEPT if unowned:
+  // conservative, toward signaling.
+  const articleMissingOpen = () =>
+    store
+      .query({ types: ['todo'], cap: 1000 })
+      .filter((t) => t.source === 'system' && t.system_reason === 'article_missing');
+  const reachedMissing = articleMissingOpen()
+    .filter((t) => (t.file_keys ?? []).some((k) => paths.includes(k)))
+    .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? -1 : 1) : a.created_at < b.created_at ? -1 : 1));
+  if (reachedMissing.length) {
+    const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
+    const carriedIgnored = gitIgnored(carriedAll, input.cwd);
+    if (carriedIgnored === null) store.recordCheckSkipped('article-demand-carried-gitignore', 'no_git', undefined, now);
+    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p))));
+    const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+    withRetry(() =>
+      store.withTransaction(() => {
+        // Re-read under the write lock — a concurrently removed item simply
+        // vanishes from the set rather than being written back into existence.
+        const fresh = reachedMissing.map((t) => store.get(t.id)).filter(Boolean);
+        if (!fresh.length) return;
+        const stillOwed = (p) => !prunable.has(p) && isUnowned(p);
+        const healed = [...new Set([...unowned, ...fresh.flatMap((t) => (t.file_keys ?? []).filter(stillOwed))])].sort();
+        if (!healed.length) {
+          // Every file these demands named now has an owner (or is no longer
+          // demandable territory): the debt is PAID, so the items leave by the
+          // artifact-write that fulfilled them (P4). Removed, never left open
+          // with an empty file_keys list — that would be undrainable debt H1
+          // counts forever. This is AC9's "creating the owning article clears it
+          // mechanically on the next Stop", now reached even on a Stop where the
+          // demand does not fire at all.
+          for (const t of fresh) store.remove(t.id, now);
+          return;
+        }
+        const freshIds = new Set(fresh.map((t) => t.id));
+        const outsider = articleMissingOpen().find((t) => !freshIds.has(t.id) && sameSet(t.file_keys ?? [], healed));
+        if (outsider) {
+          // An item this session's paths do NOT reach already carries exactly
+          // this set — healing onto it would put two items on one dedup key.
+          // Keep theirs, drop ours: the union is preserved intact either way.
+          for (const t of fresh) store.remove(t.id, now);
+          return;
+        }
+        const [survivor, ...others] = fresh;
+        for (const t of others) store.remove(t.id, now);
+        const prior = [...(survivor.file_keys ?? [])].sort();
+        if (JSON.stringify(prior) === JSON.stringify(healed)) return; // nothing moved — no version churn
+        // Healed IN PLACE (versioned update, same id — feature_link/H1 references
+        // survive). Writing the live set HERE is also what keeps the mint below
+        // able to match this same item: the choke keys on {system_reason, sorted
+        // file_keys}, so a corrected set supplied only at the mint would miss the
+        // stale item and insert a second one beside it.
+        store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
+      })
+    );
+  }
 
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
     // No duties to enforce (e.g. only non-research dispatches recorded, or a
@@ -1060,22 +1283,9 @@ try {
 
   // §6 H10 article demand: touched files nothing owns, at threshold or any new
   // unowned file (vs git HEAD; no-git degrades loud to threshold-only).
-  // Ownership joins feature_article AND repo-located reference docs (§3.2.5) —
-  // same join as H7; a governing document's owner is its reference_material
-  // record, never a forced feature article (adjudicated 2026-06-12).
-  // A record declaring a working_tree owns files in a DIFFERENT tree — it never
-  // grants ownership of this root's same-named path (comsoft-juiced 2026-07-17).
-  let unowned = paths.filter(
-    (p) => !store.query({ types: ['feature_article', 'reference_material'], file_keys: [p], cap: 25 }).some((r) => !r.working_tree)
-  );
-  // A gitignored path is never governed territory (board 1de3653b) — it cannot
-  // be owned, so demanding an article for it is a false demand. A failed ignore
-  // check degrades to the unfiltered list (toward signaling), recorded loudly.
-  if (unowned.length) {
-    const ignored = gitIgnored(unowned, input.cwd);
-    if (ignored === null) store.recordCheckSkipped('article-demand-gitignore', 'no_git', undefined, now);
-    else unowned = unowned.filter((p) => !ignored.has(p));
-  }
+  // `isUnowned` / `unowned` and the live recompute that shares them are computed
+  // ABOVE the no-duty terminal release (see the block there) — only the DEMAND
+  // decision stays here, because only it is gated on the duties above.
   let newUnowned = [];
   if (unowned.length) {
     const head = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only', '--', ...unowned], {
@@ -1125,6 +1335,28 @@ try {
       // dangle in the claim file forever with no next-Stop adoption ever
       // triggered. F6: duties are outstanding here (capture still pending),
       // so settlement itself does not run.
+      releaseTouchesClaim();
+      releaseWithPressure();
+    }
+    // CARRY WHILE THE NAMED TARGET IS STILL LIVE (board cb457cbd). The bound on
+    // this grace is the TARGET's liveness, not a Stop count: while the register
+    // still holds the dispatch the declaration names, converting to debt would
+    // file mid-flight agent work as conductor negligence — the exact misreading
+    // decision ec9eacaa fixed for the file lanes, which this lane never
+    // inherited. Non-terminal in exactly the shape of the first pending Stop
+    // above: BOTH work registers survive, so a write landing before any later
+    // Stop still settles the duty terminally with zero queue noise (the
+    // all-duties-satisfied branch above), and the Stop after the entry leaves the
+    // register falls straight through to the conversion below — the debt is
+    // CARRIED, never dropped (P5), and never minted twice (the open-capture_owed
+    // choke). Settlement stays unrun here for the same reason it does above (F6):
+    // the capture duty is outstanding, so the candidates ride the claim onward.
+    // The nag marker is left exactly as the first pending Stop left it (spent),
+    // which is what makes the fall-through convert immediately once the target
+    // lands; the clear-on-every-release rule documented at clearRegisters()
+    // governs the paths that CALL it, and this path, like the first pending Stop
+    // above, deliberately does not.
+    if (pendingTargetLive) {
       releaseTouchesClaim();
       releaseWithPressure();
     }
@@ -1307,9 +1539,23 @@ try {
     // matches exactly and only the text (which does carry the escalated
     // count) updates in place — moving updated_at (AC2) instead of being
     // silently suppressed with nothing refreshed.
+    // Those file_keys are no longer a persisted snapshot: the live recompute
+    // above already healed this item to union(live unowned, still-unowned
+    // carried names) — so re-supplying them keeps the dedup key stable AND
+    // writes the live set (board ef206eca). The overlap match is the dedup
+    // IDENTITY only; it is never the answer to what is owed.
+    // NO `.slice(0, 20)` on a FIRST mint either (review finding A, 2026-08-29):
+    // capping here drops the 21st genuinely unowned file the moment it is
+    // measured, in the one lane that never auto-drains — an under-report, the
+    // failure this whole lane exists to prevent. The nag above already caps what
+    // a HUMAN reads (capList); the persisted list is the debt itself.
     const overlapping = store
       .query({ types: ['todo'], cap: 1000 })
       .find((t) => t.source === 'system' && t.system_reason === 'article_missing' && (t.file_keys ?? []).some((k) => unowned.includes(k)));
+    // ONE list drives both the count in the text and the persisted keys, so the
+    // item can never say "4 file(s)" while naming 7 — which it could once the
+    // healed union (⊇ this session's unowned set) started backing file_keys.
+    const demandKeys = overlapping ? overlapping.file_keys ?? [] : unowned;
     store.enqueueSystemTodo({
       id: randomUUID(),
       type: 'todo',
@@ -1321,10 +1567,10 @@ try {
       links: [],
       scope: 'project',
       stack_tags: [],
-      text: `article missing: direct-mode work touched ${unowned.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
+      text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
       source: 'system',
       system_reason: 'article_missing',
-      file_keys: overlapping ? overlapping.file_keys : unowned.slice(0, 20),
+      file_keys: demandKeys,
     });
   }
   if (!conceptSatisfied) {

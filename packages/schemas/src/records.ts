@@ -370,6 +370,21 @@ export const DRAIN_VERBS = {
 export const todoSchema = base
   .extend({
     type: z.literal('todo'),
+    // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
+    // the same stable handle decision/anti_pattern/research_finding gained in
+    // de1a7329, extended to `todo` because a board item otherwise has only a
+    // uuid and a multi-KB text blob, and a user asked to rule on "board
+    // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
+    // (knowledgeCreate) from the item's opening headline LINE for source:'user'
+    // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
+    // needed no migration. Uniqueness spans EVERY slug-bearing type — one
+    // namespace, because that is what knowledge_get/board_get resolve.
+    //
+    // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
+    // board_update and REFUSED by board_remove/maintenance_remove, which keep
+    // demanding the exact full uuid (anti-pattern
+    // no-bounded-trail-guard-for-destructive-addressing, severity block).
+    slug: z.string().min(1).optional(),
     text: z.string().min(1),
     source: z.enum(['user', 'system']),
     file_keys: z.array(repoPath).optional(),
