@@ -365,11 +365,41 @@ export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStart
   }
   for (const entry of registry.agents) {
     const installedPath = join(targetAgentsDir, `${entry.name}.md`);
-    if (!existsSync(installedPath)) {
-      problems.push({ name: entry.name, reason: 'missing_agent' });
+    // DEGRADE LOUD, NEVER SILENT (board 4fa477f2) — the same repair the H1
+    // machine-activation guard carries, not a second idiom. This read used to sit
+    // behind an existsSync() gate with no catch of its own, so ONE directory named
+    // `coder.md` (EISDIR), ONE EACCES file, ONE symlink loop (ELOOP) or ONE race
+    // deletion between the two calls threw out of the whole loop: every REMAINING
+    // agent went unprobed and the gate's actionable problems[] report (with its
+    // hook_node_unresolvable remediation) was replaced by a raw stack trace naming
+    // no agent. A partial failure must not be reported as a total one, in the guard
+    // whose entire purpose is to refuse to be silent about absent enforcement
+    // (02a1ed39: nine consecutive `up_to_date` while every agent hook was dead).
+    // Deriving BOTH verdicts from the read's own error code also closes the
+    // existsSync/readFileSync race, and stops existsSync answering `false` — i.e.
+    // `missing_agent`, i.e. "install it" — to an EACCES that means "I could not look".
+    // Only ENOENT means genuinely absent; everything else is REPORTED. ENOTDIR is
+    // deliberately NOT absence (review finding): it means an ANCESTOR component of
+    // the path is not a directory — `.claude/agents` is itself a file, say — for
+    // which "install the agent" is the wrong remedy, because the install would hit
+    // the same broken ancestor. That is a cannot-look, so it reports
+    // unreadable_agent with its code in the detail (visible:false either way; this
+    // is message accuracy, not a hole).
+    let installed;
+    try {
+      installed = readFileSync(installedPath, 'utf8');
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        problems.push({ name: entry.name, reason: 'missing_agent' });
+      } else {
+        problems.push({
+          name: entry.name,
+          reason: 'unreadable_agent',
+          detail: `${installedPath} could not be read (${err?.code ?? err?.message ?? err}) — whether its hooks run on this machine is UNKNOWN; an unreadable agent file is not a healthy one`,
+        });
+      }
       continue;
     }
-    const installed = readFileSync(installedPath, 'utf8');
     const header = parseInstalledHeader(installed);
     if (!header) {
       problems.push({ name: entry.name, reason: 'missing_generated_header' });

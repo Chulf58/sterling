@@ -181,3 +181,71 @@ test('A4: the refusal is a structured, renderable error naming BOTH the found an
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A5 — fail-open hole fix (2026-08-29): the constructor's user_version stamp
+// used to run inside tx() (BEGIN IMMEDIATE) on EVERY open, so opening an
+// already-stamped, healthy store took a write lock it never needed, contended
+// against any other writer, waited out the 5s busy_timeout, and threw — a
+// throw ~18 hook callers' runner reads as non-blocking (exit 1 = fail-open).
+// The stamp is now guarded by `if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION)`.
+// This pin needs TWO verdicts: no-throw alone would still pass a regression
+// that raises busy_timeout instead of removing the lock, so elapsed time is
+// asserted too. The control arm (no lock held) runs FIRST so a green measured
+// arm cannot be explained by a fixture whose lock never materialized.
+test('A5: opening an already-stamped, healthy store takes no write lock — succeeds fast even while another connection holds BEGIN IMMEDIATE', () => {
+  // CONTROL ARM, placed first: same open, no lock held anywhere, must also
+  // succeed fast. Without this, a fast "pass" on the measured arm below could
+  // just mean the lock-fixture never actually materialized a lock.
+  {
+    const { dir, path } = tempDbPath('sterling-schema-guard-a5-control-');
+    try {
+      const seed = new SterlingStore(path);
+      seed.close();
+      const start = Date.now();
+      const store = new SterlingStore(path);
+      const elapsed = Date.now() - start;
+      store.close();
+      assert.ok(elapsed < 1000, `control: opening with no lock held anywhere must be fast (was ${elapsed}ms)`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // MEASURED ARM: another connection holds a real write lock (BEGIN IMMEDIATE
+  // plus a DDL statement, which is what forces the lock to actually
+  // materialize rather than staying a no-op reservation).
+  const { dir, path } = tempDbPath('sterling-schema-guard-a5-');
+  let holder: DatabaseSync | undefined;
+  try {
+    const seed = new SterlingStore(path);
+    seed.close();
+    assert.equal(rawUserVersion(path), 2, 'precondition: the fixture is already stamped at the currently-supported schema version');
+
+    holder = new DatabaseSync(path);
+    holder.exec('PRAGMA busy_timeout=0');
+    holder.exec('BEGIN IMMEDIATE');
+    holder.exec('CREATE TABLE IF NOT EXISTS zz_lock (x)');
+
+    const start = Date.now();
+    let store: SterlingStore | undefined;
+    assert.doesNotThrow(() => {
+      store = new SterlingStore(path);
+    }, 'opening an already-stamped, healthy store must succeed even while another connection holds a write lock — nothing needs stamping, so the open must never attempt to take a write lock at all');
+    const elapsed = Date.now() - start;
+    store?.close();
+
+    assert.ok(
+      elapsed < 1000,
+      `opening must not busy-wait for a write lock it does not need (took ${elapsed}ms, vs. the 5000ms busy_timeout the defect used to burn through)`
+    );
+  } finally {
+    if (holder) {
+      try {
+        holder.exec('ROLLBACK');
+      } finally {
+        holder.close();
+      }
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

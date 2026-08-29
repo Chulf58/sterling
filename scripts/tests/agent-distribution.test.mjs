@@ -713,3 +713,115 @@ test('checkAgentsVisible probeExecutability: unresolvable baked node blocks; def
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// -----------------------------------------------------------------------------
+// checkAgentsVisible: one unreadable installed agent file must not suppress
+// the scan of the rest of the registry. Fix: each installed-file read now
+// derives its verdict from the read error's code (ENOENT/ENOTDIR ->
+// missing_agent; else -> unreadable_agent + detail) instead of letting an
+// unguarded readFileSync throw out of the whole loop. SPEC-ONLY: authored from
+// the fix's own description (H4 read-wall denies scripts/lib/agent-
+// distribution.mjs), verified only against this file's existing
+// checkAgentsVisible/probeExecutability conventions above (the {name, reason
+// [, detail]} problem shape, and the MACHINE_A unresolvable-node fixture that
+// already pins hook_node_unresolvable).
+// -----------------------------------------------------------------------------
+
+/** agent-a becomes a DIRECTORY at its installed path (forces EISDIR on a plain
+ *  readFileSync; needs no root/chmod trick, portable on Linux and Windows/WSL
+ *  alike). agent-b is a real MACHINE_TOKEN_TEMPLATE install under the given
+ *  vars, so its OWN verdict is independently checkable regardless of what
+ *  happens to agent-a. */
+function twoAgentRegistryWithUnreadableA(dir, vars) {
+  const { templatesDir, registryPath } = makePluginSide(dir, {
+    'agent-a.md': TEMPLATE.replace('probe-agent', 'agent-a'),
+    'agent-b.md': MACHINE_TOKEN_TEMPLATE.replace('probe-agent', 'agent-b'),
+  });
+  const targetAgentsDir = join(dir, 'project', '.claude', 'agents');
+  installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars });
+  const installedA = join(targetAgentsDir, 'agent-a.md');
+  rmSync(installedA, { force: true });
+  mkdirSync(installedA); // a directory sits where checkAgentsVisible will readFileSync
+  return { registryPath, targetAgentsDir };
+}
+
+test('CONTROL, placed first: a fully healthy two-agent registry (no unreadable file, node path resolvable) reports {visible:true, problems:[]}', () => {
+  const dir = scratch();
+  try {
+    const realHooksDir = join(dir, 'hooks-live');
+    mkdirSync(realHooksDir, { recursive: true });
+    writeFileSync(join(realHooksDir, 'h.mjs'), '// probe fixture');
+    const RESOLVABLE = { NODE: `"${process.execPath.replace(/\\/g, '/')}"`, HOOKS_DIR: realHooksDir.replace(/\\/g, '/') };
+    // agent-a must be built from MACHINE_TOKEN_TEMPLATE, not TEMPLATE.
+    // TEMPLATE bakes TWO Windows literals into one hook command line —
+    // '"C:/tools/node.exe" "C:/proj/hooks/h.mjs"' — the interpreter AND the
+    // hook script path. A partial replace of only the interpreter still
+    // leaves the hook-script literal baked in, and it does not exist on this
+    // machine either, so probeExecutability still flags a perfectly
+    // "healthy" fixture — for the OTHER literal this time. MACHINE_TOKEN_TEMPLATE
+    // (used by agent-b below, and by the passing "unresolvable baked node
+    // blocks" / resolvable-probe test above) already carries BOTH as tokens
+    // — '{{NODE}} "{{HOOKS_DIR}}/h.mjs"' — so RESOLVABLE's NODE and HOOKS_DIR
+    // both actually substitute, for both agents, with nothing left baked.
+    const { templatesDir, registryPath } = makePluginSide(dir, {
+      'agent-a.md': MACHINE_TOKEN_TEMPLATE.replace('probe-agent', 'agent-a'),
+      'agent-b.md': MACHINE_TOKEN_TEMPLATE.replace('probe-agent', 'agent-b'),
+    });
+    const targetAgentsDir = join(dir, 'project', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars: RESOLVABLE });
+    const after = '2026-01-01T00:00:01.000Z';
+    const v = checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt: after, probeExecutability: true });
+    assert.deepEqual(v, { visible: true, problems: [] }, 'control: rules out "checkAgentsVisible always reports problems" as the explanation for the two arms below');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// This control has no unreadable file, so restoring the unguarded readFileSync
+// (the sabotage below) does not touch this arm at all — it must stay green
+// under that mutation, exactly as a control should.
+
+test('an unreadable installed agent file (agent-a, forced EISDIR) is reported unreadable_agent with a plain-language detail, never silently read as current', () => {
+  const dir = scratch();
+  try {
+    const { registryPath, targetAgentsDir } = twoAgentRegistryWithUnreadableA(dir, MACHINE_A);
+    const after = '2026-01-01T00:00:01.000Z';
+    const v = checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt: after, probeExecutability: true });
+
+    assert.equal(v.visible, false);
+    const aProblem = v.problems.find((p) => p.name === 'agent-a');
+    assert.ok(aProblem, 'agent-a must be reported, not silently dropped from problems');
+    assert.equal(aProblem.reason, 'unreadable_agent');
+    assert.match(JSON.stringify(aProblem), /(cannot|could not|unable|unreadable|unknown|missing)/i, 'the detail names the read failure in plain terms');
+    assert.doesNotMatch(JSON.stringify(aProblem), /up to date/i, 'an unreadable file is never reported as current/up to date');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: restore the unguarded readFileSync (drop the try/catch that maps
+// the read error's code to unreadable_agent/missing_agent) — this test goes
+// red: the EISDIR throw either propagates uncaught out of checkAgentsVisible,
+// or (if caught only generically upstream) agent-a's problem never carries
+// reason 'unreadable_agent'.
+
+test('THE LOAD-BEARING ARM: agent-b is STILL reported hook_node_unresolvable when agent-a is unreadable — one bad file no longer suppresses the rest of the scan', () => {
+  const dir = scratch();
+  try {
+    const { registryPath, targetAgentsDir } = twoAgentRegistryWithUnreadableA(dir, MACHINE_A);
+    const after = '2026-01-01T00:00:01.000Z';
+    const v = checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt: after, probeExecutability: true });
+
+    const bProblem = v.problems.find((p) => p.name === 'agent-b');
+    assert.ok(bProblem, 'agent-b must still be scanned and reported despite agent-a throwing on read — this is the measured defect the fix closes');
+    assert.equal(bProblem.reason, 'hook_node_unresolvable');
+    assert.equal(bProblem.detail, '/machine-a/bin/node');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: restore the unguarded readFileSync — agent-a's EISDIR throws out
+// of the loop before agent-b is ever reached, so `v.problems` never contains
+// an agent-b entry (or the whole checkAgentsVisible call throws uncaught,
+// failing the test before any assertion runs). This is the arm that actually
+// distinguishes "reads are guarded per-file" from "not guarded" or "guarded
+// only globally" — the control above stays green under the identical mutation
+// because it has no unreadable file to trip it.

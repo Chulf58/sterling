@@ -5527,21 +5527,27 @@ var SterlingStore = class _SterlingStore {
       this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
     } catch {
     }
-    try {
-      this.tx(() => {
-        const current = this.db.prepare("PRAGMA user_version").get().user_version;
-        if (current > SUPPORTED_SCHEMA_VERSION) {
-          throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
-        }
-        if (current < SUPPORTED_SCHEMA_VERSION) {
-          this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
-        }
-      });
-    } catch (e) {
-      this.db.close();
-      throw e;
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      try {
+        this.tx(() => {
+          const current = this.db.prepare("PRAGMA user_version").get().user_version;
+          if (current > SUPPORTED_SCHEMA_VERSION) {
+            throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
+          }
+          if (current < SUPPORTED_SCHEMA_VERSION) {
+            this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+          }
+        });
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
     }
     this.openedSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
+    if (this.openedSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(this.openedSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
   }
   journalMode() {
     return this.db.prepare("PRAGMA journal_mode").get().journal_mode;

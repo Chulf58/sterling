@@ -59,6 +59,13 @@
 //   T2  SILENT  M5  admit every candidate
 //   T3  SILENT  M5  admit every candidate (date/sha/word-hex/colour battery)
 //   T4  WARN    M11 drop the unique-resolution branch
+//   T4b SILENT  M12 relax "resolves uniquely" to "resolves at all" against an
+//                   isolated fixture store holding a genuine 8-hex collision;
+//                   CONTROL (same fixture, unique id, no trigger) must WARN
+//                   FIRST — proves the fixture store is actually read before
+//                   T4b's silence is trusted (round-2 fix: the JSON stdin
+//                   `cwd` field, not just spawnSync's OS cwd, must point at
+//                   the fixture — decision d9521e96)
 //   T5  WARN    M2  drop the generic-type-word check
 //   T6  SILENT  M1  isGlossed always false (clipped-name gloss)
 //   T7  SILENT  M1  isGlossed always false (full-name gloss)
@@ -69,7 +76,12 @@
 //                   lookahead (see the defence-in-depth note on T11)
 //   T12 WARN    M8  reword the advisory to "do better next time"
 //   T13 EXIT 0  M9  exit 2 / permissionDecision deny on the warning path
-//   T14 SILENT  M10 drop the AskUserQuestion tool_name filter
+//   T14 (hooks.json scoping, not a hook-source mutation) — M10 was a no-op:
+//                   grep -n tool_name over the hook source is ZERO hits, so
+//                   there is no in-hook filter to sabotage. This arm instead
+//                   pins hooks/hooks.json's AskUserQuestion matcher block as
+//                   the SOLE registration of H30 — see the T14 block below
+//                   for its own named sabotage against hooks.json.
 //
 // The author of this file holds no Bash and has RUN NOTHING. The expected
 // results above are the oracle the conductor gates against, not observations.
@@ -77,11 +89,44 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(root, 'scripts', 'hooks', 'h30-bare-id-legibility.mjs');
+
+// --- isolated collision fixture (T4b) ---------------------------------------
+// Working pattern lifted from scripts/tests/knowledge-export.test.mjs:36-56
+// (getStore / makeProject / decisionRow) — a project-local store the hook is
+// pointed at via cwd, so T4b can force a genuine 8-hex AMBIGUOUS prefix
+// without depending on (or risking collision with) this repo's own live
+// store, which knowledge-export.test.mjs's sibling REFUSAL test (lines
+// 237-254) already relies on for the identical id shape.
+const FIXTURE_NOW = '2026-06-10T12:00:00.000Z';
+let SterlingStore;
+async function getStore() {
+  if (!SterlingStore) {
+    ({ SterlingStore } = await import(
+      pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href
+    ));
+  }
+  return SterlingStore;
+}
+function decisionRow(id) {
+  return {
+    id, type: 'decision', created_at: FIXTURE_NOW, updated_at: FIXTURE_NOW, author: 'conductor',
+    status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+    title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', file_keys: [],
+  };
+}
+function makeCollisionFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-h30-collision-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ stack_tags: [] }));
+  return dir;
+}
 
 // A real board item id prefix in this repo's store ("prose citation
 // resolution"), used ONLY where the arm must exercise unique resolution.
@@ -140,6 +185,25 @@ function ask(question) {
 /** Only the question field carries the fixture text; everything else is inert. */
 function askQuestionText(text) {
   return ask({ question: text, header: 'Decide' });
+}
+
+/**
+ * Override the JSON stdin payload's `cwd` field (NOT just the spawned
+ * process's OS cwd) to point at an isolated fixture directory.
+ *
+ * WHY THIS EXISTS (found via CLAUDE.md's own stated invariant, not by reading
+ * the hook): "every hook resolves `.sterling/` through readStdin's
+ * project-root normalization, never the raw shell cwd (decision d9521e96)".
+ * `ask()` above hardcodes `cwd: root` into the JSON body. Passing a fixture
+ * dir as runHook's second argument only sets spawnSync's OS-level cwd (the
+ * "raw shell cwd" the invariant says hooks do NOT use) — the JSON `cwd` field
+ * the hook actually reads was, until this helper existed, always `root`. That
+ * is precisely why T4b's fixture store was never being consulted: the hook
+ * was reading THIS repo's real store both with and without the sabotage,
+ * making its silence unrelated to ambiguity.
+ */
+function withCwd(input, dir) {
+  return { ...input, cwd: dir };
 }
 
 /**
@@ -260,16 +324,61 @@ test('T4: a bare id that resolves uniquely warns even with no trigger word', () 
 // normally catches it (see T1), which is why the residual was judged
 // acceptable. DO NOT "FIX" THIS ARM by making it warn: widening admission to
 // ambiguous prefixes reopens the false-alarm profile T3 exists to protect.
-// Expressed generically so it does not rot: the arm asserts the current rule
-// for a prefix so short it cannot be unique, with no trigger beside it.
-// SABOTAGE: relax "resolves uniquely" to "resolves at all" -> warns -> red.
+//
+// PREVIOUSLY HOLLOW, FIXED HERE (round 1). The old fixture used
+// `RESOLVING.slice(0, 4)` — a 4-char string — which CANDIDATE_RE (8 hex chars
+// or a full UUID) never even admits as a candidate, so the hook `allow()`s
+// before the ambiguity logic runs at all; the arm passed for a reason that
+// has nothing to do with ambiguity. Fixed by building an ISOLATED fixture
+// store (never the live repo store) holding records that share an 8-hex
+// prefix.
+//
+// STILL HOLLOW AFTER ROUND 1 (measured by the conductor, 2026-08-29): the
+// fixture dir was passed only as runHook's second argument (spawnSync's OS
+// cwd), while `ask()` hardcodes `cwd: root` into the JSON stdin BODY. Per
+// decision d9521e96 the hook resolves `.sterling/` through readStdin's cwd,
+// never the raw shell cwd — so the hook kept reading THIS REPO'S real store
+// throughout, and T4b's silence had nothing to do with ambiguity (it would
+// have been silent identically had the fixture held nothing at all).
+//
+// FIX, ROUND 2: `withCwd()` overrides the JSON payload's `cwd` field, and a
+// CONTROL ARM runs FIRST, in the SAME fixture store, on a bare id that
+// resolves UNIQUELY with no trigger word — it must WARN. Without this
+// control, T4b's silence would again have more than one possible cause: real
+// ambiguity, or "the fixture store still isn't being read". If the control is
+// silent, that is proof the fixture is unreachable and must be fixed before
+// T4b's silence means anything.
+// SABOTAGE (control): relax "resolves uniquely" to "resolves at all" ->
+// UNIQUE_ID still warns (no change) but the AMBIGUOUS-prefix arm below now
+// also warns -> that assertion goes red. (The control's OWN failure mode is a
+// fixture-plumbing regression, not this sabotage — see note above.)
 // ===========================================================================
-test('T4b (ACCEPTED RESIDUAL): a bare ambiguous prefix with no trigger stays silent', () => {
-  // 'c3705a15' resolves uniquely (T4); '0' as a stand-in for an ambiguous
-  // prefix is not an 8-hex candidate at all, so use a real ambiguity shape:
-  // the SAME id truncated below the citation-prefix width. It is not a
-  // candidate, and even were the width relaxed it is not unique.
-  const r = runHook(askQuestionText(`Should we close ${RESOLVING.slice(0, 4)} now?`));
+test('T4b (ACCEPTED RESIDUAL): a genuinely ambiguous bare prefix with no trigger stays silent', async () => {
+  const Store = await getStore();
+  const dir = makeCollisionFixture();
+  const store = new Store(join(dir, '.sterling', 'sterling.db'));
+  const UNIQUE_ID = 'bbbbbbbb-1111-4111-8111-111111111111';
+  store.create(decisionRow(UNIQUE_ID));
+  store.create(decisionRow('aaaaaaaa-1111-4111-8111-111111111111'));
+  store.create(decisionRow('aaaaaaaa-2222-4222-8222-222222222222'));
+  store.close();
+
+  // CONTROL, FIRST, OPPOSITE REASON: a uniquely-resolving id in this SAME
+  // fixture store, no trigger word, must WARN. Proves the fixture store is
+  // actually being read by the spawned hook before trusting T4b's silence.
+  const control = runHook(
+    withCwd(askQuestionText('Should we close bbbbbbbb before merging?'), dir),
+    dir,
+  );
+  assertWarns(control, 'bbbbbbbb', 'T4b-CONTROL');
+
+  // MAIN ARM: 'aaaaaaaa' resolves to TWO records in this fixture — no
+  // citation trigger word (mirrors T2's phrasing) — so admission, if any,
+  // could only come from the resolution branch, which must decline.
+  const r = runHook(
+    withCwd(askQuestionText('Should we close aaaaaaaa before merging?'), dir),
+    dir,
+  );
   assertSilent(r, 'T4b');
 });
 
@@ -505,16 +614,55 @@ test('T13: never blocks — exit 0 on warn, on silence, and on malformed stdin',
 // ===========================================================================
 // T14 — SCOPE: the hook only speaks for AskUserQuestion. Bare ids are correct
 // on mechanically-resolved surfaces (spawn inputs, tool parameters, the id
-// ladder) — decision 2e8c30e4 S3 names that fence explicitly — so the same
-// text on another tool must stay silent.
-// SABOTAGE M10: drop the AskUserQuestion tool_name filter -> warns -> red.
+// ladder) — decision 2e8c30e4 S3 names that fence explicitly.
+//
+// PREVIOUSLY A NO-OP, FIXED HERE. `grep -n tool_name` over
+// scripts/hooks/h30-bare-id-legibility.mjs returns ZERO hits — the hook
+// itself carries no tool_name filter to sabotage. hooks/hooks.json's
+// AskUserQuestion PreToolUse matcher is the ONLY thing scoping H30 to that
+// tool. Per the dispatch brief: do NOT add a redundant tool_name check to the
+// hook (that would change production behaviour, out of scope here) — instead
+// pin the thing that actually does the scoping: hooks.json's registration.
+// SABOTAGE: list 'h30-bare-id-legibility' under a second matcher block (e.g.
+// PostToolUse, or a wildcard/empty matcher) in hooks/hooks.json -> more than
+// one matching block is found -> red. Equally: change the sole matcher away
+// from the bare string 'AskUserQuestion' in EITHER direction — narrow it to
+// '*'/'' (regex would already catch this) OR BROADEN it to something like
+// 'AskUserQuestion|Bash' (a substring/regex match would NOT catch this, since
+// 'AskUserQuestion|Bash' still matches /AskUserQuestion/ and H30 would then
+// fire on Bash calls too) -> the exact-equality assertion below goes red
+// either way, because only the literal string 'AskUserQuestion' passes.
 // ===========================================================================
-test('T14: the same bare-id text on a NON-AskUserQuestion tool stays silent', () => {
-  const input = askQuestionText(`Should we close board ${SYNTHETIC} before merging?`);
-  input.tool_name = 'Task';
-  input.tool_input = {
-    description: 'dispatch',
-    prompt: `Should we close board ${SYNTHETIC} before merging?`,
-  };
-  assertSilent(runHook(input), 'T14');
+test('T14: hooks.json scopes H30 to AskUserQuestion only — no other matcher block also lists it', () => {
+  const hooksJsonPath = join(root, 'hooks', 'hooks.json');
+  const config = JSON.parse(readFileSync(hooksJsonPath, 'utf8'));
+  const HOOK_NAME = 'h30-bare-id-legibility';
+
+  const matchingBlocks = [];
+  for (const [event, blocks] of Object.entries(config.hooks || {})) {
+    for (const block of blocks || []) {
+      const commands = (block.hooks || []).map((h) => h.command || '');
+      if (commands.some((c) => c.includes(HOOK_NAME))) {
+        matchingBlocks.push({ event, matcher: block.matcher });
+      }
+    }
+  }
+
+  assert.equal(
+    matchingBlocks.length,
+    1,
+    `H30 must be scoped by exactly one matcher block; found ${matchingBlocks.length}: ${JSON.stringify(matchingBlocks)}`,
+  );
+  assert.equal(matchingBlocks[0].event, 'PreToolUse', 'H30 must be registered under PreToolUse');
+  assert.equal(
+    matchingBlocks[0].matcher,
+    'AskUserQuestion',
+    // A substring/regex check (e.g. /AskUserQuestion/) is too weak here: a
+    // matcher BROADENED to 'AskUserQuestion|Bash' (or any expression that
+    // still contains 'AskUserQuestion' plus extra tools) would still match
+    // that regex and pass, while H30 would in fact run outside its intended
+    // surface. Exact equality to the bare string is the only assertion that
+    // catches broadening inside the block, not just a second block appearing.
+    `the sole matcher block scoping H30 must be EXACTLY the bare string "AskUserQuestion" (no alternation, no wildcard, no extra tools); got ${JSON.stringify(matchingBlocks[0].matcher)}`,
+  );
 });

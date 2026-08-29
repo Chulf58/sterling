@@ -67,7 +67,15 @@
 //     `spend_warnings` — more than 3 receipts stamped on one commit, a
 //     receipt whose recorded `files` do not overlap the staged diff, a
 //     receipt recording no files at all, and a receipt older than a 12h
-//     horizon. None of them rejects an entry, refuses, or changes the
+//     horizon. REVIEWED-BYTES joined that list (board 0f448efb): a receipt
+//     carrying `reviewed_state.blobs` (the git blob sha of each reviewed file
+//     recorded by H22 at review END) is compared against the INDEX blob sha of
+//     the same path, and any difference is named — the first check here that
+//     asks WHAT BYTES a receipt saw rather than only WHERE/WHOSE it is. That
+//     field is also what the 12h horizon now measures from when present, since
+//     `at` is stamped at the reviewer's DISPATCH, not its completion. WARN, not
+//     refuse, is pending an explicit strength ruling that board 0f448efb names
+//     as still open. None of them rejects an entry, refuses, or changes the
 //     no-dedupe rule: the `files` attribution is known-unreliable, so a gate
 //     keyed on it would discard real reviews. The whole block is FAIL-OPEN
 //     (guarded interpolation + a try/catch that degrades to one stderr note),
@@ -611,8 +619,287 @@ try {
     }
   }
 
+  // =========================================================================
+  // REVIEWED-BYTES CHECK (board 0f448efb). Every check above this line asks
+  // WHERE or WHOSE a receipt is — session, branch, filenames. NONE of them ever
+  // asked WHAT BYTES it looked at, so a receipt earned in this session on this
+  // branch, naming exactly the files being committed, was stamped without
+  // objection onto content that changed after the review finished. The measured
+  // report (dome-farmer 2026-08-28 §11/§13.4): the first receipt of a session
+  // was timestamped before the substantive work even landed, and this CLI
+  // stamped it regardless.
+  //
+  // The evidence it reads is `reviewed_state.blobs` — a {path: git blob sha}
+  // map that h22-dispatch-register.mjs records at SubagentSTOP, i.e. at review
+  // END. That is the field this check exists to consume, and it is the reason
+  // the fix could not live in this file alone: a receipt that never recorded
+  // review-end state has nothing to compare, no matter how the comparison is
+  // written. The recorded shas are produced by `git hash-object` (filters
+  // applied) precisely so they are directly comparable to the INDEX blob shas
+  // read here — a hand-rolled content hash would mismatch on every file under
+  // autocrlf.
+  //
+  // WHY NOT MTIMES, the cheap version the report proposed: a `touch`, a branch
+  // switch, or any checkout rewrites an mtime without changing a byte, and a
+  // filesystem with coarse timestamps loses a same-second edit outright. A
+  // content hash cannot be defeated that way, which is what makes this evidence
+  // rather than a heuristic.
+  //
+  // SCOPED TO THE RECEIPT'S OWN TERRITORY, and only where that territory is
+  // ACTUALLY STAGED. Comparing anything wider — a whole-worktree digest, say —
+  // would fire on every commit of a normal multi-lane session, where sibling
+  // lanes legitimately edit other files while this review ran. A check that
+  // fires every time teaches its reader to ignore it, which is the exact fate
+  // the files[] attribution advisory above is written to avoid.
+  //
+  // WARNING ONLY — SEE THE OPEN RULING. Board 0f448efb states outright that the
+  // STRENGTH of this check (warn vs refuse) still needs deciding, because a
+  // refusal fires on legitimate rework-after-review and therefore needs its
+  // escape hatch decided in the same breath. Warning is the reversible half and
+  // the one this file's whole advisory block is already built for; the refusing
+  // half is a partition move (mismatching receipts into a withheld class beside
+  // DEFERRED), not a rewrite of this code. Until that ruling lands, this
+  // discloses and never rejects.
+  //
+  // MISSING EVIDENCE IS NEVER A FINDING — BUT AN UNUSABLE ONE IS DISCLOSED
+  // (review finding). A receipt with no reviewed_state (every receipt promoted
+  // before this shipped) is still not audited here, exactly like the pre-expiry
+  // receipts the session/branch check leaves unjudged. What changed is that
+  // evidence which is PRESENT YET UNUSABLE — an emptied or malformed
+  // reviewed_state — is now NAMED by the NO CONTENT EVIDENCE line below, rather
+  // than degrading to output-free silence indistinguishable from a clean audit.
+  // The exact boundary, and the residual gap it leaves, are stated there.
+  const recordedBlobs = (e) => {
+    const rs = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null ? e.reviewed_state : null;
+    const b = rs && typeof rs.blobs === 'object' && rs.blobs !== null && !Array.isArray(rs.blobs) ? rs.blobs : null;
+    if (!b) return [];
+    // Both halves validated: a ledger value is arbitrary JSON, and a malformed
+    // pair must drop out silently rather than compare-as-mismatch and
+    // manufacture a false disclosure out of bad data.
+    return Object.entries(b).filter(
+      ([p, sha]) => typeof p === 'string' && p !== '' && typeof sha === 'string' && /^[0-9a-f]{40}$/i.test(sha)
+    );
+  };
+  const auditPaths = new Set();
   for (const e of stampEntries) {
-    const recordedAt = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
+    for (const [p] of recordedBlobs(e)) {
+      const n = normalizePath(p);
+      if (stagedFiles.has(n)) auditPaths.add(n);
+    }
+  }
+  let stagedBlobs = null;
+  if (auditPaths.size > 0) {
+    // --stage gives the INDEX blob sha, which is exactly what the commit about
+    // to be created will contain. -z for the same path-mangling reason the
+    // staged-file read above uses it.
+    const lsFiles = spawnSync('git', ['ls-files', '--stage', '-z', '--', ...auditPaths], {
+      cwd: target,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    if (lsFiles.error || lsFiles.status !== 0) {
+      warnSpend(
+        `commit-reviewed: REVIEWED-BYTES CHECK UNAVAILABLE — git ls-files --stage could not be read ` +
+          `(${(lsFiles.stderr || (lsFiles.error && lsFiles.error.message) || `exit ${lsFiles.status}`).toString().trim()}), so the ${auditPaths.size} ` +
+          `reviewed file(s) this commit stages could not be compared against the bytes their receipts recorded at review end. Advisory only — the ` +
+          `receipts are stamped and consumed as normal, but this commit carries NO content-level evidence that they reviewed what is being committed.`
+      );
+    } else {
+      stagedBlobs = new Map();
+      for (const rec of (lsFiles.stdout ?? '').split('\0')) {
+        if (!rec) continue;
+        // Record shape: "<mode> <sha> <stage>\t<path>".
+        const tab = rec.indexOf('\t');
+        if (tab === -1) continue;
+        const meta = rec.slice(0, tab).split(' ');
+        if (meta.length < 2 || !/^[0-9a-f]{40}$/i.test(meta[1])) continue;
+        stagedBlobs.set(normalizePath(rec.slice(tab + 1)), meta[1].toLowerCase());
+      }
+    }
+  }
+  if (stagedBlobs) {
+    for (const e of stampEntries) {
+      const changed = [];
+      for (const [p, recordedSha] of recordedBlobs(e)) {
+        const n = normalizePath(p);
+        if (!stagedFiles.has(n)) continue; // outside this commit — the file-scope partition already ruled on it
+        const stagedSha = stagedBlobs.get(n);
+        // A staged DELETION has no index entry at all, so an absent sha is the
+        // strongest possible form of "not the bytes that were reviewed".
+        if (stagedSha === undefined) changed.push(`${n} (reviewed ${recordedSha.slice(0, 12)}, now DELETED/unstaged in the index)`);
+        else if (stagedSha !== recordedSha.toLowerCase()) changed.push(`${n} (reviewed ${recordedSha.slice(0, 12)}, staged ${stagedSha.slice(0, 12)})`);
+      }
+      if (changed.length > 0) {
+        warnSpend(
+          `commit-reviewed: REVIEWED BYTES CHANGED — ${e.agent_type}'s receipt is being stamped onto content that DIFFERS from what it actually ` +
+            `reviewed. Changed since review end: ${changed.join('; ')}. The receipt recorded these blob shas at its reviewer's SubagentStop ` +
+            `(reviewed_state.completed_at ${safeLabel(e.reviewed_state && e.reviewed_state.completed_at)}), so this is content evidence, not a ` +
+            `timestamp heuristic — the file was edited after the review finished. The trailer this commit lands will nonetheless attest that ` +
+            `${e.agent_type} reviewed it, which is the false attestation board 0f448efb reports. ADVISORY ONLY, pending the warn-vs-refuse ruling that ` +
+            `board names: legitimate rework-after-review produces this exact shape, so re-review the changed file(s) or state in the commit message ` +
+            `what changed and why it does not need re-reviewing.`
+        );
+      }
+    }
+  }
+
+  // PARTIAL BINDING IS DISCLOSED, NOT ASSUMED AWAY (review finding, MEDIUM).
+  // h22-dispatch-register records at most REVIEWED_BLOBS_CAP blob shas per
+  // receipt (it bounds the argv `git hash-object` is spawned with) and marks
+  // the overflow with `reviewed_state.truncated` / `truncated_of` — but until
+  // this block NOTHING on the SPEND side read those keys, so the marker was
+  // written at review end and then lost at consume time, which is the one place
+  // it had to arrive. The measured shape: 65 reviewed files, the first 64
+  // unchanged and the 65th edited after the review. The reviewed-bytes check
+  // above compares the 64 it can see and finds them clean; NO CONTENT EVIDENCE
+  // below does not fire either, because the blob map is non-empty. The commit
+  // then stamps a trailer, consumes the ledger entry, and reports an audit
+  // INDISTINGUISHABLE from a fully bound one — over a file whose bytes were
+  // never compared at all.
+  //
+  // WHAT THIS CAN AND CANNOT SAY. It does NOT recover the missing evidence:
+  // the shas for the files past the cap do not exist anywhere, so whether they
+  // changed is unknowable from this side and this line never claims otherwise.
+  // What it makes visible is the SCOPE of the audit — how many files the
+  // receipt claimed versus how many it bound, and, concretely, which files THIS
+  // COMMIT stages that the audit above could not have judged. Closing the gap
+  // for real is a recording-side change (raise/remove the cap, or batch the
+  // hashing), not something reachable here.
+  //
+  // ADVISORY ONLY, like every check in this block: the user ruled WARN, not
+  // REFUSE, for this whole mechanism. Nothing here rejects a receipt, changes
+  // what is stamped, or alters what is consumed. It goes through warnSpend so
+  // it also lands in `spend_warnings` on the JSON report — a truncation
+  // disclosed only on stderr would still be dropped by every reader of this
+  // CLI's own output.
+  const truncationOf = (e) => {
+    const rs = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null ? e.reviewed_state : null;
+    if (!rs || rs.truncated !== true) return null; // strict true — a truthy stray value is not this marker
+    const of = Number.isInteger(rs.truncated_of) && rs.truncated_of > 0 ? rs.truncated_of : null;
+    return { of };
+  };
+  for (const e of stampEntries) {
+    const t = truncationOf(e);
+    if (t === null) continue;
+    const bound = new Set(recordedBlobs(e).map(([p]) => normalizePath(p)));
+    const claimed = Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f !== '').map(normalizePath) : [];
+    // Files this commit actually stages that carry no recorded sha — the
+    // concretely unaudited territory, as opposed to the abstract count.
+    const unboundStaged = [...new Set(claimed)].filter((n) => stagedFiles.has(n) && !bound.has(n));
+    warnSpend(
+      `commit-reviewed: REVIEWED-BYTES BINDING TRUNCATED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records ` +
+        `reviewed_state.truncated${t.of === null ? '' : ` of ${t.of} reviewed file(s)`}, so only the ${bound.size} file(s) it bound could be ` +
+        `compared against this diff; the rest were never hashed at review end and whether they changed since is NOT KNOWABLE from this receipt. ` +
+        `${
+          unboundStaged.length > 0
+            ? `This commit stages ${unboundStaged.length} of the unbound file(s): ${unboundStaged.join(', ')} — the reviewed-bytes check above did not, and could not, judge them.`
+            : `None of the unbound files are staged by this commit, so the audit above covered every reviewed file it touches.`
+        } ` +
+        `A silently partial audit reads exactly like a clean one, which is why this is named rather than inferred. Advisory only: the receipt is ` +
+        `stamped and consumed exactly as before.`
+    );
+  }
+
+  // NO CONTENT EVIDENCE (review finding). The check above can only audit what
+  // reviewed_state.blobs actually carries, and it degrades to NOTHING — with no
+  // output at all — when that field is emptied or filled with values that fail
+  // the sha filter. Emptying it is therefore the trivial bypass of the
+  // reviewed-bytes check, and until this line it looked exactly like a clean
+  // audit. Mirrors the UNAVAILABLE-ls-files warning above: name what could NOT
+  // be verified. ADVISORY ONLY — the warn-vs-refuse ruling on board 0f448efb is
+  // still open and this changes nothing about what is stamped or consumed.
+  //
+  // WHAT IS DELIBERATELY NOT WARNED, and why: a commit where NO receipt has a
+  // reviewed_state key at all. That is the shape of every receipt promoted
+  // before reviewed-bytes recording shipped, i.e. the COMMON case today, and
+  // warning on it would fire on essentially every commit — the fire-every-time
+  // fate this file's own scoping comment above is written to avoid, and the
+  // state commit-reviewed-spend-warnings P2 pins as a clean run. The residual
+  // gap is stated plainly rather than hidden: the predicate below is purely
+  // RELATIVE — it fires only when SOME receipt on the commit carries usable
+  // evidence and another does not. So stripping reviewed_state off EVERY
+  // receipt of a commit is silent — not just a single-receipt commit, any
+  // commit where all receipts are missing the field — because there is
+  // nothing here that independently expects the field to exist; it only
+  // compares receipts against each other. This is not a case that closes
+  // itself over time as more receipts carry the field, since a receipt
+  // already carrying it can still be stripped back to nothing after the
+  // fact. Closing it for real needs an INDEPENDENT expectation — e.g. a
+  // registered promotion time after which reviewed_state is known to be
+  // required — which nothing in this check currently supplies. What IS
+  // caught: an emptied/malformed reviewed_state (present but yielding
+  // nothing), and a missing one alongside a sibling that has real evidence —
+  // a mechanism that recorded blobs for one receipt of this commit and none
+  // for another.
+  const anyRecordedEvidence = stampEntries.some((e) => recordedBlobs(e).length > 0);
+  const noEvidence = stampEntries.filter((e) => {
+    if (recordedBlobs(e).length > 0) return false;
+    const hasState = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null;
+    return hasState || anyRecordedEvidence;
+  });
+  if (noEvidence.length > 0) {
+    warnSpend(
+      `commit-reviewed: NO CONTENT EVIDENCE — ${noEvidence.length} of the ${stampEntries.length} receipt(s) being stamped record no usable ` +
+        `reviewed_state.blobs (${noEvidence.map((e) => `${e.agent_type}@${safeLabel(e.at)}`).join(', ')}), so NOTHING they cover could be compared ` +
+        `against the bytes those reviews actually looked at — for them the reviewed-bytes check did not pass, it did not run. Two very different causes ` +
+        `share this shape: a reviewed_state that was emptied, stripped or malformed after the fact (which is exactly how that check is made to have ` +
+        `nothing to check), or an H22 promotion that genuinely recorded none. Advisory only: the receipts are stamped and consumed exactly as before.`
+    );
+  }
+
+  for (const e of stampEntries) {
+    // AGE IS MEASURED FROM REVIEW END WHEN THE RECEIPT KNOWS IT (board
+    // 0f448efb). `at` is copied from the H22 register entry, which is stamped at
+    // SubagentSTART — so it marks when the review BEGAN, and a long review of
+    // early bytes reads as FRESHER than it is against this horizon. When the
+    // receipt carries reviewed_state.completed_at (the Stop instant) that is the
+    // honest moment; `at` stays the fallback for every receipt promoted before
+    // the field existed, so this can never retroactively change the verdict on
+    // an older receipt. The message names WHICH moment it used, because "3h old"
+    // means two different things depending on the answer.
+    const rs = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null ? e.reviewed_state : null;
+    const completedAt = rs && typeof rs.completed_at === 'string' ? rs.completed_at : null;
+    const rawCompletedMs = completedAt === null ? NaN : Date.parse(completedAt);
+    // BOUNDED TO [at, now], AND DISCARDED WHEN IT FALLS OUTSIDE (review
+    // finding). completed_at now DRIVES this horizon but is validated by
+    // nothing except Date.parse, and — unlike `at`, which is coupled to H22's
+    // duplicate-promotion key and to the consume identity, so editing it has
+    // side effects — it is otherwise free. Anyone who can write
+    // .sterling/review-ledger.json could therefore set a FUTURE completed_at
+    // and make an arbitrarily old receipt read fresh, which would make the
+    // honest-moment change a NET WEAKENING of the horizon it was meant to
+    // strengthen. A review cannot end before its own dispatch, nor in the
+    // future.
+    //
+    // AN OUT-OF-RANGE VALUE FALLS BACK TO `at`, IT IS NOT CLAMPED TO THE NEAR
+    // BOUND — this is the load-bearing half, MEASURED: clamping a future
+    // completed_at to `now` yields age 0, so the 30h-old receipt this exists to
+    // catch STILL read fresh and the horizon still never fired; only the
+    // warning changed. `at` is both the harder field to forge and the moment
+    // that drove this horizon before completed_at existed, so falling back to
+    // it can never be weaker than the pre-change behaviour. For a
+    // too-EARLY completed_at that fallback IS the [at, now] lower clamp; for a
+    // future one it is strictly stronger than the bound. Disclosed either way,
+    // never silently repaired.
+    const nowMs = Date.now();
+    const startMs = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
+    const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs; // no usable `at` → only the now-bound is enforceable
+    let completedMs = rawCompletedMs;
+    if (!Number.isNaN(rawCompletedMs) && (rawCompletedMs < lowerMs || rawCompletedMs > nowMs)) {
+      completedMs = NaN; // untrusted → the `at` fallback below owns the verdict
+      warnSpend(
+        `commit-reviewed: COMPLETED_AT OUT OF RANGE — ${e.agent_type}'s receipt records reviewed_state.completed_at ${safeLabel(completedAt)}, which is ` +
+          `${rawCompletedMs > nowMs ? 'in the FUTURE' : `EARLIER than its own dispatch instant (at ${safeLabel(e.at)})`}. A review cannot end outside ` +
+          `[dispatch, now], so that value is DISCARDED and the ${STALE_RECEIPT_HOURS}h staleness horizon below is measured from \`at\` instead. Trusted, ` +
+          `a future completed_at would make an arbitrarily old receipt read fresh — that is a bypass of the horizon, not a rounding error. Advisory only: ` +
+          `the entry is stamped and consumed as normal, but treat this receipt's timestamps as untrusted.`
+      );
+    }
+    const useCompleted = !Number.isNaN(completedMs);
+    const recordedAt = useCompleted ? completedMs : typeof e.at === 'string' ? Date.parse(e.at) : NaN;
+    const moment = useCompleted
+      ? `review END, reviewed_state.completed_at ${safeLabel(completedAt)}`
+      : `review START, at ${safeLabel(e.at)} — the DISPATCH instant, so this age is an UNDER-estimate of how stale the review is`;
     if (Number.isNaN(recordedAt)) {
       warnSpend(
         `commit-reviewed: RECEIPT AGE UNVERIFIABLE — ${e.agent_type}'s receipt carries no usable timestamp (at=${safeLabel(e.at)}), so the ` +
@@ -623,7 +910,7 @@ try {
     const ageHours = (Date.now() - recordedAt) / 3_600_000;
     if (ageHours > STALE_RECEIPT_HOURS) {
       warnSpend(
-        `commit-reviewed: STALE RECEIPT — ${e.agent_type}'s receipt is ${ageHours.toFixed(1)}h old (recorded ${safeLabel(e.at)}; advisory horizon ` +
+        `commit-reviewed: STALE RECEIPT — ${e.agent_type}'s receipt is ${ageHours.toFixed(1)}h old (measured from ${moment}; advisory horizon ` +
           `${STALE_RECEIPT_HOURS}h, i.e. almost certainly an earlier session than this commit). A receipt that outlived its own session was not ` +
           `consumed by the commit its review was for — most often because that commit was made with bare 'git commit'. Advisory only: it is still ` +
           `stamped and consumed here, so verify it actually reviewed THIS diff before relying on the trailer at the merge gate.`

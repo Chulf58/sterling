@@ -5,6 +5,11 @@
 // removes the entry whose agent_id matches — EXCEPT for a reviewer-class
 // entry (agent_type starting with the literal prefix 'reviewer-'), which is
 // first PROMOTED as {agent_type, files, at, session_id, branch, base_sha}
+// — plus an OPTIONAL reviewed_state {completed_at, blobs, truncated?,
+// truncated_of?} carrying the review-END instant and the git blob sha of each
+// reviewed file as it stood at Stop, and — only past REVIEWED_BLOBS_CAP files
+// — disclosing that the binding covers just the first 64 rather than the
+// whole territory (board 0f448efb; see reviewEndState below) —
 // into the durable review ledger
 // at .sterling/review-ledger.json (STORE ROOT, not transient/, so it
 // survives H1's session wipe — decision 12a26ca6-a301-466d-a45c-5e1eeff36694,
@@ -126,6 +131,100 @@ function gitReceiptIdentity(cwd) {
     branch: git(['symbolic-ref', '--quiet', '--short', 'HEAD']),
     base_sha: git(['rev-parse', 'HEAD']),
   };
+}
+
+// REVIEW-END CONTENT EVIDENCE (board 0f448efb). THE DEFECT THIS CLOSES, in two
+// halves that are really one: (1) a receipt was never checked against THE BYTES
+// IT REVIEWED — commit-reviewed's eligibility was session + branch + FILENAME
+// intersection, never content — and (2) the receipt's only timestamp, `at`, is
+// copied from the register entry, which stamps it at SubagentSTART (see the
+// Start branch below). So `at` marks when the review BEGAN, and a long review of
+// early bytes reads as FRESHER than it is. Both halves have the same root cause:
+// nothing was recorded at the moment the review ENDED.
+//
+// WHAT IS RECORDED: the git blob sha of each reviewed file AS IT STANDS AT STOP,
+// plus the Stop instant. base_sha (HEAD) does not answer this — a reviewer reads
+// the UNCOMMITTED working tree, which moves freely while HEAD stands still, so a
+// receipt can already carry the right base_sha for bytes that changed after it
+// was earned.
+//
+// WHY BLOB SHAS AND NOT MTIMES: the reporter's cheap version (compare `at`
+// against the newest staged mtime) is defeated by a `touch` and by any checkout
+// that rewrites mtimes without changing content; a content hash is not.
+// `git hash-object` rather than a hand-rolled sha1 of the raw bytes, because it
+// applies the SAME clean/eol filters `git add` applies — so the value is
+// directly comparable to the INDEX blob sha commit-reviewed reads at spend time,
+// including on Windows checkouts with autocrlf on, where raw-content hashing
+// would mismatch on every single file.
+//
+// POSITIVE EVIDENCE ONLY, and that is why this is ONE optional key rather than
+// two required ones. When no reviewed path resolves to a readable file there is
+// no content evidence — and nothing to anchor a completion time TO — so the key
+// is omitted entirely and every downstream check degrades to exactly today's
+// behavior (unjudgeable → eligible), the same failure direction the whole
+// receipt-expiry design already takes. Omission also matches the
+// copy-if-present, never-fabricated posture `files_source`/`attribution` already
+// use on this receipt: JSON.stringify drops an undefined-valued key, so the
+// promoted entry genuinely lacks it rather than carrying an empty default.
+//
+// NEVER THROWS, NEVER GATES: every failure path (no git, a non-zero exit, an
+// output shape that does not line up 1:1 with the inputs) returns undefined. A
+// PARTIAL result is deliberately discarded rather than recorded — a blob map
+// missing entries it should have had would read downstream as "these files were
+// not reviewed" and manufacture a false disclosure out of a tooling failure.
+const REVIEWED_BLOBS_CAP = 64; // far above any real review territory; bounds the argv this builds
+function reviewEndState(cwd, files) {
+  try {
+    const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === 'string' && f !== ''))] : [];
+    // TRUNCATION IS A CAP, NOT A FAILURE — recorded, never silent (review
+    // finding, MEDIUM). Slicing to the cap before hashing is deliberate (it
+    // bounds the argv `git hash-object` is spawned with), but for a review
+    // territory past the cap the receipt must not read as fully bound just
+    // because the shape it produces is identical to a complete one.
+    // `truncated`/`truncated_of` name exactly how partial the binding is, so a
+    // reader can tell "bound" from "bound as far as the cap" — this never
+    // refuses anything (the user ruled WARN, not REFUSE, for this whole
+    // mechanism); it only makes the cap's effect visible instead of silent.
+    const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
+    const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
+    // Only regular files can be hashed. Filtering FIRST matters: `git
+    // hash-object` fails as a whole when any one argument is missing, so a
+    // single deleted path would otherwise cost the evidence for every other
+    // file in the same receipt.
+    const present = paths.filter((p) => {
+      try {
+        return statSync(join(cwd, p)).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (present.length === 0) return undefined;
+    // `--` terminates options, so a path beginning with '-' is a path.
+    const r = spawnSync('git', ['hash-object', '--', ...present], { cwd, encoding: 'utf8', timeout: 10_000 });
+    if (!r || r.error || r.status !== 0) return undefined;
+    const shas = (r.stdout ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^[0-9a-f]{40}$/i.test(l));
+    // 1:1 or nothing — see the PARTIAL note above. git emits one sha per input
+    // in argument order, so any other count means the output cannot be aligned
+    // with the paths and must not be guessed at.
+    if (shas.length !== present.length) return undefined;
+    const blobs = {};
+    present.forEach((p, i) => {
+      blobs[p] = shas[i];
+    });
+    return {
+      completed_at: new Date().toISOString(),
+      blobs,
+      // Present only when true — same copy-if-present, never-fabricated
+      // posture as the other optional receipt fields (JSON.stringify drops an
+      // undefined-valued key, so an untruncated receipt genuinely lacks it).
+      ...(truncated ? { truncated: true, truncated_of: uniqueFiles.length } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 // EMPTY IS NULL AT THE WRITING END TOO (Codex review, MEDIUM). A promoted
@@ -637,6 +736,12 @@ try {
       // path, and holding the ledger mutex across them would push concurrent
       // reviewer stops toward the unlocked-timeout fallback for no reason.
       const identity = gitReceiptIdentity(input.cwd);
+      // Probed OUTSIDE the lock for the same reason `identity` is: it is a stat
+      // sweep plus one git spawn. It must also be read HERE, at Stop, and not
+      // inside the lock — the whole point of the field is that it names the
+      // bytes as they stood when the review ENDED, and the lock wait is time in
+      // which they could move.
+      const reviewedState = reviewEndState(input.cwd, departing.files);
       withLedgerLock(sterlingDir, () => {
         const ledgerPath = join(sterlingDir, 'review-ledger.json');
         let ledger = [];
@@ -698,10 +803,20 @@ try {
             // entirely, so the promoted receipt genuinely lacks the key rather
             // than carrying a fabricated default.
             attribution: departing.attribution,
+            // THE DISPATCH INSTANT, kept verbatim and deliberately NOT
+            // corrected in place (board 0f448efb): it is half of this hook's own
+            // duplicate-promotion key just above, and half of commit-reviewed's
+            // consume identity, so rewriting its meaning would break both. The
+            // review-END instant lives in reviewed_state.completed_at instead,
+            // which is what the staleness advisory now prefers.
             at: departing.at,
             session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
             branch: identity.branch,
             base_sha: identity.base_sha,
+            // Optional by construction — undefined when no reviewed path
+            // resolved to a readable file, and then dropped entirely by
+            // JSON.stringify (same posture as files_source/attribution above).
+            reviewed_state: reviewedState,
           });
         }
         const ledgerTmpPath = join(sterlingDir, `review-ledger.json.tmp-${process.pid}`);

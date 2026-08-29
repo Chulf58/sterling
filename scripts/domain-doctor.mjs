@@ -94,7 +94,7 @@
 //     mid-run — never a partial or replaced destination.
 import {
   readFileSync, readdirSync, existsSync, mkdirSync, openSync, readSync, closeSync,
-  realpathSync, statSync, rmSync, linkSync,
+  realpathSync, statSync, rmSync, linkSync, writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -579,6 +579,140 @@ const NO_OPERABLE_ROUTE =
   `READ-ONLY probe: it can report whether adopting WOULD be safe, it cannot perform it. Healing an existing split remains ` +
   `deliberately unbuilt (board 44434103). Nothing was written.`;
 
+/** The store's own activity_log retention (packages/store/src/index.ts:2236,
+ *  `DELETE FROM activity_log WHERE seq NOT IN (... ORDER BY seq DESC LIMIT 50)`).
+ *  Duplicated as a constant rather than imported because it is `private` inside
+ *  SterlingStore; if the store's cap ever moves, this number is what goes stale
+ *  and the disclosure below over- or under-states the eviction by that much. */
+const ACTIVITY_LOG_CAP = 50;
+
+/** The destination's activity_log as it stands BEFORE a migrate --apply.
+ *
+ *  WHY MIGRATE CARES (board b96ebf47, hazard 3). Every dest.create() calls
+ *  logActivity (packages/store/src/index.ts:1124), which INSERTS a 'created' row
+ *  and then PRUNES the table to the newest ACTIVITY_LOG_CAP rows (:2236) in the
+ *  same write. A bulk copy therefore EVICTS the destination's recent-activity
+ *  feed — the TUI Queue tab's activity section, listActivityLog — and refills it
+ *  with rows claiming a COPIED record was 'created', each stamped with the
+ *  record's ORIGINAL created_at, so the fabricated entries do not even read as
+ *  recent. Nothing in the current output says so, which makes it silent loss
+ *  inside the one tool whose charter is not losing anything silently.
+ *
+ *  THE REAL FIX IS NOT IN THIS FILE, deliberately. Suppressing or batching the
+ *  activity write belongs to SterlingStore, and re-inserting the evicted rows
+ *  from here would be a hand-crafted SQL write into a store — precisely what
+ *  this tool's charter forbids (the `domain-doctor` article's
+ *  intended_behavior: repair goes through the validated write path, never
+ *  hand-crafted SQL). So the loss is DISCLOSED before and after the run, and the
+ *  rows about to be evicted are PRESERVED VERBATIM in the run's journal, which
+ *  is the durable trail. activity_log is itself a bounded, evictable surface
+ *  that nothing may depend on surviving (anti_pattern
+ *  [no-bounded-trail-guard-for-destructive-addressing]) — the journal is where
+ *  the record belongs.
+ *
+ *  A read that THROWS is reported UNREADABLE, never swallowed: "could not be
+ *  checked" and "checked, nothing to lose" are different facts and printing the
+ *  second when the first is true is the false-clean shape this tool keeps
+ *  finding in itself. It is NOT a refusal, though — a recent-activity feed that
+ *  cannot be read is no reason to block a data migration. */
+function activityLogState(dbPath) {
+  try {
+    return readOnlyProbe(dbPath, (db) => {
+      const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
+      if (!tables.has('activity_log')) return { readable: true, present: false, entries: [] };
+      const entries = db
+        .prepare('SELECT seq, at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC')
+        .all();
+      return { readable: true, present: true, entries };
+    });
+  } catch (e) {
+    return { readable: false, present: null, entries: [], error: e.message };
+  }
+}
+
+/** How many of the destination's existing activity rows SURVIVE `inserts` new
+ *  ones, given the newest-N prune. The pre-existing rows are the oldest by seq,
+ *  so they are evicted first. */
+function activitySurvivors(before, inserts) {
+  const rows = before.readable && before.present ? before.entries.length : 0;
+  return Math.max(0, Math.min(rows, ACTIVITY_LOG_CAP - inserts));
+}
+
+/** The journal path for ONE migrate --apply run: a manifest JSON beside the
+ *  DESTINATION store (the store that changes), stamped so runs never collide —
+ *  the same convention scripts/migrate-stores.mjs uses for its migration
+ *  manifests. The name deliberately does not end in `.db`, so nothing that
+ *  enumerates store files (storeFilesUnder, projectContext's single-*.db
+ *  fallback) can mistake a journal for a store. */
+function migrateJournalPath(to, at) {
+  return `${to}.domain-doctor-migrate-${at.replace(/[:.]/g, '-')}.json`;
+}
+
+/**
+ * WHY migrate --apply JOURNALS AT ALL (board b96ebf47). It is the only path in
+ * this tool that mutates an existing store, and until now the ONLY trace it left
+ * was stdout: which records crossed, which were refused, and whether the
+ * destination is now partially migrated all lived in a terminal scrollback. That
+ * is not a trail — a run inside a script, a closed window or a crash mid-loop
+ * leaves an operator with a changed store and no way to learn what changed. The
+ * destination's own activity_log cannot stand in for it: it is capped at 50 and
+ * this very run evicts it (see activityLogState).
+ *
+ * WRITTEN TWICE, ON PURPOSE. The INTENT journal lands BEFORE the first
+ * dest.create() with outcome 'in_progress' and every planned id, so a run that
+ * dies mid-loop still names what it was in the middle of doing — the copy loop
+ * is not atomic (AC3, declined on policy 2026-08-27), so "which of these
+ * committed" is exactly the question a crash leaves behind. The same file is
+ * then rewritten with the actual per-record result and the final outcome.
+ *
+ * A JOURNAL THAT CANNOT BE WRITTEN REFUSES THE RUN, before anything is copied:
+ * an untraceable bulk write into a knowledge store is the outcome this exists to
+ * prevent, and the destination directory must be writable for the copy itself
+ * anyway, so the refusal cannot strand a legitimate migrate.
+ *
+ * ABSENCE IS ENFORCED BY THE PUBLICATION PRIMITIVE, NEVER BY AN existsSync CHECK
+ * (the AC23 ruling, from adopt --create-only's linkSync barrier; review finding
+ * 2026-08-29). The intent write goes out with flag 'wx' — O_CREAT|O_EXCL, which
+ * creates-or-fails atomically — so two --apply runs against the same destination
+ * inside the same millisecond cannot both believe the name is free and clobber
+ * each other's intent record. The earlier shape here was exactly the barrier
+ * this repo already ruled against: existsSync, then a truncating write, with the
+ * second run silently destroying the trail of a first that might still be
+ * mid-copy. The FINALIZE write stays truncating on purpose: it is rewriting the
+ * file THIS run created moments ago, and 'wx' there would fail every time.
+ */
+function writeMigrateJournal(journalPath, journal, { beforeAnyWrite }) {
+  try {
+    writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, beforeAnyWrite ? { flag: 'wx' } : undefined);
+    return true;
+  } catch (e) {
+    if (beforeAnyWrite) {
+      if (e.code === 'EEXIST') {
+        fail(
+          `refusing: another migrate journal already holds the name '${journalPath}' — the intent journal is created with O_EXCL, ` +
+            `so this run lost that race to a concurrent (or same-millisecond) --apply against the same destination. That other ` +
+            `run's journal is intact and untouched, and may describe a copy still in progress. Wait for it to finish, read its ` +
+            `journal, then re-run — a committed id is skipped as already-present. This run wrote nothing.`
+        );
+      }
+      fail(
+        `refusing: could not write the migrate journal to '${journalPath}' (${e.message}) — --apply is the one path here that ` +
+          `CHANGES a store, and it will not do that without a durable record of what it changed. Nothing was written.`
+      );
+    }
+    // AFTER the copy loop there is nothing to refuse: records already crossed.
+    // Say so loudly and point at the intent journal, which still names every
+    // planned id — never a silent swallow, and never a claim that the run was
+    // fully journalled.
+    console.error(
+      `domain-doctor: JOURNAL NOT FINALIZED — the outcome could not be written to '${journalPath}' (${e.message}). The intent ` +
+        `journal written before the copy still names every PLANNED record; the per-record outcome above (this run's stdout) is ` +
+        `now the only record of what actually crossed.`
+    );
+    return false;
+  }
+}
+
 function migrate() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
@@ -809,6 +943,14 @@ function migrate() {
     const state = src.columnState.get(r.id);
     console.log(`  copy: ${r.id} (${r.type}, ${state?.status ?? r.status ?? 'unknown'}, ${r.created_at})`);
   }
+  // READ ONCE, DISCLOSED ON BOTH BRANCHES (board b96ebf47, hazard 3): the plan
+  // and the apply must tell the same story about what the destination loses, for
+  // the same reason AC21's conflict check runs before the branch — a dry run
+  // that reports clean and an --apply that then damages something is the worse
+  // failure. Skipped entirely when there is nothing to copy: no create(), no
+  // activity row, no eviction, and a probe with nothing to say is noise (P1).
+  const activityBefore = missing.length ? activityLogState(to) : { readable: true, present: false, entries: [] };
+  const activityRowsBefore = activityBefore.present ? activityBefore.entries.length : 0;
   if (!apply) {
     console.log('DRY-RUN: nothing written — re-run with --apply to migrate');
     // THE PLAN MUST NOT READ AS ALL-OR-NOTHING (board b96ebf47, hazard 4).
@@ -827,8 +969,87 @@ function migrate() {
           `split across a smaller set than they are now rather than merged.`
       );
     }
+    if (missing.length && !activityBefore.readable) {
+      console.log(
+        `  ACTIVITY LOG: the destination's activity_log could NOT be read (${activityBefore.error}), so this plan cannot say what ` +
+          `--apply would do to it — "not checked" is not "nothing to lose".`
+      );
+    } else if (activityRowsBefore - activitySurvivors(activityBefore, missing.length) > 0) {
+      // GATED ON ACTUAL LOSS, like the NOT ATOMIC warning above is gated on
+      // `missing.length > 1`: a small copy into a short feed evicts NOTHING, and
+      // an eviction warning reading "0 entries would be EVICTED" is the noise
+      // that teaches an operator to skip this section (P1).
+      const survivors = activitySurvivors(activityBefore, missing.length);
+      console.log(
+        `  ACTIVITY LOG (FORECAST): --apply inserts one 'created' row per copied record and the store PRUNES the table to the ` +
+          `newest ${ACTIVITY_LOG_CAP} (logActivity, packages/store/src/index.ts), so on the ${activityRowsBefore} entries the ` +
+          `destination holds RIGHT NOW, ${activityRowsBefore - survivors} would be EVICTED (${survivors} surviving) and replaced ` +
+          `by rows saying each COPIED record was 'created', each stamped with that record's ORIGINAL created_at rather than now. ` +
+          `This is a prediction, not a measurement — a concurrently running server or TUI logging its own activity changes it, and ` +
+          `--apply re-reads the table and reports what actually went. The evicted rows cannot be recovered from the store ` +
+          `afterwards, so --apply preserves the whole feed verbatim in the journal it writes beside the destination before it ` +
+          `copies anything.`
+      );
+    }
     return;
   }
+  // NOTHING TO COPY IS NOT AN EVENT. A re-run of a finished migrate reaches
+  // here with an empty plan (the idempotent-skip path), writes no record and
+  // changes no store — so it gets no journal either, or every idempotent re-run
+  // would litter a manifest beside the destination for a run that did nothing.
+  if (!missing.length) {
+    console.log('MIGRATED: 0 record(s) — the destination already held every source record; nothing was written and no journal was created.');
+    return;
+  }
+  const at = new Date().toISOString();
+  // No existsSync pre-check here on purpose — see writeMigrateJournal: the
+  // O_EXCL create IS the collision check, and a check separate from the write is
+  // a window, not a barrier.
+  const journalPath = migrateJournalPath(to, at);
+  const journal = {
+    tool: 'domain-doctor migrate --apply',
+    board: 'b96ebf47',
+    at,
+    from,
+    to,
+    schema_version: { source: fromProbe.version, destination: toProbe.version },
+    source_records: rows.length,
+    already_present: rows.length - missing.length,
+    planned: missing.map((r) => ({ id: r.id, type: r.type, created_at: r.created_at })),
+    copied: [],
+    refused: [],
+    // NOT ATOMIC (AC3, declined on policy 2026-08-27): 'in_progress' is what a
+    // reader finds if this process dies mid-loop, and it is the true answer —
+    // some prefix of `planned` may have committed and the journal cannot say
+    // which. The re-run named here is the resume path.
+    outcome: 'in_progress',
+    atomic: false,
+    resume: `re-run the same command; every already-committed id is skipped as already-present`,
+    // THE EVICTED FEED, PRESERVED (hazard 3). These rows are about to be pruned
+    // out of the destination by this run's own writes and cannot be recovered
+    // from the store afterwards, so the journal is where they survive.
+    activity_log: {
+      cap: ACTIVITY_LOG_CAP,
+      readable: activityBefore.readable,
+      table_present: activityBefore.present,
+      rows_before: activityRowsBefore,
+      // FORECAST ONLY, and named as one. `survivors`/`evicted` are added at
+      // finalize from a SECOND read of the table, because a domain store is
+      // routinely open to a live MCP server or TUI whose own activity rows
+      // change what this run actually displaced.
+      forecast_survivors: activitySurvivors(activityBefore, missing.length),
+      forecast_evicted: activityRowsBefore - activitySurvivors(activityBefore, missing.length),
+      note:
+        `each copied record inserts one 'created' row (logActivity, packages/store/src/index.ts) stamped with the record's ` +
+        `ORIGINAL created_at, and the store prunes the table to the newest ${ACTIVITY_LOG_CAP}`,
+      entries_before: activityBefore.entries,
+    },
+    // PROVENANCE, same shape as the migration runner's journal (board d055b150):
+    // an unattributed store-mutating run cost a real investigation there.
+    invocation: { argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid, ppid: process.ppid },
+  };
+  writeMigrateJournal(journalPath, journal, { beforeAnyWrite: true });
+  console.log(`JOURNAL: ${journalPath}`);
   const dest = new SterlingStore(to);
   let copied = 0;
   const refused = [];
@@ -837,6 +1058,7 @@ function migrate() {
       try {
         dest.create(r); // validated path: schema + indexes + FTS
         copied++;
+        journal.copied.push(r.id);
       } catch (e) {
         refused.push({ id: r.id, reason: e.message });
       }
@@ -846,6 +1068,79 @@ function migrate() {
   }
   console.log(`MIGRATED: ${copied} record(s)`);
   for (const r of refused) console.log(`REFUSED: ${r.id} — ${r.reason}`);
+  journal.refused = refused;
+  journal.outcome = refused.length ? (copied > 0 ? 'partial' : 'nothing_written') : 'complete';
+  // A REPORT MAY NOT FORECAST (review finding, 2026-08-29). The pre-run figures
+  // are a prediction off `missing`, taken BEFORE the destination store was even
+  // opened; a domain store is routinely open to a live MCP server or TUI, and
+  // any row it logged during this run changes what was actually displaced. A
+  // forecast printed in the past tense ("were EVICTED") is a measurement claim
+  // the code never made, and it fails in the direction that matters: with a
+  // concurrent writer the forecast can read 0 and print NOTHING while real rows
+  // were lost — a false clean on the exact hazard this disclosure exists for.
+  // So the table is READ AGAIN, after dest.close(), and eviction is MEASURED by
+  // seq: activity_log.seq is INTEGER PRIMARY KEY AUTOINCREMENT, so a seq is
+  // never reused and "present before, absent after" is exact.
+  const activityAfter = activityLogState(to);
+  const afterSeqs =
+    activityAfter.readable && activityAfter.present ? new Set(activityAfter.entries.map((e) => e.seq)) : null;
+  // A MEASUREMENT NEEDS BOTH ENDS (review finding, 2026-08-29) — same class as
+  // the forecast-reported-as-measurement above, one layer further in. Eviction
+  // is `present before, absent after`, so it is only measurable against a
+  // baseline that was actually READ. When the pre-run read FAILED,
+  // `activityBefore.entries` is the fallback empty array, and the seq
+  // intersection below then computes survivors 0 / evicted 0 from nothing at
+  // all — figures the journal used to durably record with `measured: true`
+  // while stdout (correctly) said the pre-run state was NOT KNOWN. The journal
+  // is the artifact that outlives the run, so it was the copy that lied.
+  //
+  // `readable` is the ONLY end-condition here, deliberately: a before-state
+  // that was read and found EMPTY (no activity_log table yet, or a table with
+  // no rows) is a usable baseline, and `0 evicted` measured against it is a
+  // true claim, not an absent one. Unreadable and empty are different facts —
+  // the whole point of activityLogState's readable/present split.
+  const beforeUsable = activityBefore.readable === true;
+  const measured = afterSeqs !== null && beforeUsable;
+  const survivors = measured ? activityBefore.entries.filter((e) => afterSeqs.has(e.seq)).length : null;
+  const evicted = survivors === null ? null : activityRowsBefore - survivors;
+  journal.activity_log.after_readable = activityAfter.readable;
+  journal.activity_log.rows_after = afterSeqs ? activityAfter.entries.length : null;
+  journal.activity_log.survivors = survivors;
+  journal.activity_log.evicted = evicted;
+  journal.activity_log.measured = measured;
+  // Named, not inferred: a reader of the journal must not have to reconstruct
+  // WHICH end failed from the readable flags, and `measured: false` alone does
+  // not say whether the baseline or the re-read was missing.
+  journal.activity_log.not_measured_reason = measured
+    ? null
+    : !beforeUsable && afterSeqs === null
+      ? 'the destination activity_log could be read NEITHER before nor after this run'
+      : !beforeUsable
+        ? `the destination activity_log could NOT be read before this run (${activityBefore.error}), so there was no baseline to measure eviction against`
+        : 'the destination activity_log could NOT be re-read after this run';
+  const journalFinalized = writeMigrateJournal(journalPath, journal, { beforeAnyWrite: false });
+  if (evicted === null && activityRowsBefore) {
+    console.log(
+      `ACTIVITY LOG: the destination's activity_log could not be re-read after the copy` +
+        `${activityAfter.error ? ` (${activityAfter.error})` : ''}, so what this run displaced could NOT be measured. On the ` +
+        `${activityRowsBefore} entries read before it started, ${journal.activity_log.forecast_evicted} would have been evicted; ` +
+        `that is a forecast, not a measurement. The pre-run feed is preserved verbatim under 'activity_log' in the journal at ` +
+        `'${journalPath}'.`
+    );
+  } else if (evicted > 0) {
+    console.log(
+      `ACTIVITY LOG: ${evicted} of the ${activityRowsBefore} recent-activity entries the destination held before this run are ` +
+        `GONE from it now (measured by re-reading the table; the store keeps only the newest ${ACTIVITY_LOG_CAP}, and each copied ` +
+        `record inserted a 'created' row stamped with its ORIGINAL created_at). Anything a concurrently running server or TUI ` +
+        `logged during the run counts toward that displacement too. Those entries are preserved verbatim under 'activity_log' in ` +
+        `the journal at '${journalPath}'; they cannot be read back out of the store.`
+    );
+  } else if (missing.length && !activityBefore.readable) {
+    console.log(
+      `ACTIVITY LOG: the destination's activity_log could NOT be read before this run (${activityBefore.error}), so what this run ` +
+        `evicted from it is NOT KNOWN and nothing of it was preserved in the journal.`
+    );
+  }
   // THE ONE PATH THAT DID WRITE MUST SAY THAT IT WROTE (board b96ebf47, hazard
   // 4). Every guard above ends "Nothing was written"; this branch is the only
   // outcome where something MAY HAVE BEEN written and then stopped short, and it used to
@@ -860,7 +1155,10 @@ function migrate() {
   // field no caller outside the package can reach". THAT WAS FALSE, and a
   // comment asserting a limitation the code does not have is exactly how a real
   // hazard gets filed as loudness-only and then never revisited:
-  // `withTransaction<T>()` is PUBLIC (packages/store/src/index.ts:2794) and the
+  // `withTransaction<T>()` is PUBLIC (packages/store/src/index.ts, grep the
+  // symbol — this comment cited :2794, the board re-audit found :2982, and it
+  // has since moved again; a line number in a live file is a lookup that rots
+  // faster than the claim it supports) and the
   // transaction is REENTRANT (:2728-2736, :881), so
   // `dest.withTransaction(() => { for (const r of missing) dest.create(r); })`
   // is buildable today and would give exactly the atomicity that text called
@@ -870,7 +1168,7 @@ function migrate() {
   // all-or-nothing CONTRADICTS AC3 of the `domain-doctor` article — a
   // schema-invalid record is REPORTED AND SKIPPED with exit 3 — because one bad
   // record must not block a whole migration, and the resume path is wanted.
-  // withTransaction (index.ts:2794) is the route if and only if that POLICY is
+  // withTransaction (index.ts, by symbol) is the route if and only if that POLICY is
   // ever revisited, which is a decision to take rather than a repair owed (see
   // decision [domain-doctor-migrate-goes-fail-closed-on-schema-v2-and-a-ne] for
   // the surrounding transactional-importer scope). What IS owed to the operator
@@ -910,6 +1208,11 @@ function migrate() {
     }
     process.exit(3);
   }
+  // A run whose OUTCOME could not be journalled is a FINDING, not a success:
+  // records crossed (the console said which), but the durable trail stopped at
+  // the intent. Exit 3 — the same three-valued convention the rest of this tool
+  // uses for "it happened, and there is something you need to know about it".
+  if (!journalFinalized) process.exit(3);
 }
 
 /** Every id that RESOLVES in a store: `records.id` UNION, when the table

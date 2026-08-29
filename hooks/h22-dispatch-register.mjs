@@ -5476,6 +5476,40 @@ function gitReceiptIdentity(cwd) {
     base_sha: git(["rev-parse", "HEAD"])
   };
 }
+var REVIEWED_BLOBS_CAP = 64;
+function reviewEndState(cwd, files) {
+  try {
+    const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : [];
+    const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
+    const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
+    const present = paths.filter((p) => {
+      try {
+        return statSync3(join3(cwd, p)).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (present.length === 0) return void 0;
+    const r = spawnSync2("git", ["hash-object", "--", ...present], { cwd, encoding: "utf8", timeout: 1e4 });
+    if (!r || r.error || r.status !== 0) return void 0;
+    const shas = (r.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/i.test(l));
+    if (shas.length !== present.length) return void 0;
+    const blobs = {};
+    present.forEach((p, i) => {
+      blobs[p] = shas[i];
+    });
+    return {
+      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      blobs,
+      // Present only when true — same copy-if-present, never-fabricated
+      // posture as the other optional receipt fields (JSON.stringify drops an
+      // undefined-valued key, so an untruncated receipt genuinely lacks it).
+      ...truncated ? { truncated: true, truncated_of: uniqueFiles.length } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
 function normIdentity(v) {
   if (typeof v === "string") return v.trim() === "" ? null : v.trim();
   if (typeof v === "number" && Number.isFinite(v)) return String(v);
@@ -5682,6 +5716,7 @@ try {
     if (departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-")) {
       const sterlingDir = join3(input.cwd, ".sterling");
       const identity = gitReceiptIdentity(input.cwd);
+      const reviewedState = reviewEndState(input.cwd, departing.files);
       withLedgerLock(sterlingDir, () => {
         const ledgerPath = join3(sterlingDir, "review-ledger.json");
         let ledger = [];
@@ -5714,10 +5749,20 @@ try {
             // entirely, so the promoted receipt genuinely lacks the key rather
             // than carrying a fabricated default.
             attribution: departing.attribution,
+            // THE DISPATCH INSTANT, kept verbatim and deliberately NOT
+            // corrected in place (board 0f448efb): it is half of this hook's own
+            // duplicate-promotion key just above, and half of commit-reviewed's
+            // consume identity, so rewriting its meaning would break both. The
+            // review-END instant lives in reviewed_state.completed_at instead,
+            // which is what the staleness advisory now prefers.
             at: departing.at,
             session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
             branch: identity.branch,
-            base_sha: identity.base_sha
+            base_sha: identity.base_sha,
+            // Optional by construction — undefined when no reviewed path
+            // resolved to a readable file, and then dropped entirely by
+            // JSON.stringify (same posture as files_source/attribution above).
+            reviewed_state: reviewedState
           });
         }
         const ledgerTmpPath = join3(sterlingDir, `review-ledger.json.tmp-${process.pid}`);

@@ -185,7 +185,15 @@ test('queue tab (§3.2.7/§11): system items only, fixed half divider with trunc
     store.remove(named.id, '2026-06-10T12:35:00.000Z');
     const keyed = store.create({
       ...envelope('todo'),
-      text: 'article missing: direct-mode work touched 3 file(s) no feature_article owns',
+      // Wording tracks the live h10-direct-capture.mjs mint template shape
+      // ('article missing: ${demandKeys.length} file(s) nothing owns
+      // (feature_article or repo-located reference doc)...'); the old fossil
+      // phrase ('direct-mode work touched ... no feature_article owns')
+      // belonged to an earlier template and exists nowhere at HEAD. This is a
+      // display-formatting fixture only — the assertions below key off
+      // file_keys (the (+N) fallback), never off this text, so the reword
+      // changes no assertion outcome.
+      text: 'article missing: 3 file(s) nothing owns (feature_article or repo-located reference doc)',
       source: 'system',
       system_reason: 'article_missing',
       file_keys: ['src/a.mjs', 'src/b.mjs', 'src/c.mjs'],

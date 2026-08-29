@@ -1028,8 +1028,18 @@ test('H10 article demand: an open article_missing item with overlapping file key
     // go stale while the situation escalated — the surviving item now updates in
     // place through enqueueSystemTodo (same key + different text → refresh).
     const refreshed = items.find((t) => t.file_keys?.includes('src/x.mjs'));
+    // Stable substring of the live h10-direct-capture.mjs mint template
+    // ('article missing: ${demandKeys.length} file(s) nothing owns
+    // (feature_article or repo-located reference doc)...') — chosen because it
+    // survives the count/newly-created suffix. The old pinned phrase
+    // ('direct-mode work touched') is a fossil from an earlier mint template
+    // and exists nowhere at HEAD, which let this assertion pass vacuously
+    // against ANY text (including the stale seed) — SABOTAGE: revert
+    // enqueueSystemTodo's refresh path so it re-writes the OLD seed text
+    // ('article missing: earlier session') instead of the escalated template
+    // -> refreshed.text no longer contains 'file(s) nothing owns' -> red.
     assert.ok(
-      refreshed && refreshed.text.includes('direct-mode work touched'),
+      refreshed && refreshed.text.includes('file(s) nothing owns'),
       'the overlapping seed is REFRESHED in place — escalation updates the surviving item, never suppresses silently'
     );
     const unrelated = items.find((t) => t.file_keys?.includes('lib/unrelated.mjs'));

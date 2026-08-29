@@ -786,19 +786,53 @@ export class SterlingStore {
     // too-new throws from inside the transaction (rolling back any stamp
     // in progress); the catch below closes the connection before propagating,
     // matching the fast-path refusal's write-nothing/close-cleanly contract.
-    try {
-      this.tx(() => {
-        const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-        if (current > SUPPORTED_SCHEMA_VERSION) {
-          throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
-        }
-        if (current < SUPPORTED_SCHEMA_VERSION) {
-          this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
-        }
-      });
-    } catch (e) {
-      this.db.close();
-      throw e;
+    //
+    // ONLY WHEN A STAMP IS ACTUALLY OWED (board 362205a6). This transaction used
+    // to run on EVERY open, so opening an already-stamped store was itself a
+    // WRITE: `tx()` takes BEGIN IMMEDIATE, which busy-fails against any held
+    // write lock. That made a healthy read of a healthy store fail whenever
+    // another process (MCP server, TUI, a sibling hook) held the lock longer
+    // than busy_timeout — and for the hooks that is a FAIL-OPEN, because a
+    // hook's uncaught throw exits 1, the runner reads any non-2 exit as
+    // NON-BLOCKING, and openStore sits outside several hooks' fail-closed try
+    // (anti-pattern e13f0fb5). Fixing it here rather than in one hook is
+    // deliberate: every openStore caller inherits it.
+    //
+    // The condition is exact, not a heuristic. Control reaches this point only
+    // with foundSchemaVersion <= SUPPORTED (the too-new fast path above closed
+    // the connection and threw), and a foundSchemaVersion BELOW supported can
+    // only get here via `isFresh` (an existing sub-version store returned
+    // read-only). So `!==` means "this open must stamp", and equality means the
+    // transaction body would read the version, match on both comparisons and
+    // write nothing — a write lock taken purely to perform a read.
+    //
+    // What the skip gives up, stated plainly: on an already-stamped store the
+    // re-read inside the lock no longer runs, so a migrator committing a NEWER
+    // version between the fast read above and here is no longer caught by THIS
+    // transaction. Nothing is silently overwritten by that (the skipped body
+    // writes only when current < SUPPORTED, which cannot be true of a newer
+    // store). It is not left unguarded either — but the guard is the explicit
+    // too-new check on the captured baseline below, NOT assertLiveSchemaVersion:
+    // that one compares live-vs-baseline only, so a baseline captured AT the
+    // newer version compares equal forever and would allow every subsequent
+    // write against an unsupported schema (review finding, MEDIUM). The skipped
+    // body's `current > SUPPORTED → throw` is therefore restored below, outside
+    // the transaction, where it costs no write lock.
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      try {
+        this.tx(() => {
+          const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+          if (current > SUPPORTED_SCHEMA_VERSION) {
+            throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
+          }
+          if (current < SUPPORTED_SCHEMA_VERSION) {
+            this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+          }
+        });
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
     }
 
     // Capture the LIVE write guard's baseline now that the stamp-forward (if
@@ -806,6 +840,21 @@ export class SterlingStore {
     // SUPPORTED_SCHEMA_VERSION so this stays correct even if a future change
     // stamps something else.
     this.openedSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+
+    // TOO-NEW RE-CHECK ON THE CAPTURED BASELINE (review finding, MEDIUM). The
+    // conditional stamp above skips a body that also held the only re-read of
+    // `current > SUPPORTED → throw`, so with foundSchemaVersion === SUPPORTED a
+    // migrator committing a newer version between the open-time read and the
+    // capture on the line above lands that NEWER version in
+    // openedSchemaVersion. assertLiveSchemaVersion cannot catch it — it only
+    // asks live !== baseline, and here they are equal — so every subsequent
+    // write would proceed against an unsupported-newer schema, where this open
+    // previously threw. Re-assert it against SUPPORTED explicitly, closing the
+    // connection first exactly as the open-time fast path does.
+    if (this.openedSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(this.openedSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
   }
 
   journalMode(): string {

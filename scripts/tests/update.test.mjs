@@ -680,6 +680,108 @@ test('the dirty refusal splits committed BUILD OUTPUTS from source and gives eac
   );
 });
 
+// -----------------------------------------------------------------------------
+// rulings.md joins GENERATED_TRACKED; the dirty-refusal justification splits by
+// FAMILY (hooks bundles keep the byte-compare rationale, architecture.md/
+// rulings.md get a store-projection rationale); a staged build-output change
+// gets an index-aware `git restore --staged --worktree --` remedy beside the
+// existing worktree-only `git checkout --`. SPEC-ONLY: authored from the fix's
+// own description (H4 read-wall denies scripts/lib/update.mjs), verified only
+// against this file's existing cleanCurrency()/refusalFor conventions and
+// decision a9b98b7d (the original hooks/architecture.md split this extends).
+// -----------------------------------------------------------------------------
+
+test('CONTROL, placed first: a genuine SOURCE change (hooks/hooks.json) reads as SOURCE CHANGES, never a build output', () => {
+  const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [' M hooks/hooks.json'] });
+  assert.match(c, /SOURCE CHANGES/);
+  assert.doesNotMatch(c, /COMMITTED BUILD OUTPUTS/, 'hooks/hooks.json is a source file, never classified as a generated build output');
+});
+// SABOTAGE: broaden the GENERATED_TRACKED match from an exact-path form to a
+// prefix form (e.g. /^hooks\//) so it also matches hooks/hooks.json — this
+// control flips to COMMITTED BUILD OUTPUTS and the doesNotMatch assertion goes
+// red. (This control is what rules out "the classifier denies/flags
+// everything" as the explanation for the three arms below going green.)
+
+test('rulings.md is classified as a COMMITTED BUILD OUTPUT, never SOURCE CHANGES', () => {
+  const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [' M rulings.md'] });
+  assert.match(c, /COMMITTED BUILD OUTPUTS/);
+  assert.doesNotMatch(c, /SOURCE CHANGES/, 'rulings.md is a generated projection, never real source');
+});
+// SABOTAGE: drop the /^rulings\.md$/ entry from GENERATED_TRACKED — this test
+// goes red because the refusal reclassifies rulings.md as SOURCE CHANGES
+// instead of a build output.
+
+test('a STAGED build-output change (architecture.md) names the index-aware restore remedy', () => {
+  const c = refusalFor({ ...cleanCurrency(), dirty_tracked: ['M  architecture.md'] });
+  assert.match(c, /git restore --staged --worktree -- architecture\.md/);
+});
+// SABOTAGE: delete the staged-restore remedy line, leaving only the
+// worktree-only `git checkout --` remedy for the unstaged case — this test
+// goes red because the staged case would no longer name --staged --worktree.
+
+test('an unstaged architecture.md carries the store-projection justification, while a hooks bundle in the SAME refusal still carries the byte-compare justification', () => {
+  const bundle = ' M hooks/h19-knowledge-delivery.mjs';
+  const projection = ' M architecture.md';
+  const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [bundle, projection] });
+  assert.match(c, /read-only PROJECTIONS of the knowledge store/);
+  assert.match(c, /byte-compares/, 'the hooks bundle entry keeps its own byte-compare justification in the same refusal');
+});
+// SABOTAGE: restore the old single-sentence justification (the one
+// byte-compares sentence that used to cover both hooks bundles AND
+// architecture.md/rulings.md alike) — the "read-only PROJECTIONS of the
+// knowledge store" match goes red, since that wording no longer appears.
+
+// -----------------------------------------------------------------------------
+// shellQuote() PINS (spec-only — H4 read-wall denies scripts/lib/update.mjs;
+// authored from the dispatch spec: shellQuote() prints a path BARE only when
+// it matches ^[A-Za-z0-9._/-]+$, otherwise POSIX single-quotes it, embedded
+// single quotes escaped via the standard '\'' technique). Existing tests above
+// only ever exercise plain names (architecture.md, hooks/h19-*.mjs,
+// scripts/prep.mjs — all bare-safe), so the quoting branch itself is
+// unpinned. These three arms exercise it directly, reusing cleanCurrency()/
+// refusalFor() exactly as the tests above do. The CONTROL is placed first: it
+// must pass for the OPPOSITE reason (nothing needed quoting) from the two
+// arms that follow (quoting was required and applied).
+// -----------------------------------------------------------------------------
+
+test('shellQuote CONTROL: a plain, bare-safe path (architecture.md) still prints UNQUOTED — byte-identical to the frozen remedy line, since frozen remedy strings depend on it', () => {
+  const c = refusalFor({ ...cleanCurrency(), dirty_tracked: ['M  architecture.md'] });
+  assert.match(c, /git restore --staged --worktree -- architecture\.md/, 'the bare-safe path renders exactly as before shellQuote existed');
+  assert.doesNotMatch(c, /'architecture\.md'/, 'a path needing no quoting must never be wrapped in single quotes');
+});
+// SABOTAGE: none needed for this control to distinguish it from the two arms
+// below — it must stay GREEN under the very sabotage that reddens them (see
+// below), because "return path unconditionally" is only a NO-OP difference
+// for a path that was never going to be quoted in the first place. That is
+// exactly what proves the two arms below are pinning the quoting branch and
+// not something else: if this control also went red under the same
+// sabotage, the failure could not be attributed to the quoting branch alone.
+
+test('shellQuote: a dirty path containing a SPACE is single-quoted as ONE pathspec, never split into two bare words', () => {
+  const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [' M hooks/a b.mjs'] });
+  assert.match(c, /'hooks\/a b\.mjs'/, `a path containing a space must be wrapped in single quotes as one token — remedy=${c}`);
+});
+// SABOTAGE: in shellQuote(), replace the whole body with `return path;`
+// (i.e. always return the bare, unquoted path, unconditionally) — the
+// wrapping quotes vanish, the path prints as the bare, space-containing
+// (and therefore two-word-looking) `hooks/a b.mjs`, and the match above goes
+// red. Confirm the sabotage landed by grepping for the literal replaced
+// function body in scripts/lib/update.mjs before trusting a red/green read.
+
+test('shellQuote: an embedded single quote in a dirty path is escaped via the POSIX \'\\\'\' technique, not left bare or broken', () => {
+  const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [" M hooks/a'b.mjs"] });
+  // Target literal: 'hooks/a'\''b.mjs' — outer quotes, close-quote before the
+  // embedded ', an escaped literal quote (\'), then reopen-quote and the rest.
+  assert.ok(
+    c.includes("'hooks/a'\\''b.mjs'"),
+    `an embedded single quote must be escaped via '\\'' (close, escaped-quote, reopen), not left bare or malformed — remedy=${c}`
+  );
+});
+// SABOTAGE: same as above — `return path;` unconditionally in shellQuote()
+// leaves the embedded quote completely unescaped (`hooks/a'b.mjs` printed
+// raw), so the exact escaped literal above never appears and this assertion
+// goes red alongside the space-arm.
+
 // --------------------------- sterling-update.bat delivery ---------------------------
 
 const BAT_TEMPLATE = '@echo off\r\nrem updater\r\n"wt.exe" wsl.exe --cd "{{WIN_PLUGIN_DIR}}" -- bash -lic "bash scripts/update-console.sh"\r\n';
