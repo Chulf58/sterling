@@ -4628,7 +4628,15 @@ var RECORD_TYPES = {
     // The measured worst case for full bodies: board items run to ~8 KB each,
     // so a whole-board read spilled 478 KB. system_reason is what sorts the
     // maintenance queue into lanes; priority/source sort the board.
-    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
+    //
+    // slug LEADS, exactly as it does on decision/feature_article, and is
+    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
+    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
+    // address does not resolve. Names clip only in the composed `name (id8)`
+    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
+    // Absent for a legacy slugless item: digestRecord omits empty headline
+    // fields, and an absent name is safer than a fabricated one (df361a0f).
+    digest: { slug: "plain", text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
   },
   brief: {
     schema: briefSchema,
@@ -7955,20 +7963,44 @@ var machineWarning = "";
 var machineContext = "";
 try {
   const agentsDir = join6(input.cwd, ".claude", "agents");
-  if (existsSync4(agentsDir)) {
-    const dead = [];
-    for (const f of readdirSync2(agentsDir).filter((n) => n.endsWith(".md"))) {
-      const content = readFileSync4(join6(agentsDir, f), "utf8");
-      if (!parseInstalledHeader(content)) continue;
-      const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync4(p));
-      if (unresolved) dead.push({ agent: f, node: unresolved });
+  const dead = [];
+  const unknown = [];
+  let dirEntries = null;
+  try {
+    dirEntries = readdirSync2(agentsDir);
+  } catch (err) {
+    if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") {
+      unknown.push(
+        `- .claude/agents/ \u2014 activation UNKNOWN for EVERY agent in this project: the installed-agent directory could not be enumerated (${err?.code ?? err?.message ?? err})`
+      );
     }
-    if (dead.length) {
-      machineWarning = `\u26A0 ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context (e.g. ${dead[0].agent} \u2192 ${dead[0].node}) \u2014 their hooks fail silently. Run /sterling:sync-agents from this context, then restart. `;
-      machineContext = `
+  }
+  for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
+    let content = null;
+    try {
+      content = readFileSync4(join6(agentsDir, f), "utf8");
+    } catch (err) {
+      unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
+      continue;
+    }
+    if (!parseInstalledHeader(content)) {
+      if (content.includes("sterling-generated") || content.trim() === "") {
+        unknown.push(
+          `- ${f} \u2014 activation UNKNOWN: no readable sterling-generated header (damaged, truncated or empty), so whether its hook commands resolve on this machine cannot be determined \u2014 delete it and re-install rather than assume it is active`
+        );
+      }
+      continue;
+    }
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync4(p));
+    if (unresolved) dead.push({ agent: f, node: unresolved });
+  }
+  if (dead.length || unknown.length) {
+    machineWarning = (dead.length ? `\u26A0 ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context (e.g. ${dead[0].agent} \u2192 ${dead[0].node}) \u2014 their hooks fail silently. ` : "") + (unknown.length ? `\u26A0 ${unknown.length} installed agent file(s) could not be checked at all \u2014 whether their hooks run on this machine is UNKNOWN. ` : "") + `Run /sterling:sync-agents from this context, then restart. `;
+    machineContext = `
 
-MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on this machine (${dead.map((d) => d.agent).join(", ")}). Every hook of those agents fails non-blocking \u2014 the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work until scripts/check-agents-visible.mjs passes.`;
-    }
+MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` + (dead.length ? `${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on this machine (${dead.map((d) => d.agent).join(", ")}). Every hook of those agents fails non-blocking \u2014 the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. ` : "") + (unknown.length ? `${unknown.length} installed agent file(s) could not be checked, so their activation is UNKNOWN \u2014 an unreadable file is not a healthy one, and one bad file no longer silences this guard:
+` + unknown.join("\n") + `
+` : "") + `Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work until scripts/check-agents-visible.mjs passes.`;
   }
 } catch {
 }

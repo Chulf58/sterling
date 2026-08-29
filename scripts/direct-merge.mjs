@@ -747,7 +747,7 @@ if (existsSync(bundleChecker)) {
         `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — do NOT merge again.`,
         'But `npm run build` FAILED on the merged tree, so bundle freshness could NOT be',
         `verified — the merged source may not even compile. Fix this on ${into} now:`,
-        '  npm run build && npm run build:hooks',
+        '  npm run build, then node scripts/check-bundles-fresh.mjs and rebuild what it names',
         (rebuilt.stdout + rebuilt.stderr).trim(),
       ].join('\n')
     );
@@ -759,11 +759,11 @@ if (existsSync(bundleChecker)) {
     console.error(
       [
         '',
-        `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — but the shipped bundles are now STALE.`,
-        'git auto-merged hook sources without rebuilding them, so the enforcement surface',
-        `that actually runs no longer matches its source on ${into}. Fix it now, on ${into}:`,
-        '  npm run build && npm run build:hooks',
-        '  git add -A hooks && git commit -m "fix: rebuild bundles after merge"',
+        `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — but a shipped bundled artifact is now STALE.`,
+        'git auto-merged bundle sources without rebuilding them, so a shipped artifact that',
+        `actually runs (hooks enforcement, TUI, …) no longer matches its source on ${into}.`,
+        'Fix it now, on ' + into + ': run the rebuild command(s) the checker output below names,',
+        '  then: git add -A <the stale paths it names> && git commit -m "fix: rebuild bundles after merge"',
         'Checker output:',
         (bundles.stdout + bundles.stderr).trim(),
       ].join('\n')

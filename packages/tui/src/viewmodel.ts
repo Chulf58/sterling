@@ -1,6 +1,6 @@
 // TUI view models (spec §11): pure projections over the durable stores —
 // every tab is a live view; nothing here mutates anything.
-import { DRAIN_VERBS, RECORD_TYPES } from '@sterling/schemas';
+import { DRAIN_VERBS, RECORD_TYPES, displayHandle } from '@sterling/schemas';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 
 export interface Card {
@@ -389,11 +389,17 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
   for (const t of store.query({ types: ['todo'], source: 'user', cap: 500 })) {
-    const todo = t as unknown as { id: string; text: string; priority?: string; file_keys?: string[]; objective?: string };
+    const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string };
     const card: Card = {
       id: todo.id,
       type: 'todo',
-      title: todo.text.split('\n')[0],
+      // `name (id8)` where a handle EXISTS (decision 2e8c30e4) — the row a
+      // reader scans leads with the name and keeps a citable id. Where none was
+      // minted nothing is composed: a legacy item keeps its bare text line
+      // rather than gaining a hex fragment dressed as a name (df361a0f).
+      // The card `id` stays the FULL uuid — the id8 is a display abbreviation,
+      // and selection effects plus every destroying call need the whole thing.
+      title: todo.slug ? displayHandle(todo.slug, todo.id) : todo.text.split('\n')[0],
       body: todo.text,
       detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
         .filter(Boolean)
@@ -428,11 +434,12 @@ export function queueCards(store: SterlingStore): Card[] {
   return store
     .query({ types: ['todo'], source: 'system', cap: 200 })
     .map((t) => {
-      const item = t as unknown as { id: string; text: string; system_reason?: string; file_keys?: string[] };
+      const item = t as unknown as { id: string; text: string; slug?: string; system_reason?: string; file_keys?: string[] };
       return {
         id: item.id,
         type: 'todo',
-        title: item.text.split('\n')[0],
+        // Same rule as the board rows above: compose only where a handle exists.
+        title: item.slug ? displayHandle(item.slug, item.id) : item.text.split('\n')[0],
         body: item.text,
         detail: [item.system_reason, item.file_keys?.length && `files: ${item.file_keys.join(', ')}`].filter(Boolean).join(' · '),
       };

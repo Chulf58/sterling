@@ -229,6 +229,7 @@ const MANIFEST = {
   'h27-dispatch-signatures.mjs': 'blocking',
   'h28-return-contract.mjs': 'advisory',
   'h29-codex-consult-failure.mjs': 'advisory',
+  'h30-bare-id-legibility.mjs': 'advisory',
 };
 
 // ---------------------------------------------------------------------------
@@ -373,7 +374,30 @@ const BASELINE = {
     // edit inside this founding try re-digests it — the question is never
     // whether the change FEELS structural, only whether it is inside. Verify by
     // running the check, never by reasoning about the edit's shape.
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #d024bd0b" },
+    //
+    // ROTATED A SEVENTH TIME 2026-08-29 (#dc220b59 -> #97fb9c75): the review-fix
+    // containment pass (guarded disclose/skipRow primitives) edited this same
+    // statement again. SEVENTH rotation, total UNMOVED at 107. Prior:
+    // ROTATED A SIXTH TIME 2026-08-29 (#3406a777 -> #dc220b59), board f4616312 hole 1 —
+    // the newUnowned/articleDemand hoist above the no-duty terminal release changed
+    // this same statement's text again. SIXTH rotation, total UNMOVED at 107: a
+    // rotation is the digest tracking edited text, never new debt. Prior:
+    // ROTATED A FIFTH TIME 2026-08-29 (#d024bd0b -> #3406a777), board da8dcd27 —
+    // the follow-up raised by the fourth rotation's own review. That rotation put
+    // a BEGIN IMMEDIATE write transaction (with withRetry's 5-try budget) UPSTREAM
+    // of the capture duty's deny(), which materially WIDENED this entry's hole: a
+    // throw there — ordinary write contention is enough — escaped to this try's
+    // warnNonBlocking catch, exited 1, and voided every remaining Stop duty,
+    // the blocking capture nag included. That transaction now carries its OWN
+    // try/catch, degrading to check_skipped plus a stderr line and letting the
+    // duties below run.
+    // RE-EXAMINED per the header's instruction, and the answer is the same as at
+    // every prior rotation: the underlying debt is UNCHANGED — this try's catch
+    // still calls warnNonBlocking, not deny() — and the edit added no unguarded
+    // top-level statement, so this stays exactly ONE entry and
+    // FOUNDING_BASELINE_TOTAL stays 107. What moved is the SIZE of the region
+    // that can reach the catch, and it shrank. Verified by RUNNING the check.
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #97fb9c75" },
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },

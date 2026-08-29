@@ -2023,7 +2023,16 @@ export class SterlingStore {
     // Since S2 this is the generalized in-place triad's todo entry point
     // ([stable-identity-design-v2]): same id, same lifecycle, but the universal
     // server-owned version counter now bumps and the prior body is archived,
-    // exactly as it is for every other type. Todos still get no slug.
+    // exactly as it is for every other type. A todo's SLUG is likewise left
+    // exactly as it was — but note WHY, because the reason changed on
+    // 2026-08-29 and the old wording ("todos still get no slug") is now false:
+    // since readable-ids S1 ([human-readable-ids-for-board-items]) todos DO
+    // carry an optional slug (todoSchema), minted once at CREATE and only for
+    // source:'user' board items — system maintenance-queue items mint none
+    // (mintHeadlineOf returns '' for them; they read back a display name
+    // through board_get instead). `slug` is not in BOARD_UPDATABLE_FIELDS, so
+    // this method never mints, re-mints or clears one: it persists whatever
+    // slug the caller's merged candidate already carried.
     return this.applyInPlace('updateTodo', id, () => candidate, opts);
   }
 

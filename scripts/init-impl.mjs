@@ -73,6 +73,12 @@ const canonical = (v) =>
 if (!existsSync(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
 const mcpServerEntry = join(pluginRoot, 'packages', 'mcp-server', 'dist', 'main.js');
 if (!existsSync(mcpServerEntry)) fail('init REFUSED: MCP server not built — run `npm run build` in the plugin first', 2);
+// The launchers below bake the TUI bundle path; generating them against a
+// missing bundle ships a launcher that dies on double-click (board 16783088,
+// outside-family review 2026-08-29 — this check existed for the MCP entry but
+// not for the second shipped executable).
+const tuiBundleEntry = join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs');
+if (!existsSync(tuiBundleEntry)) fail('init REFUSED: TUI bundle not built — run `npm run build:tui` in the plugin first', 2);
 for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claude', '.claude/agents']) {
   const p = join(target, rel);
   if (existsSync(p) && !statSync(p).isDirectory()) {

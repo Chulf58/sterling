@@ -4654,7 +4654,15 @@ var RECORD_TYPES = {
     // The measured worst case for full bodies: board items run to ~8 KB each,
     // so a whole-board read spilled 478 KB. system_reason is what sorts the
     // maintenance queue into lanes; priority/source sort the board.
-    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
+    //
+    // slug LEADS, exactly as it does on decision/feature_article, and is
+    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
+    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
+    // address does not resolve. Names clip only in the composed `name (id8)`
+    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
+    // Absent for a legacy slugless item: digestRecord omits empty headline
+    // fields, and an absent name is safer than a fabricated one (df361a0f).
+    digest: { slug: "plain", text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
   },
   brief: {
     schema: briefSchema,
@@ -7652,6 +7660,20 @@ try {
   if (store.getRun()) allow();
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
+  const disclose = (line) => {
+    try {
+      process.stderr.write(line);
+    } catch {
+    }
+  };
+  const skipRow = (name, detail) => {
+    try {
+      store.recordCheckSkipped(name, detail, void 0, now);
+    } catch (e) {
+      disclose(`H10: check_skipped '${name}' could not be recorded \u2014 ${String(e && e.message || e)} (degrade detail: ${detail})
+`);
+    }
+  };
   const pressureMarker = join5(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const pressure = (() => {
     try {
@@ -8028,48 +8050,119 @@ try {
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
+  const owedKeys = activePaths.slice(0, 20);
+  const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
   const isUnowned = (p) => !store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 25 }).some((r) => !r.working_tree);
   let unowned = paths.filter(isUnowned);
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
-    if (ignored === null) store.recordCheckSkipped("article-demand-gitignore", "no_git", void 0, now);
+    if (ignored === null) skipRow("article-demand-gitignore", "no_git");
     else unowned = unowned.filter((p) => !ignored.has(p));
   }
-  const articleMissingOpen = () => store.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "article_missing");
-  const reachedMissing = articleMissingOpen().filter((t) => (t.file_keys ?? []).some((k) => paths.includes(k))).sort((a, b) => a.created_at === b.created_at ? a.id < b.id ? -1 : 1 : a.created_at < b.created_at ? -1 : 1);
+  const SYSTEM_TODO_CAP = 1e3;
+  let todoWindowCapped = false;
+  const systemTodoWindow = () => {
+    const rows = store.query({ types: ["todo"], source: "system", cap: SYSTEM_TODO_CAP });
+    if (rows.length >= SYSTEM_TODO_CAP && !todoWindowCapped) {
+      todoWindowCapped = true;
+      let total = null;
+      try {
+        total = store.count({ types: ["todo"], source: "system" });
+      } catch {
+      }
+      const detail = `window_capped:${rows.length}_of_${total ?? "unknown"}`;
+      skipRow("h10-todo-window-capped", detail);
+      disclose(
+        `H10: the open-maintenance-item read hit its cap (${detail}) \u2014 article_missing consolidation and mint dedup are evaluating a PARTIAL window this Stop, so a duplicate demand may be left standing or minted; drain the maintenance queue
+`
+      );
+    }
+    return rows;
+  };
+  const articleMissingOpen = () => systemTodoWindow().filter((t) => t.system_reason === "article_missing");
+  const recomputeDegraded = (e) => {
+    const detail = String(e && e.message || e);
+    skipRow("h10-article-missing-recompute", detail);
+    disclose(
+      `H10: article_missing recompute skipped \u2014 ${detail} (check_skipped h10-article-missing-recompute; the open demand may be stale until the next Stop)
+`
+    );
+  };
+  const reachedMissing = (() => {
+    try {
+      return articleMissingOpen().filter((t) => (t.file_keys ?? []).some((k) => paths.includes(k))).sort((a, b) => a.created_at === b.created_at ? a.id < b.id ? -1 : 1 : a.created_at < b.created_at ? -1 : 1);
+    } catch (e) {
+      recomputeDegraded(e);
+      return [];
+    }
+  })();
   if (reachedMissing.length) {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
-    if (carriedIgnored === null) store.recordCheckSkipped("article-demand-carried-gitignore", "no_git", void 0, now);
+    if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
     const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync4(join5(input.cwd, p))));
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
-    withRetry(
-      () => store.withTransaction(() => {
-        const fresh = reachedMissing.map((t) => store.get(t.id)).filter(Boolean);
-        if (!fresh.length) return;
-        const stillOwed = (p) => !prunable.has(p) && isUnowned(p);
-        const healed = [.../* @__PURE__ */ new Set([...unowned, ...fresh.flatMap((t) => (t.file_keys ?? []).filter(stillOwed))])].sort();
-        if (!healed.length) {
-          for (const t of fresh) store.remove(t.id, now);
-          return;
-        }
-        const freshIds = new Set(fresh.map((t) => t.id));
-        const outsider = articleMissingOpen().find((t) => !freshIds.has(t.id) && sameSet(t.file_keys ?? [], healed));
-        if (outsider) {
-          for (const t of fresh) store.remove(t.id, now);
-          return;
-        }
-        const [survivor, ...others] = fresh;
-        for (const t of others) store.remove(t.id, now);
-        const prior = [...survivor.file_keys ?? []].sort();
-        if (JSON.stringify(prior) === JSON.stringify(healed)) return;
-        store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
-      })
-    );
+    const subsetOf = (a, b) => {
+      const big = new Set(b);
+      return [...a].every((k) => big.has(k));
+    };
+    try {
+      withRetry(
+        () => store.withTransaction(() => {
+          const fresh = reachedMissing.map((t) => store.get(t.id)).filter(Boolean);
+          if (!fresh.length) return;
+          const stillOwed = (p) => !prunable.has(p) && isUnowned(p);
+          const healed = [.../* @__PURE__ */ new Set([...unowned, ...fresh.flatMap((t) => (t.file_keys ?? []).filter(stillOwed))])].sort();
+          if (!healed.length) {
+            for (const t of fresh) store.remove(t.id, now);
+            return;
+          }
+          const freshIds = new Set(fresh.map((t) => t.id));
+          const sweepContainedOutsiders = (keepIds) => {
+            for (const t of articleMissingOpen()) {
+              if (keepIds.has(t.id)) continue;
+              const keys = t.file_keys ?? [];
+              if (!keys.length || !subsetOf(keys, healed)) continue;
+              store.remove(t.id, now);
+            }
+          };
+          const outsider = articleMissingOpen().find((t) => !freshIds.has(t.id) && sameSet(t.file_keys ?? [], healed));
+          if (outsider) {
+            sweepContainedOutsiders(/* @__PURE__ */ new Set([...freshIds, outsider.id]));
+            for (const t of fresh) store.remove(t.id, now);
+            return;
+          }
+          sweepContainedOutsiders(freshIds);
+          const [survivor, ...others] = fresh;
+          for (const t of others) store.remove(t.id, now);
+          const prior = [...survivor.file_keys ?? []].sort();
+          if (JSON.stringify(prior) === JSON.stringify(healed)) return;
+          store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
+        })
+      );
+    } catch (e) {
+      recomputeDegraded(e);
+    }
   }
-  if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
+  let newUnowned = [];
+  if (unowned.length) {
+    const head = spawnSync4("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+      cwd: input.cwd,
+      encoding: "utf8",
+      timeout: 3e4
+    });
+    if (head.status === 0) {
+      const inHead = new Set(head.stdout.split("\n").filter(Boolean));
+      newUnowned = unowned.filter((p) => !inHead.has(p));
+    } else {
+      skipRow("article-demand-newfile", "no_git");
+    }
+  }
+  const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
+  const imageBinaryOnly = paths.length > 0 && paths.every((p) => IMAGE_BINARY_EXT.test(p));
+  if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     runSettlement();
     clearRegisters();
     releaseWithPressure();
@@ -8106,21 +8199,6 @@ try {
     }).map(([family]) => family);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
-  let newUnowned = [];
-  if (unowned.length) {
-    const head = spawnSync4("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
-      cwd: input.cwd,
-      encoding: "utf8",
-      timeout: 3e4
-    });
-    if (head.status === 0) {
-      const inHead = new Set(head.stdout.split("\n").filter(Boolean));
-      newUnowned = unowned.filter((p) => !inHead.has(p));
-    } else {
-      store.recordCheckSkipped("article-demand-newfile", "no_git", void 0, now);
-    }
-  }
-  const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     runSettlement();
@@ -8150,10 +8228,10 @@ try {
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close`,
+        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close${clipped}`,
         source: "system",
         system_reason: "capture_owed",
-        file_keys: activePaths.slice(0, 20)
+        file_keys: owedKeys
       });
     }
     runSettlement();
@@ -8230,15 +8308,15 @@ ${parts.join("\n\n")}`);
         links: [],
         scope: "project",
         stack_tags: [],
-        text: pendingDetail ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close` : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
+        text: (pendingDetail ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close` : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`) + clipped,
         source: "system",
         system_reason: "capture_owed",
-        file_keys: activePaths.slice(0, 20)
+        file_keys: owedKeys
       });
     }
   }
   if (articleDemand) {
-    const overlapping = store.query({ types: ["todo"], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "article_missing" && (t.file_keys ?? []).some((k) => unowned.includes(k)));
+    const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeys = overlapping ? overlapping.file_keys ?? [] : unowned;
     store.enqueueSystemTodo({
       id: randomUUID4(),

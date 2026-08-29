@@ -679,7 +679,15 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     // The measured worst case for full bodies: board items run to ~8 KB each,
     // so a whole-board read spilled 478 KB. system_reason is what sorts the
     // maintenance queue into lanes; priority/source sort the board.
-    digest: { text: 'clip', source: 'plain', priority: 'plain', system_reason: 'plain', objective: 'plain' },
+    //
+    // slug LEADS, exactly as it does on decision/feature_article, and is
+    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
+    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
+    // address does not resolve. Names clip only in the composed `name (id8)`
+    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
+    // Absent for a legacy slugless item: digestRecord omits empty headline
+    // fields, and an absent name is safer than a fabricated one (df361a0f).
+    digest: { slug: 'plain', text: 'clip', source: 'plain', priority: 'plain', system_reason: 'plain', objective: 'plain' },
   },
   brief: {
     schema: briefSchema,
@@ -764,8 +772,43 @@ export function digestRecord(record: Record<string, unknown>): Record<string, un
  */
 export const HEADLINE_CLIP = 80;
 
+/**
+ * THE COMPOSED DISPLAY HANDLE — `name (id8)`, name FIRST, id retained
+ * (decision human-readable-ids-for-board-items, 2e8c30e4). Defined ONCE here
+ * (invariant 1) because three surfaces render it: the headline projection
+ * below, the TUI board/queue card titles, and any other human-facing listing.
+ *
+ * NAME_CLIP = 48, ellipsis INCLUDED. Derivation rather than a number from the
+ * air: the mint already clamps a slug at 60 characters (decision de1a7329);
+ * the ` (id8)` half costs exactly 11 — one space, two parentheses, eight hex —
+ * so 60 − 11 = 49, rounded DOWN to 48 so the constant survives the id form
+ * gaining a character. The composed handle then lands at 59, inside the same
+ * 60-character budget the mint uses.
+ *
+ * NAMES CLIP, IDS NEVER DO: "a truncated id is unresolvable while a truncated
+ * name is still recognisable" (2e8c30e4). The clip therefore applies to the
+ * composed DISPLAY string only — never to the digest's `slug` FIELD, which is
+ * the address a reader cites, and never to the `id` field, which is the only
+ * form board_remove / maintenance_remove accept (AC23 of mcp-tool-surface;
+ * anti-pattern no-bounded-trail-guard-for-destructive-addressing). The display
+ * form ADDS; it never REPLACES.
+ */
+export const NAME_CLIP = 48;
+
+/** Leading-edge clip: the head of a name is what makes it recognisable. */
+export const clipName = (name: string): string =>
+  name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}…`;
+
+/** `name (id8)` — call ONLY where a name exists; nothing is composed from an
+ *  absent one (an id printed twice is not a name — df361a0f). */
+export const displayHandle = (name: string, id: string): string => `${clipName(name)} (${id.slice(0, 8)})`;
+
 export function headlineRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { id: record.id, priority: record.priority };
+  // The human half of the line, beside — never instead of — the full id above.
+  // Omitted entirely for a legacy slugless item: absent name over wrong name.
+  const name = s(record.slug);
+  if (name) out.name = displayHandle(name, s(record.id));
   if (record.objective !== undefined && record.objective !== null && record.objective !== '') out.objective = record.objective;
   if (record.system_reason !== undefined && record.system_reason !== null && record.system_reason !== '') out.system_reason = record.system_reason;
   const text = clipped(record.text, HEADLINE_CLIP);

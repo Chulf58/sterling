@@ -167,6 +167,50 @@ try {
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = new Date().toISOString();
 
+  // ── CONTAINMENT PRIMITIVES (board da8dcd27, extended by the 2026-08-29 review) ──
+  //
+  // H10's founding catch calls warnNonBlocking, never deny() — the baselined F5
+  // debt this hook carries (see scripts/check-failclosed-boundary.mjs). So ANY
+  // throw that escapes to it exits 1, the runner reads non-2 as NON-BLOCKING,
+  // and EVERY remaining Stop duty is voided: no nag, no capture_owed, no
+  // article_missing, and — for a throw placed upstream of the terminal release —
+  // no runSettlement()/clearRegisters() either, which leaks this session's
+  // registers into the next one (a P4 lifecycle violation on top of the
+  // fail-open). da8dcd27 contained the recompute TRANSACTION; the review found
+  // three more store calls sitting outside it, one of them (the newfile
+  // check_skipped) newly hoisted UPSTREAM of the release.
+  //
+  // The reachable failure needs nothing exotic: a store that READS but cannot
+  // be WRITTEN (read-only FS, disk full, the store's schema-drift write guard)
+  // makes every recordCheckSkipped below throw on its first try, and the arms
+  // that inject a store failure one layer deeper never see it.
+  //
+  // TWO primitives, used everywhere a degrade is RECORDED in this file's
+  // article/demand lanes, so the pattern exists once (P3) rather than being
+  // re-derived per site:
+  //   disclose(line) — stderr is the LAST-RESORT signal, and it is exactly the
+  //     channel used when the store cannot record. An EPIPE on it (a closed
+  //     runner pipe) would re-open the hole the catch closes, so it is guarded
+  //     too; there is nothing left to fall back to, hence the empty catch.
+  //   skipRow(name, detail) — a check_skipped row that can NEVER escape: when
+  //     recording the skip is itself the casualty, the degrade is disclosed on
+  //     stderr instead and control CONTINUES to the duties.
+  const disclose = (line) => {
+    try {
+      process.stderr.write(line);
+    } catch {
+      // the last-resort channel is gone (EPIPE / closed pipe). Throwing here
+      // would void every remaining duty — silence is the lesser failure.
+    }
+  };
+  const skipRow = (name, detail) => {
+    try {
+      store.recordCheckSkipped(name, detail, undefined, now);
+    } catch (e) {
+      disclose(`H10: check_skipped '${name}' could not be recorded — ${String((e && e.message) || e)} (degrade detail: ${detail})\n`);
+    }
+  };
+
   // CONDUCTOR CONTEXT PRESSURE (context-rotation slice 1): H6's transcript machinery
   // (latestUsage/fillPct) pointed at the conductor's OWN transcript — Stop payloads carry
   // transcript_path natively, no deriveAgentTranscript. Advisory and FAIL-OPEN in its own
@@ -983,7 +1027,11 @@ try {
   // Touch-noise precision (board 05e298f0): reading an image/binary file is
   // inspection, not knowledge-producing work — excluded from the CAPTURE
   // duty's touch set only (never the article-demand `paths` below, which
-  // stays unfiltered per §6 H10's ownership join).
+  // stays unfiltered per §6 H10's ownership join — an image in a MIXED session
+  // still counts toward the article demand, AC2 of h10-touch-noise.test.mjs).
+  // The one place this regex reaches the article lane is the `imageBinaryOnly`
+  // exemption on the no-duty terminal release, which fires only when EVERY
+  // touched path is an image — see the block there.
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   // A file a LIVE dispatch owns leaves the capture trigger set too (decision
   // ec9eacaa) — dropped here rather than at activePaths so it cannot backdate
@@ -1007,6 +1055,24 @@ try {
   // Capture duty: triggered by file-touching work OR debug-scope events not
   // already covered by a no-capture declaration.
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
+  // capture_owed file_keys: CONTEXT, not the debt (item 40b378e8, classification
+  // settled 2026-08-29). Unlike article_missing — where the file list IS what is
+  // owed, which is why the cap was removed there — a capture_owed item's subject
+  // is "this session ended without capture": the mint is gated on whether ANY
+  // capture_owed is open, the lane sits outside UPDATE_RESOLVABLE_LANES, and a
+  // `resolves` claim naming it is refused. The keys only tell the reader where to
+  // look, so a cap on them costs no debt and the cap STAYS. It also has to stay
+  // for now regardless: the second mint site (scripts/hooks/h1-session-start.mjs)
+  // carries the identical cap, and two sites disagreeing about how much they
+  // persist is worse than one disclosed cap on both.
+  // What was actually wrong is that the truncation was SILENT (P5): 25 touched
+  // paths became 20 keys with nothing said, and the capture_pending branch
+  // carried no count at all. Both texts now state it when it bites.
+  const owedKeys = activePaths.slice(0, 20);
+  const clipped =
+    activePaths.length > owedKeys.length
+      ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))`
+      : '';
   // Research duty: triggered by research events not covered by a no-capture
   // declaration (research_tool or configured agent).
   const hasResearchDuty = activeResearchEvents.length > 0;
@@ -1021,11 +1087,11 @@ try {
   // item names. Recomputing below that release left exactly those Stops
   // re-stamping a stale item, so the earlier rationale comment ("reaches a
   // non-firing Stop") was describing a placement it did not have.
-  // SCOPE, stated so the comment cannot overclaim: only the RECOMPUTE moves up.
-  // The article DEMAND itself (newUnowned/articleDemand, still computed below)
-  // stays muted on that release — that mute is PRE-EXISTING, predates this
-  // lane's change, and is deliberately left alone here rather than widened into
-  // a drive-by behavior change.
+  // SCOPE: the ef206eca change moved only the RECOMPUTE up and left the DEMAND
+  // muted on that release. That residual mute was item f4616312 hole 1 and is
+  // CLOSED as of 2026-08-29 — `newUnowned`/`articleDemand` are now computed
+  // just above the release too, and the release requires `!articleDemand`
+  // (except for a genuinely image/binary-only session). See the block there.
   //
   // Ownership joins feature_article AND repo-located reference docs (§3.2.5) —
   // same join as H7; a governing document's owner is its reference_material
@@ -1043,7 +1109,12 @@ try {
   // check degrades to the unfiltered list (toward signaling), recorded loudly.
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
-    if (ignored === null) store.recordCheckSkipped('article-demand-gitignore', 'no_git', undefined, now);
+    // skipRow, not a bare recordCheckSkipped: this is the FIRST store WRITE the
+    // article lane performs and it sits upstream of the terminal release, so on
+    // a store that reads but cannot write it is reached before either of the
+    // sites the review named — guarding those two while leaving this one bare
+    // would not close the scenario at all.
+    if (ignored === null) skipRow('article-demand-gitignore', 'no_git');
     else unowned = unowned.filter((p) => !ignored.has(p));
   }
 
@@ -1120,62 +1191,290 @@ try {
   // may run while the store's write lock is held. A key that appears only in the
   // re-read (added concurrently) was never probed, so it is KEPT if unowned:
   // conservative, toward signaling.
-  const articleMissingOpen = () =>
-    store
-      .query({ types: ['todo'], cap: 1000 })
-      .filter((t) => t.source === 'system' && t.system_reason === 'article_missing');
-  const reachedMissing = articleMissingOpen()
-    .filter((t) => (t.file_keys ?? []).some((k) => paths.includes(k)))
-    .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? -1 : 1) : a.created_at < b.created_at ? -1 : 1));
+  // A QUERY RESULT IS A WINDOW, NOT AN INVENTORY (review finding 3, 2026-08-29).
+  // Both this recompute and the mint below rest a CORRECTNESS invariant on this
+  // read — AC9's "two items are never left on one file_keys set" (the
+  // consolidation/outsider sweep) and enqueueSystemTodo's dedup (the mint's
+  // overlap match). Past the cap an already-open item becomes INVISIBLE and both
+  // fail SILENTLY: the sweep leaves a duplicate standing, the mint inserts a
+  // second item beside one it could not see. `capped` was never inspected.
+  //
+  // TWO CHANGES, both cheap:
+  //  1. FILTER BY SOURCE. QueryOptions.source is applied in the store's BASE
+  //     FILTER, before the cap (packages/store baseFilter, "audit finding
+  //     38/43"), so board items — which share this lane's todo type and are the
+  //     bulk of the rows in a busy project — no longer consume the window at
+  //     all. That is a real narrowing, not a re-sort.
+  //  2. INSPECT THE CAP AND DEGRADE LOUD (P5). store.query returns a bare array
+  //     with no `capped` flag, so a full window (returned === cap) IS the
+  //     capped signal, exactly as the tool surface defines it; store.count over
+  //     the same base filter supplies the true total for the disclosure and is
+  //     itself guarded, since the count is a nicety and the cap hit is the
+  //     finding.
+  // WE STILL PROCEED on a partial window, deliberately: every consequence of a
+  // short window is an OVER-report (a missed removal, a duplicate mint), while
+  // suppressing the demand would be an UNDER-report — the loss direction this
+  // whole lane exists to prevent. Disclosed once per Stop, never per call.
+  const SYSTEM_TODO_CAP = 1000;
+  let todoWindowCapped = false;
+  const systemTodoWindow = () => {
+    const rows = store.query({ types: ['todo'], source: 'system', cap: SYSTEM_TODO_CAP });
+    if (rows.length >= SYSTEM_TODO_CAP && !todoWindowCapped) {
+      todoWindowCapped = true;
+      let total = null;
+      try {
+        total = store.count({ types: ['todo'], source: 'system' });
+      } catch {
+        // the exact total is a nicety — reaching the cap is the finding
+      }
+      const detail = `window_capped:${rows.length}_of_${total ?? 'unknown'}`;
+      skipRow('h10-todo-window-capped', detail);
+      disclose(
+        `H10: the open-maintenance-item read hit its cap (${detail}) — article_missing consolidation and mint dedup are evaluating a PARTIAL window this Stop, so a duplicate demand may be left standing or minted; drain the maintenance queue\n`
+      );
+    }
+    return rows;
+  };
+  const articleMissingOpen = () => systemTodoWindow().filter((t) => t.system_reason === 'article_missing');
+  // ONE DEGRADE for every containment point in this recompute (board da8dcd27,
+  // widened by review finding 1, 2026-08-29): record best-effort, DISCLOSE, and
+  // CONTINUE to the duties. Both primitives it calls are throw-proof, so the
+  // degrade itself can never become the thing that escapes.
+  const recomputeDegraded = (e) => {
+    const detail = String((e && e.message) || e);
+    // The check_skipped trail is best-effort BY NECESSITY, not by convenience:
+    // the likeliest cause of the failure is that the store cannot be written at
+    // all, in which case recording the skip throws too — and a throw HERE would
+    // reopen the exact hole this closes. skipRow contains that, and falls back
+    // to stderr so a failed row is still visible.
+    skipRow('h10-article-missing-recompute', detail);
+    // ...which is why the disclosure is not the check_skipped row alone (P5).
+    // In the store-unwritable case that row never lands, and a silently skipped
+    // heal is indistinguishable from a healthy Stop. article_missing sits
+    // outside UPDATE_RESOLVABLE_LANES and never auto-drains, so the stale item
+    // left behind keeps prescribing "create the owning article" for files that
+    // may already have one — a demand that misleads in the corrupting direction
+    // is worth one line of stderr. The write is guarded too (review LOW(a)): an
+    // EPIPE on the last-resort channel would re-open the very hole this closes.
+    disclose(
+      `H10: article_missing recompute skipped — ${detail} (check_skipped h10-article-missing-recompute; the open demand may be stale until the next Stop)\n`
+    );
+  };
+  // THE READ IS CONTAINED TOO, not merely the transaction (review finding 1,
+  // 2026-08-29, extending board da8dcd27). da8dcd27 wrapped the write
+  // transaction; the store READS that feed it sat OUTSIDE, and so did the
+  // carried-gitignore degrade row below. On a store that READS but cannot be
+  // WRITTEN with git also unavailable, that row threw straight to the founding
+  // catch — warnNonBlocking, exit 1, read as NON-BLOCKING, every remaining duty
+  // voided: the da8dcd27 defect reached one layer above where its arms inject.
+  // A failed read degrades to "no items reached", which skips the heal for one
+  // Stop (bounded staleness on an item that stays open) instead of costing the
+  // capture nag, the mints, and the settlement/clear below.
+  const reachedMissing = (() => {
+    try {
+      return articleMissingOpen()
+        .filter((t) => (t.file_keys ?? []).some((k) => paths.includes(k)))
+        .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? -1 : 1) : a.created_at < b.created_at ? -1 : 1));
+    } catch (e) {
+      recomputeDegraded(e);
+      return [];
+    }
+  })();
   if (reachedMissing.length) {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
-    if (carriedIgnored === null) store.recordCheckSkipped('article-demand-carried-gitignore', 'no_git', undefined, now);
+    if (carriedIgnored === null) skipRow('article-demand-carried-gitignore', 'no_git');
     const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p))));
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
-    withRetry(() =>
-      store.withTransaction(() => {
-        // Re-read under the write lock — a concurrently removed item simply
-        // vanishes from the set rather than being written back into existence.
-        const fresh = reachedMissing.map((t) => store.get(t.id)).filter(Boolean);
-        if (!fresh.length) return;
-        const stillOwed = (p) => !prunable.has(p) && isUnowned(p);
-        const healed = [...new Set([...unowned, ...fresh.flatMap((t) => (t.file_keys ?? []).filter(stillOwed))])].sort();
-        if (!healed.length) {
-          // Every file these demands named now has an owner (or is no longer
-          // demandable territory): the debt is PAID, so the items leave by the
-          // artifact-write that fulfilled them (P4). Removed, never left open
-          // with an empty file_keys list — that would be undrainable debt H1
-          // counts forever. This is AC9's "creating the owning article clears it
-          // mechanically on the next Stop", now reached even on a Stop where the
-          // demand does not fire at all.
-          for (const t of fresh) store.remove(t.id, now);
-          return;
-        }
-        const freshIds = new Set(fresh.map((t) => t.id));
-        const outsider = articleMissingOpen().find((t) => !freshIds.has(t.id) && sameSet(t.file_keys ?? [], healed));
-        if (outsider) {
-          // An item this session's paths do NOT reach already carries exactly
-          // this set — healing onto it would put two items on one dedup key.
-          // Keep theirs, drop ours: the union is preserved intact either way.
-          for (const t of fresh) store.remove(t.id, now);
-          return;
-        }
-        const [survivor, ...others] = fresh;
-        for (const t of others) store.remove(t.id, now);
-        const prior = [...(survivor.file_keys ?? [])].sort();
-        if (JSON.stringify(prior) === JSON.stringify(healed)) return; // nothing moved — no version churn
-        // Healed IN PLACE (versioned update, same id — feature_link/H1 references
-        // survive). Writing the live set HERE is also what keeps the mint below
-        // able to match this same item: the choke keys on {system_reason, sorted
-        // file_keys}, so a corrected set supplied only at the mint would miss the
-        // stale item and insert a second one beside it.
-        store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
-      })
-    );
+    const subsetOf = (a, b) => {
+      const big = new Set(b);
+      return [...a].every((k) => big.has(k));
+    };
+    // THE TRANSACTION ITSELF (board da8dcd27). Everything below is a BEGIN
+    // IMMEDIATE *write* transaction with a retry budget, and it sits UPSTREAM of
+    // the capture duty's blocking deny(). H10's founding catch calls
+    // warnNonBlocking, never deny() — the baselined F5 debt this hook carries
+    // (see its entry in scripts/check-failclosed-boundary.mjs) — so a throw that
+    // escapes here exits 1, the runner reads non-2 as NON-BLOCKING, and EVERY
+    // remaining Stop duty is voided, the capture nag included: the session ends
+    // with no nag shown and no capture_owed minted, which is the exact failure
+    // the capture lane exists to prevent. Nothing exotic is needed to reach it —
+    // withRetry gives up after 5 tries (~375ms) and rethrows, so a concurrent
+    // MCP board_add holding the write lock is enough, and a non-BUSY refusal
+    // (the store's live schema-drift write guard, a schema rejection) rethrows
+    // on the FIRST try.
+    //
+    // The recompute is ADVISORY *relative to the duties below it*: it heals an
+    // item that is already open and stays open, so its failure costs one Stop's
+    // worth of staleness, whereas escaping costs every duty. Same shape and same
+    // reasoning as runSettlement's own try above.
+    //
+    // WHAT THIS DOES NOT DO: it does not make H10 fail-closed. The founding try
+    // still warns rather than denying, that hole is pre-existing and baselined,
+    // and retiring it is its own adjudicated change. This only stops the
+    // recompute from WIDENING it.
+    try {
+      withRetry(() =>
+        store.withTransaction(() => {
+          // Re-read under the write lock — a concurrently removed item simply
+          // vanishes from the set rather than being written back into existence.
+          const fresh = reachedMissing.map((t) => store.get(t.id)).filter(Boolean);
+          if (!fresh.length) return;
+          const stillOwed = (p) => !prunable.has(p) && isUnowned(p);
+          const healed = [...new Set([...unowned, ...fresh.flatMap((t) => (t.file_keys ?? []).filter(stillOwed))])].sort();
+          if (!healed.length) {
+            // Every file these demands named now has an owner (or is no longer
+            // demandable territory): the debt is PAID, so the items leave by the
+            // artifact-write that fulfilled them (P4). Removed, never left open
+            // with an empty file_keys list — that would be undrainable debt H1
+            // counts forever. This is AC9's "creating the owning article clears it
+            // mechanically on the next Stop", now reached even on a Stop where the
+            // demand does not fire at all.
+            for (const t of fresh) store.remove(t.id, now);
+            return;
+          }
+          const freshIds = new Set(fresh.map((t) => t.id));
+          // STRICT-SUBSET OUTSIDERS (item f4616312 hole 2, reproduced 2026-08-29
+          // as arm B-4). The equality guard BELOW only ever fires under
+          // CONCURRENCY: healed ⊇ unowned and unowned ⊆ paths, so an outsider
+          // carrying EXACTLY healed would itself have been reached by this
+          // session's paths unless `unowned` is empty or the item was written
+          // between the two reads. A STRICT SUBSET needs no concurrency at all —
+          // it can be built entirely from the CARRIED half of the union, whose
+          // names are by construction outside this session's paths. Measured
+          // leak: an outsider [c1] beside our healed [a, c1] survived, leaving
+          // TWO open demands whose key sets are one a subset of the other, in
+          // the lane that never auto-drains.
+          //
+          // THE DIRECTION IS THE OPPOSITE OF THE EQUALITY BRANCH BELOW, and
+          // deliberately so. At EQUALITY the two key sets are identical, so
+          // either item carries the whole debt losslessly and keeping the
+          // outsider is free — it avoids a write to an item outside this
+          // session's reach. At STRICT SUBSET only OURS carries every still-owed
+          // name (healed ⊃ theirs); deferring to theirs would DROP the names
+          // healed holds and theirs lacks — silent knowledge loss in the one
+          // lane with no other mechanism to re-raise them. So here we absorb
+          // THEIRS into OURS: remove the contained outsiders, keep our survivor.
+          //
+          // An outsider naming NOTHING is left alone: an empty key set is a
+          // trivial subset of everything, and removing it would discard a demand
+          // whose scope our union cannot be shown to cover (toward signaling,
+          // the same conservative direction the probes above take).
+          //
+          // A FUNCTION, AND IT RUNS ON BOTH BRANCHES (review finding 2,
+          // 2026-08-29). This sweep used to sit BELOW the equality branch, which
+          // `return`s — so the moment a concurrent write produced an outsider
+          // carrying exactly `healed`, the sweep never ran and hole 2 leaked
+          // again one branch over: fresh=[a] + still-owed carried c1 heals to
+          // [a,c1]; outsider X=[a,c1] fires equality; outsider Y=[c1] SURVIVES
+          // beside X, one a strict subset of the other, in the lane that never
+          // auto-drains. Sweeping on the equality branch is lossless for the
+          // same reason the branch itself is: the item KEPT there carries
+          // exactly `healed`, which is a superset of every key set this sweep
+          // removes, so no name leaves the store that the survivor does not
+          // already name. `keepIds` is what makes the two calls differ — on the
+          // equality branch the kept outsider must be exempt from its own
+          // (non-strict) subset test.
+          const sweepContainedOutsiders = (keepIds) => {
+            for (const t of articleMissingOpen()) {
+              if (keepIds.has(t.id)) continue;
+              const keys = t.file_keys ?? [];
+              if (!keys.length || !subsetOf(keys, healed)) continue;
+              store.remove(t.id, now);
+            }
+          };
+          const outsider = articleMissingOpen().find((t) => !freshIds.has(t.id) && sameSet(t.file_keys ?? [], healed));
+          if (outsider) {
+            // An item this session's paths do NOT reach already carries exactly
+            // this set — healing onto it would put two items on one dedup key.
+            // Keep theirs, drop ours: the union is preserved intact either way.
+            // The sweep still runs (see above), so a subset outsider is not
+            // spared merely because an EQUAL one happened to exist as well.
+            sweepContainedOutsiders(new Set([...freshIds, outsider.id]));
+            for (const t of fresh) store.remove(t.id, now);
+            return;
+          }
+          sweepContainedOutsiders(freshIds);
+          const [survivor, ...others] = fresh;
+          for (const t of others) store.remove(t.id, now);
+          const prior = [...(survivor.file_keys ?? [])].sort();
+          if (JSON.stringify(prior) === JSON.stringify(healed)) return; // nothing moved — no version churn
+          // Healed IN PLACE (versioned update, same id — feature_link/H1 references
+          // survive). Writing the live set HERE is also what keeps the mint below
+          // able to match this same item: the choke keys on {system_reason, sorted
+          // file_keys}, so a corrected set supplied only at the mint would miss the
+          // stale item and insert a second one beside it.
+          store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
+        })
+      );
+    } catch (e) {
+      // Same degrade as the contained READ above — one handler, one pattern.
+      recomputeDegraded(e);
+    }
   }
 
-  if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty) {
+  // §6 H10 article demand: touched files nothing owns, at threshold or any new
+  // unowned file (vs git HEAD; no-git degrades loud to threshold-only).
+  //
+  // HOISTED ABOVE THE NO-DUTY TERMINAL RELEASE (item f4616312 hole 1,
+  // 2026-08-29), completing what board ef206eca started. That fix moved the
+  // live RECOMPUTE up and deliberately left the DEMAND muted here; the mute is
+  // the defect. `paths` (the article-demand input set) is NOT filtered by
+  // no_capture or test_repair — only `activeTouches`/`activePaths` are — so a
+  // Stop whose every capture touch was discharged on the CAPTURE lane reached
+  // the release below with `hasCaptureDuty === false` and never evaluated the
+  // article lane at all. Because that release CLEARS THE REGISTERS, a file that
+  // became unowned during such a Stop was lost permanently: no soft-block, no
+  // article_missing item, and no later mechanism that re-raises it. That is a
+  // CAPTURE-lane declaration silently discharging the ARTICLE-DEMAND lane —
+  // exactly the shape decision no-capture-discharge-is-lane-scoped forbids, and
+  // `test_repair` (a per-path capture discharge) had the identical escape.
+  // NOT a threshold question: newUnowned.length > 0 triggers the demand on its
+  // own, so ONE newly created unowned file is enough — min_unowned_files never
+  // enters it.
+  let newUnowned = [];
+  if (unowned.length) {
+    const head = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only', '--', ...unowned], {
+      cwd: input.cwd,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    if (head.status === 0) {
+      const inHead = new Set(head.stdout.split('\n').filter(Boolean));
+      newUnowned = unowned.filter((p) => !inHead.has(p));
+    } else {
+      // skipRow, not a bare recordCheckSkipped (review finding 1, 2026-08-29):
+      // the hole-1 hoist moved this store WRITE upstream of the terminal
+      // release, so on a store that reads-but-cannot-write with git also
+      // unavailable a throw here escapes to the founding catch and skips not
+      // only every duty but runSettlement()/clearRegisters() as well — leaking
+      // this session's registers into the next one (P4). Guarded, the degrade
+      // costs at most its own row.
+      skipRow('article-demand-newfile', 'no_git');
+    }
+  }
+  const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
+
+  // IMAGE/BINARY-ONLY SESSIONS (board 05e298f0) — the ONE case that still
+  // releases clean through the no-duty branch below with an article demand
+  // standing. Reading images is inspection, not knowledge-producing work, and
+  // that ruling says such a session ends clean; nothing is being "discharged"
+  // here because image-only activity never TRIGGERS an article duty in the
+  // first place. The two cases share one physical branch but are separable BY
+  // CAUSE, and the cause is what is tested: image-only means EVERY `paths`
+  // entry is an image, whereas a no_capture/test_repair discharge always leaves
+  // at least one NON-image entry in `paths` that was removed from
+  // `activeTouches`. Merely asking whether a no_capture event exists would not
+  // distinguish them.
+  //
+  // SCOPE — this flag is applied to the no-other-duty TERMINAL release below
+  // and NOWHERE ELSE. Images stay in `unowned`/`newUnowned`/`articleDemand` for
+  // MIXED sessions by design (AC2 of scripts/tests/h10-touch-noise.test.mjs:
+  // an image neither adds to nor shields a real file's duty), so globally
+  // weakening `articleDemand` by this flag would silently break that ruling.
+  const imageBinaryOnly = paths.length > 0 && paths.every((p) => IMAGE_BINARY_EXT.test(p));
+
+  if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     // No duties to enforce (e.g. only non-research dispatches recorded, or a
     // no-capture declaration covered every touch/debug event) — settle, clear, release.
     runSettlement();
@@ -1281,26 +1580,11 @@ try {
   }
   const conceptSatisfied = unmetFamilies.length === 0;
 
-  // §6 H10 article demand: touched files nothing owns, at threshold or any new
-  // unowned file (vs git HEAD; no-git degrades loud to threshold-only).
-  // `isUnowned` / `unowned` and the live recompute that shares them are computed
-  // ABOVE the no-duty terminal release (see the block there) — only the DEMAND
-  // decision stays here, because only it is gated on the duties above.
-  let newUnowned = [];
-  if (unowned.length) {
-    const head = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only', '--', ...unowned], {
-      cwd: input.cwd,
-      encoding: 'utf8',
-      timeout: 30_000,
-    });
-    if (head.status === 0) {
-      const inHead = new Set(head.stdout.split('\n').filter(Boolean));
-      newUnowned = unowned.filter((p) => !inHead.has(p));
-    } else {
-      store.recordCheckSkipped('article-demand-newfile', 'no_git', undefined, now);
-    }
-  }
-  const articleDemand = unowned.length >= config.article_demand.min_unowned_files || newUnowned.length > 0;
+  // `isUnowned` / `unowned`, the live recompute that shares them, AND the
+  // article demand itself (`newUnowned` / `articleDemand`) are all computed
+  // ABOVE the no-duty terminal release — see the block there for why the demand
+  // had to move up too (item f4616312 hole 1). Every use below reads those
+  // hoisted values unchanged.
 
   // All duties satisfied → settle (F6: this IS the "Stop after capture/reconcile
   // writes" boundary), clear registers, release.
@@ -1378,10 +1662,10 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close`,
+        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close${clipped}`,
         source: 'system',
         system_reason: 'capture_owed',
-        file_keys: activePaths.slice(0, 20),
+        file_keys: owedKeys,
       });
     }
     // R2 (board c198866d round-3 fixer, BLOCKING): this IS a terminal
@@ -1521,12 +1805,13 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: pendingDetail
-          ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close`
-          : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`,
+        text:
+          (pendingDetail
+            ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close`
+            : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`) + clipped,
         source: 'system',
         system_reason: 'capture_owed',
-        file_keys: activePaths.slice(0, 20),
+        file_keys: owedKeys,
       });
     }
   }
@@ -1549,9 +1834,12 @@ try {
     // measured, in the one lane that never auto-drains — an under-report, the
     // failure this whole lane exists to prevent. The nag above already caps what
     // a HUMAN reads (capList); the persisted list is the debt itself.
-    const overlapping = store
-      .query({ types: ['todo'], cap: 1000 })
-      .find((t) => t.source === 'system' && t.system_reason === 'article_missing' && (t.file_keys ?? []).some((k) => unowned.includes(k)));
+    // THE SAME WINDOW THE RECOMPUTE READS (review finding 3, 2026-08-29): this
+    // dedup match rests on SEEING the open item, so past the cap it mints a
+    // second item beside one it could not see. systemTodoWindow filters by
+    // source before the cap and discloses a capped read once per Stop — see its
+    // definition above.
+    const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     // ONE list drives both the count in the text and the persisted keys, so the
     // item can never say "4 file(s)" while naming 7 — which it could once the
     // healed union (⊇ this session's unowned set) started backing file_keys.

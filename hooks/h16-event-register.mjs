@@ -4624,7 +4624,15 @@ var RECORD_TYPES = {
     // The measured worst case for full bodies: board items run to ~8 KB each,
     // so a whole-board read spilled 478 KB. system_reason is what sorts the
     // maintenance queue into lanes; priority/source sort the board.
-    digest: { text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
+    //
+    // slug LEADS, exactly as it does on decision/feature_article, and is
+    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
+    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
+    // address does not resolve. Names clip only in the composed `name (id8)`
+    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
+    // Absent for a legacy slugless item: digestRecord omits empty headline
+    // fields, and an absent name is safer than a fabricated one (df361a0f).
+    digest: { slug: "plain", text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
   },
   brief: {
     schema: briefSchema,

@@ -1060,36 +1060,92 @@ try {
 // warn BOTH surfaces: the human (systemMessage) and the conductor
 // (additionalContext, with the recovery duty). Fail-open — the probe must
 // never break SessionStart.
+//
+// DEGRADE LOUD, NEVER SILENT (board 4fa477f2) — the same repair the agent-
+// currency block below carries, not a second shape. The enumeration and every
+// per-file read used to sit under the single outer catch behind an existsSync
+// gate, so ONE subdirectory named `x.md` (EISDIR), ONE EACCES file or ONE race
+// deletion discarded the whole check and the dead-hooks warning never rendered —
+// for ANY agent, including the perfectly readable ones. A partial failure
+// reported as a total absence, in the guard whose entire purpose is to refuse to
+// be silent about absent enforcement (02a1ed39: nine consecutive `up_to_date`
+// while every agent hook was dead). Only the outermost catch stays silent.
 let machineWarning = '';
 let machineContext = '';
 try {
   const agentsDir = join(input.cwd, '.claude', 'agents');
-  if (existsSync(agentsDir)) {
-    const dead = [];
-    for (const f of readdirSync(agentsDir).filter((n) => n.endsWith('.md'))) {
-      const content = readFileSync(join(agentsDir, f), 'utf8');
-      if (!parseInstalledHeader(content)) continue; // foreign/hand-made — not ours to judge
-      const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync(p));
-      if (unresolved) dead.push({ agent: f, node: unresolved });
+  const dead = [];
+  const unknown = [];
+  let dirEntries = null;
+  try {
+    dirEntries = readdirSync(agentsDir);
+  } catch (err) {
+    // ENOENT/ENOTDIR: the project simply has no installed agents — nothing to
+    // activate and nothing to report. Anything else (EACCES, ELOOP, EIO) means we
+    // COULD NOT LOOK, and the existsSync() this replaced answered `false` to
+    // exactly that, silently.
+    if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') {
+      unknown.push(
+        `- .claude/agents/ — activation UNKNOWN for EVERY agent in this project: the installed-agent directory could not be enumerated (${err?.code ?? err?.message ?? err})`
+      );
     }
-    if (dead.length) {
-      machineWarning =
-        `⚠ ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context ` +
-        `(e.g. ${dead[0].agent} → ${dead[0].node}) — their hooks fail silently. ` +
-        `Run /sterling:sync-agents from this context, then restart. `;
-      machineContext =
-        `\n\nMACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ${dead.length} installed agent(s) in ` +
-        `.claude/agents/ carry hook node paths that do not resolve on this machine ` +
-        `(${dead.map((d) => d.agent).join(', ')}). Every hook of those agents fails non-blocking — ` +
-        `the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. Before dispatching any ` +
-        `subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as ` +
-        `machine_rebaked), tell the user a RESTART is required, and do not start pipeline work ` +
-        `until scripts/check-agents-visible.mjs passes.`;
+  }
+  for (const f of (dirEntries ?? []).filter((n) => n.endsWith('.md'))) {
+    let content = null;
+    try {
+      content = readFileSync(join(agentsDir, f), 'utf8');
+    } catch (err) {
+      unknown.push(`- ${f} — activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
+      continue;
     }
+    if (!parseInstalledHeader(content)) {
+      // A genuinely FOREIGN file is not Sterling's to judge and stays silent —
+      // but "unparseable" must never be read as "not ours": a file still carrying
+      // the generated marker, or one that is empty/truncated, is a DAMAGED
+      // Sterling install whose hooks may well be dead, and filing it under
+      // foreign retires it from this check permanently and silently.
+      if (content.includes('sterling-generated') || content.trim() === '') {
+        unknown.push(
+          `- ${f} — activation UNKNOWN: no readable sterling-generated header (damaged, truncated or empty), so whether its hook commands resolve on this machine cannot be determined — delete it and re-install rather than assume it is active`
+        );
+      }
+      continue;
+    }
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync(p));
+    if (unresolved) dead.push({ agent: f, node: unresolved });
+  }
+  if (dead.length || unknown.length) {
+    machineWarning =
+      (dead.length
+        ? `⚠ ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context ` +
+          `(e.g. ${dead[0].agent} → ${dead[0].node}) — their hooks fail silently. `
+        : '') +
+      (unknown.length
+        ? `⚠ ${unknown.length} installed agent file(s) could not be checked at all — whether their hooks run on this machine is UNKNOWN. `
+        : '') +
+      `Run /sterling:sync-agents from this context, then restart. `;
+    machineContext =
+      `\n\nMACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` +
+      (dead.length
+        ? `${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on ` +
+          `this machine (${dead.map((d) => d.agent).join(', ')}). Every hook of those agents fails ` +
+          `non-blocking — the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. `
+        : '') +
+      (unknown.length
+        ? `${unknown.length} installed agent file(s) could not be checked, so their activation is UNKNOWN — ` +
+          `an unreadable file is not a healthy one, and one bad file no longer silences this guard:\n` +
+          unknown.join('\n') +
+          `\n`
+        : '') +
+      `Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context ` +
+      `(re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work ` +
+      `until scripts/check-agents-visible.mjs passes.`;
   }
 } catch {
   // fail-open — never break SessionStart (P1); the check-agents-visible gate
-  // still blocks pipeline dispatch on the same condition.
+  // still blocks pipeline dispatch on the same condition. LAST RESORT only: the
+  // enumeration, every per-file read and every damaged header each carry their
+  // own catch and each degrades LOUD, so nothing routine reaches here (02a1ed39).
 }
 
 // AGENT CURRENCY (board 6ce18724, research_finding 0038af7c). The machine-

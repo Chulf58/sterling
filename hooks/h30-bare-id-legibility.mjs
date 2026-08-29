@@ -5,13 +5,9 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h6-context-watch.mjs
-import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
-import { join as join3, dirname as dirname3 } from "node:path";
-
 // scripts/hooks/lib/common.mjs
-import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, join as join2, resolve } from "node:path";
+import { readFileSync, existsSync as existsSync3 } from "node:fs";
+import { dirname as dirname3, join as join3, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5161,6 +5157,9 @@ var configSchema = external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({})
 });
+function parseConfig(raw) {
+  return configSchema.parse(raw);
+}
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -5192,9 +5191,396 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync, realpathSync } from "node:fs";
-import { dirname, basename, join, resolve as resolvePath } from "node:path";
+import { mkdirSync as mkdirSync2, existsSync as existsSync2, realpathSync } from "node:fs";
+import { dirname as dirname2, basename, join as join2, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
+
+// packages/store/dist/mounted.js
+import { mkdirSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+function resolveDomainMounts(config) {
+  return config.stack_tags.map((name) => ({
+    name,
+    dbPath: config.domain_paths[name] ?? join(homedir(), ".sterling", "domains", name, "sterling.db")
+  }));
+}
+function open(dbPath) {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  return new SterlingStore(dbPath);
+}
+var MountedStores = class {
+  /** The project store — also the home of all run/board/transient state. */
+  project;
+  domains = /* @__PURE__ */ new Map();
+  /** Opening a store creates its file + schema (§2.3 lazy creation): a domain
+   *  store comes into being the first time a project's manifest mounts it.
+   *  When options.skipMissing is true, domain mounts whose db file does NOT
+   *  already exist on disk are SKIPPED — never created. Existing siblings that
+   *  DO exist are still mounted. The default (no options / skipMissing false)
+   *  always lazily creates missing stores (§2.3 backward-compatible default). */
+  constructor(projectDbPath, mounts = [], options) {
+    this.project = open(projectDbPath);
+    for (const m of mounts) {
+      if (options?.skipMissing && !existsSync(m.dbPath))
+        continue;
+      this.domains.set(m.name, open(m.dbPath));
+    }
+  }
+  /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
+   *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
+   *  (feature_article always project, reference/research project-then-promote).
+   *
+   *  Validation here needs `scope`, so it must run BEFORE the write reaches a
+   *  store — which means it must also run the store's identity normalization
+   *  first (SterlingStore.normalizeIdentityEnvelope, the ONE definition):
+   *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
+   *  accepts was rejected through the mounted surface, because the schemas
+   *  registry still declares the derived status/superseded_by fields. */
+  create(input2) {
+    const normalized = SterlingStore.normalizeIdentityEnvelope(input2);
+    const record = validateRecord(normalized);
+    assertNoFieldLoss("create", normalized, record);
+    return this.storeFor(record.scope).create(record);
+  }
+  /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
+   *  state and never shared, so this resolves to the project store in practice —
+   *  and the dedup key is therefore evaluated within that ONE store rather than
+   *  across the fan, which is right: two projects' queues are independent, and a
+   *  cross-store key would let one project's item suppress another's. */
+  enqueueSystemTodo(input2) {
+    const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input2));
+    return this.storeFor(record.scope).enqueueSystemTodo(record);
+  }
+  storeFor(scope) {
+    if (scope === "project")
+      return this.project;
+    const m = /^domain:(.+)$/.exec(scope);
+    if (m) {
+      const store = this.domains.get(m[1]);
+      if (!store)
+        throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
+      return store;
+    }
+    throw new Error(`unroutable scope '${scope}'`);
+  }
+  /** Cross-store retrieval (§3.4): every mounted store runs the full
+   *  filter→join→rank→cap; results concatenate PROJECT-FIRST then domains (each
+   *  internally bm25-ranked — §3.3 project-store-first bias) and the overall cap
+   *  re-applies. A unified cross-store bm25 re-rank is a later refinement. */
+  query(opts = {}) {
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    const merged = this.all().flatMap((s2) => s2.query(opts));
+    return merged.slice(0, cap);
+  }
+  /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
+   *  query(), summed project-first across every mounted store (countBySource is
+   *  the same fan, kept per-source for the TUI's badges). No body fetch. The tool
+   *  layer reports it so a capped retrieval can say how many records matched the
+   *  filter it was given, instead of presenting its window as the whole store. */
+  count(opts = {}) {
+    return this.countBySource(opts).reduce((n, s2) => n + s2.count, 0);
+  }
+  /** Cross-mount twin of countAboveScore (board a577a69d) — summed
+   *  project-first across every mounted store, same fan as count(). */
+  countAboveScore(opts, minScore) {
+    return this.all().reduce((n, s2) => n + s2.countAboveScore(opts, minScore), 0);
+  }
+  /** Per-source projection (AC2): project store FIRST, then each mounted domain
+   *  in manifest order. Each store runs the full query independently — type
+   *  filter, file-key join, cap, and match_all are all PER-STORE (never a
+   *  global slice across the merged result). Zero domains → exactly one entry.
+   *  The source name is 'project' for the project store and the domain manifest
+   *  name (DomainMount.name) for each domain store. */
+  bySource(opts) {
+    const result = [];
+    result.push({ source: "project", records: this.project.query(opts) });
+    for (const [name, store] of this.domains) {
+      result.push({ source: name, records: store.query(opts) });
+    }
+    return result;
+  }
+  /** Count-only per-source projection — the COUNT(*) twin of bySource (same
+   *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
+   *  tree's collapsed category/source badges use this so the default all-collapsed
+   *  view does not fetch + parse every source's record bodies each frame. */
+  countBySource(opts) {
+    const result = [{ source: "project", count: this.project.count(opts) }];
+    for (const [name, store] of this.domains) {
+      result.push({ source: name, count: store.count(opts) });
+    }
+    return result;
+  }
+  /** Records from ONE named source ('project' or a mounted domain name) — the
+   *  full §3.4 query against that single store. The TUI fetches bodies only for
+   *  the source the user actually expanded; an unknown source yields []. */
+  querySource(source, opts = {}) {
+    const store = source === "project" ? this.project : this.domains.get(source);
+    return store ? store.query(opts) : [];
+  }
+  /** Cross-store fetch by id: project first, then domains. */
+  get(id) {
+    for (const s2 of this.all()) {
+      const r = s2.get(id);
+      if (r)
+        return r;
+    }
+    return void 0;
+  }
+  /** Project-first concatenation of every mounted store's id index (any status,
+   *  tombstones included). A citation checker MUST span mounts: legitimately
+   *  cited ids live in the shared domain stores as often as in the project one,
+   *  so a project-only lookup calls them dangling. No dedup needed — a record
+   *  lives in exactly one store. */
+  recordIdIndex() {
+    return this.all().flatMap((s2) => s2.recordIdIndex());
+  }
+  /** Project-first concatenation of every mounted store's dead-id alias index
+   *  ([stable-identity-design-v2] contract 3) — same reasoning as
+   *  recordIdIndex: a historical id cited anywhere may have belonged to a
+   *  record that now lives in a domain store, so resolution MUST span mounts.
+   *  A historical id is unique across the fan (it was one record's id), so no
+   *  dedup is needed. */
+  recordAliases() {
+    return this.all().flatMap((s2) => s2.recordAliases());
+  }
+  /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
+   *  3db7095f's deterministic lookup, mounted). Feature articles are always
+   *  project-scoped and never promote (AC7), so in practice this reads the project
+   *  store — but it fans anyway, deliberately: its callers are H19's one-hop
+   *  pointers and knowledge_create's slug-collision refusal, and for BOTH of them
+   *  over-detecting a slug that somehow lives in a domain store is safe while
+   *  under-detecting is not. A project-only lookup would let a clash through and
+   *  serve two records under one slug, which is the failure the refusal exists to
+   *  prevent. No dedup needed — a record lives in exactly one store. */
+  articlesBySlug(slug) {
+    return this.all().flatMap((s2) => s2.articlesBySlug(slug));
+  }
+  /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
+   *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
+   *  callers are a uniqueness refusal and an identity resolution, and both
+   *  would rather see a domain-store record than miss one. */
+  recordsBySlug(slug) {
+    return this.all().flatMap((s2) => s2.recordsBySlug(slug));
+  }
+  /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
+   *  fallthrough is the sole caller (decision df361a0f) and takes result[0] as
+   *  THE newest carrier, so the fan-in order is load-bearing. A slug does NOT
+   *  live in exactly one store: retireInFavorOf's promotion shape leaves the
+   *  project tombstone behind while the live copy is promoted into a domain
+   *  store, so one lineage's tombstones can be split across stores. Plain
+   *  project-first concatenation would let an OLDER project tombstone shadow a
+   *  NEWER domain one, so the fanned results are merge-sorted by updated_at
+   *  DESC — each store's own rows already arrive newest-first, so this is a
+   *  stable merge, not a full re-sort. rowid ordering (and the newest-first
+   *  guarantee it gives) is only meaningful WITHIN one store; updated_at is
+   *  the one field comparable across stores, and is therefore the cross-store
+   *  sort key here (review finding, 2026-08-20). */
+  supersededRecordsBySlug(slug) {
+    return this.all().flatMap((s2) => s2.supersededRecordsBySlug(slug)).sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
+  }
+  /** Cross-store terminus resolution (decision de1a7329): a record lives in
+   *  exactly one store (same reasoning as get()), so this tries each mounted
+   *  store project-first and returns the first hit. */
+  resolveTerminus(id) {
+    for (const s2 of this.all()) {
+      const r = s2.resolveTerminus(id);
+      if (r)
+        return r;
+    }
+    return null;
+  }
+  /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
+   *  lives with its SOURCE record (addLink routes by source), so a record's
+   *  inbound supersedes edges can sit in a DIFFERENT mounted store than the
+   *  target itself — every mount is scanned and the hits merged, same
+   *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
+   *  anti_pattern 1896c79b): a record promoted into a domain store leaves a
+   *  project-store tombstone behind, so the SAME source id can resolve out of
+   *  two different mounts — first-seen (project-first, this.all()'s own
+   *  ordering) wins, never a duplicate entry for one concept. */
+  inboundSupersedes(id) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const record of this.all().flatMap((s2) => s2.inboundSupersedes(id))) {
+      if (seen.has(record.id))
+        continue;
+      seen.add(record.id);
+      out.push(record);
+    }
+    return out;
+  }
+  // -- record mutations: route to the store that HOLDS the record --------------
+  // A record's scope decided where it lives at create time; a later change has to
+  // land in that same store, so these route by where the id actually is — never
+  // by the caller. (knowledge_update gets the record first, so supersede always
+  // finds it; remove routes on its id the same way. addLink routes on the SOURCE
+  // id — the edge lives with its source — and validates the TARGET mount-wide.)
+  /** Versioned change in the holding store (a domain record supersedes in its domain store). */
+  supersede(...args) {
+    return this.storeHolding(args[0]).supersede(...args);
+  }
+  /** Promotion tombstone: retire the original in its (project) store, pointing at
+   *  the cross-store replacement. The replacement already lives in another store
+   *  (the promoted domain copy), so only the original's holding store is touched. */
+  retireInFavorOf(...args) {
+    return this.storeHolding(args[0]).retireInFavorOf(...args);
+  }
+  /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
+  remove(...args) {
+    return this.storeHolding(args[0]).remove(...args);
+  }
+  // -- the generalized IN-PLACE write triad (stable-identity S2, decision
+  // [stable-identity-design-v2]) — same holding-store routing as supersede:
+  // an in-place write must land on the row that actually exists, and the
+  // version counter it bumps is that store's.
+  /** knowledge_update-shaped in-place write in the holding store. */
+  updateRecord(...args) {
+    return this.storeHolding(args[0]).updateRecord(...args);
+  }
+  /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
+  editRecordField(...args) {
+    return this.storeHolding(args[0]).editRecordField(...args);
+  }
+  /** knowledge_append-shaped array growth in the holding store. */
+  appendRecordField(...args) {
+    return this.storeHolding(args[0]).appendRecordField(...args);
+  }
+  /** An archived (record_id, version) snapshot from whichever store holds the
+   *  record. Version history is store-local, exactly like the record itself. */
+  getRecordVersion(...args) {
+    return this.storeHolding(args[0]).getRecordVersion(...args);
+  }
+  /** IN-PLACE todo edit (board_update) in the holding store — todos are always
+   *  project-scoped (§3.3), so this always resolves to the project store, but it
+   *  routes the same way as supersede/remove for consistency rather than assuming. */
+  updateTodo(...args) {
+    return this.storeHolding(args[0]).updateTodo(...args);
+  }
+  /** Typed link edge, added on the source record in its holding store. The TARGET
+   *  is resolved across ALL mounted stores (cross-store get, like get()) before
+   *  delegating: cross-store edges are a legitimate shape — promotion itself writes
+   *  them (supersedes / informed_by across project↔domain) — and the holding
+   *  store's local check cannot see a target mounted elsewhere, so it is told the
+   *  target is already validated. */
+  addLink(sourceId, rel, targetId) {
+    if (!this.get(targetId))
+      throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain`);
+    return this.storeHolding(sourceId).addLink(sourceId, rel, targetId, true);
+  }
+  storeHolding(id) {
+    for (const s2 of this.all())
+      if (s2.get(id))
+        return s2;
+    throw new Error(`no record '${id}' in the project store or any mounted domain`);
+  }
+  // -- run/board/transient state: PROJECT-LOCAL, never a domain ----------------
+  // Runs (§7.5 one active run), the board/maintenance queue (§3.2.7), handoffs and
+  // check_skipped are project-scoped by definition — they live in the project
+  // store, so MountedStores forwards them straight through. Knowledge fans across
+  // mounts; run state does not. Signatures mirror SterlingStore exactly.
+  createRun(...args) {
+    return this.project.createRun(...args);
+  }
+  getRun(...args) {
+    return this.project.getRun(...args);
+  }
+  casTransition(...args) {
+    return this.project.casTransition(...args);
+  }
+  casTransitionMerge(...args) {
+    return this.project.casTransitionMerge(...args);
+  }
+  recordPendingExit(...args) {
+    return this.project.recordPendingExit(...args);
+  }
+  getPendingExit(...args) {
+    return this.project.getPendingExit(...args);
+  }
+  appendRunEscalation(...args) {
+    return this.project.appendRunEscalation(...args);
+  }
+  appendRunReconcileNeeded(...args) {
+    return this.project.appendRunReconcileNeeded(...args);
+  }
+  recordCheckSkipped(...args) {
+    return this.project.recordCheckSkipped(...args);
+  }
+  writeHandoff(...args) {
+    return this.project.writeHandoff(...args);
+  }
+  /** The drain log is project-local (§3.2.7) — forwarded like every run/board surface. */
+  drainLogEntry(...args) {
+    return this.project.drainLogEntry(...args);
+  }
+  readHandoffs(...args) {
+    return this.project.readHandoffs(...args);
+  }
+  setRunReviewMandatory(...args) {
+    return this.project.setRunReviewMandatory(...args);
+  }
+  /** knowledge_split's multi-record write (decision
+   *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
+   *  only — feature_article is always project-scoped (§3.3), so the split's
+   *  children-plus-parent transaction never needs to span a domain mount. */
+  withTransaction(fn) {
+    return this.runScopedTransaction("project", this.project, fn);
+  }
+  /** Per-mount transaction boundary (board d47a9e2d): routes to the SterlingStore
+   *  holding `scope` (project → the project store; domain:<name> → that domain
+   *  store, storeFor's existing routing — an unmounted domain throws loudly
+   *  BEFORE any transaction opens) so a tool-layer write whose records all
+   *  belong to one owning mount (e.g. a domain-scoped knowledge_extract) can
+   *  commit create/update/link atomically on that mount, exactly as
+   *  withTransaction does for the project store. Guarded against CROSS-MOUNT
+   *  nesting the same way withTransaction is (see runScopedTransaction) —
+   *  same-store nesting still joins via the physical store's own txDepth. */
+  withTransactionForScope(scope, fn) {
+    return this.runScopedTransaction(scope, this.storeFor(scope), fn);
+  }
+  /** Tracks which scope's transaction is currently open across THIS
+   *  MountedStores instance (not per-physical-store — a physical store's own
+   *  txDepth only knows about ITSELF) and refuses a NESTED call that targets a
+   *  DIFFERENT scope: opening a second BEGIN IMMEDIATE on a different SQLite
+   *  connection while the outer transaction is still open would let the inner
+   *  one commit independently, so a later failure in the outer transaction
+   *  could no longer roll the inner write back — silently breaking atomicity.
+   *  A nested call to the SAME scope still joins cleanly, because it reaches
+   *  the same physical store's reentrant `tx()` (txDepth). */
+  activeTransactionScope;
+  runScopedTransaction(scope, store, fn) {
+    if (this.activeTransactionScope !== void 0 && this.activeTransactionScope !== scope) {
+      throw new Error(`nested transaction: cannot open a transaction for scope '${scope}' while a transaction for scope '${this.activeTransactionScope}' is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
+    }
+    const isOutermost = this.activeTransactionScope === void 0;
+    if (isOutermost)
+      this.activeTransactionScope = scope;
+    try {
+      return store.withTransaction(fn);
+    } finally {
+      if (isOutermost)
+        this.activeTransactionScope = void 0;
+    }
+  }
+  /** Per-store snapshot (§2.3): each store snapshots independently; the caller
+   *  supplies a path per store name ('project' or 'domain-<name>'). */
+  snapshotAll(pathFor) {
+    this.project.snapshot(pathFor("project"));
+    for (const [name, store] of this.domains)
+      store.snapshot(pathFor(`domain-${name}`));
+  }
+  /** Mounted domain names, in manifest order. */
+  domainNames() {
+    return [...this.domains.keys()];
+  }
+  close() {
+    for (const s2 of this.all())
+      s2.close();
+  }
+  all() {
+    return [this.project, ...this.domains.values()];
+  }
+};
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
@@ -5447,7 +5833,7 @@ var SterlingStore = class _SterlingStore {
     this.db = new DatabaseSync2(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join2(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.db.exec("PRAGMA busy_timeout=5000");
@@ -5922,10 +6308,10 @@ var SterlingStore = class _SterlingStore {
       }
       const entry = RECORD_TYPES[validated.type];
       const stored = _SterlingStore.storableBody(validated);
-      const now2 = (/* @__PURE__ */ new Date()).toISOString();
-      this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, identity.version, now2, identity.body);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, identity.version, now, identity.body);
       const res = this.db.prepare(`UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
-             updated_at = ?, body = ? WHERE id = ? AND version = ?`).run(nextVersion, _SterlingStore.derivedStatus(identity.lifecycle, freshness), identity.lifecycle, freshness, supersededBy, stored.updated_at ?? now2, JSON.stringify(stored), id, identity.version);
+             updated_at = ?, body = ? WHERE id = ? AND version = ?`).run(nextVersion, _SterlingStore.derivedStatus(identity.lifecycle, freshness), identity.lifecycle, freshness, supersededBy, stored.updated_at ?? now, JSON.stringify(stored), id, identity.version);
       if (res.changes === 0) {
         throw new Error(`${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) \u2014 re-read and retry`);
       }
@@ -5938,11 +6324,11 @@ var SterlingStore = class _SterlingStore {
         this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
       }
       for (const link of validated.links)
-        this.insertRelation(id, link.rel, link.target_id, now2);
+        this.insertRelation(id, link.rel, link.target_id, now);
       this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
-      this.logActivity("updated", validated, stored.updated_at ?? now2);
+      this.logActivity("updated", validated, stored.updated_at ?? now);
       if (opts.resolves?.length)
-        this.drainResolves(op, opts.resolves, now2);
+        this.drainResolves(op, opts.resolves, now);
       served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
     });
     return served;
@@ -6565,10 +6951,10 @@ var SterlingStore = class _SterlingStore {
   /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
   snapshot(targetPath) {
     const target = targetPath.replace(/\\/g, "/");
-    if (existsSync(target)) {
+    if (existsSync2(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync(dirname(target), { recursive: true });
+    mkdirSync2(dirname2(target), { recursive: true });
     this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
   }
   close() {
@@ -6582,15 +6968,15 @@ var SterlingStore = class _SterlingStore {
   // -------------------------------------------------------------------------
   /** Run begins at gate approval. One active run at a time (§7.5). */
   createRun(input2) {
-    const run2 = runRecordSchema.parse(input2);
+    const run = runRecordSchema.parse(input2);
     this.tx(() => {
       const active = this.getRun();
       if (active) {
         throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
       }
-      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run2.id, run2.machine_state, JSON.stringify(run2), run2.started_at);
+      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
     });
-    return run2;
+    return run;
   }
   /** By id, or the single active run when no id is given. */
   getRun(id) {
@@ -6625,16 +7011,16 @@ var SterlingStore = class _SterlingStore {
    * between the read and the write.
    */
   casTransition(observed, next) {
-    const run2 = runRecordSchema.parse(next);
+    const run = runRecordSchema.parse(next);
     this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run2.id);
+      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run.id);
       const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run2.machine_state, tail, JSON.stringify(run2), (/* @__PURE__ */ new Date()).toISOString(), run2.id, observed);
+      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, tail, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
       if (res.changes === 0) {
-        throw new Error(`CAS rejected: run '${run2.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
+        throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
       }
     });
-    return run2;
+    return run;
   }
   /**
    * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
@@ -6753,11 +7139,11 @@ var SterlingStore = class _SterlingStore {
   }
   /** H6 context warns + run_escalate land here (§6). */
   appendRunEscalation(runId, entry) {
-    this.updateRunOptimistic(runId, (run2) => ({ ...run2, escalations: [...run2.escalations, entry] }));
+    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
   }
   /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
   appendRunReconcileNeeded(runId, articleId) {
-    this.updateRunOptimistic(runId, (run2) => (run2.reconcile_needed ?? []).includes(articleId) ? run2 : { ...run2, reconcile_needed: [...run2.reconcile_needed ?? [], articleId] });
+    this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
   }
   /**
    * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
@@ -6767,7 +7153,7 @@ var SterlingStore = class _SterlingStore {
    * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
    */
   appendRunScopeAmendment(runId, amendment) {
-    this.updateRunOptimistic(runId, (run2) => (run2.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run2 : { ...run2, scope_amendments: [...run2.scope_amendments ?? [], amendment] });
+    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
   }
   /**
    * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
@@ -6778,17 +7164,17 @@ var SterlingStore = class _SterlingStore {
    * Pick — agent-invisible (decision 628c4b7f).
    */
   setRunReviewMandatory(runId, phaseId, items) {
-    this.updateRunOptimistic(runId, (run2) => {
-      const kept = (run2.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
+    this.updateRunOptimistic(runId, (run) => {
+      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
       const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run2, review_mandatory: [...kept, ...added] };
+      return { ...run, review_mandatory: [...kept, ...added] };
     });
   }
   /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
   incrementDispatchCount(runId, agentType) {
-    const next = this.updateRunOptimistic(runId, (run2) => ({
-      ...run2,
-      dispatch_counts: { ...run2.dispatch_counts, [agentType]: (run2.dispatch_counts[agentType] ?? 0) + 1 }
+    const next = this.updateRunOptimistic(runId, (run) => ({
+      ...run,
+      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
     }));
     return next.dispatch_counts[agentType];
   }
@@ -6878,13 +7264,13 @@ var SterlingStore = class _SterlingStore {
    * and snapshot BEFORE calling this.
    */
   disposeRunRows(runId, summaries) {
-    const run2 = this.getRun(runId);
-    if (!run2)
+    const run = this.getRun(runId);
+    if (!run)
       throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run2.machine_state !== "completing") {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run2.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
+    if (run.machine_state !== "completing") {
+      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
     }
-    const next = runRecordSchema.parse({ ...run2, machine_state: "awaiting_merge_gate", summaries });
+    const next = runRecordSchema.parse({ ...run, machine_state: "awaiting_merge_gate", summaries });
     this.tx(() => {
       const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, "completing");
       if (res.changes === 0)
@@ -6905,11 +7291,11 @@ var SterlingStore = class _SterlingStore {
    * Refuses on a non-terminal run — never a back door around disposal.
    */
   purgeRunRows(runId) {
-    const run2 = this.getRun(runId);
-    if (!run2)
+    const run = this.getRun(runId);
+    if (!run)
       throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run2.machine_state !== "rejected" && run2.machine_state !== "merged") {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run2.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
+    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
+      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
     }
     this.tx(() => {
       this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
@@ -6938,11 +7324,11 @@ var SterlingStore = class _SterlingStore {
    * pinned model IDs. No network; no fabrication — day-one entries are the IDs
    * already in use by the installed agents.
    */
-  bootstrapCatalogIfAbsent(config2, nowISO) {
+  bootstrapCatalogIfAbsent(config, nowISO) {
     const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
     if (existing.length > 0)
       return;
-    const cfg = config2;
+    const cfg = config;
     const models = cfg.models ?? {};
     const ids = /* @__PURE__ */ new Set();
     for (const v of Object.values(models)) {
@@ -7105,8 +7491,8 @@ function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync2(join2(dir, ".sterling", "sterling.db"))) return dir;
-    const parent = dirname2(dir);
+    if (existsSync3(join3(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname3(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -7117,137 +7503,146 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function deny(message) {
-  process.stderr.write(message);
-  process.exit(2);
-}
 function allow() {
   process.exit(0);
 }
 function loadConfig(cwd) {
-  const p = join2(cwd, ".sterling", "config.json");
-  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+  const p = join3(cwd, ".sterling", "config.json");
+  return existsSync3(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 function openStore(cwd) {
-  const p = join2(cwd, ".sterling", "sterling.db");
-  return existsSync2(p) ? new SterlingStore(p) : null;
+  const p = join3(cwd, ".sterling", "sterling.db");
+  return existsSync3(p) ? new SterlingStore(p) : null;
 }
 
-// scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
-var TAIL_BYTES = 1024 * 1024;
-function deriveAgentTranscript(parentTranscriptPath, agentId) {
-  const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
-  const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync3(flat)) return flat;
-  const wfRoot = `${sessionDir}/subagents/workflows`;
+// scripts/lib/citations.mjs
+function buildResolver(store) {
+  const index = store.recordIdIndex();
+  let aliasRows = [];
   try {
-    for (const d of readdirSync(wfRoot)) {
-      const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync3(candidate)) return candidate;
-    }
+    aliasRows = store.recordAliases();
   } catch {
+    aliasRows = [];
   }
-  return flat;
-}
-function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync3(path)) return null;
-  const fd = openSync(path, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const len = Math.min(size, bytes);
-    const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, size - len);
-    return buf.toString("utf8");
-  } finally {
-    closeSync(fd);
+  for (const a of aliasRows) {
+    index.push({ id: a.historical_id, type: "alias", status: "superseded" });
   }
-}
-function latestUsage(path) {
-  const tail = readTail(path);
-  if (tail === null) return { usage: null, reason: "transcript_missing" };
-  const lines = tail.split("\n");
-  let sawAssistant = false;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (entry.type !== "assistant") continue;
-    sawAssistant = true;
-    const usage = entry.message?.usage;
-    if (usage && typeof usage.input_tokens === "number") {
-      return { usage, model: entry.message?.model, reason: null };
-    }
+  const fullIds = new Set(index.map((r) => r.id));
+  const byId = new Map(index.map((r) => [r.id, r]));
+  const byPrefix = /* @__PURE__ */ new Map();
+  for (const r of index) {
+    const p = r.id.slice(0, 8);
+    if (!byPrefix.has(p)) byPrefix.set(p, []);
+    byPrefix.get(p).push(r);
   }
-  if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync(path).size > TAIL_BYTES;
-  return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
-}
-function fillPct(usage, windowSize) {
-  const used = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
-  return 100 * used / windowSize;
+  function resolve2(id) {
+    if (id.length > 8) return fullIds.has(id) ? byId.get(id) : void 0;
+    const hits = byPrefix.get(id);
+    if (!hits || hits.length === 0) return void 0;
+    return hits.length > 1 ? "ambiguous" : hits[0];
+  }
+  const getById = (id) => store.get(id);
+  return { resolve: resolve2, getById, size: index.length };
 }
 
-// scripts/hooks/h6-context-watch.mjs
-var input = readStdin();
-if (!input.agent_id) {
-  const s2 = openStore(input.cwd);
-  if (s2) {
-    try {
-      s2.recordCheckSkipped("context-watch", "agent_id_missing", s2.getRun()?.id, (/* @__PURE__ */ new Date()).toISOString());
-    } finally {
-      s2.close();
+// scripts/hooks/h30-bare-id-legibility.mjs
+import { existsSync as existsSync4 } from "node:fs";
+import { join as join4 } from "node:path";
+var CANDIDATE_RE = /(?<![0-9A-Za-z])(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|[0-9A-Fa-f]{8})(?![0-9A-Za-z-])/g;
+var CITATION_CONTEXT_RE = /\b(?:board|todo|task|maintenance|decision|anti_pattern|article|feature_article|finding|research_finding|brief|knowledge_get)\b[^\n]{0,12}$/i;
+var GENERIC_TYPE_WORDS = /* @__PURE__ */ new Set(["board", "item", "record", "decision", "todo", "task", "id", "uuid"]);
+var FILLER_WORDS = /* @__PURE__ */ new Set(["the", "a", "an", "this", "that", "these", "those", "for", "of", "and", "or", "in", "on", "to", "our", "its", "is", "are", "we", "you", "i", "it"]);
+function visibleFields(questions) {
+  const out = [];
+  for (const [qi, q] of (Array.isArray(questions) ? questions : []).entries()) {
+    const where = questions.length > 1 ? ` (question ${qi + 1})` : "";
+    if (typeof q?.question === "string") out.push({ label: `the question text${where}`, text: q.question });
+    if (typeof q?.header === "string") out.push({ label: `the question header${where}`, text: q.header });
+    for (const [oi, o] of (Array.isArray(q?.options) ? q.options : []).entries()) {
+      if (typeof o?.label === "string") out.push({ label: `option ${oi + 1}'s label${where}`, text: o.label });
+      if (typeof o?.description === "string") out.push({ label: `option ${oi + 1}'s description${where}`, text: o.description });
     }
   }
-  process.stderr.write("H6 degraded loudly: agent_id missing from hook input (platform drift?) \u2014 recorded check_skipped {context-watch}");
-  allow();
+  return out.filter((f) => f.text.trim());
 }
-var config = loadConfig(input.cwd);
-var cw = {
-  warn_pct: 60,
-  block_pct: 95,
-  mode: "observe",
-  windows: { default: 2e5 },
-  ...config?.context_watch ?? {}
-};
-var store = openStore(input.cwd);
-var run = store ? store.getRun() : void 0;
-var now = (/* @__PURE__ */ new Date()).toISOString();
-function recordSkip(reason) {
-  if (store) store.recordCheckSkipped("context-watch", reason, run?.id, now);
+function isGlossed(text, start, end) {
+  if (text[start - 1] !== "(" || text[end] !== ")") return false;
+  const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+  const phrase = text.slice(lineStart, start - 1).trim();
+  if (!phrase) return false;
+  const tokens = phrase.split(/[^A-Za-z0-9_-]+/).map((t) => t.toLowerCase().replace(/^-+|-+$/g, "")).filter(Boolean);
+  const last = tokens[tokens.length - 1];
+  if (!last || !/[a-z]/.test(last)) return false;
+  if (/^[0-9a-f]{8}$/.test(last)) return false;
+  const folded = last.length > 3 && last.endsWith("s") ? last.slice(0, -1) : last;
+  return !GENERIC_TYPE_WORDS.has(folded) && !FILLER_WORDS.has(folded);
+}
+function openUniverse(cwd) {
+  const dbPath = join4(cwd ?? ".", ".sterling", "sterling.db");
+  if (!existsSync4(dbPath)) return null;
+  try {
+    return new MountedStores(dbPath, resolveDomainMounts(parseConfig(loadConfig(cwd) ?? {})), { skipMissing: true });
+  } catch {
+    return openStore(cwd);
+  }
+}
+var input;
+try {
+  input = readStdin();
+} catch {
+  allow();
 }
 try {
-  const transcript = deriveAgentTranscript(input.transcript_path, input.agent_id);
-  const { usage, model, reason } = latestUsage(transcript);
-  if (!usage) {
-    recordSkip(reason ?? "format_unparseable");
-    process.stderr.write(`H6 degraded loudly: ${reason} for agent ${input.agent_id} (recorded check_skipped {context-watch})`);
-    allow();
-  }
-  const windowSize = model && cw.windows[model] || cw.windows.default;
-  const fill = fillPct(usage, windowSize);
-  if (input.hook_event_name === "PostToolUse") {
-    const fillsPath = run ? join3(input.cwd, ".sterling", "runs", run.id, "h6-fills.jsonl") : join3(input.cwd, ".sterling", "transient", "h6-fills.jsonl");
-    mkdirSync2(dirname3(fillsPath), { recursive: true });
-    appendFileSync(
-      fillsPath,
-      JSON.stringify({ agent_id: input.agent_id, agent_type: input.agent_type, fill_pct: fill, model, at: now }) + "\n"
-    );
-    if (fill >= cw.warn_pct && run) {
-      store.appendRunEscalation(run.id, { kind: "context_warn", agent_id: input.agent_id, fill_pct: fill, at: now });
+  const fields = visibleFields(input.tool_input?.questions);
+  if (!fields.length) allow();
+  const found = [];
+  for (const field of fields) {
+    for (const m of field.text.matchAll(CANDIDATE_RE)) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (isGlossed(field.text, start, end)) continue;
+      const lineStart = field.text.lastIndexOf("\n", start - 1) + 1;
+      found.push({
+        id: m[0],
+        where: field.label,
+        cited: CITATION_CONTEXT_RE.test(field.text.slice(lineStart, start))
+      });
     }
   }
-  if (input.hook_event_name === "PreToolUse" && fill >= cw.block_pct && cw.mode === "enforce") {
-    deny(
-      `H6: context fill ${fill.toFixed(1)}% \u2265 ${cw.block_pct}% for agent ${input.agent_id} \u2014 stop now and exit phase-overflow {fill_pct: ${fill.toFixed(1)}}; work past this point is rejected, not salvaged (P7)`
+  if (!found.length) allow();
+  const store = openUniverse(input.cwd);
+  if (!store) allow();
+  let resolve2;
+  try {
+    ({ resolve: resolve2 } = buildResolver(store));
+  } catch {
+    resolve2 = () => void 0;
+  }
+  const seen = /* @__PURE__ */ new Set();
+  const findings = [];
+  for (const f of found) {
+    const key = f.id.toLowerCase();
+    if (seen.has(key)) continue;
+    const row = resolve2(key);
+    const resolves = row && row !== "ambiguous";
+    if (!resolves && !f.cited) continue;
+    seen.add(key);
+    findings.push(
+      `  - '${f.id}' in ${f.where} \u2014 ${resolves ? `a ${row.type} in this store` : "cited as a Sterling record"}, shown with no human-readable name beside it`
     );
   }
+  if (!findings.length) allow();
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: input.hook_event_name,
+        additionalContext: `H30 BARE-ID LEGIBILITY ADVISORY \u2014 POST-ANSWER, NOT A GATE (it cannot arrive before the user answers; decision human-readable-ids-for-board-items, layer S3). You put a choice to the user naming identifier(s) the reader has no way to recognise:
+${findings.join("\n")}
+DO NOT TREAT THIS ANSWER AS A RULING. RE-ASK WITH READABLE NAMES \u2014 print the name first and keep the id beside it, \`name (id8)\`; names clip, ids never do. An unanswerable question is worse than an unasked one, because it manufactures a ruling from someone who could not see what they were ruling on. Bare ids stay correct for mechanically-resolved surfaces (spawn inputs, tool parameters, the id ladder) and for history entries pinned to what was live then \u2014 this is the HUMAN surface, so it is neither.`
+      }
+    })
+  );
   allow();
-} finally {
-  if (store) store.close();
+} catch {
+  allow();
 }

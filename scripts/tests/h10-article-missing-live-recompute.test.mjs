@@ -759,3 +759,224 @@ test('E-4 (DEGRADE control): a FAILED gitignore probe KEEPS the carried name —
     cleanup();
   }
 });
+
+// =========================================================================
+// APPENDED 2026-08-29 (second wave) — THE STRICT-SUBSET OUTSIDER LEAK, plus
+// the check_skipped receipt E-4 deliberately left unpinned.
+//
+// WHY THESE ARMS EXIST, STATED PLAINLY: the shipped code comment for the
+// subset sweep cites "reproduced 2026-08-29 as arm B-4", and until this block
+// landed NO ARM B-4 EXISTED anywhere in scripts/tests — the reproduction lived
+// in a probe that was deleted. A citation to a test that does not exist is
+// worse than no citation: it tells the next reader the behaviour is pinned
+// when nothing observes it. B-4 below is that arm, written to the reproduced
+// red exactly:
+//     one item; got 2: [["src/c1.mjs"],["src/a.mjs","src/c1.mjs"]]
+//
+// THE RULING. Consolidation folds every open article_missing item this
+// session's paths REACH into one survivor carrying the union. An item OUTSIDE
+// that reach is handled by direction, and the two directions are deliberately
+// OPPOSITE:
+//   EQUALITY (arm B-3, above) — the outsider carries exactly the healed set:
+//     keep THEIRS, drop OURS. Both records assert the identical demand and the
+//     outsider is the older record with the inbound history.
+//   STRICT SUBSET (arm B-4, here) — the outsider's keys are a PROPER subset of
+//     the healed set: keep OURS, drop THEIRS. Deferring to theirs here would
+//     DROP the names only ours carries, and a dropped name on this lane is
+//     permanent silent loss (article_missing is outside UPDATE_RESOLVABLE_LANES,
+//     never auto-drains, and H1 only COUNTS it). The inversion is the whole
+//     point, so it is pinned rather than inferred from the neighbouring branch.
+//   DISJOINT (arm B-4-CONTROL) — untouched. This is the arm that makes B-4
+//     evidence rather than a coincidence: "one item remains" has a second
+//     possible cause — a sweep that removes every non-survivor — and that
+//     implementation passes B-4 identically while destroying unrelated debt.
+//   EMPTY KEYS (arm B-5) — skipped, deliberately, because the empty set is a
+//     trivial subset of everything and would otherwise be swept by any healed
+//     set at all. A conservative deviation that nothing pins looks exactly like
+//     an oversight to the next reader, and gets "simplified" away.
+//
+// EVERY ARM BELOW IS EXPECTED GREEN AGAINST THE CURRENT (already-fixed) code,
+// and each names the ONE-LINE SABOTAGE that must turn it RED.
+// =========================================================================
+
+/** One touched, live, unowned file — under the demand threshold on purpose, so
+ *  the recompute path (not the mint path) is what these arms exercise. */
+const OURS_LIVE = 'src/a.mjs';
+const SHARED_CARRIED = 'src/c1.mjs';
+
+test('B-4-CONTROL (must pass for the OPPOSITE reason — placed FIRST): an outsider whose keys are DISJOINT from the healed set survives the session untouched — the subset sweep is a sweep of SUBSETS, never of everything out of reach', () => {
+  // SABOTAGE that must turn THIS red: widen the sweep from `subsetOf(item.file_keys, healed)`
+  // to an unconditional removal of every open item that is not the survivor.
+  // EXPECT RED: src/z9.mjs vanishes.
+  //
+  // WITHOUT THIS ARM B-4 is not evidence. Its verdict — "exactly one item
+  // remains" — is satisfied identically by a lane that deletes every
+  // article_missing item it did not just write, which is the most destructive
+  // possible reading of consolidation and would silently erase every unrelated
+  // demand on the queue.
+  const { dir, store, cleanup } = makeH10Project();
+  try {
+    placeFiles(dir, [OURS_LIVE, SHARED_CARRIED, 'src/z9.mjs']);
+    systemTodo(store, [OURS_LIVE, SHARED_CARRIED], '2026-08-28T08:00:00.000Z', { objective: 'fixture-ours' });
+    systemTodo(store, ['src/z9.mjs'], '2026-08-28T08:05:00.000Z', { objective: 'fixture-disjoint-outsider' });
+
+    encounterTolerant(dir, store, [OURS_LIVE], '2026-08-28T10:00:00.000Z');
+
+    const open = demands(store);
+    const byObjective = Object.fromEntries(open.map((d) => [d.objective, [...(d.file_keys ?? [])].sort()]));
+    assert.ok(
+      byObjective['fixture-disjoint-outsider'],
+      `CONTROL BROKEN — OVER-SWEEP SHAPE: src/z9.mjs is still unowned, still on disk, and shares NO key with this session's healed set {${OURS_LIVE}, ${SHARED_CARRIED}}. Nothing in the ruling permits touching it. If it is gone, the sweep is removing by reachability instead of by subset, and B-4's green below means only that the lane deletes everything. Open items were: ${JSON.stringify(byObjective)}`,
+    );
+    assert.deepEqual(byObjective['fixture-disjoint-outsider'], ['src/z9.mjs'], 'CONTROL: and it is untouched, not merely surviving with a rewritten key list');
+    assert.deepEqual(
+      byObjective['fixture-ours'],
+      [OURS_LIVE, SHARED_CARRIED].sort(),
+      'CONTROL: our reached item heals to the union of the live unowned set and its still-owed carried name — this is the exact healed set B-4 measures against',
+    );
+    assert.equal(open.length, 2, `CONTROL: exactly two items — ours and the untouched disjoint outsider. Open items were: ${JSON.stringify(byObjective)}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('B-4 (THE REPRODUCED RED — the arm the shipped code comment cites): an outsider whose keys are a STRICT SUBSET of the healed set is removed and OURS survives carrying BOTH names — at strict subset only ours carries every still-owed name', () => {
+  // SABOTAGE that must turn this red: drop the subset sweep and handle only the
+  // equality case (`sameSet`). EXPECT RED with exactly the reproduced shape —
+  // one item; got 2: [["src/c1.mjs"],["src/a.mjs","src/c1.mjs"]].
+  //
+  // SECOND SABOTAGE, and it must ALSO turn this red, because it is the one a
+  // reader is most likely to "fix" by symmetry with the neighbouring equality
+  // branch: invert the direction — keep THEIRS and drop OURS at strict subset.
+  // EXPECT RED on the surviving key list, which loses src/a.mjs permanently.
+  const { dir, store, cleanup } = makeH10Project();
+  try {
+    placeFiles(dir, [OURS_LIVE, SHARED_CARRIED]);
+    // Ours: REACHED by this session (it names src/a.mjs) and heals to
+    // {src/a.mjs, src/c1.mjs} — src/c1.mjs is unowned, on disk, not gitignored,
+    // so the ruling keeps it.
+    systemTodo(store, [OURS_LIVE, SHARED_CARRIED], '2026-08-28T08:00:00.000Z', { objective: 'fixture-ours' });
+    // Theirs: OUTSIDE this session's reach (src/a.mjs is not among its keys)
+    // and a PROPER subset of the healed set — the near-miss board f4616312
+    // reported, which the empty-`unowned` outsider guard could never reach.
+    systemTodo(store, [SHARED_CARRIED], '2026-08-28T08:05:00.000Z', { objective: 'fixture-subset-outsider' });
+    assert.equal(demands(store).length, 2, 'baseline: two open items, one a strict subset of what the other will heal to');
+
+    encounterTolerant(dir, store, [OURS_LIVE], '2026-08-28T10:00:00.000Z');
+
+    const open = demands(store);
+    assert.equal(
+      open.length,
+      1,
+      `MANUFACTURED-DUPLICATE SHAPE (the reproduced red, verbatim: one item; got 2: [["${SHARED_CARRIED}"],["${OURS_LIVE}","${SHARED_CARRIED}"]]): two open items now overlap on ${SHARED_CARRIED}, and file_keys IS enqueueSystemTodo's dedup key — the next enqueue breaks at the first match, so the second item stands open forever, never drained, counted by H1 forever. Open items were: ${JSON.stringify(open.map((d) => [...(d.file_keys ?? [])].sort()))}`,
+    );
+    assert.deepEqual(
+      [...open[0].file_keys].sort(),
+      [OURS_LIVE, SHARED_CARRIED].sort(),
+      `DIRECTION SHAPE if this names only ${SHARED_CARRIED}: at STRICT SUBSET the survivor must be OURS, which is the only record carrying every still-owed name. The neighbouring EQUALITY branch defers to the outsider precisely because the two sets are identical there — copying that deference down to strict subset drops ${OURS_LIVE}, and a dropped name on this lane is permanent silent loss, which AC9 calls the worse direction`,
+    );
+    assert.equal(
+      open[0].objective,
+      'fixture-ours',
+      'and the SURVIVOR is our reached item — the record that actually carries the union. This assertion is what distinguishes "kept ours" from "kept theirs and happened to widen its keys"',
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('B-5 (the conservative deviation, pinned so it does not look like an oversight): an outsider with an EMPTY file_keys list is SKIPPED by the subset sweep — the empty set is a trivial subset of everything', () => {
+  // SABOTAGE that must turn this red: remove the empty-file_keys skip from the
+  // sweep, so `subsetOf([], healed)` returns true and the item is removed.
+  // EXPECT RED: the empty-keyed item is gone.
+  //
+  // The deviation is deliberate and it is CONSERVATIVE: with no skip, ANY
+  // healed set at all sweeps away every empty-keyed open item on the queue,
+  // whatever produced it. Removing debt is the irreversible direction on a lane
+  // that never auto-drains, so an item nobody can prove is a duplicate is left
+  // standing.
+  const { dir, store, cleanup } = makeH10Project();
+  try {
+    placeFiles(dir, [OURS_LIVE, SHARED_CARRIED]);
+    systemTodo(store, [OURS_LIVE, SHARED_CARRIED], '2026-08-28T08:00:00.000Z', { objective: 'fixture-ours' });
+    systemTodo(store, [], '2026-08-28T08:05:00.000Z', { objective: 'fixture-empty-outsider' });
+    assert.equal(demands(store).length, 2, 'baseline: our item plus an empty-keyed open item');
+
+    encounterTolerant(dir, store, [OURS_LIVE], '2026-08-28T10:00:00.000Z');
+
+    const open = demands(store);
+    const objectives = open.map((d) => d.objective).sort();
+    assert.deepEqual(
+      objectives,
+      ['fixture-empty-outsider', 'fixture-ours'],
+      `TRIVIAL-SUBSET SHAPE if the empty-keyed item is gone: [] is a subset of every set, so an unguarded subset test removes it on any session that heals anything. Open objectives were: ${JSON.stringify(objectives)}`,
+    );
+    assert.deepEqual(
+      [...open.find((d) => d.objective === 'fixture-ours').file_keys].sort(),
+      [OURS_LIVE, SHARED_CARRIED].sort(),
+      'and the skip costs nothing on the healing side — our survivor still carries the full union',
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('E-4b (the receipt E-4 could not assert): a FAILED gitignore probe on a CARRIED name records check_skipped `article-demand-carried-gitignore` — the degrade is LOUD, not merely safe', () => {
+  // SABOTAGE that must turn this red: drop the check_skipped record from the
+  // failed carried-name ignore probe (keep the name, say nothing).
+  //
+  // WHY THIS IS A SEPARATE ARM FROM E-4: E-4 pins the SAFETY property (a broken
+  // probe keeps the name). Safety alone is silent — a lane that keeps names
+  // because a tool is broken, and never says so, is indistinguishable from one
+  // where the tool works. P5 is fail LOUD, never silent, and AC9 names this
+  // receipt by its exact string. E-4's author correctly refused to assert an
+  // invented accessor; the read surface is SterlingStore.listCheckSkipped(),
+  // the same accessor scripts/tests/gitignore-frontier.test.mjs AC7 already
+  // uses for the MINT-side degrade of the same probe.
+  const { dir, store, cleanup } = makeH10Project();
+  try {
+    const git = spawnSync('git', ['init'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(git.status, 0, `E-4b fixture: needs a real git repo so the failure is a PROBE failure, not the no_git path: ${git.stderr}`);
+
+    encounterTolerant(dir, store, ['src/a.mjs', 'build/gen.mjs', 'src/doomed.mjs'], '2026-08-28T09:00:00.000Z');
+    assert.ok(demandedPaths(store).includes('build/gen.mjs'), 'baseline: build/gen.mjs demanded while nothing ignored it');
+
+    writeFileSync(join(dir, '.gitignore'), 'build/\n');
+    rmSync(join(dir, 'src', 'doomed.mjs'), { force: true }); // liveness marker, read first below
+
+    // Break the probe itself: git is unreachable, so the ignore check ERRORS
+    // instead of answering. `.git` is present, so this is not the no_git path.
+    const emptyBin = join(dir, '.sterling', 'no-bin');
+    mkdirSync(emptyBin, { recursive: true });
+    touchRegister(dir, ['src/a.mjs', 'src/b.mjs', 'src/c.mjs'], '2026-08-28T10:00:00.000Z');
+    captureDecision(store, '2026-08-28T10:00:00.000Z');
+    const first = stop(dir, { PATH: emptyBin });
+    assert.ok(first.code === 0 || first.code === 2, `E-4b: a broken git probe must degrade, never crash the gate (code ${first.code}): ${first.stderr}`);
+    if (first.code === 2) {
+      const second = stop(dir, { PATH: emptyBin });
+      assert.equal(second.code, 0, `E-4b: the session releases: ${second.stderr}`);
+    }
+
+    const paths = demandedPaths(store);
+    // LIVENESS, and it must be read first: without it a hook that crashed or
+    // bailed early would leave the item untouched, and the receipt assertion
+    // below would be measuring a run in which the carried-name path never
+    // executed at all.
+    assert.ok(
+      !paths.includes('src/doomed.mjs'),
+      'E-4b LIVENESS: the recompute ran despite the broken probe — src/doomed.mjs is gone from disk and the absent-on-disk ruling (which needs no git) still pruned it. If this fails, nothing below is evidence about the carried-name gitignore path',
+    );
+    assert.ok(
+      paths.includes('build/gen.mjs'),
+      'E-4b LIVENESS (the E-4 property, restated here so the receipt is checked on a run that actually exercised the degrade): the failed probe KEPT the carried name',
+    );
+
+    const skipped = store.listCheckSkipped();
+    assert.ok(
+      skipped.some((c) => /article-demand-carried-gitignore/.test(`${c.check_name ?? ''} ${c.reason ?? ''}`)),
+      `SILENT-DEGRADE SHAPE: the carried-name ignore probe failed and the name was kept, but nothing recorded WHY. AC9 names this receipt exactly — "a FAILED gitignore probe KEEPS the name and records check_skipped article-demand-carried-gitignore" — because a lane that quietly compensates for a broken tool hides the broken tool (P5). Recorded rows were: ${JSON.stringify(skipped.map((c) => c.check_name ?? c.reason ?? c))}`,
+    );
+  } finally {
+    cleanup();
+  }
+});

@@ -87,6 +87,25 @@ export interface BoardFilter {
    * filter as a genuine AND, applied in the same JS pass as system_reason/contains.
    */
   feature_slug?: string;
+  /**
+   * Narrow to the slices of ONE objective — the grouping key board_add requires
+   * and decision a8d2ce6c made the axis the TUI groups by and H1 counts by. The
+   * data was always stored and the filter was simply missing: a consuming
+   * project paged 306 items across two lanes to find one objective's slices.
+   *
+   * Exact match on the stored value, in the same JS pass as source/system_reason
+   * — a genuine WHERE, like every sibling clause here. THE WRITE SIDE'S
+   * NORMALIZATION IS MIRRORED: board_add/board_update normalize the declared
+   * value 'standalone' to field-absent (ungrouped), so objective:'standalone'
+   * here selects the UNGROUPED items rather than matching a literal group of
+   * that name — reading the write surface's own vocabulary as a group name
+   * would return nothing, silently, for the one value the tool description
+   * teaches. An objective no item carries narrows to nothing rather than
+   * erroring (feature_slug's boundary), and a system-source item can never
+   * match: maintenance items are lane-keyed by system_reason and board_add
+   * refuses an objective on them.
+   */
+  objective?: string;
   cap?: number;
   projection?: BoardProjection;
   /**
@@ -166,6 +185,32 @@ export interface BoardQueryResult {
   records: DurableRecord[] | Record<string, unknown>[];
 }
 
+/**
+ * knowledge_query's per-record staleness verdict (see computeBaselineDrift):
+ * the DERIVED reading of the server-owned `file_baselines` the query projection
+ * strips — which owned paths' bytes have moved since the record was written
+ * against them, and which could not be checked at all. Never the hashes
+ * themselves: knowledge_get stays the full-fidelity read, deliberately.
+ *
+ * OMITTED ENTIRELY when a record's owned files are all unmoved — so the
+ * envelope's `provenance` is what makes an absence readable (a record owning no
+ * files can never be annotated, and that is not a freshness claim).
+ */
+export interface BaselineDrift {
+  /** owned paths whose CURRENT bytes differ from the recorded baseline */
+  changed: string[];
+  /**
+   * owned paths carrying a baseline that could not be re-read at all (absent
+   * from the tree, unreadable, or a working_tree name this config does not map).
+   * A NON-verdict, reported rather than folded into `changed` or into silence:
+   * abstention presented as "unchanged" is the exact P5 inversion board_query's
+   * own F3 fix exists to prevent.
+   */
+  unverifiable?: string[];
+  /** what the verdict means, in one sentence per arm */
+  note: string;
+}
+
 /** knowledge_query's disclosed result envelope (see knowledgeQueryResult). */
 export interface KnowledgeQueryResult {
   /** records matching the FILTER (types/stack_tags/file_keys), rank- and cap-blind */
@@ -184,6 +229,18 @@ export interface KnowledgeQueryResult {
    * 'ready' (a complete, non-empty window).
    */
   answerability: 'ready' | 'verify_targets' | 'insufficient';
+  /**
+   * Whether the per-record `baseline_drift` check RAN over this window — the
+   * same honesty contract board_query's `provenance` carries, for the same
+   * reason: an ABSENT annotation must never be readable as a positive freshness
+   * claim (P5). 'checked' means every baselined record in this window was
+   * compared against its recorded baseline, so a record with no annotation is
+   * genuinely unmoved. 'unavailable:<reason>' — no_repo_root | no_baselines |
+   * count_projection — states WHY no comparison happened, which is the case a
+   * silent field would misrepresent: a decision, a todo, or any record owning
+   * no files can never be annotated at all.
+   */
+  provenance: string;
   records: Record<string, unknown>[];
   /** projection:'count' only, and only when multiple `types` were queried: the
    *  same uncapped, rank-blind count() split per queried type, alongside the
@@ -886,6 +943,77 @@ export class SterlingTools {
     const current = this.hashFile(rel, root);
     if (current === undefined) return false;
     return current !== baseline;
+  }
+
+  /**
+   * The staleness verdict knowledge_query never surfaced (reported 2026-08-29:
+   * "no equivalent staleness annotation at all" on knowledge_query). Nothing new
+   * is COMPUTED here — the baselines exist, H7 and the read-time drift wires
+   * already consult them, and projectForQuery strips them from query output so
+   * a reader could not see that a record's owned file had moved since the bytes
+   * it was written against. This DERIVES that verdict for the window and hands
+   * it to the reader, mirroring board_query's annotation + `provenance` pair.
+   *
+   * WHY NOT contentChanged(): that helper deliberately collapses "no baseline"
+   * and "cannot read the file" into `false`, because its callers RAISE FLAGS and
+   * must abstain rather than fabricate one. Here abstention is itself something
+   * to report, so the same primitive (hashFile vs. the recorded baseline) is
+   * read at finer grain — one policy, two readings, not two policies.
+   *
+   * A FLAG ONLY, never a mint: this path enqueues nothing. Invalidation already
+   * exists (H7 / the read-time drift wires, decision 57d9a52d) and a second lane
+   * on the same fact would be double-reporting.
+   *
+   * Baselines exist for feature_article and reference_material only (see
+   * computeBaselines), which is exactly why the envelope has to disclose
+   * whether the check ran: over a window of decisions there is nothing to
+   * compare, and silence there means "unknowable", not "fresh".
+   */
+  private computeBaselineDrift(records: DurableRecord[]): { status: string; annotations: Map<string, BaselineDrift> } {
+    const annotations = new Map<string, BaselineDrift>();
+    if (!this.repoRoot) return { status: 'unavailable:no_repo_root', annotations };
+    const eligible = (records as unknown as Record<string, unknown>[]).filter((r) => {
+      const baselines = r.file_baselines as Record<string, string> | undefined;
+      return baselines !== undefined && Object.keys(baselines).length > 0;
+    });
+    if (eligible.length === 0) return { status: 'unavailable:no_baselines', annotations };
+    for (const rec of eligible) {
+      const baselines = rec.file_baselines as Record<string, string>;
+      const paths = Object.keys(baselines).sort();
+      const changed: string[] = [];
+      const unverifiable: string[] = [];
+      // Detached-working-tree resolution, same as every other baseline consumer:
+      // an unmapped working_tree name is never checked against the wrong tree —
+      // it abstains, LOUDLY, as the whole record's unverifiable set.
+      const tree = this.treeRootFor(rec);
+      if (tree.unresolved || !tree.root) {
+        unverifiable.push(...paths);
+      } else {
+        for (const rel of paths) {
+          const current = this.hashFile(rel, tree.root);
+          if (current === undefined) unverifiable.push(rel);
+          else if (current !== baselines[rel]) changed.push(rel);
+        }
+      }
+      if (!changed.length && !unverifiable.length) continue; // unmoved: say nothing (P1)
+      const notes: string[] = [];
+      if (changed.length) {
+        notes.push(
+          `⚠ ${changed.length} owned file(s) changed since this record's baseline (${changed.join(', ')}) — it was written against different bytes, so re-read the code before trusting it`
+        );
+      }
+      if (unverifiable.length) {
+        notes.push(
+          `⚠ ${unverifiable.length} owned file(s) could not be re-read, so their freshness is NOT verified (${unverifiable.join(', ')}) — absent from this tree, unreadable, or in an unmapped working_tree`
+        );
+      }
+      annotations.set(rec.id as string, {
+        changed,
+        ...(unverifiable.length ? { unverifiable } : {}),
+        note: notes.join('; '),
+      });
+    }
+    return { status: 'checked', annotations };
   }
 
   // -- knowledge CRUD ---------------------------------------------------------
@@ -2318,6 +2446,9 @@ export class SterlingTools {
         cap: filter.cap ?? DEFAULT_QUERY_CAP,
         capped: false,
         answerability: matchedFilter === 0 ? 'insufficient' : 'ready',
+        // A count NEVER enumerates, so no record's baseline was consulted —
+        // said out loud rather than left to read as "nothing is stale here".
+        provenance: 'unavailable:count_projection',
         records: [],
         ...(byType ? { by_type: byType } : {}),
       };
@@ -2346,6 +2477,16 @@ export class SterlingTools {
     // anything ruled about X" combines the two rather than reading a bare
     // filter count as if it were a relevance judgement.
     const aboveThreshold = filter.min_score !== undefined ? this.store.countAboveScore(filter, filter.min_score) : undefined;
+    // The derived baseline verdict rides EVERY enumerating projection: an
+    // annotation only the expensive projection can see is one a paging reader
+    // never sees. Computed over the pre-projection records, which still carry
+    // the baselines projectForQuery strips.
+    const { status: provenance, annotations } = this.computeBaselineDrift(records);
+    const projectRecord = (r: (typeof records)[number]): Record<string, unknown> => {
+      const base = projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r);
+      const drift = annotations.get(r.id);
+      return drift ? { ...base, baseline_drift: drift } : base;
+    };
     return {
       matched_filter: matchedFilter,
       returned: records.length,
@@ -2359,7 +2500,8 @@ export class SterlingTools {
             }
           : {}),
       answerability,
-      records: records.map((r) => (projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r))),
+      provenance,
+      records: records.map(projectRecord),
       ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
     };
   }
@@ -4784,6 +4926,12 @@ export class SterlingTools {
     if (filter.contains) {
       const needle = filter.contains.toLowerCase();
       filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
+    }
+    if (filter.objective !== undefined) {
+      // Same normalization the WRITE side applies (decision a8d2ce6c):
+      // 'standalone' means ungrouped, which is stored as field-absent.
+      const wanted = filter.objective === 'standalone' ? undefined : filter.objective;
+      filtered = filtered.filter((t) => (t as { objective?: string }).objective === wanted);
     }
     if (filter.feature_slug !== undefined) {
       const chain = this.articleChainIds(filter.feature_slug);
