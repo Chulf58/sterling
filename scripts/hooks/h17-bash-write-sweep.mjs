@@ -3005,10 +3005,19 @@ function mintRestorePerformed(cwd, paths, agentId) {
 // the fail-closed catch and DENIES, loudly and with the size named. It never
 // truncates, so a partial restore is not reachable; the cost of the bound is a
 // denial on an absurdly large tracked file, never a silently wrong file.
-const HEAD_BLOB_MAX_BYTES = 256 * 1024 * 1024;
-
-// The ONLY two HEAD modes a `{path, bytes}` restore can express.
-const REGULAR_BLOB_MODES = new Set(['100644', '100755']);
+// BOTH CONSTANTS BELOW LIVE INSIDE THEIR CONSUMING FUNCTION, NOT AT MODULE SCOPE,
+// AND THAT PLACEMENT IS LOAD-BEARING RATHER THAN STYLISTIC. A module-scope
+// statement runs at IMPORT — before the deny decision and outside any try whose
+// catch reaches deny() — so the fail-closed boundary check counts it as a hole:
+// if it threw, the hook would exit 1, the runner reads non-2 as NON-BLOCKING, and
+// the gate is voided. These two cannot realistically throw, but the baseline is a
+// RATCHET THAT ONLY SHRINKS (scripts/check-failclosed-boundary.mjs), and its two
+// growth doors are deliberately narrow: raise the founding total (which is
+// exact, test-pinned, and reserved for UNJUSTIFIED entries), or add an `admitted`
+// entry that is REPRINTED ON EVERY RUN FOREVER. Neither is the right price for a
+// numeric literal and a two-element Set, so they moved instead of being admitted.
+// Re-creating the Set per call costs nothing: the restore path runs once per
+// restored path, not in a loop.
 
 // Resolve `rel`'s HEAD tree entry NUL-SAFELY. `-z` is load-bearing twice over:
 // it makes the RECORD separator NUL (so a path containing a newline cannot break
@@ -3065,6 +3074,8 @@ function headTreeEntry(cwd, rel) {
 // conduct rules forbid, while telling the reader to go and fix a machine that is
 // working correctly. See the catch-all at the foot of the Post path.
 function assertRestorableHeadEntry(entry, rel) {
+  // The ONLY two HEAD modes a `{path, bytes}` restore can express.
+  const REGULAR_BLOB_MODES = new Set(['100644', '100755']);
   if (entry.type !== 'blob' || !REGULAR_BLOB_MODES.has(entry.mode)) {
     const e = new Error(
       `refusing to restore tracked path '${rel}': its HEAD entry is NOT a regular file (mode ${entry.mode}, type ${entry.type}). A symlink (120000), ` +
@@ -3080,6 +3091,7 @@ function assertRestorableHeadEntry(entry, rel) {
 // round-trips through a string (two different invalid-UTF-8 sequences decode to
 // the same U+FFFD — a text round-trip is lossy exactly where tampering hides).
 function headBlobBytes(cwd, entry, rel) {
+  const HEAD_BLOB_MAX_BYTES = 256 * 1024 * 1024;
   const r = spawnSync('git', ['-C', cwd, 'cat-file', 'blob', entry.oid], { maxBuffer: HEAD_BLOB_MAX_BYTES });
   if (r.error || r.status !== 0) {
     const stderr = r.stderr ? r.stderr.toString() : '';

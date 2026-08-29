@@ -18,6 +18,7 @@ import {
   readSync,
   writeSync,
   ftruncateSync,
+  fchmodSync,
   closeSync,
   fstatSync,
   lstatSync,
@@ -7432,31 +7433,51 @@ function dirHandleOf(h) {
 function lstatKindUnder(cwd2, rel, what = "path classification") {
   return withPinnedParent(cwd2, rel, what, {}, (parentHandle, leaf) => parentHandle === null ? "absent" : lstatKind(`${parentHandle}/${leaf}`));
 }
-function writeRegularAt(parentHandle, leaf, buf, rel) {
+function writeRegularAt(parentHandle, leaf, buf, rel, { what = "(B) baseline path", execBit = null, createOnly = false } = {}) {
   const anchored = `${parentHandle}/${leaf}`;
-  if (IS_WIN32) {
-    const kind = lstatKind(anchored);
-    if (kind !== "file" && kind !== "absent") {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink or other non-regular entry is never written through by a restore`
-      );
-    }
+  const wantsExec = execBit !== null && execBit !== void 0;
+  if (wantsExec && !createOnly) {
+    throw new Error(
+      `refusing to restore ${what} '${rel}': an execBit was supplied without createOnly. The executable bit may only be applied to a file THIS call created \u2014 applying it to a pre-existing descriptor would also preserve that file's other mode bits, which is how an attacker-widened mode (chmod 0777, invisible to git status) survives a path reported as reverted`
+    );
   }
   let fd = null;
   let creating = false;
-  try {
-    fd = openSync(anchored, FS.O_WRONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
-  } catch (e) {
-    const code = e && e.code;
-    if (code === "ENOENT") {
-      creating = true;
+  if (createOnly) {
+    creating = true;
+    try {
       fd = openSync(anchored, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 438);
-    } else if (code === "ELOOP") {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: symlink) \u2014 a symlink or other non-regular entry is never written through by a restore`
-      );
-    } else {
+    } catch (e) {
+      if (e && e.code === "EEXIST") {
+        throw new Error(
+          `refusing to restore ${what} '${rel}': an entry appeared at this name after it was cleared and before the restore could create it (EEXIST on O_CREAT|O_EXCL). That is a racing writer \u2014 possibly one planting a hardlink to a file outside the repository so the restore would write through it \u2014 so the restore REFUSES rather than opening whatever arrived; nothing was written, and the call is denied. THE PATH IS NOT INTACT: "nothing was written" means this restore wrote no bytes, NOT that the enforcement path is in a good state \u2014 the original entry was already cleared and the racer's entry is what now sits at this name. Inspect and restore it deliberately`
+        );
+      }
       throw e;
+    }
+  } else {
+    if (IS_WIN32) {
+      const kind = lstatKind(anchored);
+      if (kind !== "file" && kind !== "absent") {
+        throw new Error(
+          `refusing to restore ${what} '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink or other non-regular entry is never written through by a restore`
+        );
+      }
+    }
+    try {
+      fd = openSync(anchored, FS.O_WRONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
+    } catch (e) {
+      const code = e && e.code;
+      if (code === "ENOENT") {
+        creating = true;
+        fd = openSync(anchored, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 438);
+      } else if (code === "ELOOP") {
+        throw new Error(
+          `refusing to restore ${what} '${rel}': the existing entry is not a regular file (lstat kind: symlink) \u2014 a symlink or other non-regular entry is never written through by a restore`
+        );
+      } else {
+        throw e;
+      }
     }
   }
   let primary;
@@ -7465,13 +7486,23 @@ function writeRegularAt(parentHandle, leaf, buf, rel) {
       const st = fstatSync(fd);
       if (!st.isFile()) {
         throw new Error(
-          `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (fstat type on the OPEN descriptor) \u2014 a symlink, directory or other non-regular entry is never written through by a restore, and nothing has been truncated`
+          `refusing to restore ${what} '${rel}': the existing entry is not a regular file (fstat type on the OPEN descriptor) \u2014 a symlink, directory or other non-regular entry is never written through by a restore, and nothing has been truncated`
         );
       }
       ftruncateSync(fd, 0);
     }
     let written = 0;
     while (written < buf.length) written += writeSync(fd, buf, written, buf.length - written, null);
+    if (wantsExec && !IS_WIN32) {
+      if (!creating) {
+        throw new Error(
+          `refusing to restore ${what} '${rel}': the executable bit was about to be applied to a descriptor this call did NOT create \u2014 the file's other mode bits would be preserved along with it, which is the attacker-widened-mode residual; nothing further is written`
+        );
+      }
+      const cur = fstatSync(fd).mode & 4095;
+      const next = execBit ? cur | 73 : cur & ~73;
+      if (next !== cur) fchmodSync(fd, next);
+    }
   } catch (e) {
     primary = e;
     throw e;
@@ -8328,21 +8359,111 @@ function mintRestorePerformed(cwd2, paths, agentId) {
     }
   }
 }
+function headTreeEntry(cwd2, rel) {
+  const r = spawnSync("git", ["-C", cwd2, "--literal-pathspecs", "ls-tree", "-z", "HEAD", "--", rel], {
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024
+  });
+  if (r.error || r.status !== 0) {
+    throw new Error(`git ls-tree -z HEAD -- '${rel}' failed (status ${r.status}: ${r.stderr || r.error})`);
+  }
+  const matches = [];
+  for (const tok of (r.stdout || "").split("\0")) {
+    if (!tok) continue;
+    const tab = tok.indexOf("	");
+    if (tab < 0) throw new Error(`git ls-tree -z HEAD produced an unparseable entry while resolving '${rel}' ('${tok.slice(0, 60)}')`);
+    if (tok.slice(tab + 1) !== rel) continue;
+    const fields = tok.slice(0, tab).split(/\s+/).filter(Boolean);
+    if (fields.length < 3) throw new Error(`git ls-tree -z HEAD produced an unparseable metadata field while resolving '${rel}' ('${tok.slice(0, 60)}')`);
+    matches.push({ mode: fields[0], type: fields[1], oid: fields[2] });
+  }
+  if (matches.length !== 1) {
+    throw new Error(
+      `refusing to restore tracked path '${rel}': its HEAD tree resolution returned ${matches.length} entries naming exactly this path, and a restore requires exactly one \u2014 a path git resolves to zero entries (it is not the blob HEAD holds under this name) or to several (a directory, or a pathspec that matched more than the name asked for) is denied WITHOUT materializing anything`
+    );
+  }
+  return matches[0];
+}
+function assertRestorableHeadEntry(entry, rel) {
+  const REGULAR_BLOB_MODES = /* @__PURE__ */ new Set(["100644", "100755"]);
+  if (entry.type !== "blob" || !REGULAR_BLOB_MODES.has(entry.mode)) {
+    const e = new Error(
+      `refusing to restore tracked path '${rel}': its HEAD entry is NOT a regular file (mode ${entry.mode}, type ${entry.type}). A symlink (120000), a gitlink/submodule (160000) and a tree (040000) cannot be expressed by the {path, bytes} materialization this restore performs, so NOTHING has been written and the call is denied \u2014 a non-regular HEAD entry is refused on sight, never approximated`
+    );
+    e.h17NonRestorableHeadEntry = true;
+    throw e;
+  }
+}
+function headBlobBytes(cwd2, entry, rel) {
+  const HEAD_BLOB_MAX_BYTES = 256 * 1024 * 1024;
+  const r = spawnSync("git", ["-C", cwd2, "cat-file", "blob", entry.oid], { maxBuffer: HEAD_BLOB_MAX_BYTES });
+  if (r.error || r.status !== 0) {
+    const stderr = r.stderr ? r.stderr.toString() : "";
+    throw new Error(
+      `git cat-file blob ${entry.oid} (HEAD:'${rel}') failed (status ${r.status}: ${stderr || r.error}) \u2014 the HEAD bytes could not be read, so nothing was restored` + (r.error && r.error.code === "ENOBUFS" ? ` (the blob exceeds this hook's ${HEAD_BLOB_MAX_BYTES}-byte in-memory bound; it is DENIED, never truncated)` : "")
+    );
+  }
+  return r.stdout;
+}
+function indexDispositionAgainstHead(cwd2, rel, entry) {
+  const r = spawnSync("git", ["-C", cwd2, "--literal-pathspecs", "ls-files", "--stage", "-z", "--", rel], {
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024
+  });
+  if (r.error || r.status !== 0) {
+    throw new Error(`git ls-files --stage -z -- '${rel}' failed (status ${r.status}: ${r.stderr || r.error})`);
+  }
+  const stages = [];
+  for (const tok of (r.stdout || "").split("\0")) {
+    if (!tok) continue;
+    const tab = tok.indexOf("	");
+    if (tab < 0) throw new Error(`git ls-files --stage -z produced an unparseable entry while reading the index for '${rel}' ('${tok.slice(0, 60)}')`);
+    if (tok.slice(tab + 1) !== rel) continue;
+    const f = tok.slice(0, tab).split(/\s+/).filter(Boolean);
+    if (f.length < 3) throw new Error(`git ls-files --stage -z produced an unparseable metadata field while reading the index for '${rel}' ('${tok.slice(0, 60)}')`);
+    stages.push({ mode: f[0], oid: f[1], stage: f[2] });
+  }
+  if (stages.length === 0) return `the path has NO entry in the index, while HEAD holds it as ${entry.mode} ${entry.oid}`;
+  if (stages.length > 1) return `the index holds ${stages.length} unmerged CONFLICT stages for this path (stages ${stages.map((s3) => s3.stage).join(", ")})`;
+  const s2 = stages[0];
+  if (s2.stage !== "0") return `the index entry sits at unmerged conflict stage ${s2.stage}, not stage 0`;
+  if (s2.mode !== entry.mode || s2.oid !== entry.oid) return `the index entry is ${s2.mode} ${s2.oid} while HEAD holds ${entry.mode} ${entry.oid}`;
+  return null;
+}
+function materializeHeadBlob(cwd2, rel, entry, bytes) {
+  const what = `(A) tracked restore of '${rel}'`;
+  assertRestorableHeadEntry(entry, rel);
+  withPinnedParent(cwd2, rel, what, { createParents: true }, (parentHandle, leaf) => {
+    const anchored = `${parentHandle}/${leaf}`;
+    const kind = lstatKind(anchored);
+    if (kind === "dir") {
+      throw new Error(
+        `${what}: a DIRECTORY stands at this path while HEAD holds a regular file \u2014 refusing to restore. Removing it would be a recursive delete, which this arm deliberately does not hold; the call is denied and nothing is written.`
+      );
+    }
+    if (kind === "error") {
+      throw new Error(`${what}: the entry standing at this path could not be classified (lstat error) \u2014 refusing to restore, nothing is written`);
+    }
+    if (kind !== "absent") rmSync(anchored, { force: true });
+    writeRegularAt(parentHandle, leaf, bytes, rel, { what: "(A) tracked path", execBit: entry.mode === "100755", createOnly: true });
+  });
+}
 function restoreTracked(cwd2, relRaw) {
   const rel = relRaw.replace(/\/+$/, "");
   const inHead = spawnSync("git", ["-C", cwd2, "cat-file", "-e", "HEAD:" + rel], { encoding: "utf8" }).status === 0;
   if (inHead) {
     assertRealAncestors(cwd2, rel, `(A) tracked restore of '${rel}'`);
-    const r = spawnSync("git", ["-C", cwd2, "checkout", "HEAD", "--", rel], { encoding: "utf8" });
-    if (r.error || r.status !== 0) throw new Error(`checkout HEAD -- ${rel} failed: ${r.stderr || r.error}`);
-    return { restored: true, leftOnDisk: [] };
+    const entry = headTreeEntry(cwd2, rel);
+    assertRestorableHeadEntry(entry, rel);
+    materializeHeadBlob(cwd2, rel, entry, headBlobBytes(cwd2, entry, rel));
+    return { restored: true, leftOnDisk: [], indexUnrepaired: indexDispositionAgainstHead(cwd2, rel, entry) };
   }
-  if (isEnforcementSurface(rel)) return { restored: false, leftOnDisk: [rel] };
+  if (isEnforcementSurface(rel)) return { restored: false, leftOnDisk: [rel], indexUnrepaired: null };
   const leftOnDisk = withPinnedParent(cwd2, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
     if (parentHandle === null) return [];
     return removeTreeAt(parentHandle, leaf, rel);
   });
-  return { restored: leftOnDisk.length === 0, leftOnDisk };
+  return { restored: leftOnDisk.length === 0, leftOnDisk, indexUnrepaired: null };
 }
 var input;
 try {
@@ -8452,6 +8573,7 @@ try {
   const preExisting = [];
   const changedPreDirty = [];
   const restoredPaths = [];
+  const indexUnrepaired = [];
   const unauthorizedAdditions = [];
   const noteUnauthorizedAddition = (rel) => {
     if (!unauthorizedAdditions.includes(rel)) unauthorizedAdditions.push(rel);
@@ -8630,6 +8752,7 @@ try {
       }
       violations.push(rel);
       restoredPaths.push(rel);
+      if (outcome.indexUnrepaired) indexUnrepaired.push(`${rel} (${outcome.indexUnrepaired})`);
     }
   }
   if (restoredPaths.length) mintRestorePerformed(cwd, restoredPaths, input.agent_id);
@@ -8739,6 +8862,11 @@ try {
         `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. This is the post-Bash restore-and-deny design (decisions 2422e76a, f404dfb4): the bytes were deliberately rolled back to their pre-call state before the denial, not lost work or an automatic reset. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
       );
     }
+    if (indexUnrepaired.length) {
+      parts.push(
+        `H17: INDEX NOT REPAIRED \u2014 the worktree bytes of the path(s) below were restored from HEAD, but the git INDEX still differs from HEAD for them: ${indexUnrepaired.join("; ")}. The restore is deliberately LOCK-FREE (it reads HEAD's blob and writes the file directly, never taking .git/index.lock), so it moves the worktree half ONLY \u2014 the word "reverted" above describes the worktree, not the index. Repairing the index is a conductor-controlled, serialized operation and is deliberately NOT performed by this hook; a human or the conductor must reset the staged entry (e.g. \`git reset HEAD -- <path>\`). The command is denied either way.`
+      );
+    }
     if (unauthorizedAdditions.length) {
       parts.push(
         `H17: UNAUTHORIZED ADDITION(S) DETECTED in the protected (B) enforcement surface, and LEFT IN PLACE ON DISK: ${unauthorizedAdditions.join(", ")} \u2014 exit contract-violated, never route around. These path(s) hold no entry in this call's Pre-image baseline and appeared inside this command's window. The command is DENIED; the file(s) still sit on disk, BYTE-IDENTICAL to what was written there. H17 DETECTED the addition, it did not delete it: deleting is IRREVERSIBLE, and this sweep cannot tell a malicious plant from a legitimate file the conductor just created \u2014 a detector that deletes destroys real work on one false positive. A HUMAN must inspect each path above and take it off disk if it is a plant; H17 keeps denying agent Bash while it stands, so an addition left in place buys nothing but a red gate. Nothing of yours was undone.`
@@ -8784,6 +8912,12 @@ try {
   }
   allow();
 } catch (e) {
+  if (e && e.h17NonRestorableHeadEntry) {
+    deny(
+      `H17: NON-RESTORABLE HEAD ENTRY \u2014 ${e && e.message || e}
+This is NOT an environment defect and NOT a broken machine: HEAD genuinely holds a non-regular entry (a symlink, a submodule/gitlink, or a tree) at this path, and H17's restore materializes {path, bytes} only, so it can express none of them. NOTHING was written \u2014 the path is exactly as your command left it. The condition is PERMANENT for this path until the committed entry changes, so re-running will not clear it; exit contract-violated and report it, never route around.`
+    );
+  }
   deny(
     environmentDefectDenial("H17", `Enforcement verification failed (${e && e.message || e}) \u2014 failing closed (P5).`, {
       agentId: input.agent_id
