@@ -936,7 +936,9 @@ function writeRegularAt(parentHandle, leaf, buf, rel, { what = '(B) baseline pat
         throw new Error(
           `refusing to restore ${what} '${rel}': an entry appeared at this name after it was cleared and before the restore could create it ` +
             `(EEXIST on O_CREAT|O_EXCL). That is a racing writer — possibly one planting a hardlink to a file outside the repository so the restore ` +
-            `would write through it — so the restore REFUSES rather than opening whatever arrived; nothing was written, and the call is denied`
+            `would write through it — so the restore REFUSES rather than opening whatever arrived; nothing was written, and the call is denied. ` +
+            `THE PATH IS NOT INTACT: "nothing was written" means this restore wrote no bytes, NOT that the enforcement path is in a good state — ` +
+            `the original entry was already cleared and the racer's entry is what now sits at this name. Inspect and restore it deliberately`
         );
       }
       throw e;
