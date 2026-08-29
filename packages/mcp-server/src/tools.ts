@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ZodError } from 'zod';
-import { normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -161,6 +161,60 @@ export type Projection = 'full' | 'digest' | 'count';
  */
 export type BoardProjection = Projection | 'headline';
 
+/**
+ * PARALLEL-LANE SEED — one collision group in board_query's `lane_advisory`:
+ * the user-source items that declare a write path in common, and the path(s)
+ * they share.
+ */
+export interface LaneCollision {
+  /** the shared file_keys entries, sorted — every item below declares ALL of them */
+  paths: string[];
+  /**
+   * the colliding items, newest-updated first. `name` is the item's slug or,
+   * for a legacy slugless item, its clipped headline — because a bare id in
+   * front of a human is unanswerable (CLAUDE.md, decision
+   * `human-readable-ids-for-board-items`). The full id rides alongside it.
+   */
+  items: { id: string; name: string }[];
+}
+
+/**
+ * PARALLEL-LANE SEED — the derived, ADVISORY reading of a board page's shared
+ * write paths. Present only when two or more USER-source items in the matched
+ * set declare a path in common; absent (not empty) otherwise, so its mere
+ * presence is the signal.
+ *
+ * WHAT IT IS FOR: a slice decomposes into lanes — read-only scoping (write-set
+ * empty), test authoring (write-set inside the test-path globs, where H5's
+ * frozen-tests wall keeps it) and implementation (everything else) — and a
+ * shared write path collides the IMPLEMENTATION lane ONLY. Measured 2026-08-29:
+ * five slices of one objective all wrote a single hook file, the conductor
+ * serialized the SLICES, and every scoping and test-authoring lane sat idle
+ * although none of them ever collided. This block states which lane the
+ * collision actually constrains, so that reasoning does not have to be
+ * re-derived by hand at each dispatch moment.
+ *
+ * WHAT IT IS NOT: it never denies, filters, reorders or refuses anything —
+ * `records` comes back exactly as it would without it — and it never counts
+ * agents toward a target. Under-delegation and over-dispatch are the same
+ * defect (delegation contract), so a mechanism that pushes toward a NUMBER
+ * reintroduces the quota pathology it exists to cure. A parallel-safe lane is
+ * not thereby a lane worth dispatching.
+ *
+ * SYSTEM-SOURCE ITEMS NEVER JOIN A GROUP: the maintenance queue is
+ * mechanism-detected debt drained by an artifact-write, not parallel work, so
+ * a queue item sharing a path with a board slice is not a lane collision.
+ * maintenance_query therefore never carries this key at all.
+ */
+export interface LaneAdvisory {
+  /** the ONE lane a shared write path constrains */
+  serialized_lane: 'implementation';
+  /** the lanes of a file-colliding slice that stay dispatchable */
+  parallel_safe_lanes: ('read_only_scoping' | 'test_authoring')[];
+  /** one entry per set of items colliding on the same path(s); never empty when present */
+  collisions: LaneCollision[];
+}
+
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
   /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
@@ -181,6 +235,11 @@ export interface BoardQueryResult {
    * one (P5).
    */
   provenance: string;
+  /**
+   * PARALLEL-LANE SEED: present ONLY when two or more user-source items in the
+   * matched set share a file_keys path — see LaneAdvisory. Absent, never empty.
+   */
+  lane_advisory?: LaneAdvisory;
   /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
@@ -4983,6 +5042,95 @@ export class SterlingTools {
     return chain;
   }
 
+  /**
+   * PARALLEL-LANE SEED — derive `lane_advisory` from the FULL MATCHED SET.
+   *
+   * Deliberately fed `matching`, never the post-cap `records` window: a
+   * collision the caller's cap happens to split across two pages is exactly the
+   * collision most likely to be missed by hand, so scanning the page would make
+   * the advisory least useful precisely where it is most needed.
+   *
+   * `file_keys` is read as a proxy for a slice's WRITE-SET. That proxy was
+   * MEASURED before this shipped (2026-08-29, 14 sampled open user items / ~29
+   * entries): all but ~2 entries were write targets, the exceptions being paths
+   * an item named as the mechanism to derive FROM. So false collisions from
+   * read-only entries are rare; and because this never denies anything, a false
+   * collision costs a line of prose rather than a serialized lane. The blast
+   * radius of the proxy being wrong is bounded BY the advisory-only design.
+   *
+   * Returns undefined — not an empty block — when nothing collides: an empty
+   * advisory is a claim ("checked, nothing found") this cannot honestly make
+   * for items that declare no file_keys at all, and absence keeps the envelope
+   * silent on a board with nothing to say.
+   */
+  private laneAdvisory(matching: DurableRecord[]): LaneAdvisory | undefined {
+    // AC4: system-source items are maintenance debt drained by an artifact-write,
+    // not parallel work — they never join a group, so maintenance_query (all
+    // system) never carries this key.
+    const userItems = matching.filter((r) => (r as unknown as { source?: string }).source === 'user');
+    // path -> the user items declaring it, in `matching` order (updated_at DESC).
+    const byPath = new Map<string, DurableRecord[]>();
+    for (const item of userItems) {
+      const keys = (item as unknown as { file_keys?: unknown }).file_keys;
+      if (!Array.isArray(keys)) continue;
+      // Dedupe WITHIN one item: a path listed twice by one item is not a
+      // collision with itself.
+      for (const path of new Set(keys.filter((k): k is string => typeof k === 'string' && k.length > 0))) {
+        const bucket = byPath.get(path);
+        if (bucket) bucket.push(item);
+        else byPath.set(path, [item]);
+      }
+    }
+    // Merge paths sharing the IDENTICAL item set into one group — that is what
+    // makes `paths` plural. Five slices that all write the same hook AND the
+    // same test file read as one collision, not two.
+    const groups = new Map<string, { paths: string[]; items: DurableRecord[] }>();
+    for (const [path, items] of byPath) {
+      if (items.length < 2) continue; // AC1: two or more, or it is not a collision
+      const key = items.map((i) => (i as unknown as { id: string }).id).join(' ');
+      const group = groups.get(key);
+      if (group) group.paths.push(path);
+      else groups.set(key, { paths: [path], items });
+    }
+    if (groups.size === 0) return undefined; // AC3: absent, never an empty block
+    const collisions: LaneCollision[] = [...groups.values()]
+      .map((g) => ({
+        paths: [...g.paths].sort(),
+        // AC7: name first, id retained — never a bare id in front of a human.
+        items: g.items.map((i) => {
+          const rec = i as unknown as Record<string, unknown>;
+          return { id: String(rec.id), name: SterlingTools.boardItemName(rec) };
+        }),
+      }))
+      // Deterministic and useful: the widest collision first, ties broken on the
+      // first path so the order never depends on Map insertion order.
+      .sort((a, b) => b.items.length - a.items.length || (a.paths[0] < b.paths[0] ? -1 : a.paths[0] > b.paths[0] ? 1 : 0));
+    return {
+      serialized_lane: 'implementation',
+      parallel_safe_lanes: ['read_only_scoping', 'test_authoring'],
+      collisions,
+    };
+  }
+
+  /**
+   * A board item's human-readable name: its slug, or — for a legacy slugless
+   * item — its clipped headline, which IS the item's title in practice (board
+   * text opens with an all-caps statement of the finding). Deliberately more
+   * forgiving than headlineRecord's slug-or-nothing rule: that surface prints a
+   * name BESIDE a field the reader can already see, whereas a collision group's
+   * whole job is to let a human recognise which items collide, and a group of
+   * bare uuids is the unanswerable-question failure this rule exists to close.
+   */
+  private static boardItemName(rec: Record<string, unknown>): string {
+    const slug = typeof rec.slug === 'string' ? rec.slug.trim() : '';
+    if (slug) return clipName(slug);
+    const text = typeof rec.text === 'string' ? rec.text : '';
+    const headline = text.split('\n').find((line) => line.trim().length > 0)?.trim() ?? '';
+    // Last resort only — an item with neither slug nor text should not exist,
+    // and a marker beats an empty string that reads as a missing field.
+    return headline ? clipName(headline) : '(unnamed board item)';
+  }
+
   boardQuery(filter: BoardFilter = {}): DurableRecord[] {
     const offset = filter.offset ?? 0;
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
@@ -5035,6 +5183,10 @@ export class SterlingTools {
     // this keeps the annotation visible through whichever projection the
     // caller asked for without adding a wire field no projection declares).
     const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    // PARALLEL-LANE SEED: derived from `matching` (the FULL matched set), NOT
+    // from `records` — see laneAdvisory. Advisory only: it is computed after
+    // `records` is already fixed and never touches it.
+    const lane_advisory = this.laneAdvisory(matching);
     const projectRecord = (r: DurableRecord): Record<string, unknown> => {
       const base =
         projection === 'headline'
@@ -5058,7 +5210,11 @@ export class SterlingTools {
       capped,
       offset,
       provenance,
+      // AC3: the key is ABSENT when nothing collides, never an empty block.
+      ...(lane_advisory ? { lane_advisory } : {}),
       ...(notes.length ? { note: notes.join('; ') } : {}),
+      // AC6: unchanged, unfiltered, unreordered — the advisory above is derived
+      // FROM this page's matched set and never acts on it.
       records: records.map(projectRecord),
     };
   }

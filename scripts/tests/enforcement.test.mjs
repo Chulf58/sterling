@@ -1583,10 +1583,12 @@ function tu(tag) {
 test('H17: a PRE-EXISTING dirty hooks/ file that is UNCHANGED across the window no longer denies — it is VERIFIED, and the uncommitted work survives', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    // The conductor's own uncommitted work — e.g. a mid-run bundle rebuild, which
-    // only the conductor can run (the coder's allowlist holds the toolchain
-    // run_commands only). Under the old ruling this alone denied every parallel
-    // lane, including lanes running read-only commands.
+    // The conductor's own uncommitted work — e.g. a mid-run bundle rebuild. NOTE:
+    // this is not conductor-exclusive at HEAD — the coder's allowlist admits any
+    // declared toolchain run_commands entry, and this repo's .sterling/config.json
+    // declares build_hooks: "npm run build:hooks" inside run_commands, so a
+    // coder-run rebuild is equally plausible. Under the old ruling this alone
+    // denied every parallel lane, including lanes running read-only commands.
     const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
     writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
     const conductorBytes = readFileSync(bundle, 'utf8');
