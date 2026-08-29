@@ -148,6 +148,9 @@
 // site in the Slice 2 residual list; and the (B) restore's `writeUnder` path
 // still truncates in place, which is a PRE-EXISTING exposure this slice neither
 // introduced nor closed, named there and reported to the conductor.
+// THAT LAST CLAUSE IS HISTORICAL AS OF S4 (2026-08-29) — read the v5.0 paragraph
+// below before trusting it: the (B) truncate-in-place exposure was REPRODUCED LIVE
+// and is now closed by DELETING the primitive, not by hardening it.
 // v4.0 (USER RULING 2026-08-27) — THE (B) ADDITION ARM NO LONGER DELETES. A file
 // that appears in protected (B) territory with no entry in this call's Pre
 // baseline is DENIED and REPORTED, and it SURVIVES ON DISK BYTE-IDENTICAL.
@@ -158,13 +161,38 @@
 // v3.5 paragraph above says about "the (B) delete arm" is therefore HISTORICAL —
 // `removeUnder`/`removeFileAt` are deleted, not merely uncalled (gravestones at
 // their old sites), and the only delete primitive left in this file is
-// `removeTreeAt`, reachable ONLY from `restoreTracked`. THE RESTORE ARMS ARE
-// UNCHANGED: a modified/deleted baselined file still has its bytes put back,
-// because a recorded pre-image (and, on the (A) side, HEAD) is a recoverable
-// source of truth that an ADDITION by definition lacks. Additions are reported
-// through their own `unauthorizedAdditions` list with their own wording — never
-// through `violations`, whose text says "reverted" and would be a false action
-// claim (anti-pattern 586bccdc).
+// `removeTreeAt`, reachable ONLY from `restoreTracked`. THE (B) RESTORE ARMS ARE
+// UNCHANGED BY *THIS* RULING: a modified/deleted baselined file still has its bytes
+// put back, because a recorded pre-image (and, on the (A) side, HEAD) is a
+// recoverable source of truth that an ADDITION by definition lacks. Additions are
+// reported through their own `unauthorizedAdditions` list with their own wording —
+// never through `violations`, whose text says "reverted" and would be a false
+// action claim (anti-pattern 586bccdc).
+// THE SENTENCE ABOVE ABOUT THE (B) RESTORE ARMS IS SUPERSEDED — see v5.0. It is
+// left standing rather than rewritten because it records what v4.0 decided and WHY
+// it stopped where it did; only v5.0 changed that verdict, and on evidence v4.0
+// did not have.
+// v5.0 (S4, 2026-08-29) — THE (B) SURFACE IS NOW DETECT-AND-DENY IN FULL, so the
+// restore/addition ASYMMETRY v4.0 preserved is gone: RULING D of decision
+// h17-baseline-integrity-redesign-rulings-abcd (532a4383), refined by
+// h17-ruling-d-needs-a-b-enumerating-stamp-producer-and-stamp-invalidation
+// (fac9a69b). A changed (B) path is ALLOWED only where a TRUSTED conductor stamp
+// entry attests its CURRENT bytes; otherwise it is DENIED and LEFT EXACTLY AS THE
+// COMMAND LEFT IT. WHAT CHANGED THE VERDICT, because v4.0's asymmetry argument was
+// sound on its own terms: the (B) pre-image is NOT the recoverable source of truth
+// that sentence assumes — it lives in an os.tmpdir() record the audited command can
+// itself write, unlike HEAD on the (A) side — and the restore primitive wrote by
+// TRUNCATING IN PLACE, so a (B) path replaced by a hardlink to an outside file made
+// the "restore" land baseline bytes on a file outside the repository (reproduced
+// live by the S4 red bar, board 59765a46). `writeUnder` is DELETED, not merely
+// uncalled (gravestone at its old site), so the (B) stage now holds NO write and NO
+// delete primitive at all. (B) modify/delete findings are reported through their own
+// `baselineDenied` list with "denied, left in place" wording, for exactly the reason
+// additions are — `violations` claims a rollback that no longer happens.
+// THE STAMP ITSELF IS NOW PROTECTED, which it previously was not by anything: it is
+// witnessed at Pre and re-witnessed at Post, an in-window change DENIES, and the
+// stamp is DELETED (invalidated) so a forgery cannot be adopted by the next Pre.
+// The integrity check is ORDERED BEFORE every exemption consult in the same Post.
 // v4.1 (2026-08-27, outside-family review of v4.0 — CONFIRMED HIGH): DELETING
 // THE (B) ADDITION ARM'S UNLINK WAS NOT STRUCTURALLY SUFFICIENT. The (B) surface
 // has a SECOND route into this hook, and it runs EARLIER. `git add -f
@@ -223,6 +251,11 @@ import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 // settings.local.json is enforcement surface but git is blind to it).
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
 const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
+// The conductor's attestation input (scripts/enforcement-stamp.mjs writes it).
+// NAMED ONCE, because since S4 it is read, witnessed AND invalidated from three
+// different places, and three copies of a security-relevant path string is three
+// chances for one of them to drift out of step with the others.
+const STAMP_REL = '.sterling/transient/enforcement-stamp.json';
 
 // ---------------------------------------------------------------------------
 // THE SHARED SECURE-I/O LAYER — SLICE 1: READ + CLASSIFY (decision 532a4383
@@ -642,6 +675,15 @@ function openLeafNoFollow(abs, extraFlags = 0) {
 //     path STILL truncates in place and so still carries it — a pre-existing
 //     exposure this slice did not introduce and does not close, named here
 //     because a residual list that omits it is the false-claim failure again.
+//     [CLOSED by S4, 2026-08-29 — the (B) half only.] The exposure was REPRODUCED
+//     LIVE (a (B) path hardlinked to an outside victim had the victim's bytes
+//     overwritten by the "restore"), and it is closed by DELETING the aiming site
+//     rather than hardening the primitive: `writeUnder` is gone and the (B) surface
+//     is detect-and-deny, so no (B) path reaches a write at all. `writeRegularAt`
+//     survives for its (A) caller, whose `createOnly` mode never enters the
+//     truncate-in-place arm. What REMAINS true of this bullet is the general claim
+//     about in-place writes; what is no longer true is that any (B) path can reach
+//     one.
 //   * A RECURSIVE DELETE PINS EVERY DIRECTORY IT DESCENDS, so it can never be
 //     re-aimed out of the tree; but if a racer RENAMES that directory elsewhere
 //     mid-delete, the pinned descriptor still names the same directory OBJECT
@@ -666,8 +708,9 @@ function openLeafNoFollow(abs, extraFlags = 0) {
 //     the (A) state hash, the (B) baseline bytes, the enforcement stamp. What is
 //     NOT closed is the pair on the MUTATING side — `removeTreeAt` (the last
 //     delete primitive in this file) lstats the leaf and then unlinks the NAME,
-//     and `writeUnder`'s
-//     ancestor walk lstats each component before pinning it. Those are the same
+//     and the surviving pinned-ancestor walks (`withPinnedParent`, used by the (A)
+//     restore and by the S4 stamp invalidation — `writeUnder`'s walk is gone with
+//     the function) lstat each component before pinning it. Those are the same
 //     bounded exposure the first bullet describes and cannot be closed without
 //     unlinkat/renameat, which Node does not expose.
 //   * A DIRENT IS A PRE-FILTER, NEVER THE VERDICT. The (B) walk still reads
@@ -1554,6 +1597,39 @@ function stateFile(cwd, runId, key) {
   return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}-call-${key}.json`);
 }
 
+// THE PER-CALL STAMP WITNESS RECORD (Ruling 2 of fac9a69b): the stamp's own state
+// as Pre observed it, so Post can tell an in-window stamp write from a legitimate
+// conductor rewrite made BETWEEN windows. A SEPARATE FILE rather than a field on
+// the (B) content baseline, for the same reason the (A) attribution record is one:
+// the baseline's key-validation loop is the most security-critical code in this
+// hook, every key it accepts must match a (B) glob, and the stamp is not in that
+// set — smuggling a witness through it would force a change to exactly the loop
+// that must not change (smallest safe implementation).
+// THE FILENAME CANNOT COLLIDE WITH ANY OTHER PER-CALL RECORD: the (A) STATE record
+// is `…-<runId>-call-<hex>.json`, the (B) baseline is `…-call-<hex>.baseline.json`
+// and the attribution record is `…-call-<hex>.dirty.json`, so this one carries its
+// own `.stamp` token. A `-call-<hex>.stamp` middle segment is not all-hex, so it
+// can never be mistaken for the STATE record's name.
+// A NULL KEY RETURNS THE LEGACY PER-RUN NAME, never a silent per-call fabrication,
+// matching every other record here; the degraded exposure is disclosed at Post
+// through the existing `baselineShared` / `attributionShared` notices. The per-call
+// record is unlinked by the Post that reads it; the legacy per-run one is left for
+// concurrent lanes, exactly as the (B) baseline's is.
+// ACCEPTED, DISCLOSED RESIDUAL — LIKE EVERY OTHER RECORD THIS HOOK WRITES, THIS
+// ONE IS AGENT-WRITABLE. os.tmpdir() is writable by the audited command, the
+// filename is derived from values the command can compute (project tag, run id,
+// tool_use_id), and no gate covers that path — the (B) denial already says exactly
+// this about the content baseline ("these records live in os.tmpdir() and are
+// writable by the audited command"). So the stamp-integrity comparison is
+// DETECTION resting on an attacker-writable input, not prevention: an agent that
+// overwrites its own witness to describe a stamp it is about to forge defeats it.
+// Unfixable at this layer — hook and command share a UID with no privilege
+// boundary (research_finding 79942bda) — so it is named here rather than implied.
+function stampWitnessFile(cwd, runId, key) {
+  const tag = projectTag(cwd);
+  return join(tmpdir(), key ? `sterling-enforce-${tag}-${runId}-call-${key}.stamp.json` : `sterling-enforce-${tag}-${runId}.stamp.json`);
+}
+
 // Current INDEX entries (`mode:oid:stage`, conflict stages joined) for the given
 // repo-relative paths, as a Map path -> string. Its own term in the comparison
 // because a staged-index-only change (`git add`) moves nothing in the worktree:
@@ -2179,21 +2255,113 @@ function isDirectoryAt(cwd, rel) {
   return lstatKindUnder(cwd, rel, `(A) directory classification of '${rel}'`) === 'dir';
 }
 
-// The stamp's entries, as { present, entries }. `entries` is null whenever the
-// stamp cannot be used (absent, not a JSON array, or — review finding 3 — not a
-// REGULAR FILE: the stamp is read through lstat too, so
-// .sterling/transient/enforcement-stamp.json cannot be a symlink pointing the
-// consult at bytes outside the repo). `present` keeps the existing message
-// distinction between "no stamp at all" and "a stamp that attests nothing".
-// A parse error propagates to the caller's fail-closed catch, unchanged.
-// SLICE 2: the stamp's own ancestors ('.sterling', 'transient') are now pinned
-// across the classify→read, so a '.sterling' swapped for a symlink cannot route
-// the consult at a stamp outside the repo — it throws, and every caller treats a
-// throw as attesting NOTHING.
-function readStamp(cwd) {
-  return withPinnedParent(cwd, '.sterling/transient/enforcement-stamp.json', 'enforcement stamp', {}, (parentHandle, leaf) =>
-    parentHandle === null ? { present: false, entries: null } : readStampAt(parentHandle, leaf)
-  );
+// THE STAMP, READ EXACTLY ONCE PER SWEEP, as { kind, sha256, present, entries }.
+// `entries` is null whenever the stamp cannot be used (absent, not a JSON array,
+// unreadable/oversize, or — review finding 3 — not a REGULAR FILE: the stamp is
+// classified by the open, so .sterling/transient/enforcement-stamp.json cannot be
+// a symlink pointing the consult at bytes outside the repo). `present` keeps the
+// message distinction between "no stamp at all" and "a stamp that attests
+// nothing". SLICE 2: the stamp's own ancestors ('.sterling', 'transient') are
+// pinned across the classify→read, so a '.sterling' swapped for a symlink cannot
+// route the consult at a stamp outside the repo.
+//
+// ONE READ IS THE SECURITY PROPERTY, NOT AN OPTIMIZATION (S4 review, MEDIUM —
+// a genuine TOCTOU). The first S4 shape hashed the stamp for the integrity
+// witness and then let EVERY consult re-open and re-read the file. The audited
+// command can BACKGROUND a child that outlives the command itself
+// (`(sleep 0.3; cp forged <stamp>) &`), so a forgery landing AFTER the witness
+// read but BEFORE a consult was invisible to the comparison and authoritative for
+// the consult — the witness saw no change, `stampTrusted` stayed true, and the
+// consults read the forged bytes. Reading once and serving every consult from
+// these same in-memory bytes removes the window entirely: the bytes that are
+// WITNESSED are, by construction, the identical bytes that are CONSULTED, because
+// there is only ever one read of the file in a sweep.
+// THE HASH IS COMPUTED FROM THE BYTES THIS READ RETURNED, never by a second
+// streamed pass over the path — a separate hashing read would reintroduce the
+// same window one level down.
+// EVERY FAILURE IS A NON-'file' KIND, NEVER A THROW, so a caller can always
+// compare one snapshot against another: an unreadable/oversize/unparseable stamp
+// yields a stable kind with `entries: null`, which is unusable for attestation
+// while still comparing equal to itself across a window (so it is never
+// misreported as tampering). That costs an attacker nothing — a stamp this cannot
+// read is a stamp no consult can read either, and it exempts nothing.
+function readStampSnapshot(cwd) {
+  try {
+    return withPinnedParent(cwd, STAMP_REL, 'enforcement stamp', {}, (parentHandle, leaf) =>
+      parentHandle === null ? { kind: 'absent', sha256: null, present: false, entries: null } : readStampAt(parentHandle, leaf)
+    );
+  } catch {
+    // A non-directory/unresolvable ancestor threw. Unusable for attestation, and
+    // stable across the window (both ends observe the same anomaly).
+    return { kind: 'unwitnessable', sha256: null, present: false, entries: null };
+  }
+}
+
+// THE STAMP'S OWN OBSERVABLE STATE, as a comparable witness (Ruling 2 of decision
+// h17-ruling-d-needs-a-b-enumerating-stamp-producer-and-stamp-invalidation,
+// fac9a69b). Until S4 the stamp path was protected by NOTHING: it is in neither
+// the (A) ENFORCEMENT_SURFACE nor the (B) BASELINE_GLOBS, so an agent Bash command
+// could write it freely and self-attest its own tamper. Pre records this witness
+// and Post recomputes it; a DIFFERENCE across one call window is the attack.
+// DELIBERATELY A HASH, NOT THE BYTES. The stamp lives in gitignored
+// .sterling/transient/ where no gate bounds its size, so carrying its CONTENT in
+// the per-call record would let an oversize stamp blow the record's own byte
+// budget and turn every Post for that call into a false deny — a self-DoS on the
+// guard. Only {kind, sha256} is retained, which is constant-size for any stamp.
+// DERIVED FROM `readStampSnapshot`, never from a second pass over the path: the
+// witness and the entries a sweep consults must come from ONE read, or a
+// backgrounded child can substitute the file between them (see that function).
+//
+// ACCEPTED, DISCLOSED RESIDUAL — THE WITNESS RECORD IS ITSELF AGENT-WRITABLE.
+// This detection rests on a record in os.tmpdir() (`stampWitnessFile`), under a
+// name the audited command can compute and overwrite, exactly like the (B)
+// content baseline and the (A) attribution/state records — and the (B) denial
+// already says so in as many words ("these records live in os.tmpdir() and are
+// writable by the audited command, so a crafted baseline is conduct, not
+// environment"). An agent that rewrites its own witness to match a stamp it plans
+// to forge defeats this comparison. NOT FIXABLE HERE: hook and command run as the
+// SAME UID with no privilege boundary between them (research_finding 79942bda),
+// so there is no location this process can write that the command cannot. Named
+// rather than silently implied, because a detection mechanism whose own input is
+// attacker-writable must never be described as prevention. The residual is
+// bounded by the same-UID assumption every other record in this file already
+// carries, and by fail-closed handling everywhere else: a MISSING or CORRUPT
+// witness yields no exemption at all rather than a false pass.
+function stampWitness(cwd) {
+  const snap = readStampSnapshot(cwd);
+  return { kind: snap.kind, sha256: snap.sha256 };
+}
+
+// INVALIDATE the stamp by DELETING it (Ruling 2 of fac9a69b). This is what closes
+// the TWO-CALL LAUNDERING BYPASS, and the bypass is the reason a bare in-window
+// deny is not enough: call N writes ONLY a forged stamp and is denied, but the
+// forged file SURVIVES; Pre of call N+1 then snapshots that forgery as its
+// legitimate starting state, call N+1 changes a (B) file to the forged hash, the
+// stamp does not move WITHIN N+1, and the modification is exempted. Once call N
+// has ended, an agent-written stamp on disk is indistinguishable from a conductor
+// stamp legitimately written between calls — so the denial must have a CROSS-CALL
+// consequence or the next Pre becomes an adoption point.
+// DELETION, NOT RESTORATION, and that is the ruling's choice rather than an
+// omission: the stamp is explicitly TRANSIENT AND REPRODUCIBLE (H1 already deletes
+// it at every SessionStart, P4), deleting forces deliberate re-attestation, and a
+// restore-instead would reintroduce a WRITE PRIMITIVE AIMED AT A PROTECTED PATH —
+// the exact class S4 deletes `writeUnder` to remove.
+// PINNED, like every other resolution in this file: the unlink runs through the
+// parent descriptor `withPinnedParent` holds, so a `.sterling` swapped for a
+// symlink cannot re-aim it at a file outside the repository. `rmSync` never
+// follows a symlink at the LEAF (it unlinks the link itself), so the leaf needs no
+// separate guard. Best-effort by construction: it returns whether the stamp is
+// gone, and a failure to remove it never changes the denial that is already owed.
+function invalidateStamp(cwd) {
+  try {
+    return withPinnedParent(cwd, STAMP_REL, 'enforcement stamp invalidation', {}, (parentHandle, leaf) => {
+      if (parentHandle === null) return true; // no '.sterling/transient' at all — nothing to invalidate
+      rmSync(`${parentHandle}/${leaf}`, { force: true });
+      return true;
+    });
+  } catch {
+    return false;
+  }
 }
 
 // SLICE 2 (review finding B): CLASSIFIED BY THE OPEN, not by an lstat followed
@@ -2207,7 +2375,7 @@ function readStampAt(parentHandle, leaf) {
   const h = classifyLeafAt(parentHandle, leaf);
   let primary;
   try {
-    if (h.kind !== 'file') return { present: h.kind !== 'absent', entries: null };
+    if (h.kind !== 'file') return { kind: h.kind, sha256: null, present: h.kind !== 'absent', entries: null };
     return readStampFromFd(h, stampPath);
   } catch (e) {
     primary = e;
@@ -2227,8 +2395,29 @@ function readStampFromFd(h, stampPath) {
   // an unreadable stamp fail closed exactly WHERE IT MATTERS and nowhere else:
   // "no attestation available" only bites on a path that needs attestation, so
   // a garbage stamp for a window with nothing to attest changes no verdict.
-  const stamp = JSON.parse(readClassifiedBytes(h, MAX_STAMP_BYTES, 'enforcement stamp', stampPath).toString('utf8'));
-  return { present: true, entries: Array.isArray(stamp) ? stamp : null };
+  // THE READ, THE WITNESS HASH AND THE PARSE ALL COME FROM ONE `bytes` BUFFER
+  // (S4 review, TOCTOU fix): hashing the path a second time — or re-reading it at
+  // consult time — would let a backgrounded child substitute the file between the
+  // two observations. There is exactly one read, so witnessed bytes and consulted
+  // bytes cannot differ.
+  // A READ FAILURE (oversize, torn, EACCES) IS A KIND, NOT A THROW, so the caller
+  // can still compare this snapshot against the Pre witness; a PARSE failure or a
+  // non-array shape leaves `entries` null while the witness hash stays real, so an
+  // unparseable stamp is still detected if it CHANGES mid-window.
+  let bytes;
+  try {
+    bytes = readClassifiedBytes(h, MAX_STAMP_BYTES, 'enforcement stamp', stampPath);
+  } catch {
+    return { kind: 'unreadable', sha256: null, present: true, entries: null };
+  }
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  let parsed = null;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return { kind: 'file', sha256, present: true, entries: null };
+  }
+  return { kind: 'file', sha256, present: true, entries: Array.isArray(parsed) ? parsed : null };
 }
 
 // Read a leaf's bytes THROUGH THE DESCRIPTOR IT WAS CLASSIFIED BY. On Linux that
@@ -2607,34 +2796,64 @@ function validateBaselineKey(key) {
   return fwd;
 }
 
-// The restore's OWN write primitive (board 8b53dc84, ROUND 2 — folds in board
-// 4d7d188d) — the serious half of the defect: a plain writeFileSync to a path
-// currently occupied by a symlink FOLLOWS it, landing baseline bytes on a
-// destination the agent chose, outside the repository; and
-// mkdirSync(dirname(abs), {recursive:true}) creates directories THROUGH an
-// existing symlinked ANCESTOR exactly the same way. Guarded here with its own
-// component-by-component classification (`classifyPathComponents`, ancestors
-// AND the final segment), deliberately SEPARATE from collectBaseline's
-// read-side scan above (which already denies before this is ever reached in
-// the ordinary flow, since a kind transition makes "current" throw first) — a
-// write primitive that can be aimed is worse than one that can merely be
-// evaded, so it is never trusted to be safe only because an earlier scan said
-// so. `content` is base64 of the raw bytes to restore (collectBaseline's own
-// encoding), decoded back to a Buffer so the write is byte-exact.
-// SLICE 2: the classification and the WRITE now share one held parent
-// descriptor. Slice 1's shape classified the chain, dropped every descriptor,
-// then let `mkdirSync(dirname(abs), {recursive:true})` and `writeFileSync(abs)`
-// each re-resolve the whole string — so an ancestor swapped in that gap was
-// created through and written through by primitives that had been authorized
-// against a different chain. `withPinnedParent` holds the parent open for the
-// whole operation, creates any missing ancestor ONE COMPONENT AT A TIME through
-// that pin (never a recursive mkdir, which walks the string), and hands
-// `writeRegularAt` a parent that cannot be re-aimed.
-function writeUnder(cwd, rel, content) {
-  withPinnedParent(cwd, rel, `(B) baseline restore of '${rel}'`, { createParents: true }, (parentHandle, leaf) => {
-    writeRegularAt(parentHandle, leaf, Buffer.from(content, 'base64'), rel);
-  });
-}
+// GRAVESTONE — `writeUnder(cwd, rel, content)` WAS the (B) sweep's RESTORE
+// primitive: the modify arm called it to put a changed (B) file's pre-image bytes
+// back, and the delete arm called it to recreate a (B) file that had vanished.
+// DELETED 2026-08-29 by RULING D of decision h17-baseline-integrity-redesign-
+// rulings-abcd (532a4383), as refined by h17-ruling-d-needs-a-b-enumerating-stamp-
+// producer-and-stamp-invalidation (fac9a69b): the (B) surface moved to
+// DETECT-AND-DENY, so a changed (B) path is DENIED and LEFT EXACTLY AS THE COMMAND
+// LEFT IT.
+// WHY, kept here because the reason IS the ruling and a ruling stripped of its
+// justification gets re-opened:
+//   (1) THE HARDLINK CLOBBER. This primitive wrote through `writeRegularAt`'s
+//       truncate-in-place arm, and truncate-in-place does not care how many names
+//       an object has. A (B) path replaced by a HARDLINK to a file OUTSIDE the
+//       repository made the "restore" write baseline bytes straight through the
+//       shared inode onto that outside file. Descriptor pinning cannot close it:
+//       the whole S1–S3 threat model is about NAME RESOLUTION, and pinning
+//       constrains which NAME resolves to which object while saying nothing about
+//       how many names an object has. REPRODUCED LIVE, not reasoned — the S4 red
+//       bar caught the victim's bytes coming back as the restored baseline content.
+//   (2) THE PRE-IMAGE IS NOT A TRUSTWORTHY SOURCE. The (A) restore is justified by
+//       an asymmetry that does NOT hold here: (A) reverts to HEAD, which git can
+//       always hand back, whereas the (B) pre-image lives only in an os.tmpdir()
+//       record that the audited command can itself write. Restoring from it makes
+//       the guard a writer of attacker-influenceable bytes.
+// STRUCTURAL, NOT ADVISORY: the function is GONE, not merely uncalled, so the (B)
+// stage now holds NO write primitive and NO delete primitive at all — there is
+// nothing left in that scope for a future edit to re-aim, and no comment standing
+// in for a guard (anti-pattern 586bccdc). Its two callers were the modify and
+// delete arms it served, and both are now `baselineDenied.push(rel)`.
+// `writeRegularAt` DELIBERATELY SURVIVES and this is not an oversight: it has a
+// separate, legitimate (A) caller — the read-blob restore of a TRACKED path, whose
+// bytes come from HEAD (Ruling A) — and that caller uses the `createOnly`
+// unlink-and-create mode precisely so the truncate-in-place arm is unreachable
+// from it. The primitive was never the defect; aiming it at a path whose only
+// pre-image was an agent-writable record was.
+// SABOTAGE TABLE for this ruling (specified, never run in-place — mutation runs are
+// conductor-only, decision 02e03ed8, and in-place mutation of scripts/hooks/** is
+// anti-pattern 37b3cb0a):
+//   S1: restore `writeUnder` and call it where `baselineDenied.push(rel)` now sits.
+//       REAL CARRIER: the BYTE-IDENTITY assertions in AC1/AC6-DENY of
+//       scripts/tests/h17-b-detect-and-deny.test.mjs (`deepEqual(readFileSync(coder),
+//       newBytes)`). NOT the exit code — the same trap the `removeUnder` gravestone
+//       records: the old code restored FIRST and denied (exit 2) anyway, so an
+//       exit-code assertion stays GREEN while the disk outcome is inverted.
+//   S2: recreate a DELETED (B) path from the Pre baseline. CARRIER: AC2's
+//       `existsSync(coder) === false`, which `assert.equal(r.code, 2)` cannot see.
+//   S3: push (B) modify/delete findings back into `violations`. CARRIER: AC3's
+//       `doesNotMatch(/reverted|rolled\s*back/i)` — the `violations` wording claims
+//       a rollback that no longer happens.
+//   S4: drop the disposition wording from the (B) denial (generic "denied").
+//       CARRIER: AC3's `match(/left (in place|on disk|untouched|as[- ]is)/i)`.
+//   S5: drop `baselineDenied.length` from the deny condition below. CARRIER: the
+//       exit-code assertions — this is the ONE sabotage here the exit code does
+//       catch, because it is the one that stops the denial firing at all.
+//   S6: keep the restore but unlink-and-recreate instead of truncating in place.
+//       CARRIER: AC11's shared-inode + `nlink >= 2` assertions — the victim's bytes
+//       survive, so the byte assertions alone would stay green, and only the link
+//       relationship reveals that H17 still took a write action.
 
 // GRAVESTONE — `removeUnder(cwd, rel)` WAS the (B) sweep's DELETE primitive
 // (board 128fedb7 site 2): the addition arm called it on every live (B) file
@@ -2763,9 +2982,12 @@ function parsePorcelainZ(out) {
 // state genuinely CHANGED is attested PER PATH by stampAttestsCurrentBytes /
 // stampAttestsDirectory in the sweep, because one unstamped unchanged path must
 // never collapse attestation for a changed stamped one.
-function verifyStampAttestation(cwd, preExistingRels) {
+// `stamp` IS THE SWEEP'S SINGLE SNAPSHOT (S4 review, TOCTOU fix), passed in
+// rather than re-read here: a consult that re-opened the file could be served
+// bytes a backgrounded child substituted after the integrity witness was taken.
+function verifyStampAttestation(cwd, preExistingRels, stamp) {
   try {
-    const { present, entries } = readStamp(cwd);
+    const { present, entries } = stamp;
     if (!present) return { attested: false, stampPresent: false, failedPath: null };
     if (!entries) return { attested: false, stampPresent: true, failedPath: null };
     const byPath = new Map();
@@ -2800,15 +3022,23 @@ function verifyStampAttestation(cwd, preExistingRels) {
 }
 
 // FIX-A (decision h17-stamp-honor-loud-restore, 4d9b76e8): a fresh conductor
-// attestation for a SINGLE in-window path — read the stamp NOW and hash the
+// attestation for a SINGLE in-window path — consult the stamp and hash the
 // file's CURRENT bytes. Deliberately separate from verifyStampAttestation
 // above (FIX C): that one attests a whole preExisting SET at once, all-or-
 // nothing; this one gates a single restore decision for a path that was NOT
 // dirty at Pre. FAIL-CLOSED: any error (missing/corrupt stamp, unlisted path,
 // hash mismatch, deleted-entry shape) attests nothing.
-function stampAttestsCurrentBytes(cwd, rel) {
+// `stamp` IS THE SWEEP'S SINGLE SNAPSHOT (S4 review, TOCTOU fix). This function
+// was the hot spot: it is called once per candidate path AND once per child file
+// from `stampAttestsDirectory`, so the old `readStamp(cwd)` here re-opened the
+// stamp file many times in one sweep, giving a backgrounded child that many
+// chances to substitute it after the integrity witness had already been taken.
+// The TARGET path's bytes are still hashed live below — that is required and
+// correct, since the question is whether the target's CURRENT bytes match — but
+// the ATTESTATION it is compared against is now fixed for the whole sweep.
+function stampAttestsCurrentBytes(cwd, rel, stamp) {
   try {
-    const { entries } = readStamp(cwd);
+    const { entries } = stamp;
     if (!entries) return false;
     const entry = entries.find((e) => e && e.path === rel);
     if (!entry) return false;
@@ -2840,7 +3070,11 @@ function stampAttestsCurrentBytes(cwd, rel) {
 // the dir by walking its child files: EVERY child stamp-attested → the dir is
 // conductor work-in-flight (skip restore + deny). Empty dir, any unattested or
 // mismatched child, or any fs error → false (fail-closed, restore as before).
-function stampAttestsDirectory(cwd, relDir) {
+// `stamp` IS THE SWEEP'S SINGLE SNAPSHOT (S4 review, TOCTOU fix) and is threaded
+// straight through to the per-child consult below — this function is exactly the
+// amplifier that made the old re-read dangerous, since one directory could drive
+// an unbounded number of stamp re-opens in a single sweep.
+function stampAttestsDirectory(cwd, relDir, stamp) {
   try {
     const files = [];
     // INCREMENTAL + BUDGETED (board 55fcccac clause 3), for the same reason
@@ -2896,7 +3130,7 @@ function stampAttestsDirectory(cwd, relDir) {
       walk(dirHandle, relDir, 0);
     });
     if (!files.length) return false;
-    return files.every((f) => stampAttestsCurrentBytes(cwd, f));
+    return files.every((f) => stampAttestsCurrentBytes(cwd, f, stamp));
   } catch {
     return false;
   }
@@ -3592,6 +3826,25 @@ if (event === 'PreToolUse') {
     // removes (P4).
     const dirtyRels = dirtyTrackedRels(cwd);
     writeFileSync(dirtyFile(cwd, runId, key), JSON.stringify(dirtyRels));
+    // THE STAMP WITNESS (Ruling 2 of fac9a69b): the conductor's attestation input
+    // is itself unprotected — it sits in neither the (A) enforcement surface nor
+    // the (B) glob set — so without this record an agent could write a stamp
+    // attesting its own tamper and have it honoured in the very same Post. Record
+    // what the stamp looks like BEFORE the command runs; Post recomputes and any
+    // difference is an in-window stamp write. Written on EVERY path, per-call key
+    // or legacy per-run name, so Post always has something to compare against.
+    // NEVER THROWS: `stampWitness` returns a non-'file' kind for every failure, so
+    // an absent, oversize, corrupt or unreadable stamp cannot turn this snapshot
+    // into a Pre-time deny — an unusable stamp is a normal, common state (H1
+    // deletes the stamp at every SessionStart), not an anomaly.
+    // ACCEPTED, DISCLOSED RESIDUAL: this record lands in os.tmpdir() under a name
+    // the audited command can compute and OVERWRITE — the same same-UID exposure
+    // the (B) content baseline and the (A) attribution/state records carry, and
+    // which the (B) denial states outright. An agent that rewrites its own witness
+    // to match a stamp it intends to forge defeats the comparison at Post. There is
+    // no location this hook can write that the command cannot (79942bda), so the
+    // residual is NAMED, not closed — see `stampWitness` for the full statement.
+    writeFileSync(stampWitnessFile(cwd, runId, key), JSON.stringify(stampWitness(cwd)));
     // PER-CALL Pre-STATE record (7021526c): the STATE of every dirty path, so
     // Post can compare rather than deny the whole result for being unable to.
     // Written ONLY when tool_use_id is usable — a null key degrades LOUDLY at
@@ -3734,6 +3987,97 @@ try {
   const noteUnauthorizedAddition = (rel) => {
     if (!unauthorizedAdditions.includes(rel)) unauthorizedAdditions.push(rel);
   };
+  // (B) paths MODIFIED or DELETED in-window with no attesting stamp entry (S4,
+  // RULING D of 532a4383 as refined by fac9a69b). A SEPARATE LIST FROM `violations`
+  // for precisely the reason `unauthorizedAdditions` is one, and the reason is not
+  // cosmetics: the `violations` denial says the named bytes were "reverted" and
+  // "rolled back to their pre-call state", which was TRUE while the (B) arm
+  // restored and is a FALSE ACTION CLAIM now that it does not. A security surface
+  // that claims a protection it does not implement is anti-pattern 586bccdc — the
+  // false claim is worse than the gap, because it tells a human the tamper is gone
+  // when it is sitting on their disk, and it stops the next reader from looking.
+  // These paths are DENIED, REPORTED, and LEFT EXACTLY AS THE COMMAND LEFT THEM.
+  const baselineDenied = [];
+
+  // -------------------------------------------------------------------------
+  // STAMP INTEGRITY — RULING 2 of decision h17-ruling-d-needs-a-b-enumerating-
+  // stamp-producer-and-stamp-invalidation (fac9a69b).
+  //
+  // ORDERING IS LOAD-BEARING, AND THIS POSITION IS THE MECHANISM. It runs BEFORE
+  // the (A) sweep's two exemption consults below and before the (B) stage's, so a
+  // stamp forged INSIDE this window is ineligible for EVERY exemption in this same
+  // Post. Consulting first and noticing afterwards would honour the forgery once —
+  // which is the whole of the one-call self-attestation attack: change a (B) file
+  // and write a matching stamp in the same command.
+  //
+  // FAIL-CLOSED HERE MEANS "NO EXEMPTION", NEVER "DENY EVERYTHING". A missing or
+  // unparseable witness record makes the stamp UNTRUSTED (`stampTrusted = false`)
+  // and nothing more: no tampering is claimed, no stamp is deleted, and an
+  // UNCHANGED surface still allows without the stamp ever being consulted. Only a
+  // witnessed DIFFERENCE is treated as tampering — an in-window stamp write — and
+  // only that path deletes.
+  //
+  // WHY DELETION AND NOT MERELY A DENY: see `invalidateStamp`. A denial with no
+  // cross-call consequence turns the next Pre into an adoption point.
+  //
+  // ACCEPTED CONSEQUENCE, DISCLOSED NOT BURIED: conductor stamping must happen
+  // BETWEEN audited Bash windows. A conductor stamp written INSIDE an active agent
+  // window is observationally identical to the agent attack and will be denied and
+  // invalidated. That matches the standing posture (quiesce agent Bash across a
+  // build), and preserving concurrent mid-window stamping would need a trusted
+  // coordination channel that does not exist on a same-UID machine (79942bda).
+  // -------------------------------------------------------------------------
+  let stampTrusted = true;
+  let stampTampered = false;
+  let stampInvalidated = false;
+  // THE SWEEP'S ONE AND ONLY READ OF THE STAMP FILE (S4 review, TOCTOU fix).
+  // Everything downstream — the integrity comparison AND every exemption consult —
+  // is served from this object. Nothing below re-opens the path, which is what
+  // makes "witnessed bytes == consulted bytes" true by construction rather than by
+  // timing: the audited command can background a child that outlives it, so any
+  // second read would be a fresh opportunity to substitute the file.
+  const stampSnapshot = readStampSnapshot(cwd);
+  {
+    const witnessPath = stampWitnessFile(cwd, runId, callId);
+    let preWitness = null;
+    try {
+      preWitness = readBoundedJsonFile(witnessPath, MAX_RECORD_BYTES, 'enforcement stamp witness'); // BOUNDED, board 55fcccac clause 4
+    } catch {
+      preWitness = null; // absent/corrupt/oversize -> untrusted stamp, NOT a tampering claim
+    }
+    // LIFECYCLE-BOUND (P4), exactly like the (B) content baseline, INCLUDING its
+    // per-call/legacy asymmetry: a PER-CALL record's life ends with the Post that
+    // read it, so it is unlinked here (best-effort — the bytes are already in
+    // memory, so a failed unlink leaks a temp record and can never change a
+    // verdict). The LEGACY PER-RUN witness is deliberately LEFT ALONE for the same
+    // reason the per-run baseline is: it is not this call's to consume, a
+    // concurrent lane in the same run may still need it, and the next Pre
+    // overwrites it anyway.
+    if (callId) {
+      try {
+        rmSync(witnessPath, { force: true });
+      } catch {
+        /* leaked temp record only; the comparison already happened in memory */
+      }
+    }
+    const nowWitness = { kind: stampSnapshot.kind, sha256: stampSnapshot.sha256 };
+    if (!preWitness || typeof preWitness.kind !== 'string') {
+      stampTrusted = false;
+    } else if (preWitness.kind !== nowWitness.kind || (preWitness.sha256 ?? null) !== (nowWitness.sha256 ?? null)) {
+      stampTampered = true;
+      stampTrusted = false;
+      stampInvalidated = invalidateStamp(cwd);
+    }
+  }
+
+  // THE ONE PLACE A STAMP EXEMPTION IS DECIDED, so `stampTrusted` cannot be
+  // honoured at one consult and forgotten at another, and so every consult is
+  // served the SAME `stampSnapshot` the integrity check just judged. Keeps the
+  // existing directory-vs-file split (an untracked dirty DIRECTORY reaches the
+  // consult as its collapsed path while the CLI expands it into child files, so a
+  // per-path lookup could never match one).
+  const stampAttestsPath = (rel) =>
+    stampTrusted && (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel, stampSnapshot) : stampAttestsCurrentBytes(cwd, rel, stampSnapshot));
 
   // No working store → no runId to key the attribution record on, so
   // `preDirty` stays empty: unverifiable attribution is never treated as
@@ -3753,9 +4097,14 @@ try {
   // changes what the guard trusts and says nothing is the defect, not the
   // degradation.
   let baselineShared = null;
-  // The (B) paths this Post restored/removed, kept beside `violations` (which
-  // mixes (A) and (B)) so the shared-baseline disclosure can name exactly the
-  // writes it applies to.
+  // The (B) paths this Post found a DIFFERENCE on — modified, deleted, or added —
+  // kept beside `violations` (which is now purely (A)) so the shared-baseline
+  // disclosure can name exactly the paths that disclosure applies to.
+  // "restored/removed" was accurate while the (B) arm wrote and unlinked. Since S4
+  // it neither writes nor deletes ANY (B) path, so the noun is now COMPARISONS, not
+  // writes — and the degraded-(B) notice composed from this list says "compared",
+  // which is what is true of every member (anti-pattern 586bccdc: never let a name
+  // or a comment assert an action the code stopped taking).
   const baselineViolations = [];
   // Set when the (A) ATTRIBUTION record had to fall back to the SHARED per-run
   // file because this call carries no usable tool_use_id (board 489554d4), the
@@ -4136,7 +4485,7 @@ try {
         // link is unattestable by construction and falls straight to (3): those
         // leave the bytes identical, match the stamp, and were wrongly allowed.
         if (stampCouldAttest(wasState, nowState)) {
-          if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
+          if (stampAttestsPath(rel)) continue; // S4: a stamp changed IN THIS WINDOW attests nothing here
         }
         changedPreDirty.push(rel); // (3) denied, and still not restored
         continue;
@@ -4152,7 +4501,7 @@ try {
       // finding-2 gate above: this arm has no recorded Pre state to diff, so
       // there is no "difference confined to bytes" to establish — AC13's
       // clean-at-Pre behaviour stays exactly as it was.
-      if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
+      if (stampAttestsPath(rel)) continue; // S4: a stamp changed IN THIS WINDOW attests nothing here
       const outcome = restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
       if (!outcome.restored) {
         // PROTECTED (B) PATH, DETECTED BY THE (A) SWEEP (2026-08-27 defect
@@ -4308,16 +4657,34 @@ try {
       );
     }
 
-    for (const [rel, content] of Object.entries(valid)) {
-      if (!(rel in current)) {
-        writeUnder(cwd, rel, content); // baseline file deleted → recreate
-        violations.push(rel);
-        baselineViolations.push(rel);
-      } else if (current[rel] !== content) {
-        writeUnder(cwd, rel, content); // modified → restore bytes
-        violations.push(rel);
-        baselineViolations.push(rel);
-      }
+    // (B) DETECT-AND-DENY — RULING D of decision 532a4383, as refined by fac9a69b.
+    // A (B) path whose state differs from this call's Pre baseline is ALLOWED only
+    // where a TRUSTED stamp entry attests its CURRENT bytes (or its continued
+    // ABSENCE). Otherwise it is DENIED and THE BYTES ARE LEFT EXACTLY AS THE
+    // COMMAND WROTE THEM — never restored, never recreated, never truncated or
+    // rewritten by H17 itself.
+    // WHY THE RESTORE WENT, kept here because a ruling stripped of its reason gets
+    // re-opened: the (B) restore's only write primitive truncated IN PLACE, so a
+    // (B) path replaced by a HARDLINK to a file outside the repository made the
+    // "restore" write baseline bytes straight through the shared inode onto an
+    // arbitrary outside file. That is not a name-resolution bug descriptor pinning
+    // can close — a hardlink defeats pinning by not using a name at all — and the
+    // asymmetry that justifies the (A) restore does not hold here: (A) reverts to
+    // HEAD, a recoverable source of truth git can hand back, while a (B) pre-image
+    // lives only in an os.tmpdir() record the audited command can itself write.
+    // Detection is therefore the correct disposition for the whole (B) surface,
+    // which is why the modify/delete arms now join the ADDITION arm rather than
+    // keeping a delete-free write primitive alive beside it.
+    // ORDERING NOTE: `stampAttestsPath` already carries the `stampTrusted` gate, so
+    // a stamp forged inside this window exempts nothing here either.
+    for (const rel of Object.keys(valid)) {
+      const changed = !(rel in current) || current[rel] !== valid[rel];
+      if (!changed) continue; // (1) verified by observation — the stamp is never consulted
+      // (2) conductor-attested. `stampAttestsCurrentBytes` resolves the DELETED case
+      // too: an absent path attests iff the stamp carries `deleted:true` for it.
+      if (stampAttestsPath(rel)) continue;
+      baselineDenied.push(rel); // (3) denied, and deliberately NOT restored
+      baselineViolations.push(rel);
     }
     for (const rel of Object.keys(current)) {
       if (!(rel in valid)) {
@@ -4393,8 +4760,8 @@ try {
   // as before, optionally naming which path failed attestation when a stamp
   // was present but did not fully cover the dirt.
   let stampFailedPath = null;
-  if (preExisting.length) {
-    const verdict = verifyStampAttestation(cwd, preExisting);
+  if (preExisting.length && stampTrusted) {
+    const verdict = verifyStampAttestation(cwd, preExisting, stampSnapshot);
     if (verdict.attested) {
       preExisting.length = 0;
     } else if (verdict.stampPresent) {
@@ -4406,7 +4773,13 @@ try {
   // `violations`: since the addition arm no longer mutates anything, this list is
   // the ONLY trace an unexpected addition leaves — drop it from this condition
   // and a planted file allows silently (sabotage S5 at the gravestone).
-  if (violations.length || unauthorizedAdditions.length || preExisting.length || changedPreDirty.length) {
+  // `baselineDenied.length` and `stampTampered` are FIRST-CLASS deny triggers, not
+  // riders on `violations`: since the (B) arm stopped restoring, `baselineDenied`
+  // is the ONLY trace a (B) modify/delete leaves, and an in-window stamp write
+  // frequently changes nothing else on disk at all (that is exactly the two-call
+  // laundering setup — call N plants ONLY a stamp). Drop either from this condition
+  // and the corresponding attack allows silently.
+  if (violations.length || unauthorizedAdditions.length || baselineDenied.length || stampTampered || preExisting.length || changedPreDirty.length) {
     const parts = [];
     if (changedPreDirty.length) {
       // Decision 7021526c step 3. NOT the environment-defect class: the state
@@ -4459,6 +4832,43 @@ try {
           `deleting is IRREVERSIBLE, and this sweep cannot tell a malicious plant from a legitimate file the conductor just created — a detector that deletes ` +
           `destroys real work on one false positive. A HUMAN must inspect each path above and take it off disk if it is a plant; H17 keeps denying agent Bash ` +
           `while it stands, so an addition left in place buys nothing but a red gate. Nothing of yours was undone.`
+      );
+    }
+    if (baselineDenied.length) {
+      // WORDING IS LOAD-BEARING, exactly as it is for the addition arm above, and
+      // for the same reason: the disposition is unusual — the gate denied and the
+      // change is still on disk. It must NOT borrow the `violations` vocabulary
+      // ("reverted", "rolled back to their pre-call state"), because describing an
+      // action that no longer happens is anti-pattern 586bccdc at the user-facing
+      // surface: it would tell a human their tamper was undone while it sits in
+      // their working tree, and it would stop the next reader from looking.
+      parts.push(
+        `H17: PROTECTED (B) ENFORCEMENT PATH(S) CHANGED IN THIS COMMAND'S WINDOW WITH NO CONDUCTOR ATTESTATION — DENIED, AND LEFT IN PLACE EXACTLY AS ` +
+          `THE COMMAND LEFT THEM: ${baselineDenied.join(', ')} — exit contract-violated, never route around. These path(s) are gitignored enforcement ` +
+          `surface (.claude/agents/**, .claude/settings*.json, .sterling/config.json); their state differs from this call's Pre-image baseline and no ` +
+          `trusted conductor stamp attests the CURRENT state. H17 DETECTED the change and took NO WRITE ACTION on it: nothing was restored, recreated, ` +
+          `truncated or rewritten, and whatever is on disk now is what your command put there. Restoring was REMOVED deliberately — the (B) pre-image ` +
+          `lives only in a temp record the audited command can itself write, so restoring from it made this gate a writer of attacker-influenceable ` +
+          `bytes, and its truncate-in-place write could be aimed THROUGH a hardlink at a file outside the repository. The sanctioned route is a ` +
+          `conductor-run \`node scripts/enforcement-stamp.mjs\` BETWEEN Bash calls, never inside one. A HUMAN must inspect each path above.`
+      );
+    }
+    if (stampTampered) {
+      // The stamp is the conductor's ATTESTATION INPUT, so a command that writes it
+      // is trying to authorize itself. Stated plainly, including the one action H17
+      // DID take here — the deletion — because an invalidation the reader does not
+      // know about looks like a vanished file next time they go to use it.
+      parts.push(
+        `H17: THE ENFORCEMENT STAMP (${STAMP_REL}) CHANGED INSIDE THIS COMMAND'S WINDOW — DENIED, and the stamp has been ` +
+          `${stampInvalidated ? 'INVALIDATED (DELETED)' : 'left in place ONLY because deleting it FAILED — treat it as untrusted and remove it by hand'}` +
+          `. — exit contract-violated, never route around. The stamp is the CONDUCTOR'S ATTESTATION INPUT: H17 exempts a changed enforcement path whose ` +
+          `current bytes match a stamp entry, so a command that writes the stamp is authorizing its own tamper. It was recorded at PreToolUse and ` +
+          `recomputed now, and it moved in between. NO EXEMPTION FROM IT WAS HONOURED ANYWHERE IN THIS SWEEP — the integrity check runs BEFORE every ` +
+          `consult, so a stamp forged in this window cannot excuse a single path in the same result. It is DELETED rather than merely refused because a ` +
+          `denial with no cross-call consequence turns the NEXT PreToolUse into an adoption point: the forged file would survive, be snapshotted as a ` +
+          `legitimate starting state, and attest a matching change one call later. The stamp is transient and reproducible (H1 deletes it at every ` +
+          `SessionStart), so nothing durable was lost — the CONDUCTOR re-attests deliberately with \`node scripts/enforcement-stamp.mjs\` BETWEEN Bash ` +
+          `calls. A conductor stamp written INSIDE an active agent window is observationally identical to this attack and is denied the same way.`
       );
     }
     // DEGRADED-LOUD ON THE (B) SIDE (board 11609d1f), the mirror of

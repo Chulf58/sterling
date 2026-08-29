@@ -2,7 +2,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync, statSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -1114,6 +1114,48 @@ const GIT_SKIP = (() => {
   return !r.error && r.status === 0 ? false : 'git not available on this host';
 })();
 
+// SLICE 1 hardlink probe — copied in SHAPE from
+// h17-read-blob-restore.test.mjs's HARDLINK_SKIP (T11). Two tmpdir() siblings
+// so the probe (and every real test below that uses it) is same-device by
+// construction; on this host the checkout may be drvfs while tmpdir() is
+// ext4, so pairing a victim with the real checkout would fail EXDEV before
+// the primitive is ever exercised — indistinguishable, from a bare exception,
+// from "hard links aren't supported here". A genuine EXDEV during the probe
+// itself (i.e. the two tmpdir() siblings are NOT same-device) is a broken
+// fixture, not a skip, and must fail loudly rather than silently skip every
+// test that depends on it.
+const HARDLINK_SKIP = (() => {
+  let outsideProbe;
+  let targetProbe;
+  try {
+    outsideProbe = mkdtempSync(join(tmpdir(), 'sterling-enf-hlprobe-outside-'));
+    targetProbe = mkdtempSync(join(tmpdir(), 'sterling-enf-hlprobe-target-'));
+    const a = join(outsideProbe, 'a.txt');
+    const b = join(targetProbe, 'b.txt');
+    writeFileSync(a, 'x');
+    try {
+      linkSync(a, b);
+    } catch (e) {
+      if (e.code === 'EXDEV') {
+        throw new Error(
+          `BROKEN FIXTURE (not a skip): the outside-victim dir (${outsideProbe}) and the target tmpdir() shape (${targetProbe}) are on DIFFERENT devices — link() failed EXDEV. Both are meant to be tmpdir() siblings; fix the directory placement rather than letting this skip silently.`
+        );
+      }
+      throw e;
+    }
+    const ok = statSync(b).nlink >= 2 && statSync(a).ino === statSync(b).ino;
+    return ok
+      ? false
+      : `hard links are not supported between ${outsideProbe} and ${targetProbe} on this host/filesystem — the hardlink fixture cannot be constructed`;
+  } catch (e) {
+    if (typeof e.message === 'string' && e.message.startsWith('BROKEN FIXTURE')) throw e; // never swallow — must fail loudly, never skip
+    return `hard links are not supported on this host (${e.code ?? e.message})`;
+  } finally {
+    if (outsideProbe) rmSync(outsideProbe, { recursive: true, force: true });
+    if (targetProbe) rmSync(targetProbe, { recursive: true, force: true });
+  }
+})();
+
 // run git in `dir` (setup helper — never silently swallows a setup failure: P5)
 function git(dir, args, { must = false } = {}) {
   const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
@@ -1406,20 +1448,25 @@ test('H17 AC5: no agent_id (conductor) → exit 0, nothing touched, short-circui
 });
 
 // ---------------------------------------------------------------------------
-// AC8 (v3.1 EXPANDED, addition arm RE-CUT 2026-08-27 per user ruling) — gitignored
+// AC8 (v3.1 EXPANDED, addition arm RE-CUT 2026-08-27 per user ruling; RESTORE ARM
+// INVERTED 2026-08-29 — Ruling D of decision 532a4383, refined by fac9a69b: the
+// WHOLE (B) set moves to DETECT-AND-DENY, NO RESTORE, closing the two-call
+// laundering bypass a call-window-only restore would leave open) — gitignored
 //   enforcement writes caught via the (B) baseline;
 //   agents/evil.md (new → DENIED + REPORTED, left ON DISK — deleting an unexpected
 //     addition is irreversible and H17 cannot tell a malicious plant from a
 //     legitimate file the conductor just created; the sweep is a detector, not
 //     an eraser, so a real plant survives on disk until a human removes it),
-//   .sterling/config.json (modified→restore — UNCHANGED by the ruling: git is a
-//     recoverable source of truth for a tracked/known baseline, so restore-on-modify
-//     still applies),
-//   .claude/settings.local.json (v3.1 NEW, modified→restore — also unchanged).
-//   sterling.db change NOT flagged.
+//   .sterling/config.json (modified → DENIED, bytes LEFT EXACTLY AS THE COMMAND
+//     WROTE THEM — restore-on-modify is RETIRED for the whole (B) set; there is
+//     no longer a git-recoverable-baseline carve-out for a tracked/known (B) file),
+//   .claude/settings.local.json (modified → DENIED, same no-restore rule — also
+//     inverted from the prior restore-on-modify behaviour).
+//   sterling.db change NOT flagged (unchanged — explicitly excluded from the (B)
+//     set per decision fac9a69b / the h17 article).
 // ---------------------------------------------------------------------------
 
-test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+left in place, modified files restored; sterling.db NOT flagged', { skip: GIT_SKIP }, () => {
+test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+left in place, modified files denied+left as written (no restore); sterling.db NOT flagged', { skip: GIT_SKIP }, () => {
   const { dir, store, cleanup } = makeGitProject();
   try {
     // --- .claude/agents/evil.md : NEW → DENIED, file SURVIVES byte-identical on disk ---
@@ -1460,24 +1507,40 @@ test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+l
     // this assertion goes red.
     assert.ok(existsSync(legitAgent), 'a legit pre-existing agent file is left untouched');
 
-    // --- .sterling/config.json : MODIFIED → restored (kept valid so h17 config reads still succeed) ---
+    // --- .sterling/config.json : MODIFIED → DENIED, bytes LEFT AS WRITTEN (Ruling D: no restore) ---
     const configPath = join(dir, '.sterling', 'config.json');
     const origConfig = readFileSync(configPath, 'utf8');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(configPath, JSON.stringify({ ...CONFIG, HACKED: true }));
+    const hackedConfig = JSON.stringify({ ...CONFIG, HACKED: true });
+    writeFileSync(configPath, hackedConfig);
     r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `modified gitignored config must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(configPath, 'utf8'), origConfig, '.sterling/config.json restored to baseline');
+    // Sabotage: reintroduce a restore-to-baseline write on this (B) arm (e.g. call
+    // the old writeUnder-to-HEAD/baseline routine for .sterling/config.json before
+    // returning) → this assertion goes red, because the bytes would revert to
+    // origConfig instead of staying as the command wrote them.
+    assert.equal(readFileSync(configPath, 'utf8'), hackedConfig, '.sterling/config.json is DENIED but left byte-identical to what the command wrote — never restored (Ruling D, decision 532a4383/fac9a69b)');
+    assert.notEqual(readFileSync(configPath, 'utf8'), origConfig, 'and specifically NOT reverted to the pre-write baseline');
 
-    // --- .claude/settings.local.json (the GITIGNORED hook-disable file, v3.1 NEW): MODIFIED → restored ---
+    // --- .claude/settings.local.json (the GITIGNORED hook-disable file): MODIFIED →
+    // DENIED, bytes LEFT AS WRITTEN (Ruling D: no restore). PREDICTED inversion, not
+    // yet observed — this section sits behind the config.json abort above and never
+    // ran under the old suite; settings.local.json is named in the same (B) set as
+    // config.json in both 532a4383 and fac9a69b, so the same no-restore rule should
+    // apply, but confirm on the real run rather than trusting this by analogy alone. ---
     const settingsLocal = join(dir, '.claude', 'settings.local.json');
     const origSettings = readFileSync(settingsLocal, 'utf8');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(settingsLocal, JSON.stringify({ hooks: 'DISABLED' }));
+    const hackedSettings = JSON.stringify({ hooks: 'DISABLED' });
+    writeFileSync(settingsLocal, hackedSettings);
     r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1);
-    assert.equal(r.code, 2, `v3.1: gitignored settings.local.json write must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(settingsLocal, 'utf8'), origSettings, 'settings.local.json restored to baseline');
+    assert.equal(r.code, 2, `gitignored settings.local.json write must deny — ${oneLine(r.stderr)}`);
+    // Sabotage: reintroduce a restore-to-baseline write on this (B) arm → this
+    // assertion goes red, because the bytes would revert to origSettings instead of
+    // staying as the command wrote them.
+    assert.equal(readFileSync(settingsLocal, 'utf8'), hackedSettings, 'settings.local.json is DENIED but left byte-identical to what the command wrote — never restored (Ruling D)');
+    assert.notEqual(readFileSync(settingsLocal, 'utf8'), origSettings, 'and specifically NOT reverted to the pre-write baseline');
 
     // --- sterling.db change is NOT in the (B) set and git is blind to it → NOT flagged ---
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
@@ -1688,23 +1751,66 @@ function runStampCli(dir) {
   return spawnSync(process.execPath, [join(root, 'scripts', 'enforcement-stamp.mjs')], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
 }
 
-test('enforcement-stamp.mjs: refuses (nonzero) with "nothing to attest" when hooks/ is clean', { skip: GIT_SKIP }, () => {
+// INVERTED 2026-08-29 by decision fac9a69b (Ruling 1, refining Ruling D of
+// 532a4383): the fixture's (B) set — .claude/agents/coder.md,
+// .claude/settings.local.json, .sterling/config.json — is gitignored, so git
+// itself never reports it dirty; but Ruling 1 makes the stamp PRODUCER
+// enumerate the (B) family explicitly, independent of git status, so those
+// paths are ALWAYS attestable. A git-clean tracked tree (hooks/ untouched
+// since the init commit) therefore no longer means "nothing to attest" — the
+// (B) set alone gives the CLI something to stamp. This test used to assert the
+// opposite; it now asserts the (B) paths ARE attested.
+test('enforcement-stamp.mjs: a git-clean tracked tree still attests the always-enumerated (B) baseline set — never "nothing to attest"', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const r = runStampCli(dir);
-    // EXPECTED FAILURE TODAY: the script does not exist — spawnSync reports a
-    // launch/module-not-found failure, which is itself nonzero, so THIS particular
-    // assertion may pass by accident; the message assertion below is the one that
-    // actually pins post-fix behavior and fails today (no matching text is produced).
-    assert.notEqual(r.status, 0, 'a clean tree has nothing to attest — the CLI must not exit 0');
-    assert.match((r.stderr || '') + (r.stdout || ''), /nothing to attest/i, 'names why it refused');
-    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json')), false, 'no stamp is written on a clean tree');
+    // Sabotage: short-circuit the (B)-set enumeration in scripts/enforcement-stamp.mjs
+    // (e.g. make its path-listing function return [] unconditionally, or gate its
+    // call site behind `if (false)`) → the CLI falls back to git-dirty-tracked-paths
+    // only, finds none on this hooks-clean fixture, and this assertion goes red
+    // (status nonzero again, "nothing to attest").
+    assert.equal(r.status, 0, `the (B) set is always attestable, so the CLI must succeed even with hooks/ git-clean — ${oneLine(r.stderr)}`);
+    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
+    assert.ok(existsSync(stampPath), 'a stamp file IS written — the (B) set alone gives it something to attest');
+    const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
+    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e.sha256]));
+    // Sabotage: hash a placeholder/empty buffer instead of the (B) path's actual
+    // current bytes in the (B)-enumeration arm → any one of these three equalities
+    // goes red while status/existence stay green.
+    assert.equal(
+      byPath['.claude/agents/coder.md'],
+      createHash('sha256').update(readFileSync(join(dir, '.claude', 'agents', 'coder.md'))).digest('hex'),
+      'the (B) agents file is attested with its current bytes even though git never saw it as dirty'
+    );
+    assert.equal(
+      byPath['.claude/settings.local.json'],
+      createHash('sha256').update(readFileSync(join(dir, '.claude', 'settings.local.json'))).digest('hex'),
+      'the (B) settings.local.json is attested'
+    );
+    assert.equal(
+      byPath['.sterling/config.json'],
+      createHash('sha256').update(readFileSync(join(dir, '.sterling', 'config.json'))).digest('hex'),
+      'the (B) config.json is attested'
+    );
+    assert.equal(byPath['.sterling/sterling.db'], undefined, 'sterling.db is explicitly excluded from the (B) set and must never be stamped');
+    assert.equal(
+      Object.keys(byPath).filter((p) => p.startsWith('hooks/')).length,
+      0,
+      'hooks/ is git-clean and unchanged, so no hooks/ path is stamped — only the (B) set is'
+    );
   } finally {
     cleanup();
   }
 });
 
-test('enforcement-stamp.mjs: stamps every dirty hooks/ path with the sha256 of its CURRENT bytes, and a re-run overwrites rather than merges', { skip: GIT_SKIP }, () => {
+// Repaired 2026-08-29 (decision fac9a69b, Ruling 1): the stamp now ALWAYS carries
+// the (B) set (.claude/agents/coder.md, .claude/settings.local.json,
+// .sterling/config.json) alongside whatever is git-dirty, so the count is 4 after
+// the first run, not 1. Membership is asserted as the exact SET of paths rather
+// than a bare length — a bare `.length === 4` would stay green even if the wrong
+// four paths showed up (e.g. a duplicate hooks/ entry instead of a missing (B)
+// path), which is exactly the failure mode a length-only pin cannot catch.
+test('enforcement-stamp.mjs: stamps every dirty hooks/ path with the sha256 of its CURRENT bytes plus the always-enumerated (B) set, and a re-run overwrites rather than merges', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
@@ -1713,10 +1819,18 @@ test('enforcement-stamp.mjs: stamps every dirty hooks/ path with the sha256 of i
     assert.equal(r.status, 0, `stamp CLI must succeed while hooks/ is dirty: ${oneLine(r.stderr)}`);
     const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
     let stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    assert.equal(stamp.length, 1);
-    assert.equal(stamp[0].path, 'hooks/h3-contract-gate.mjs');
-    assert.equal(stamp[0].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
-    assert.ok(typeof stamp[0].at === 'string' && stamp[0].at.length > 0);
+    let paths = stamp.map((e) => e.path).sort();
+    // Sabotage: comment out or gate off the (B)-enumeration call in
+    // scripts/enforcement-stamp.mjs → the three (B) paths disappear from this list
+    // and this assertion goes red (actual would be ['hooks/h3-contract-gate.mjs']).
+    assert.deepEqual(
+      paths,
+      ['.claude/agents/coder.md', '.claude/settings.local.json', '.sterling/config.json', 'hooks/h3-contract-gate.mjs'].sort(),
+      'stamp lists exactly the one dirty hooks/ path plus the three always-attested (B) paths — never more, never fewer'
+    );
+    const byPath0 = Object.fromEntries(stamp.map((e) => [e.path, e]));
+    assert.equal(byPath0['hooks/h3-contract-gate.mjs'].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
+    assert.ok(typeof byPath0['hooks/h3-contract-gate.mjs'].at === 'string' && byPath0['hooks/h3-contract-gate.mjs'].at.length > 0);
 
     // further drift + a second dirty path: re-running OVERWRITES with the fresh
     // set, never appends the stale entry alongside the new ones
@@ -1726,11 +1840,139 @@ test('enforcement-stamp.mjs: stamps every dirty hooks/ path with the sha256 of i
     r = runStampCli(dir);
     assert.equal(r.status, 0, oneLine(r.stderr));
     stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    assert.equal(stamp.length, 2, 'the fresh stamp lists both currently-dirty paths, not appended to the first, single-entry stamp');
+    // PREDICTION, not yet observed: this section sat behind the `stamp.length === 1`
+    // abort above and never actually ran under the old suite. By the same Ruling 1
+    // logic this second run's set should be BOTH now-dirty hooks/ paths PLUS the
+    // same three always-attested (B) paths = 5 members, not 2. Confirm on the real
+    // run; if it disagrees this is a fresh finding, not a rubber-stamped repair.
+    paths = stamp.map((e) => e.path).sort();
+    assert.deepEqual(
+      paths,
+      ['.claude/agents/coder.md', '.claude/settings.local.json', '.sterling/config.json', 'hooks/h3-contract-gate.mjs', 'hooks/hooks.json'].sort(),
+      'the fresh stamp lists both currently-dirty hooks/ paths plus the three always-attested (B) paths, not appended to the stale first-run set'
+    );
     const byPath = Object.fromEntries(stamp.map((e) => [e.path, e.sha256]));
     assert.equal(byPath['hooks/h3-contract-gate.mjs'], createHash('sha256').update(readFileSync(bundle)).digest('hex'), "the NEW bytes are hashed, not the first stamp's stale hash");
     assert.equal(byPath['hooks/hooks.json'], createHash('sha256').update(readFileSync(hooksJson)).digest('hex'));
   } finally {
+    cleanup();
+  }
+});
+
+// =========================================================================
+// SLICE 1 — enforcement-stamp.mjs PRODUCER TRUNCATE-IN-PLACE HARDLINK CLOBBER
+// (conductor-verified live defect, found by an outside-family Codex consult;
+// same class as the deleted (B)-restore primitive `writeUnder`, whose
+// truncate-in-place hardlink clobber is pinned above at H17 T11 in
+// h17-read-blob-restore.test.mjs).
+//
+// enforcement-stamp.mjs:296 classifies the stamp target path via
+// classifyPathComponents, accepting kind 'file' or 'absent'; :303 then calls
+// plain `writeFileSync(stampPath, JSON.stringify(stamp))`. A HARDLINK IS A
+// REGULAR FILE TO lstat, so the classify check — built to catch a SYMLINK at
+// the stamp path — does not catch a hardlink. If an agent plants a hardlink
+// at `.sterling/transient/enforcement-stamp.json` pointing at any other file
+// on the filesystem, the PRODUCER'S OWN writeFileSync truncates and
+// overwrites that shared inode with stamp JSON — the conductor's own
+// attestation tool, run trusted, clobbers a victim file it was never told
+// about.
+//
+// CONTROL (placed first, NO producer involved): reproduces the exact
+// primitive the producer uses at :303 — a plain `writeFileSync` on an
+// EXISTING hardlinked leaf, no O_EXCL, no unlink-first — and proves it
+// actually clobbers the linked outside file ON THIS HOST. Without this
+// control a green TREATMENT result below is unfalsifiable: it would pass
+// identically if hard links simply don't work on this filesystem/mount
+// (mirrors T11's CONTROL rationale in h17-read-blob-restore.test.mjs:825-830).
+//
+// TREATMENT drives the REAL producer CLI end-to-end (spawnSync, same
+// `runStampCli` used by the two sibling CLI tests above) against a fixture
+// with a dirty (B) surface (makeGitProject already seeds
+// .claude/agents/coder.md, .claude/settings.local.json, .sterling/config.json
+// — see the "always-enumerated (B) baseline set" test above), plants the
+// hardlink, and asserts the SAFETY PROPERTY rather than one specific
+// implementation shape: either the victim's bytes survive byte-for-byte and
+// the stamp path is no longer the same inode as the victim (unlink-and-create
+// or temp-file-plus-rename), OR the producer refuses outright and leaves the
+// victim untouched. Never asserts on exit code alone.
+//
+// SABOTAGE (to re-redden after the fix lands): in scripts/enforcement-stamp.mjs,
+// change the stamp-writing line from an unlink-and-create (or
+// temp-file-plus-rename) shape back to a bare
+// `writeFileSync(stampPath, JSON.stringify(stamp))` on the classified target
+// — i.e. revert to writing directly at the existing path without first
+// removing/replacing the directory entry. That flips both TREATMENT
+// assertions red: the victim's bytes become the stamp JSON instead of
+// `VICTIM_BYTES`, and the victim path keeps sharing the stamp path's inode
+// (nlink stays >= 2, same ino).
+// =========================================================================
+
+test('SLICE1 CONTROL: on this host, writeFileSync on a hardlinked leaf really does clobber the linked outside file (no producer involved)', { skip: GIT_SKIP || HARDLINK_SKIP }, () => {
+  const probeDir = mkdtempSync(join(tmpdir(), 'sterling-enf-s1control-'));
+  const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-enf-s1control-outside-'));
+  try {
+    const outsideFile = join(outsideDir, 'victim.bin');
+    const victimBytes = Buffer.from('SLICE1-VICTIM-BYTES-MUST-SURVIVE\n');
+    writeFileSync(outsideFile, victimBytes);
+
+    const leaf = join(probeDir, 'enforcement-stamp.json');
+    linkSync(outsideFile, leaf);
+
+    // exact primitive shape used at enforcement-stamp.mjs:303 — a plain
+    // writeFileSync on the existing (hardlinked) leaf, no unlink first.
+    writeFileSync(leaf, JSON.stringify([{ path: 'irrelevant', sha256: 'deadbeef' }]));
+
+    const after = readFileSync(outsideFile);
+    assert.ok(
+      !after.equals(victimBytes),
+      'CONTROL: writeFileSync on a hardlinked leaf must actually change the OUTSIDE file bytes on this host, or the TREATMENT test below proves nothing about the fix defending against it'
+    );
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('SLICE1: enforcement-stamp.mjs producer does not clobber a victim file reached via a hardlink planted at the stamp path', { skip: GIT_SKIP || HARDLINK_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject(); // dirty (B) surface already seeded — something to attest
+  const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-enf-s1-outside-'));
+  try {
+    const victimFile = join(outsideDir, 'victim.bin');
+    const victimBytes = Buffer.from('SLICE1-VICTIM-BYTES-MUST-SURVIVE\n');
+    writeFileSync(victimFile, victimBytes);
+
+    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
+    mkdirSync(dirname(stampPath), { recursive: true });
+    linkSync(victimFile, stampPath); // plant the hardlink AT the stamp path
+
+    const preVictimIno = statSync(victimFile).ino;
+    assert.equal(statSync(stampPath).ino, preVictimIno, 'PRECONDITION: the stamp path and the victim share one inode before the producer runs');
+
+    const r = runStampCli(dir);
+
+    // never assert on exit code alone — the safety property is byte survival,
+    // whether the producer proceeds (exit 0) or refuses outright (nonzero).
+    assert.deepEqual(
+      readFileSync(victimFile),
+      victimBytes,
+      `SLICE1: THE LOAD-BEARING PROPERTY — the victim file's bytes must be UNTOUCHED after the producer runs; a truncate-in-place stamp write would have overwritten this shared inode with stamp JSON — producer exit ${r.status}, stderr: ${oneLine(r.stderr)}`
+    );
+
+    // acceptable fix shapes: (a) unlink-and-recreate / temp-file-plus-rename,
+    // so the victim no longer shares an inode with whatever now sits at the
+    // stamp path (even if the producer still wrote a stamp there); or
+    // (b) the producer refused outright and never touched the stamp path at
+    // all, in which case the hardlink itself still exists and nlink stays 2
+    // — but the bytes assertion above already proves no clobber happened
+    // either way. Assert the disjunction explicitly so a fix that DELETES the
+    // hardlink without writing anything also passes.
+    const stampStillLinkedToVictim = existsSync(stampPath) && statSync(stampPath).ino === preVictimIno && statSync(victimFile).nlink >= 2;
+    assert.ok(
+      !stampStillLinkedToVictim || r.status !== 0,
+      'SLICE1: if the producer reports success (exit 0), the stamp path must no longer be the same inode as the victim — writing "successfully" while still sharing the victim inode means the write went through the hardlink'
+    );
+  } finally {
+    rmSync(outsideDir, { recursive: true, force: true });
     cleanup();
   }
 });
