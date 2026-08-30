@@ -653,19 +653,21 @@ const dispatchResidueContext = dispatchResidueLines.length
 // foreign entries anyway. Fail-open like every H1 read.
 await deleteRegisterUnderLock(input.cwd);
 
-// CONDUCTOR-ATTESTED ENFORCEMENT STAMP (decision h17-enforcement-stamp-
-// conductor-attested-dirt, 6e132e19): deleted UNCONDITIONALLY — every source,
-// resume included, mirroring the dispatch register above. It carries no
-// capture debt of its own (never a residue register, never a capture_owed
-// trigger) and it is only ever correct for the bundle bytes it attested at
-// stamp time: a new session's conductor re-attests deliberately via
-// scripts/enforcement-stamp.mjs, which is cheap to re-run (P4). Fail-open like
-// every H1 read.
-try {
-  rmSync(join(input.cwd, '.sterling', 'transient', 'enforcement-stamp.json'), { force: true });
-} catch {
-  // fail-open — a failed delete costs re-attestation precision, never the injection
-}
+// GRAVESTONE — an unconditional `rmSync` of the conductor-attested enforcement
+// stamp (`.sterling/transient/enforcement-stamp.json`, decision 6e132e19) stood
+// here. DELETED 2026-08-30 (S4) by decisions h17-demotes-to-tripwire-with-
+// minimal-b-hash-list (78dc9bd6) and b-baseline-hash-list-concrete-design
+// (fe861066): the stamp/attestation apparatus is gone whole, so there is nothing
+// left at that path for H1 to reclaim.
+// NOT REPOINTED, AND THAT IS THE RULING, NOT AN OVERSIGHT (fe861066 D2). The
+// stamp's successor — the persistent (B) baseline hash list at
+// `.sterling/enforcement-baseline.json` — is deliberately NOT transient,
+// session-scoped state: cross-session (B) tamper detection is the one strict
+// improvement it buys, and a SessionStart that deleted (or rewrote) it would
+// bless whatever is on disk at session start and reproduce exactly the
+// session-bound coverage that made the stamp worthless. It is minted ONLY by the
+// conductor-gated clearer (scripts/enforcement-reconcile.mjs). H1 must never
+// touch it; pinned by scripts/tests/h1-session-residue.test.mjs.
 
 // LEAKED H17 PER-CALL TMPDIR RECLAMATION (board 2d4cf493). H17's Bash sweep
 // writes per-call transient records into os.tmpdir() — the (A) STATE record

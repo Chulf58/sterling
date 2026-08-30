@@ -97,7 +97,6 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
-const STAMP_CLI = join(root, 'scripts', 'enforcement-stamp.mjs');
 const NOW = '2026-06-10T12:00:00.000Z';
 
 let SterlingStore;
@@ -311,16 +310,6 @@ function lane(tag) {
 
 function stampPath(dir) {
   return join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-}
-
-// the conductor's attestation CLI, exactly as enforcement.test.mjs invokes it
-function runStampCli(dir) {
-  const r = spawnSync(process.execPath, [STAMP_CLI], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
-  return { status: r.status, stderr: r.stderr ?? '', stdout: r.stdout ?? '' };
-}
-
-function sha256(buf) {
-  return createHash('sha256').update(buf).digest('hex');
 }
 
 // recursive listing of an out-of-repo directory, as a sorted set of relative
@@ -642,217 +631,63 @@ test(
 // pins that the deletion is NOT undone) and by
 // h17-pre-state-snapshot.test.mjs PIN-EXISTENCE-GONE.
 
-// =========================================================================
-// PIN 5 — PIN-STAMP-NO-READ-THROUGH-LINK (board site 4, the READ half). The
-// stamp is the conductor's ATTESTATION INPUT: H17 allows an in-window change
-// whose current bytes match a fresh stamp entry. So a stamp CLI that reads a
-// dirty path with existsSync/readFileSync — both of which FOLLOW links —
-// attests OUT-OF-REPO bytes as if they were the enforcement file's own, and the
-// attestation then exempts them.
+// *** BOTH ARMS RETIRED 2026-08-30 per dc616f69 R16(ii) — PRODUCER PINNED-WALK
+// DISCIPLINE, retired rather than inverted (S4 classification map omission;
+// hook lane caught it as a STOP). *** PIN 5 — PIN-STAMP-NO-READ-THROUGH-LINK
+// pinned that the stamp producer's READ of a dirty enforcement path is
+// lstat-guarded rather than following a symlink (existsSync/readFileSync both
+// FOLLOW links) into out-of-repo bytes. Decision 78dc9bd6 deletes
+// scripts/enforcement-stamp.mjs outright — there is no producer left to read
+// anything through a link. The CONTROL arm asserted the CLI genuinely reads
+// and attests a dirty regular file's own bytes; that CLI no longer exists, so
+// the control can no longer pass for the opposite reason (`spawnSync` on a
+// removed path fails MODULE_NOT_FOUND before ever reaching a read), and
+// without it the treatment arm's "no stamp was written" is exactly the
+// vacuous green R16(ii) names — true because the module is gone, not because
+// a guard fired.
 //
-// CONTROL ARM FIRST, passing for the OPPOSITE reason: the same dirty path as a
-// REGULAR FILE produces a `{path, sha256}` entry whose digest is the file's own
-// bytes. Without it, the treatment arm's "no stamp was written" could be
-// satisfied by a CLI that refuses everything (or by a CLI that never considered
-// this path at all).
+// STILL COVERED ELSEWHERE: the equivalent enumerate/hash discipline —
+// reading each (B) member's CURRENT bytes without following a link planted at
+// the path — is now the CLEARER's (scripts/enforcement-reconcile.mjs), pinned
+// by scripts/tests/enforcement-reconcile.test.mjs's retained-descriptor
+// family (AC-R26..R49).
+
+// *** BOTH ARMS RETIRED 2026-08-30 per dc616f69 R16(ii) — PRODUCER PINNED-WALK
+// DISCIPLINE, retired rather than inverted. *** PIN 6 —
+// PIN-STAMP-WALK-REJECTS-LINKED-CHILD pinned that the stamp producer's WALK
+// over a dirty untracked directory refuses wholesale on meeting a
+// symlink-to-a-directory child, rather than following it out of the
+// repository or silently skipping it. The producer this walk belonged to is
+// deleted along with the rest of scripts/enforcement-stamp.mjs (decision
+// 78dc9bd6) — there is no walk left to defeat. The CONTROL arm asserted the
+// CLI genuinely descends into an untracked directory and stamps its contained
+// regular files; with the CLI gone that control fails the same way (spawn on
+// a removed path), so it cannot rule out "the module doesn't exist" as the
+// treatment arm's cause — the vacuous-green class R16(ii) names.
 //
-// EXPECTED FAILURE SHAPE if the lstat guard is absent: the CLI succeeds through
-// the link — `assert.notEqual(r.status, 0, ...)` fires with actual 0, and the
-// follow-up `assert.equal(existsSync(stampPath(dir)), false, ...)` fires because
-// a stamp file exists holding the sha256 of the OUTSIDE bytes.
+// STILL COVERED ELSEWHERE: the equivalent enumerate/hash discipline over a
+// directory member of BASELINE_GLOBS is the CLEARER's, pinned by
+// scripts/tests/enforcement-reconcile.test.mjs's retained-descriptor family
+// (AC-R26..R49).
+
+// *** BOTH ARMS RETIRED 2026-08-30 per dc616f69 R16(ii) — PRODUCER PINNED-WALK
+// DISCIPLINE, retired rather than inverted. *** PIN 7 —
+// PIN-STAMP-NO-WRITE-THROUGH-LINKED-STERLING pinned that the stamp producer's
+// OWN OUTPUT WRITE (.sterling/transient/enforcement-stamp.json, created via a
+// recursive mkdir) refuses when an ancestor of that path is a symlink out of
+// the repository, rather than installing the attestation somewhere the
+// conductor never intended and H17 never reads. The producer and its output
+// path are both deleted along with scripts/enforcement-stamp.mjs (decision
+// 78dc9bd6) — there is no write left to aim anywhere. The CONTROL arm
+// asserted the CLI genuinely creates .sterling/transient and writes the stamp
+// inside the repo; with the CLI gone that assertion fails the same way (spawn
+// on a removed path), so the treatment arm's "nothing appeared outside" is
+// the vacuous-green class R16(ii) names rather than evidence a guard fired.
 //
-// SABOTAGE: revert the lstat-guarded read to the `existsSync`/`readFileSync`
-// pair.
-// =========================================================================
-
-test('PIN-STAMP-NO-READ-THROUGH-LINK: CONTROL — a dirty REGULAR enforcement file is stamped with the sha256 of its own bytes', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    const dirty = Buffer.from('// conductor rebuild, dirty and attestable\n');
-    writeFileSync(bundle, dirty);
-
-    const r = runStampCli(dir);
-    assert.equal(r.status, 0, `CONTROL: the CLI must stamp a dirty regular enforcement file — status ${r.status}, stderr: ${oneLine(r.stderr)}`);
-    const stamp = JSON.parse(readFileSync(stampPath(dir), 'utf8'));
-    const entry = stamp.find((e) => e?.path === 'hooks/h3-contract-gate.mjs');
-    assert.ok(entry, `CONTROL: the dirty path is in the stamp (entries: ${stamp.map((e) => e?.path).join(', ')})`);
-    assert.equal(entry.sha256, sha256(dirty), "CONTROL: and the digest is the file's OWN bytes — so this CLI does read and attest this path");
-  } finally {
-    cleanup();
-  }
-});
-
-test('PIN-STAMP-NO-READ-THROUGH-LINK: the same path as a SYMLINK to an out-of-repo file is never read through — the CLI refuses and writes NO stamp', { skip: GIT_SKIP || SYMLINK_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  const outsideTarget = join(tmpdir(), 'sterling-h17-ah-stampread-' + randomUUID().slice(0, 8));
-  try {
-    const outsideContent = Buffer.from('OUTSIDE-REPO BYTES — attesting these would exempt content no sweep covers\n');
-    writeFileSync(outsideTarget, outsideContent);
-
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    rmSync(bundle, { force: true });
-    symlinkSync(outsideTarget, bundle);
-    assert.equal(lstatSync(bundle).isSymbolicLink(), true, 'PRECONDITION: the dirty enforcement path is a symlink out of the repo');
-    assert.notEqual(porcelain(dir), '', 'PRECONDITION: git reports the path as changed, so the CLI has exactly the same input as the control arm');
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists yet, so any stamp found below was written by THIS run');
-
-    const r = runStampCli(dir);
-
-    assert.notEqual(r.status, 0, `a non-regular dirty path is UNATTESTABLE — the CLI must refuse, not follow the link (stdout+stderr: ${oneLine(r.stdout + ' ' + r.stderr)})`);
-    assert.equal(
-      existsSync(stampPath(dir)),
-      false,
-      `no stamp may be written at all — an attestation covering out-of-repo bytes is worse than none (stdout+stderr: ${oneLine(r.stdout + ' ' + r.stderr)})`
-    );
-    assert.notEqual(oneLine(r.stdout + ' ' + r.stderr), '', 'and the refusal says something (P5: never a silent nonzero)');
-    assert.deepEqual(readFileSync(outsideTarget), outsideContent, 'the out-of-repo target is byte-unchanged');
-  } finally {
-    cleanup([outsideTarget]);
-  }
-});
-
-// =========================================================================
-// PIN 6 — PIN-STAMP-WALK-REJECTS-LINKED-CHILD (board site 4, the WALK). The
-// CLI expands a dirty UNTRACKED DIRECTORY into its contained files (git
-// collapses it into one porcelain entry). That walk must classify each entry it
-// meets: a symlink-to-a-directory child is a door out of the repository, and
-// following it stamps a tree no sweep covers.
-//
-// CONTROL ARM FIRST: the same untracked directory WITHOUT the link is stamped
-// per-file, so a refusal in the treatment arm is discriminating rather than "the
-// CLI refuses this fixture".
-//
-// EXPECTED FAILURE SHAPE if the guard is absent: the CLI exits 0 and the stamp
-// holds entries reached through the link — `assert.notEqual(r.status, 0, ...)`
-// fires with actual 0, and the no-stamp assertion fires naming the entries.
-//
-// RULING THIS PIN MAKES EXPLICIT (so a red is read correctly rather than
-// "fixed" by loosening the test): the refusal is WHOLESALE — no stamp file at
-// all. A partial stamp written from a walk that met an unclassifiable entry is
-// an attestation of unknown provenance, which is exactly the poisoned input the
-// board item names. If the implementation instead skips the link and stamps the
-// regular sibling, THIS assertion is what fires, and the disposition question
-// (refuse wholesale vs skip-and-continue) goes back to the conductor rather than
-// being settled by editing the pin.
-//
-// SABOTAGE: delete the `isSymbolicLink()` branch in `listFilesUnder`.
-// =========================================================================
-
-test('PIN-STAMP-WALK-REJECTS-LINKED-CHILD: CONTROL — a dirty untracked enforcement directory of regular files stamps per-file', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const newDir = join(dir, 'hooks', 'newdir');
-    mkdirSync(newDir, { recursive: true });
-    const aBytes = Buffer.from('// untracked enforcement-surface file, uncommitted\n');
-    writeFileSync(join(newDir, 'a.mjs'), aBytes);
-
-    const r = runStampCli(dir);
-    assert.equal(r.status, 0, `CONTROL: an untracked enforcement directory of regular files is attestable — status ${r.status}, stderr: ${oneLine(r.stderr)}`);
-    const stamp = JSON.parse(readFileSync(stampPath(dir), 'utf8'));
-    const entry = stamp.find((e) => e?.path === 'hooks/newdir/a.mjs');
-    assert.ok(entry, `CONTROL: the walk reaches the contained file (entries: ${stamp.map((e) => e?.path).join(', ')})`);
-    assert.equal(entry.sha256, sha256(aBytes), 'CONTROL: and stamps its own bytes — so the walk really does descend into this directory');
-  } finally {
-    cleanup();
-  }
-});
-
-test('PIN-STAMP-WALK-REJECTS-LINKED-CHILD: a symlink-to-an-outside-directory inside that dirty untracked directory makes the CLI refuse — nothing is stamped', { skip: GIT_SKIP || SYMLINK_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-h17-ah-stampwalk-'));
-  try {
-    const secret = Buffer.from('OUTSIDE-REPO CONTENT — must never be enumerated or attested\n');
-    writeFileSync(join(outsideDir, 'secret.txt'), secret);
-    const beforeTree = treeOf(outsideDir);
-
-    const newDir = join(dir, 'hooks', 'newdir');
-    mkdirSync(newDir, { recursive: true });
-    writeFileSync(join(newDir, 'a.mjs'), '// untracked enforcement-surface file, uncommitted\n');
-    symlinkSync(outsideDir, join(newDir, 'link'));
-    assert.equal(lstatSync(join(newDir, 'link')).isSymbolicLink(), true, 'PRECONDITION: a symlink to an outside DIRECTORY sits inside the dirty untracked directory');
-    assert.match(porcelain(dir), /newdir/, 'PRECONDITION: git reports the untracked directory, the same input the control arm gave the CLI');
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists yet');
-
-    const r = runStampCli(dir);
-
-    assert.notEqual(r.status, 0, `an unclassifiable entry in the walk makes the whole attestation untrustworthy — the CLI must refuse (stdout+stderr: ${oneLine(r.stdout + ' ' + r.stderr)})`);
-    assert.equal(
-      existsSync(stampPath(dir)),
-      false,
-      `NOTHING may be stamped — not even the regular sibling: a partial attestation from a walk that met a door out of the repo is the poisoned input board 128fedb7 names (stdout+stderr: ${oneLine(r.stdout + ' ' + r.stderr)})`
-    );
-    assert.deepEqual(treeOf(outsideDir), beforeTree, 'and the outside directory is untouched');
-    assert.deepEqual(readFileSync(join(outsideDir, 'secret.txt')), secret, 'byte for byte');
-  } finally {
-    cleanup();
-    rmSync(outsideDir, { recursive: true, force: true });
-  }
-});
-
-// =========================================================================
-// PIN 7 — PIN-STAMP-NO-WRITE-THROUGH-LINKED-STERLING (board site 4, the WRITE).
-// The CLI's own output path — `.sterling/transient/enforcement-stamp.json` — is
-// created with a recursive mkdir, so any component of it can be a link the
-// agent planted; the stamp then lands outside the repository (and, worse, the
-// attestation the conductor believes it wrote does not exist where H17 reads
-// it).
-//
-// CONTROL ARM FIRST: with `.sterling/transient` absent (the normal case, a real
-// directory the CLI creates itself) the same dirt IS stamped at the expected
-// path — so the treatment arm's refusal is not "this CLI refuses this dirt".
-// `.sterling` ITSELF is deliberately not swapped: that would take
-// `sterling.db`/`config.json` with it and confound the result with a
-// store-resolution failure (the same reasoning the sibling ancestor file states).
-//
-// EXPECTED FAILURE SHAPE if the pre-write classification is absent: the CLI
-// exits 0 and `existsSync(join(outsideDir, 'enforcement-stamp.json'))` is true —
-// the `assert.deepEqual(treeOf(outsideDir), beforeTree, ...)` line fires with
-// that extra entry, and `assert.notEqual(r.status, 0, ...)` fires with actual 0.
-//
-// SABOTAGE: delete the pre-write `classifyPathComponents` calls.
-// =========================================================================
-
-test('PIN-STAMP-NO-WRITE-THROUGH-LINKED-STERLING: CONTROL — the CLI creates .sterling/transient itself and writes the stamp inside the repo', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    writeFileSync(join(dir, 'hooks', 'h3-contract-gate.mjs'), '// conductor rebuild, dirty and attestable\n');
-    assert.equal(existsSync(join(dir, '.sterling', 'transient')), false, 'PRECONDITION: .sterling/transient does not exist yet — the CLI creates it');
-
-    const r = runStampCli(dir);
-    assert.equal(r.status, 0, `CONTROL: this dirt is attestable — status ${r.status}, stderr: ${oneLine(r.stderr)}`);
-    assert.equal(existsSync(stampPath(dir)), true, 'CONTROL: and the stamp lands at .sterling/transient/enforcement-stamp.json inside the repo');
-  } finally {
-    cleanup();
-  }
-});
-
-test('PIN-STAMP-NO-WRITE-THROUGH-LINKED-STERLING: with .sterling/transient a symlink to an outside directory the CLI refuses — no stamp is created in the link target', { skip: GIT_SKIP || SYMLINK_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-h17-ah-stampwrite-'));
-  try {
-    const beforeTree = treeOf(outsideDir);
-    assert.deepEqual(beforeTree, [], 'PRECONDITION: the outside directory starts EMPTY — any entry proves a write-through');
-
-    writeFileSync(join(dir, 'hooks', 'h3-contract-gate.mjs'), '// conductor rebuild, dirty and attestable\n'); // same dirt as the control arm
-    const transient = join(dir, '.sterling', 'transient');
-    symlinkSync(outsideDir, transient);
-    assert.equal(lstatSync(transient).isSymbolicLink(), true, 'PRECONDITION: the stamp\'s parent directory is a symlink out of the repo');
-
-    const r = runStampCli(dir);
-
-    assert.notEqual(r.status, 0, `the CLI must refuse to write its attestation through a linked ancestor (stdout+stderr: ${oneLine(r.stdout + ' ' + r.stderr)})`);
-    assert.deepEqual(
-      treeOf(outsideDir),
-      beforeTree,
-      'no enforcement-stamp.json (nor anything else) may be created inside the link target — the conductor would believe it stamped a path H17 never reads'
-    );
-    assert.equal(existsSync(join(outsideDir, 'enforcement-stamp.json')), false, 'stated directly as well as by the tree comparison, because this is the whole point of the pin');
-  } finally {
-    cleanup();
-    rmSync(outsideDir, { recursive: true, force: true });
-  }
-});
+// STILL COVERED ELSEWHERE: the equivalent no-write-through-a-linked-ancestor
+// discipline for the CLEARER's own install path is pinned by
+// scripts/tests/enforcement-reconcile.test.mjs's ADOPT install pins
+// (AC-R54/AC-R55).
 
 // #########################################################################
 // ##  PINS 8-9 — ROSTER REVIEW F4: restoreTracked's TWO OTHER PRIMITIVES ##

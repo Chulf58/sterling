@@ -5356,6 +5356,22 @@ ${record.title ?? ""}`;
     return `${record.question ?? ""}`;
   return "";
 }
+function axisTitleText(record) {
+  if (!record || typeof record !== "object")
+    return "";
+  if (record.type === "anti_pattern")
+    return `${record.title ?? ""}`;
+  if (record.type === "decision")
+    return `${record.title ?? ""}`;
+  if (record.type === "feature_article")
+    return `${record.slug ?? ""} ${record.concept_family ?? ""}
+${record.title ?? ""}`;
+  if (record.type === "research_finding")
+    return `${record.question ?? ""}`;
+  if (record.type === "disconfirmed_hypothesis")
+    return `${record.question ?? ""}`;
+  return "";
+}
 function axisHits(record, terms) {
   const hay = axisNarrowText(record).toLowerCase();
   if (!hay)
@@ -5422,9 +5438,15 @@ function hasDiscriminatingHit(hits) {
 }
 var AXIS_RECORD_TOP_K = 6;
 var AXIS_MIN_RECORD_TERMS = 2;
-function recordCentralityHits(record, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
+function narrowCentralTerms(record, topK) {
+  return extractAxisTerms(axisNarrowText(record), topK);
+}
+function unionCentralTerms(record, topK) {
+  return [
+    .../* @__PURE__ */ new Set([...narrowCentralTerms(record, topK), ...extractAxisTerms(axisTitleText(record), topK)])
+  ];
+}
+function coveredCentralTerms(central, outgoingText) {
   const words = [
     ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
   ];
@@ -5432,12 +5454,20 @@ function recordCentralityHits(record, outgoingText, opts = {}) {
     return [];
   return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
 }
+function recordCentralityHits(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  return coveredCentralTerms(unionCentralTerms(record, topK), outgoingText);
+}
 function hasRecordCentralityHit(record, outgoingText, opts = {}) {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
   const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
-  const covered = recordCentralityHits(record, outgoingText, { topK });
+  const central = unionCentralTerms(record, topK);
+  const covered = coveredCentralTerms(central, outgoingText);
   return covered.length >= Math.min(minTerms, central.length);
+}
+function hasFullNarrowCentralityCoverage(record, outgoingText, opts = {}) {
+  const central = narrowCentralTerms(record, opts.topK ?? AXIS_RECORD_TOP_K);
+  return coveredCentralTerms(central, outgoingText).length >= central.length;
 }
 
 // packages/store/dist/index.js
@@ -5600,6 +5630,32 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
+function appendPathSegment(path, segment) {
+  if (typeof segment === "number")
+    return `${path}[${segment}]`;
+  return path ? `${path}.${segment}` : segment;
+}
+function allKeyPathsUnder(value, path, depth, out) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (value === null || typeof value !== "object")
+    return out;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const here = appendPathSegment(path, i);
+      out.push(here);
+      allKeyPathsUnder(value[i], here, depth + 1, out);
+    }
+    return out;
+  }
+  for (const key of Object.keys(value)) {
+    const here = appendPathSegment(path, key);
+    out.push(here);
+    allKeyPathsUnder(value[key], here, depth + 1, out);
+  }
+  return out;
+}
 function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
   if (depth > MAX_BODY_COMPARE_DEPTH) {
     throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
@@ -5608,20 +5664,22 @@ function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
     return out;
   if (Array.isArray(before)) {
     if (!Array.isArray(after))
-      return out;
+      return allKeyPathsUnder(before, path, depth, out);
     for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i);
       if (i >= after.length)
-        out.push(`${path}[${i}]`);
+        out.push(here);
       else
-        droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+        droppedKeyPaths(before[i], after[i], here, depth + 1, out);
     }
     return out;
   }
-  if (after === null || typeof after !== "object" || Array.isArray(after))
-    return out;
+  if (after === null || typeof after !== "object" || Array.isArray(after)) {
+    return allKeyPathsUnder(before, path, depth, out);
+  }
   const parsed = after;
   for (const key of Object.keys(before)) {
-    const here = path ? `${path}.${key}` : key;
+    const here = appendPathSegment(path, key);
     if (!Object.prototype.hasOwnProperty.call(parsed, key))
       out.push(here);
     else
@@ -5635,6 +5693,22 @@ function assertNoFieldLoss(op, before, after) {
     return;
   const type = typeof before.type === "string" ? before.type : "unknown";
   throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+}
+function unrecognizedKeyPaths(error) {
+  const issues = error?.issues;
+  if (!Array.isArray(issues))
+    return [];
+  const out = [];
+  for (const raw of issues) {
+    const issue = raw;
+    if (issue.code !== "unrecognized_keys" || !Array.isArray(issue.keys))
+      continue;
+    const segments = Array.isArray(issue.path) ? issue.path : [];
+    const base2 = segments.reduce((acc, segment) => appendPathSegment(acc, typeof segment === "number" ? segment : String(segment)), "");
+    for (const key of issue.keys)
+      out.push(appendPathSegment(base2, String(key)));
+  }
+  return out;
 }
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
@@ -6007,7 +6081,16 @@ var SterlingStore = class _SterlingStore {
     if (prepared.lifecycle === "retired" && !prepared.input.superseded_by) {
       throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
     }
-    const record = validateRecord(prepared.input);
+    let record;
+    try {
+      record = validateRecord(prepared.input);
+    } catch (err) {
+      const refused = unrecognizedKeyPaths(err);
+      if (refused.length === 0)
+        throw err;
+      const type = typeof prepared.input.type === "string" ? prepared.input.type : "unknown";
+      throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
+    }
     assertNoFieldLoss("create", prepared.input, record);
     this.tx(() => {
       this.insertRecord(record);
@@ -7380,11 +7463,36 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/hooks/lib/advisory-counter.mjs
+import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
+import { join as join3 } from "node:path";
+function recordAdvisoryFire(root, hook, sessionId) {
+  try {
+    if (!root || !hook) return;
+    if (!existsSync3(join3(root, ".sterling"))) return;
+    const dir = join3(root, ".sterling", "transient");
+    mkdirSync2(dir, { recursive: true });
+    let session = typeof sessionId === "string" && sessionId ? sessionId : null;
+    if (!session) {
+      try {
+        const parsed = JSON.parse(readFileSync2(join3(dir, "session.json"), "utf8"));
+        session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
+      } catch {
+      }
+    }
+    appendFileSync(
+      join3(dir, "advisory-fires.ndjson"),
+      JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
+    );
+  } catch {
+  }
+}
+
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync } from "node:fs";
-import { join as join3, dirname as dirname3 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync } from "node:fs";
+import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
-  return join3(cwd, ".sterling", "transient", "delivery");
+  return join4(cwd, ".sterling", "transient", "delivery");
 }
 function outgoingProposalText(toolInput) {
   const ti = toolInput ?? {};
@@ -7399,7 +7507,7 @@ function outgoingProposalText(toolInput) {
   return "";
 }
 function guardPath(cwd, agentId) {
-  return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+  return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
 function emptyGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
@@ -7419,8 +7527,8 @@ function markDelivered(guard, records) {
 }
 function readGuard(path) {
   try {
-    if (!existsSync3(path)) return emptyGuard();
-    return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
+    if (!existsSync4(path)) return emptyGuard();
+    return { ...emptyGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
@@ -7428,14 +7536,13 @@ function readGuard(path) {
   }
 }
 function writeGuard(path, guard) {
-  mkdirSync2(dirname3(path), { recursive: true });
+  mkdirSync3(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
 var DENY_RULING_TYPES = ["decision", "anti_pattern"];
 var STRICT_MIN_HITS = 3;
-var STRICT_MIN_RECORD_TERMS = AXIS_RECORD_TOP_K;
 var DELTA_MIN_NEW_TERMS = 5;
 function subQuestionText(q) {
   return [
@@ -7445,15 +7552,15 @@ function subQuestionText(q) {
   ].filter((s2) => typeof s2 === "string" && s2.trim()).join("\n");
 }
 function denyLedgerPath(cwd, agentId) {
-  return join3(deliveryDir(cwd), agentId ? `deny-ledger-agent-${agentId}.json` : "deny-ledger-conductor.json");
+  return join4(deliveryDir(cwd), agentId ? `deny-ledger-agent-${agentId}.json` : "deny-ledger-conductor.json");
 }
 function emptyDenyLedger() {
   return { entries: {}, overrides: [] };
 }
 function readDenyLedger(path) {
   try {
-    if (!existsSync3(path)) return emptyDenyLedger();
-    return { ...emptyDenyLedger(), ...JSON.parse(readFileSync2(path, "utf8")) };
+    if (!existsSync4(path)) return emptyDenyLedger();
+    return { ...emptyDenyLedger(), ...JSON.parse(readFileSync3(path, "utf8")) };
   } catch {
     process.stderr.write(`H20: corrupt deny-once ledger at ${path} \u2014 reset to empty
 `);
@@ -7461,7 +7568,7 @@ function readDenyLedger(path) {
   }
 }
 function writeDenyLedger(path, ledger) {
-  mkdirSync2(dirname3(path), { recursive: true });
+  mkdirSync3(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(ledger));
   renameSync(tmp, path);
@@ -7655,7 +7762,12 @@ try {
       const subText = subQuestionText(q);
       const subTerms = extractAxisTerms(subText, MAX_RANK_TERMS);
       const strict = candidates.filter((r) => DENY_RULING_TYPES.includes(r.type)).map((r) => ({ record: r, hits: axisHits(r, subTerms) })).filter(
-        (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, subText, { minTerms: STRICT_MIN_RECORD_TERMS })
+        (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && // FULL coverage of the record's PRE-UNION narrow top-K. NOT
+        // hasRecordCentralityHit: this rung exits 2 and blocks the user's
+        // question, so it must never see the title-union central set (a
+        // bigger set makes full coverage a weaker per-term demand — see
+        // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
+        hasFullNarrowCentralityCoverage(x.record, subText)
       );
       return { index, label: q?.header || q?.question, subText, subTerms, strict };
     });
@@ -7692,6 +7804,7 @@ try {
     writeDenyLedger(ledgerPath, ledger);
     if (unresolved.length) {
       const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
+      recordAdvisoryFire(input.cwd, "h20", input.session_id);
       deny(renderDenyOnceMessage(unresolved, questions.length, open));
     }
   }
@@ -7752,6 +7865,7 @@ try {
     // still lead (stop the mistake), answers ride with the article pointers.
     ...promptIsQuestionShaped ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]
   ];
+  recordAdvisoryFire(input.cwd, "h20", input.session_id);
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join("\n\n") }

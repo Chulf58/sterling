@@ -1121,22 +1121,26 @@ test('PIN-FALLBACK-SKEW (boundary guard): a tool_use_id present at Pre and absen
 // PIN-STAMP-BEFORE-RESTORE — INVERTED per dc616f69 R11, which DELETES the (A)
 // stamp exemption ("keeping it as a 'do not latch' authority reintroduces the
 // very attestation premise this decision rejects"). Decision 4d9b76e8 is
-// superseded on this arm. The block is kept rather than retired because this
-// fixture is one of only two that can prove the exemption is GONE rather than
-// merely unreachable: the stamp matches the CURRENT bytes EXACTLY, so a deny
-// here has exactly one possible cause. Its sibling is
-// h17-stamp-honor.test.mjs PIN1 (the established duplicated-tripwire idiom).
+// superseded on this arm.
 //
-// EXPECTED FAILURE SHAPE: `r.code === 2` fires with actual 0 if any
-// stamp consult returns to this arm; the bytes assertion fires if a restore
+// RESIDUAL STAMP FIXTURE REMOVED S4 (decision 78dc9bd6/fe861066): the
+// enforcement-stamp apparatus this pin's old fixture wrote to is deleted
+// outright — scripts/enforcement-stamp.mjs no longer exists. The always-deny
+// property is unchanged and untouched by that removal (a same-UID-forgeable
+// attestation could never have changed the verdict, present or absent); the
+// fixture now simply performs the CLEAN-at-Pre in-window change with no
+// artifact written alongside it at all.
+//
+// EXPECTED FAILURE SHAPE: `r.code === 2` fires with actual 0 if any exemption
+// consult ever returns to this arm; the bytes assertion fires if a restore
 // returns.
 //
-// CATCHES SABOTAGE: re-add the fresh-stamp check to the clean-at-Pre arm ->
-// RED on the exit code. Re-add `restoreTracked` -> RED on the bytes. Two
+// CATCHES SABOTAGE: re-add any exemption check to the clean-at-Pre arm -> RED
+// on the exit code. Re-add `restoreTracked` -> RED on the bytes. Two
 // mutations, two distinct assertions; neither reds both.
 // =========================================================================
 
-test('PIN-STAMP-BEFORE-RESTORE (dc616f69 R11): a CLEAN-at-Pre in-window change matching a fresh stamp is NO LONGER honored — denied, latched, left on disk', { skip: GIT_SKIP }, () => {
+test('PIN-STAMP-BEFORE-RESTORE (dc616f69 R11): a CLEAN-at-Pre in-window change is NO LONGER exemptible by any attestation — denied, latched, left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json'); // CLEAN at Pre
@@ -1147,14 +1151,13 @@ test('PIN-STAMP-BEFORE-RESTORE (dc616f69 R11): a CLEAN-at-Pre in-window change m
 
     const newBytes = JSON.stringify({ hooks: { PreToolUse: [] }, CONDUCTOR_EDIT: true }) + '\n';
     writeFileSync(hooksJson, newBytes);
-    writeStamp(dir, [{ path: 'hooks/hooks.json', sha256: sha256Of(hooksJson), at: NOW }]);
 
     const r = h17(dir, 'PostToolUse', L);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(
       r.code,
       2,
-      `an exact fresh stamp is NOT an authorization — a same-UID-forgeable attestation may never change the verdict — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+      `an in-window (A) change is denied unconditionally — no attestation of any kind may change the verdict — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
     );
     assert.equal(readFileSync(hooksJson, 'utf8'), newBytes, 'and the bytes are LEFT ON DISK exactly as written — denied, never reverted');
     assert.match(oneLine(r.stderr), /left on disk/i, 'the denial STATES the disposition');
@@ -1166,82 +1169,49 @@ test('PIN-STAMP-BEFORE-RESTORE (dc616f69 R11): a CLEAN-at-Pre in-window change m
 
 // =========================================================================
 // PIN-STAMP-ON-CHANGED-PREDIRT — INVERTED per dc616f69 R11. The adjudicated
-// step 2 below is DELETED: the stamp consult is gone from the changed-pre-dirty
-// arm exactly as it is gone from the clean-at-Pre arm, so Post's order is now:
+// step 2 (a fresh-stamp consult) is DELETED: it is gone from the
+// changed-pre-dirty arm exactly as it is gone from the clean-at-Pre arm, so
+// Post's order is now:
 //   1. state UNCHANGED  -> allow, nothing consulted (PIN-ALLOW);
 //   2. state CHANGED    -> DENY and LATCH, unconditionally, and still no
-//                          restore. No attestation can move this verdict.
-// ARM 2 (stamp attests the PRE image) is unchanged and is now the CONTROL: it
-// denies under BOTH the old and the new hook, so it can never distinguish them
-// on its own — which is what makes it a control. ARM 1 (stamp attests the
-// CURRENT bytes exactly) is INVERTED from allow to deny and is the only arm in
-// this file that isolates the exemption's removal on the pre-dirty branch.
+//                          restore. No attestation of any kind can move this
+//                          verdict — there is no longer any attestation
+//                          apparatus (scripts/enforcement-stamp.mjs) left to
+//                          consult in the first place.
 //
-// EXPECTED FAILURE SHAPE: ARM 1's `r.code === 2` fires with actual 0 if the
-// changed-pre-dirty stamp consult returns.
-// CATCHES SABOTAGE: re-add the fresh-stamp consult to the changed arm -> ARM 1
-// RED, ARM 2 GREEN (the asymmetry is the evidence). Drop the changed-pre-dirty
-// deny entirely -> BOTH arms RED, which is the signature of a broken comparison
-// rather than a restored exemption.
+// RESIDUAL STAMP FIXTURE REMOVED S4 (decision 78dc9bd6/fe861066): both arms
+// used to write a stamp file naming either the PRE image's hash (arm 2, the
+// control) or the CURRENT bytes' hash (arm 1, the pin) to prove the deleted
+// step 2 could not be fooled either way. With the whole apparatus gone there
+// is nothing left to write or attest, so both arms are now simply "a pre-dirty
+// path, changed in-window, denies" — the SAME property, with the vestigial
+// attestation artifact removed rather than left inert on disk.
 //
-// HISTORICAL RATIONALE for the deleted step 2, retained because it explains why
-// the arm existed at all (decision 7021526c v2 / 4d9b76e8):
-// THE WHY, which is what makes step 2 safe rather than a hole: a stamp can be
-// written ONLY by a deliberate conductor-run CLI and never from a Bash-invoked
-// rebuild (decision 6e132e19 — auto-stamping from build-hooks.mjs was rejected
-// precisely because an agent rebuilding inside its own Bash call would then
-// self-attest). So current bytes matching a FRESH stamp mean the change is
-// conductor-attested, and denying it would punish the conductor for its own
-// attested edit.
+// EXPECTED FAILURE SHAPE: either arm's `r.code === 2` fires with actual 0 if
+// any exemption consult ever returns to this arm.
+// CATCHES SABOTAGE: re-add ANY exemption consult to the changed-pre-dirty arm
+// -> RED on the exit code, on either or both arms depending on which state the
+// consult keys off. Drop the changed-pre-dirty deny entirely -> BOTH arms RED.
 //
-// ARM 1 pins step 2: the stamp hashes the CHANGED (current) bytes -> allow.
-// ARM 2 pins that step 2 hashes the CURRENT state and not the Pre image: a
-// stamp matching the PRE-image while the file now holds something else is NOT
-// an exact match, so it falls to step 3 and denies. Without arm 2 an
-// implementation could compare the stamp against its own Pre snapshot and pass
-// arm 1 while attesting nothing about what is actually on disk. Arm 2 runs
-// FIRST in the body as defensive ordering: a sequential arm placed after a
-// failing one never executes, so putting the cheaper guard first keeps it
-// exercised even if the other arm ever regresses to red.
-//
-// EXPECTED: BOTH ARMS GREEN today, and green after — confirmed by run,
-// 2026-08-22. THIS IS A REGRESSION GUARD, NOT A NEW-BEHAVIOUR PIN, and the
-// reason matters: today's stamp consult already covers every pre-dirty path,
-// ALL-OR-NOTHING over the whole pre-existing set, so "changed pre-dirty + fresh
-// matching stamp -> allow" already happens — by a different route than the
-// PER-PATH step 2 the adjudication describes. The adjudication therefore
-// described behaviour already on disk rather than introducing it. The per-path
-// rewrite could easily break this, which is exactly why the guard stays. A red
-// here is a REAL regression, never an expected failure.
-//
-// CATCHES SABOTAGE: the fresh-stamp consult on the CHANGED-pre-dirty arm forced
-// to `if (false)` — arm 1 flips to a deny, firing both its code assertion and
-// its bytes assertion. Arm 2 catches the converse over-widening: a consult that
-// matches against the Pre image, or that treats the mere PRESENCE of a stamp
-// entry for the path as attestation.
-//
-// NO COLLISION with the mismatched/corrupt/non-array stamp table in
-// enforcement.test.mjs: that table holds the state UNCHANGED, so it never
-// reaches step 2 and the stamp's shape cannot matter there. The stamp is
-// causally irrelevant on the unchanged arm and causally decisive on the changed
-// arm — one order of operations, no contradiction.
+// EXPECTED: BOTH ARMS GREEN today, and green after. THIS IS A REGRESSION
+// GUARD, NOT A NEW-BEHAVIOUR PIN — a red here is a REAL regression, never an
+// expected failure.
 // =========================================================================
 
-test('PIN-STAMP-ON-CHANGED-PREDIRT (dc616f69 R11): a pre-dirty path CHANGED in-window DENIES even when its CURRENT bytes match a fresh stamp — attestation no longer exempts, and still no restore', { skip: GIT_SKIP }, () => {
+test('PIN-STAMP-ON-CHANGED-PREDIRT (dc616f69 R11): a pre-dirty path CHANGED in-window DENIES unconditionally — no attestation of any kind exempts it, and still no restore', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const bundle = bundlePath(dir);
 
-    // ARM 2 FIRST (expected GREEN today, so today's red on arm 1 cannot mask it):
-    // the stamp attests the PRE image while the file has since moved on. Not an
-    // exact match on the CURRENT state -> step 3 denies.
+    // ARM 2 FIRST: the pre-dirty path changes once (Pre snapshots X), then
+    // changes AGAIN inside the window (to Z) — a plain changed-pre-dirty path,
+    // no artifact of any kind alongside it.
     const preImage = '// X: conductor rebuild in flight, uncommitted\n';
     writeFileSync(bundle, preImage);
 
     const L2 = lane('stale-attestation');
     assert.equal(h17(dir, 'PreToolUse', L2).code, 0); // Pre snapshots X
-    writeStamp(dir, [{ path: BUNDLE_REL, sha256: sha256Of(bundle), at: NOW }]); // hashes X, the Pre image
-    const laterBytes = '// Z: changed again, while the stamp still attests X\n';
+    const laterBytes = '// Z: changed again, in-window\n';
     writeFileSync(bundle, laterBytes); // ...then the file moves to Z
 
     let r = h17(dir, 'PostToolUse', L2);
@@ -1250,7 +1220,8 @@ test('PIN-STAMP-ON-CHANGED-PREDIRT (dc616f69 R11): a pre-dirty path CHANGED in-w
     assert.equal(readFileSync(bundle, 'utf8'), laterBytes, 'and the deny still performs no restore on a pre-dirty path');
     assert.equal(existsSync(latchPath(dir)), true, 'dc616f69: the changed-pre-dirty arm latches eagerly too');
 
-    // ARM 1 — the stamp attests the CHANGED bytes EXACTLY, and must still deny.
+    // ARM 1 — a second, independent changed-pre-dirty window, still no
+    // artifact of any kind, must still deny.
     // FIXTURE HAZARD (dc616f69): arm 2 above just latched, and a standing latch
     // denies the next Pre. Without this clear, ARM 1's Pre fails its exit-0
     // assertion and the arm never reaches its own subject.
@@ -1259,15 +1230,14 @@ test('PIN-STAMP-ON-CHANGED-PREDIRT (dc616f69 R11): a pre-dirty path CHANGED in-w
     assert.equal(h17(dir, 'PreToolUse', L1).code, 0); // Pre snapshots Z
     const conductorBytes = '// Y: the conductor continued its own rebuild INSIDE the window\n';
     writeFileSync(bundle, conductorBytes);
-    assert.notEqual(conductorBytes, laterBytes, 'PRECONDITION: the state genuinely CHANGED — the allow below must come from step 2, never from step 1');
-    writeStamp(dir, [{ path: BUNDLE_REL, sha256: sha256Of(bundle), at: NOW }]); // hashes the CURRENT bytes
+    assert.notEqual(conductorBytes, laterBytes, 'PRECONDITION: the state genuinely CHANGED');
 
     r = h17(dir, 'PostToolUse', L1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(
       r.code,
       2,
-      `THE PIN: a fresh stamp matching the CHANGED bytes EXACTLY is no longer an authorization — a same-UID-forgeable attestation may never suppress a denial (dc616f69 R11) — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+      `THE PIN: a changed-pre-dirty path denies unconditionally — no attestation of any kind may suppress a denial (dc616f69 R11) — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
     );
     assert.equal(readFileSync(bundle, 'utf8'), conductorBytes, 'and the bytes are left exactly as they were written: denied, and still NO restore');
     assert.equal(existsSync(latchPath(dir)), true, 'and this detection latches as well');

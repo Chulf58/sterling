@@ -5097,6 +5097,31 @@ function warnNonBlocking(message) {
   process.exit(1);
 }
 
+// scripts/hooks/lib/advisory-counter.mjs
+import { appendFileSync, existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+function recordAdvisoryFire(root, hook, sessionId) {
+  try {
+    if (!root || !hook) return;
+    if (!existsSync2(join2(root, ".sterling"))) return;
+    const dir = join2(root, ".sterling", "transient");
+    mkdirSync(dir, { recursive: true });
+    let session = typeof sessionId === "string" && sessionId ? sessionId : null;
+    if (!session) {
+      try {
+        const parsed = JSON.parse(readFileSync2(join2(dir, "session.json"), "utf8"));
+        session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
+      } catch {
+      }
+    }
+    appendFileSync(
+      join2(dir, "advisory-fires.ndjson"),
+      JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
+    );
+  } catch {
+  }
+}
+
 // scripts/lib/codex-mcp.mjs
 var AUTH_MARKER_RE = /\b(401|unauthorized|auth|token expired)\b/i;
 function looksLikeAuthFailure(errorText) {
@@ -5198,6 +5223,7 @@ try {
     `--- end untrusted Codex error text ---`,
     `NOTE: the exact auth-death error shape from \`codex mcp-server\` is UNMEASURED (board 923e3836), so detection here is HEURISTIC. The raw result above (capped/redacted) is emitted so the shape can be CAPTURED on this first real failure \u2014 record it against the finding codex-mcp-live-probe-this-machine / the sparring-partner article, then trust it less until it is observed.`
   ].join("\n");
+  recordAdvisoryFire(input.cwd, "h29", input.session_id);
   process.stderr.write(block + "\n");
   process.stdout.write(
     JSON.stringify({

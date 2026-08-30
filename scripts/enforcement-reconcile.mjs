@@ -6,31 +6,74 @@
 // Rulings R2/R3 of h17-global-registration-is-gated-on-a-live-subagent-delivery-
 // probe-and-the-clearer-ships-first (knowledge_get b3cfdbc5).
 //
-// WHAT THIS IS, AND WHY IT IS A SEPARATE FILE FROM THE PRODUCER. Ruling 5
-// overturned the conductor's own round-1 design as FATAL: making
-// `scripts/enforcement-stamp.mjs` the clearer hands a laundering route to a
-// BACKGROUND CHILD THAT OUTLIVES THE AUDITED BASH CALL — a threat H17 already
-// recognises at `readStampSnapshot`, not a speculative one. Call N tampers the
+// ===========================================================================
+// S4 REWORK (decision b-baseline-hash-list-concrete-design, knowledge_get
+// fe861066) — THE ENFORCEMENT STAMP IS DELETED AND A PERSISTENT BASELINE HASH
+// LIST IS THE (B) COMPARATOR. Decision h17-demotes-to-tripwire-with-minimal-b-
+// hash-list (78dc9bd6) demotes H17 from security boundary to TRIPWIRE and
+// deletes `scripts/enforcement-stamp.mjs` outright. THIS FILE IS THE ONLY
+// SANCTIONED MINTER of the replacement (fe861066 D2) and its only reader.
+//
+//   .sterling/enforcement-baseline.json   (gitignored; DIRECTLY under
+//     `.sterling/`, NOT under `.sterling/transient/` — persistent evidence does
+//     not belong in a lifecycle-bound directory, which is what let H1's
+//     SessionStart sweep destroy the stamp's cross-session value)
+//   { version: 1,                          EXACTLY 1; anything else is malformed
+//     minted_at: <ISO string>,             DIAGNOSTIC ONLY — never freshness and
+//                                          never authority: an ancient minted_at
+//                                          with an exact match still verifies
+//     entries: [ {path, sha256}, ... ] }   a SORTED ARRAY, strictly ascending by
+//                                          path (an ARRAY so a duplicate is
+//                                          detectable without a raw JSON parser;
+//                                          ties/dupes are a SHAPE defect), path
+//                                          repo-relative POSIX inside
+//                                          BASELINE_GLOBS, sha256 lowercase
+//                                          64-hex. NO per-entry `deleted` and no
+//                                          `at`: a path that is gone simply has
+//                                          no entry.
+//
+// TWO MODES (fe861066 D5), and the difference is who accepts the surface:
+//   VERIFY (default) — read the list, compare it to the current (B) surface for
+//     EXACT set equality in both directions, ALSO prove the (A) tracked
+//     enforcement surface clean, then discharge the latch. NO LIST AT ALL
+//     REFUSES: there is nothing to verify against, and "looks self-consistent"
+//     is not "was attested".
+//   ADOPT (`adopt: true`) — the explicitly-named HUMAN-ACCEPTANCE operation.
+//     It MINTS the list from the surface as it now is. With no latch it
+//     initialises and removes nothing; with a latch it installs the list, binds
+//     the INSTALLED file, and only then removes the latch. It PROCEEDS on (A)
+//     dirt but names it LOUDLY, because accepting is what ADOPT is for.
+//
+// WHY MINTING AND CLEARING STAY ONE DELIBERATE ACT RATHER THAN TWO PROGRAMS.
+// The deleted producer/clearer split existed to stop a BACKGROUND CHILD THAT
+// OUTLIVES THE AUDITED BASH CALL from laundering a tamper: call N tampers the
 // (B) surface and spawns a waiting child; H17's Post denies and sets the latch;
-// the child then runs the producer, stamps the TAMPERED bytes and clears the
-// latch; call N+1 is accepted and the tamper is now the legitimate baseline
-// forever. So: THE PRODUCER WRITES THE STAMP AND NEVER REMOVES A LATCH, and
-// clearance is this separate, explicit, CONDUCTOR-ONLY action.
-// STAMPING IS NOT CLEARING. Nothing in `scripts/enforcement-stamp.mjs` may ever
-// gain a latch-removal path, and nothing here writes a stamp.
+// the child runs the producer, stamps the TAMPERED bytes, and call N+1 accepts
+// them forever. That property survives the rework and is why the list is minted
+// ONLY here, ONLY under the conductor gate, and ONLY by an explicit `adopt`
+// flag: a list appearing on disk NEVER clears a latch by itself (AC-R1's
+// laundering pin), and default VERIFY never writes.
 //
 // THE CONSEQUENCE FOR THIS FILE'S PREDICATE, stated because it killed the first
-// design and is easy to re-introduce: A STAMP THAT EXACTLY EQUALS THE CURRENT
+// design and is easy to re-introduce: A LIST THAT EXACTLY EQUALS THE CURRENT
 // (B) SURFACE IS NOT SUFFICIENT ON ITS OWN. "Self-consistent with whatever is on
 // disk right now" is exactly what the laundering child manufactures. Exact
 // equality is a NECESSARY condition this function checks; the SUFFICIENT part
-// would have to come from the protocol around it — the stamp written by one
-// deliberate conductor act, the clear authorized by a second — and NOTHING IN
-// THIS REPOSITORY SUPPLIES THAT HALF TODAY. That is why AC-R2 refuses a MISSING
-// stamp even though the surface is untouched and looks perfect: "looks fine" is
-// not "was attested". Read the next paragraph before treating the missing half
-// as a mere gap in wiring: it is the difference between a checked claim and an
-// asserted one.
+// would have to come from the protocol around it — and per fe861066's HONESTY
+// CLAUSE nothing in this repository supplies that half: `callerRole` is
+// self-asserted and a same-UID actor can forge or adopt its own inputs. That is
+// why AC-R2 refuses a MISSING list even though the surface is untouched and
+// looks perfect: "looks fine" is not "was attested". Read the next paragraph
+// before treating the missing half as a mere gap in wiring.
+//
+// THE (A)/(B) LATCH DOMAIN (fe861066 D5). ONE latch spans BOTH an (A)
+// tracked-git-surface incident and a (B) list incident, so a (B)-only
+// verification must not discharge an (A) one. Default VERIFY therefore ALSO
+// requires the (A) surface — git-reported dirt on `hooks/**` UNION the shared
+// `ENFORCEMENT_SURFACE` export (imported, never re-spelled) — to be clean, and
+// REFUSES when it is not, however exactly the (B) list matches. Dirt on tracked
+// paths OUTSIDE that union is NOT an (A) incident: a clearer that refused on any
+// dirty working tree would be unusable mid-branch.
 //
 // `callerRole` IS A CALLER-SUPPLIED ASSERTION, NOT AN AUTHORITY BOUNDARY
 // (decision 4b3183b8 R6). NOT a "pure function" argument either — this module
@@ -73,8 +116,8 @@
 // adversarial intent at all.
 //
 // THIS CLEARER IS A FAIL-CLOSED TRIPWIRE AND RECONCILIATION AID, NOT AN ATOMIC
-// SECURITY BOUNDARY. It establishes that the surface MATCHES ITS STAMP AT THE
-// MOMENT OF CHECKING. It does NOT establish that nothing capable of modifying
+// SECURITY BOUNDARY. It establishes that the surface MATCHES ITS BASELINE LIST
+// AT THE MOMENT OF CHECKING. It does NOT establish that nothing capable of modifying
 // the surface ran concurrently, and no sequence of userspace observations can:
 // leaf A is confirmed, then rewritten while B..N are checked, and the retained
 // descriptor still sees the same inode (decision 0ac7be95 R1). What the split
@@ -90,14 +133,18 @@
 // editor. Do not let a future session quietly re-narrow this residual, and do
 // not let one assume the gate fixed it.
 //
-// ORDER IS STAMP FIRST, CLEAR LAST (Ruling 10), and NO ATOMICITY IS REQUIRED
+// ORDER IS LIST FIRST, CLEAR LAST (fe861066 D5), and NO ATOMICITY IS REQUIRED
 // PRECISELY BECAUSE EVERY INTERMEDIATE STATE STILL DENIES:
-//   * valid stamp + surviving latch + crash = CONTINUED DENIAL, recoverable by
-//     re-running this function. Safe.
-//   * latch absent + crash before the stamp = SILENT ADOPTION. Unreachable,
-//     because this file never writes a stamp and never removes a latch it has
-//     not just verified a stamp against.
-// THE LATCH ALWAYS WINS over the stamp: a matching exact stamp is evidence that
+//   * valid list + surviving latch + crash = CONTINUED DENIAL, recoverable by
+//     re-running this function. That is the LEGAL CRASH STATE for ADOPT, whose
+//     install happens strictly before the removal walk.
+//   * latch absent + crash before the list = SILENT ADOPTION. Unreachable,
+//     because this file never removes a latch it has not just verified a list
+//     against, and ADOPT installs before it unlinks.
+// THE DURABILITY CLAIM, STATED HONESTLY (fe861066 D5): any crash before the
+// confirmed latch removal leaves the latch logically authoritative, and a
+// subsequent run recovers even if the rename was not durable.
+// THE LATCH ALWAYS WINS over the list: an exact match is evidence that
 // reconciliation MAY proceed, never proof that the outstanding incident was
 // discharged.
 //
@@ -118,18 +165,21 @@
 // S4r REPAIR PASS — THE FIVE THINGS THIS FILE NOW DOES THAT IT DID NOT.
 //
 // F1 (CRITICAL, AC-R18/AC-R19) — THE VERDICT IS BOUND TO THE EVIDENCE IT WAS
-//   COMPUTED FROM. The previous shape re-read the stamp, re-enumerated the
+//   COMPUTED FROM. The previous shape re-read the comparator, re-enumerated the
 //   surface, recomputed a verdict — and then RELEASED EVERY DESCRIPTOR AND PIN
 //   from those checks before starting a fresh latch-removal walk that validated
-//   only the LATCH's own identity. Nothing bound the stamp or the (B) surface
+//   only the LATCH's own identity. Nothing bound the list or the (B) surface
 //   across that interval, so an attacker who won the window substituted
-//   TAMPERED bytes TOGETHER WITH A MATCHING ATTACKER STAMP: self-consistent, so
+//   TAMPERED bytes TOGETHER WITH A MATCHING ATTACKER LIST: self-consistent, so
 //   a naive "verify once more" sees nothing, and the call returned cleared:true
 //   for bytes nobody ever verified.
 //   RE-VERIFYING MORE TIMES IS NOT THE FIX AND WAS NOT ADOPTED. The final
 //   verification pass now RETAINS, for the rest of the call: the pinned
 //   directory chain, an open descriptor on EVERY (B) leaf it hashed, and an
-//   open descriptor on the stamp it parsed. Immediately before the unlink —
+//   open descriptor on the baseline list it parsed (in ADOPT mode, on the
+//   NEWLY INSTALLED list re-opened after the rename — retaining the OLD
+//   descriptor across an atomic replacement would bind nothing). Immediately
+//   before the unlink —
 //   after the removal walk has already pinned `.sterling` and confirmed the
 //   latch's identity, so the confirmation is the LAST thing that happens before
 //   the irreversible act — `confirmBoundEvidence` proves, for each of those
@@ -144,8 +194,8 @@
 //     (c) MEMBERSHIP: re-listing each RETAINED DIRECTORY DESCRIPTOR still
 //         yields the same (B)-relevant entry names. (a) and (b) are per-member
 //         and cannot see a member APPEARING or DISAPPEARING; this half can.
-//     (d) the same three properties for the STAMP itself.
-//   The comparison target is the IN-MEMORY VERDICT, never the on-disk stamp —
+//     (d) the same three properties for the BASELINE LIST itself.
+//   The comparison target is the IN-MEMORY VERDICT, never the on-disk list —
 //   which is exactly why a self-consistent substitution cannot satisfy it.
 //
 // F2 (HIGH, AC-R24) — THE IDENTITY GATE IS INVERTED AND FAILS CLOSED. It
@@ -175,7 +225,7 @@
 // F4 (AC-R21) — A DIRECTORY THAT VANISHES BETWEEN readdir AND open REFUSES. It
 //   was formerly treated as an empty listing, so a populated agents
 //   subdirectory could be renamed out across both enumeration passes and
-//   restored afterwards while the surviving visible set matched the stamp.
+//   restored afterwards while the surviving visible set matched the baseline.
 //
 // F5 (AC-R5/AC-R7 + hardening) — EVERY REFUSAL IS ATTRIBUTABLE. Three different
 //   conditions formerly returned `{cleared:false}` in wording no test could
@@ -198,17 +248,20 @@
 //   THE ATTACK: after the final verdict, rename `.claude` aside to
 //   `.claude.verified` and install a NEW `.claude` holding tampered agent and
 //   settings files. Every retained descriptor resolves through the DETACHED
-//   verified tree, so identities and hashes match and the stamp is untouched —
+//   verified tree, so identities and hashes match and the list is untouched —
 //   and the latch is removed although the LIVE tree was never verified. The
-//   identical trick on `.sterling/transient` substitutes the manifest.
+//   identical trick on `.sterling` — the directory that DIRECTLY contains the
+//   baseline list since fe861066 D1 — substitutes the manifest.
 //   THE ABSENT-ROOT VARIANT IS WORSE BECAUSE IT NEEDS NO RENAME: when `.claude`
 //   did not exist at verification, NO directory evidence was recorded at all, so
 //   CREATING `.claude/settings.json` after the verdict was invisible to all
 //   three binding properties.
 //   THE FIX: EVERY DIRECTORY EDGE this call walks is retained as
 //   {PARENT DESCRIPTOR, CHILD NAME, CHILD dev/ino} — root->`.claude`,
-//   `.claude`->`agents`, every recursive agents edge, root->`.sterling`,
-//   `.sterling`->`transient` — plus the ANCHOR's own dev/ino; and
+//   `.claude`->`agents`, every recursive agents edge, and root->`.sterling`
+//   (which is now the edge DIRECTLY containing the baseline list AND the latch:
+//   the old `.sterling`->`transient` edge died with the stamp's location, and
+//   `transient/` is walked by nothing here) — plus the ANCHOR's own dev/ino; and
 //   `confirmBoundEdges` requires, as part of the pre-unlink confirmation, that
 //   `lstat(parent-fd/name)` STILL yields the retained child. An edge that was
 //   ABSENT at verification retains EXPECTED ABSENCE and must still return
@@ -249,9 +302,9 @@
 //   counted per entry as it arrives); the confirmation re-listing had no count
 //   check at all (now it has its own budget); the win32 hashing path read a file
 //   whole before the 8 MiB per-file bound (now fstat-then-chunk like POSIX); and
-//   the stamp read used `readFileSync(fd)` after an `fstat` size check, so growth
-//   between the two allowed an arbitrary allocation (now a chunked read that
-//   refuses the moment it passes the bound). EMFILE handling is UNCHANGED and
+//   the comparator read used `readFileSync(fd)` after an `fstat` size check, so
+//   growth between the two allowed an arbitrary allocation (now a chunked read
+//   that refuses the moment it passes the bound). EMFILE handling is UNCHANGED and
 //   stays fail-closed — every required open happens before the unlink and an open
 //   failure is a refusal.
 // ===========================================================================
@@ -275,10 +328,11 @@
 // NEVER PASS ANY OF THEM.
 // ===========================================================================
 //
-// I/O DISCIPLINE. Every classification, read and the removal itself resolve
-// through DESCRIPTOR-PINNED, NO-FOLLOW I/O, following the idiom of
-// `withPinnedStampParent` / `readRegularAt` in scripts/enforcement-stamp.mjs and
-// `withPinnedParent` / `classifyLeafAt` in scripts/hooks/h17-bash-write-sweep.mjs.
+// I/O DISCIPLINE. Every classification, read, the ADOPT install and the removal
+// itself resolve through DESCRIPTOR-PINNED, NO-FOLLOW I/O, following the
+// `withPinnedParent` / `classifyLeafAt` idiom of
+// scripts/hooks/h17-bash-write-sweep.mjs (the reviewed one in this repo — the
+// other former copy, scripts/enforcement-stamp.mjs, is DELETED by 78dc9bd6).
 // THE PIN IS ACQUIRED BY WALKING, NEVER BY AN ABSOLUTE-PATH OPEN — anti-pattern
 // descriptor-pin-defeated-at-acquisition-when-the-directory-fd-is-opened-by-
 // absolute-path (knowledge_get 7760c328, severity BLOCK): O_NOFOLLOW guards only
@@ -290,16 +344,16 @@
 // scope (knowledge_get f36eb854) covers, cited because this file shares the
 // anchor SHAPE and the same reasoning.
 //
-// DELIBERATELY DUPLICATED, NOT SHARED, on exactly the grounds
-// scripts/enforcement-stamp.mjs already states for its own copies of
-// `classifyPathComponents` and `assertSecureIoAvailable`: H17 is an
-// esbuild-bundled standalone (invariant 4) and a new shared module under
-// scripts/lib/ is outside this change's contract. The duplication is real and is
-// SURFACED rather than hidden — these three files must stay in step. The one
-// thing NOT duplicated is `matchesGlob`, imported from @sterling/schemas so that
-// "is this a (B) path?" has exactly ONE definition here and in H17's
-// `validateBaselineKey`; a second glob notion is precisely how an exact-set
-// comparison rots into a subset one.
+// DELIBERATELY DUPLICATED, NOT SHARED: H17 is an esbuild-bundled standalone
+// (invariant 4) and a new shared module under scripts/lib/ is outside this
+// change's contract, so `pinChain` / `classifyLeafAt` / `assertSecureIoAvailable`
+// exist here in H17's shape. The duplication is real and is SURFACED rather than
+// hidden — the two files must stay in step. TWO THINGS ARE NOT DUPLICATED, and
+// both are load-bearing: `matchesGlob` (imported from @sterling/schemas) and
+// `ENFORCEMENT_SURFACE` (imported from scripts/hooks/lib/contract.mjs), so that
+// "is this an enforcement path?" has exactly ONE definition here, in H17 and in
+// H3. A second glob notion is precisely how an exact-set comparison rots into a
+// subset one.
 //
 // TEST COMMAND: node --test scripts/tests/enforcement-reconcile.test.mjs
 
@@ -313,13 +367,18 @@ import {
   opendirSync,
   readFileSync,
   readSync,
+  writeSync,
+  fsyncSync,
+  renameSync,
   existsSync,
   unlinkSync,
   constants as FS,
 } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { matchesGlob } from '@sterling/schemas';
+import { ENFORCEMENT_SURFACE } from './hooks/lib/contract.mjs';
 
 const REAL_WIN32 = process.platform === 'win32';
 
@@ -364,19 +423,32 @@ function isWin32() {
 const PROCFS_FD_DIR = '/proc/self/fd';
 const PROC_SUPER_MAGIC = 0x9fa0n;
 
-// THE (B) SET, character-for-character H17's own `BASELINE_GLOBS`
-// (scripts/hooks/h17-bash-write-sweep.mjs). The taint latch is DELIBERATELY NOT
-// a member (Ruling 7): the incident marker must never become part of the surface
-// whose incident it records.
-const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
+// THE (B) SET — THE SHARED `ENFORCEMENT_SURFACE` EXPORT ITSELF, not a copy of
+// its globs (fe861066 D1: dynamic membership under a FIXED surface definition;
+// invariant 1: one definition, imported). The taint latch and the baseline list
+// are DELIBERATELY NOT members: neither the incident marker nor the evidence may
+// become part of the surface whose incident it records.
+const BASELINE_GLOBS = ENFORCEMENT_SURFACE;
+
+// THE (A) SET — the git-visible half of the ONE latch's domain (fe861066 D5
+// LATCH DOMAIN). `hooks/**` is added HERE rather than in contract.mjs because
+// that export deliberately excludes it (see its own comment: H3 self-protects
+// the bundled hooks dir by absolute path and H17 pins `hooks/**` separately), so
+// this union is the (A) scope stated once, in one place, on top of the shared
+// definition rather than beside a re-spelled copy of it.
+const A_SURFACE_GLOBS = Object.freeze(['hooks/**', ...ENFORCEMENT_SURFACE]);
 
 const STERLING_DIR = '.sterling';
 const DB_LEAF = 'sterling.db';
 const LATCH_LEAF = 'enforcement-taint.json';
 const LATCH_REL = `${STERLING_DIR}/${LATCH_LEAF}`;
-const STAMP_DIR_REL = `${STERLING_DIR}/transient`;
-const STAMP_LEAF = 'enforcement-stamp.json';
-const STAMP_REL = `${STAMP_DIR_REL}/${STAMP_LEAF}`;
+// fe861066 D1 — DIRECTLY under `.sterling/`, never under `.sterling/transient/`:
+// persistent evidence does not live in a lifecycle-bound directory, and the name
+// deliberately shares nothing with the dead stamp's.
+const LIST_LEAF = 'enforcement-baseline.json';
+const LIST_REL = `${STERLING_DIR}/${LIST_LEAF}`;
+const LIST_WHAT = `the baseline list '${LIST_REL}'`;
+const LIST_VERSION = 1;
 const CLAUDE_DIR = '.claude';
 const AGENTS_LEAF = 'agents';
 const AGENTS_REL = `${CLAUDE_DIR}/${AGENTS_LEAF}`;
@@ -386,10 +458,10 @@ const SETTINGS_GLOB = `${CLAUDE_DIR}/settings*.json`;
 
 const CONDUCTOR_ROLE = 'conductor';
 
-// A stamp large enough to blow this process's memory is not a stamp worth
+// A baseline list large enough to blow this process's memory is not a list worth
 // trusting. Bounded like every other record H17 reads (board 55fcccac clause 4);
 // over-budget is a REFUSAL, never a truncated parse.
-const MAX_STAMP_BYTES = 8 * 1024 * 1024;
+const MAX_LIST_BYTES = 8 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // F3 — THE (B) ENUMERATION BOUNDS. Every one of these is a LOUD REFUSAL naming
@@ -516,7 +588,7 @@ function closePinned(fd, primary) {
 
 // ---------------------------------------------------------------------------
 // F1's LIFETIME PRIMITIVE. Descriptors this call must KEEP — the pinned chain,
-// every (B) leaf, every walked (B) directory, the stamp — live in a scope that
+// every (B) leaf, every walked (B) directory, the baseline list — live in a scope that
 // is closed by the mechanical end of the operation, never by a remembered step
 // (P4). A scope is what lets "the bytes I verified" stay reachable across the
 // verdict, the test seam and the removal instead of being released the instant
@@ -610,10 +682,11 @@ function openChildDir(anchored, soFar, what) {
 // same dev/ino as `fstat` on the descriptor this walk holds. It PROVES that at
 // verification time every component name still denotes the very inode this
 // process pinned; it does NOT prove continuity, because a swap-and-swap-back
-// before the check is invisible. Copied in shape from
-// `withPinnedStampParent`'s identity pass, which is the reviewed idiom in this
-// repo — copying the weaker of two available idioms into a clearer would be a
-// defect, not a simplification.
+// before the check is invisible. Copied in shape from `withPinnedParent` /
+// `openPinnedDir` in scripts/hooks/h17-bash-write-sweep.mjs, which is the
+// reviewed idiom in this repo (anti-pattern 7760c328's RIGHT WAY names it) —
+// copying the weaker of two available idioms into a clearer would be a defect,
+// not a simplification.
 //
 // F6 — WHAT THIS WALK NOW RETAINS, and why acquisition-time identity alone was a
 // CRITICAL. `edges` carries one record per DIRECTORY EDGE — the PARENT's pinned
@@ -654,11 +727,11 @@ function pinChain(cwd, relDir, scope, what = `'${relDir}'`) {
     try {
       kind = lstatSync(dirAbs).isDirectory() ? 'dir' : 'other';
     } catch (e) {
-      if (e && e.code === 'ENOENT') return { handle: null, absentAt: relDir, edges: [], root: null };
+      if (e && e.code === 'ENOENT') return { handle: null, fd: null, absentAt: relDir, edges: [], root: null };
       throw refuse(`${what} could not be classified (${errText(e)}). The latch is LEFT IN PLACE.`);
     }
     if (kind !== 'dir') throw refuse(`${what} is not a directory — refusing to resolve through it. The latch is LEFT IN PLACE.`);
-    return { handle: dirAbs, absentAt: null, edges: [], root: null };
+    return { handle: dirAbs, fd: null, absentAt: null, edges: [], root: null };
   }
   assertSecureIoAvailable(cwd);
   // The ROOT is the one open that FOLLOWS (see the header): it is the trust
@@ -732,8 +805,12 @@ function pinChain(cwd, relDir, scope, what = `'${relDir}'`) {
     edges.push({ parentHandle: link.parentHandle, name: link.name, rel: link.soFar, expect: 'dir', dev: devOf(byFd), ino: inoOf(byFd) });
   }
   if (absentEdge) edges.push(absentEdge);
-  if (absentAt !== null) return { handle: null, absentAt, edges, root };
-  return { handle, absentAt: null, edges, root };
+  if (absentAt !== null) return { handle: null, fd: null, absentAt, edges, root };
+  // THE LEAF DIRECTORY'S OWN DESCRIPTOR, returned alongside its procfs handle so
+  // the ADOPT install can `fsync` the DIRECTORY it renamed into. Deriving it by
+  // parsing the handle string back into a number would be a second, unchecked
+  // notion of the same fact.
+  return { handle, fd: chain.length > 0 ? chain[chain.length - 1].fd : rootFd, absentAt: null, edges, root };
 }
 
 // CLASSIFY A LEAF BY OPENING IT, not by lstat-then-open. The lstat/open pair is
@@ -1025,11 +1102,12 @@ function listDirBound(handle, relDir, countEntry) {
 
 // ---------------------------------------------------------------------------
 // ENUMERATE AND HASH THE CURRENT (B) SURFACE. Mirrors H17's `collectBaseline`
-// and the producer's `baselineSetPaths` in WHAT it covers — `.claude/agents/**`
-// recursively (VERIFIED against scripts/enforcement-stamp.mjs's own recursive
-// `listFilesUnder` walk, not assumed), `.claude/settings*.json` top level only,
-// `.sterling/config.json` — and differs only in carrying sha256 rather than
-// bytes, because this function never restores anything.
+// in WHAT it covers — `.claude/agents/**` RECURSIVELY, `.claude/settings*.json`
+// TOP LEVEL ONLY, `.sterling/config.json` — and differs only in carrying sha256
+// rather than bytes, because this function never restores anything. The three
+// globs are not spelled here at all: `BASELINE_GLOBS` IS the shared
+// `ENFORCEMENT_SURFACE` export, and this walk's shape is what "dynamic
+// membership under a fixed surface definition" means in code.
 // A Dirent is a PRE-FILTER, NEVER THE VERDICT: every decision is re-established
 // by the open that follows (O_NOFOLLOW + fstat), so a stale or raced Dirent can
 // only cost a refusal, never a wrong hash.
@@ -1244,9 +1322,9 @@ async function collectBaseline(cwd, scope, { retain = false, onBeforeDirectoryOp
 //     Formerly `return undefined`, i.e. enumerated as EMPTY, which let a
 //     populated agents subdirectory be renamed out across both enumeration
 //     passes and restored afterwards while the surviving visible set matched
-//     the stamp exactly. It now REFUSES (AC-R21).
+//     the baseline exactly. It now REFUSES (AC-R21).
 //   EACCES — the directory cannot be enumerated at all, so a tampered grant can
-//     hide inside it while the visible set matches the stamp. It now REFUSES,
+//     hide inside it while the visible set matches the baseline. It now REFUSES,
 //     naming the directory (AC-R20).
 // O_NOFOLLOW remains the third face: a child swapped for a symlink between its
 // Dirent and this open FAILS rather than being descended into.
@@ -1287,47 +1365,53 @@ function openBaselineChildDir(parentHandle, name, rel, scope) {
 }
 
 // ---------------------------------------------------------------------------
-// THE STAMP, read ONCE per pass through a pinned parent and classified BY THE
-// OPEN. Returns `{ present, kind, sha256, entries, bound }`. `sha256` is
-// computed from THE BYTES THIS READ RETURNED, never by a second streamed pass
-// over the path — a separate hashing read would reintroduce a substitution
-// window one level down.
-// When `retain` is true the stamp's descriptor and its pinned parent stay open
-// in `scope`, and `bound` carries what `confirmBoundEvidence` needs to prove,
-// right before the unlink, that the stamp the verdict was computed against is
-// still the stamp on disk (F1, property (d)).
+// THE BASELINE LIST, read ONCE per pass through a pinned parent and classified
+// BY THE OPEN. Returns `{ present, kind, sha256, doc, bound, edges, roots }`.
+// `sha256` is computed from THE BYTES THIS READ RETURNED, never by a second
+// streamed pass over the path — a separate hashing read would reintroduce a
+// substitution window one level down.
+// When `retain` is true the list's descriptor and its pinned parent stay open in
+// `scope`, and `bound` carries what `confirmBoundEvidence` needs to prove, right
+// before the unlink, that the list the verdict was computed against is still the
+// list on disk (F1, property (d)).
+//
+// SAME PIN-CHAIN AND RETAINED-BOUND-DESCRIPTOR SEMANTICS AS THE DEAD STAMP READ
+// IT REPLACES — retargeted path, one fewer directory edge. The list's OWN chain
+// (root->'.sterling') is retained as edges exactly like the (B) surface's:
+// substituting `.sterling` after the verdict swaps the MANIFEST the NEXT call
+// will trust, which is the same attack aimed at the other half of the
+// comparison (AC-R32).
 // ---------------------------------------------------------------------------
-function readStampSnapshot(cwd, scope, { retain = false } = {}) {
-  // F6 — the stamp's OWN chain (root->'.sterling'->'transient') is retained as
-  // edges exactly like the (B) surface's: substituting `.sterling/transient`
-  // after the verdict swaps the MANIFEST, which is the same attack aimed at the
-  // other half of the comparison.
-  const parent = pinChain(cwd, STAMP_DIR_REL, scope, `the enforcement stamp '${STAMP_REL}'`);
+function readBaselineList(cwd, scope, { retain = false } = {}) {
+  const parent = pinChain(cwd, STERLING_DIR, scope, LIST_WHAT);
   const edges = parent.edges;
   const roots = parent.root ? [parent.root] : [];
-  const absent = { present: false, kind: 'absent', sha256: null, entries: null, bound: null, edges, roots };
+  const absent = { present: false, kind: 'absent', sha256: null, doc: null, parsed: false, bound: null, edges, roots };
   if (parent.handle === null) return absent;
-  const h = classifyLeafAt(parent.handle, STAMP_LEAF);
+  const h = classifyLeafAt(parent.handle, LIST_LEAF);
   let primary;
   let retained = false;
   try {
     if (h.kind === 'absent') return absent;
-    if (h.kind !== 'file') return { present: true, kind: h.kind, sha256: null, entries: null, bound: null, edges, roots };
-    const bytes = readClassifiedBytes(h, MAX_STAMP_BYTES, `the enforcement stamp '${STAMP_REL}'`);
+    if (h.kind !== 'file') return { present: true, kind: h.kind, sha256: null, doc: null, parsed: false, bound: null, edges, roots };
+    const bytes = readClassifiedBytes(h, MAX_LIST_BYTES, LIST_WHAT);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
-    let entries = null;
+    let doc = null;
+    let parsed = false;
     try {
-      entries = JSON.parse(bytes.toString('utf8'));
+      doc = JSON.parse(bytes.toString('utf8'));
+      parsed = true;
     } catch {
-      entries = null; // malformed — the caller refuses; the hash still compares across the window
+      doc = null; // malformed — the caller refuses; the hash still compares across the window
+      parsed = false;
     }
     let bound = null;
     if (retain) {
       scope.keep(h.fd);
       retained = true;
-      bound = { parentHandle: parent.handle, leaf: STAMP_LEAF, fd: h.fd, anchored: h.anchored, dev: devOf(h.st), ino: inoOf(h.st), sha256 };
+      bound = { parentHandle: parent.handle, leaf: LIST_LEAF, fd: h.fd, anchored: h.anchored, dev: devOf(h.st), ino: inoOf(h.st), sha256 };
     }
-    return { present: true, kind: 'file', sha256, entries, bound, edges, roots };
+    return { present: true, kind: 'file', sha256, doc, parsed, bound, edges, roots };
   } catch (e) {
     primary = e;
     throw e;
@@ -1337,92 +1421,161 @@ function readStampSnapshot(cwd, scope, { retain = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// THE EXACT-MANIFEST COMPARISON (Ruling 4 of bcd2cc09, and items 1/AC-R4/AC-R6/
-// AC-R7 of the contract). THREE PROPERTIES, ALL REQUIRED:
-//   * EXACT SET EQUALITY IN BOTH DIRECTIONS. A stamped subset is not enough
-//     (AC-R4), and a stamp claiming a (B) path the current surface does not have
-//     is not enough either (AC-R7). A one-directional check is a defect.
-//   * EXACT BYTES. Path presence alone attests nothing (AC-R5).
-//   * NO AMBIGUITY. A duplicated (B) path is refused WHOLE, never resolved by a
-//     first-match `find()` (AC-R6) — a stamp carrying `[{p, good}, {p, forged}]`
-//     would otherwise read as attesting whichever was emitted first, which is an
-//     ambiguity no exact-set comparison can be built on.
-// NON-(B) ENTRIES ARE SKIPPED, NOT REJECTED: the same stamp legitimately attests
-// H17's (A) tracked surface, whose paths are not (B) paths and are validated on
-// their own terms elsewhere. `validateBaselineKey` is the ONE definition of "is
-// a (B) path" so a second notion cannot drift from the first.
-// A STAMPED DELETION (`deleted:true`) attests iff the path is STILL absent —
-// exactly H17's rule, and VERIFIED against the producer, which emits
-// `{path, deleted:true, at}` with NO sha256 (scripts/enforcement-stamp.mjs).
-// Absence at stamp time is representable by omission once the comparison is
-// set-exact, so a deletion entry is honoured but never required.
+// LIST SHAPE VALIDATION (fe861066 D1), RUN BEFORE ANY CONTENT IS COMPARED. The
+// list's SHAPE must be valid before its CONTENT means anything, and each defect
+// gets its OWN attribution: version, sortedness, duplication and hash format are
+// SHAPE questions, not delta-from-current questions, and collapsing them into
+// one "malformed" family is how a shape guard goes hollow (a bare
+// `try { … } catch { entries = [] }` refuses down the INCOMPLETE path instead
+// and satisfies a test that only checks `cleared:false`).
 //
-// F5 — EVERY REFUSAL BELOW NAMES ITS OWN GUARD, in the vocabulary the test file
-// pins. The paired families (stale-entry vs incomplete; deleted-but-present vs
-// missing-hash) deliberately do not share wording: an unattributable
-// `{cleared:false}` is what let one pin go hollow and another resolve to a
-// different test's guard.
+// THE ENTRIES ARE AN ARRAY, NOT AN OBJECT, PRECISELY SO DUPLICATION IS VISIBLE:
+// a JSON object silently keeps the last of two colliding keys, so a list
+// carrying `[{p, good}, {p, forged}]` would read as attesting whichever survived
+// the parse. Refused WHOLE instead.
+//
+// Returns the parsed entries array; throws a discriminated refusal otherwise.
+//
+// PARITY CONTRACT (Codex delta review, S4): `parseBaselineList` in
+// scripts/hooks/h17-bash-write-sweep.mjs must accept EXACTLY the lists this
+// function accepts — closed {path, sha256} entry shape, byte-canonical paths
+// (validateBaselineKey(p) === p, never normalized into validity), sorted,
+// duplicate-free, lowercase-64-hex. The two readers share one definition of a
+// valid list or the mechanism splits: hook-looser is a laundering route (a
+// list the clearer refuses still pacifies the hook); hook-stricter is a
+// self-wedge (a correct ADOPT mints a list the hook then denies every call).
+// Editing either validator means re-checking the other.
 // ---------------------------------------------------------------------------
-function verifyExactManifest(stamp, current) {
-  if (!stamp.present) {
+function validateListShape(list) {
+  if (!list.present) {
     throw refuse(
-      `there is no enforcement stamp at '${STAMP_REL}', so there is nothing the current (B) surface can be verified AGAINST. A surface that merely LOOKS ` +
-        `self-consistent is not an attested one — the whole point of the split between attestation and clearance is that the clearer requires a stamp the ` +
-        `conductor deliberately wrote (decision bcd2cc09 Ruling 5). Run 'node scripts/enforcement-stamp.mjs' first, then reconcile. The latch is LEFT IN PLACE.`
+      `no baseline present at '${LIST_REL}' — there is nothing the current (B) surface can be verified AGAINST. A surface that merely LOOKS ` +
+        `self-consistent is not an attested one; the whole point of the list is that it records what a conductor DELIBERATELY accepted (decision ` +
+        `fe861066 D2/D5). Run reconciliation in ADOPT mode to initialise it, then verify. The latch is LEFT IN PLACE.`
     );
   }
-  if (stamp.kind !== 'file') {
-    throw refuse(`the enforcement stamp at '${STAMP_REL}' is ${stamp.kind}, not a regular file — it attests nothing and is never read through. The latch is LEFT IN PLACE.`);
+  if (list.kind !== 'file') {
+    throw refuse(`${LIST_WHAT} is ${list.kind}, not a regular file — it attests nothing and is never read through. The latch is LEFT IN PLACE.`);
   }
-  if (stamp.entries === null) {
-    throw refuse(`the enforcement stamp at '${STAMP_REL}' is malformed (it does not parse as JSON) — a stamp that cannot be read attests nothing. The latch is LEFT IN PLACE.`);
+  if (!list.parsed) {
+    throw refuse(`${LIST_WHAT} is malformed: it does not parse as JSON — a baseline that cannot be read attests nothing. The latch is LEFT IN PLACE.`);
   }
-  if (!Array.isArray(stamp.entries)) {
-    throw refuse(`the enforcement stamp at '${STAMP_REL}' is malformed: it does not parse to a JSON ARRAY of entries — refusing it whole. The latch is LEFT IN PLACE.`);
+  const doc = list.doc;
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+    throw refuse(`${LIST_WHAT} is malformed: it does not parse to a JSON OBJECT — refusing it whole. The latch is LEFT IN PLACE.`);
   }
+  if (doc.version !== LIST_VERSION) {
+    throw refuse(
+      `the baseline version is not ${LIST_VERSION} — ${LIST_WHAT} declares ${doc.version === undefined ? 'no version at all' : JSON.stringify(doc.version)}, ` +
+        `and a baseline whose version this clearer does not understand is refused WHOLE rather than interpreted on a guess. The latch is LEFT IN PLACE.`
+    );
+  }
+  if (!Array.isArray(doc.entries)) {
+    throw refuse(`${LIST_WHAT} is malformed: 'entries' is not a JSON ARRAY — refusing it whole. The latch is LEFT IN PLACE.`);
+  }
+  // `minted_at` IS READ BY NOTHING. fe861066 D1: DIAGNOSTIC ONLY — never
+  // freshness, never authority. An ancient minted_at with an exact match
+  // verifies (AC-R58); a fresh one buys nothing.
+  const entries = doc.entries;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e === null || typeof e !== 'object' || Array.isArray(e) || typeof e.path !== 'string' || typeof e.sha256 !== 'string') {
+      throw refuse(
+        `${LIST_WHAT} is malformed: entry #${i} is not an object carrying a string 'path' and a string 'sha256' — the entry shape is fixed at ` +
+          `{path, sha256} (no 'deleted', no 'at'), and an entry that is not that shape attests nothing. The latch is LEFT IN PLACE.`
+      );
+    }
+    // THE ENTRY SHAPE IS CLOSED, NOT MERELY REQUIRED. An entry carrying a key
+    // beyond {path, sha256} is refused rather than ignored, because the field
+    // most likely to appear there is `deleted: true` — the dead stamp's deletion
+    // attestation, whose whole meaning was "this path is legitimately absent".
+    // Silently dropping it would accept a list written against a MEANING THIS
+    // CLEARER NO LONGER IMPLEMENTS, and a reader of that list would believe an
+    // absence was attested when nothing here would ever honour it. Same argument
+    // for any future field: an unknown key means the writer believed something
+    // about this list that the reader does not.
+    const keys = Object.keys(e);
+    const unknown = keys.filter((k) => k !== 'path' && k !== 'sha256').sort();
+    if (unknown.length > 0) {
+      throw refuse(
+        `${LIST_WHAT} is malformed: entry #${i} (${JSON.stringify(e.path)}) carries unknown entry key${unknown.length === 1 ? '' : 's'} ` +
+          `(${unknown.join(', ')}) — the entry shape is EXACTLY {path, sha256} (fe861066 D1), and an entry carrying more than that was written against a ` +
+          `meaning this clearer does not implement. Refused WHOLE rather than partly honoured. The latch is LEFT IN PLACE.`
+      );
+    }
+    if (validateBaselineKey(e.path) !== e.path) {
+      throw refuse(
+        `${LIST_WHAT} is malformed: the entry path ${JSON.stringify(e.path)} is not a repo-relative POSIX path inside the fixed (B) surface definition ` +
+          `(${BASELINE_GLOBS.join(', ')}) — a foreign or non-normalized key cannot stand in an exact-set comparison. The latch is LEFT IN PLACE.`
+      );
+    }
+    if (!/^[0-9a-f]{64}$/.test(e.sha256)) {
+      throw refuse(
+        `the baseline hash for '${e.path}' is not a valid lowercase 64-hex sha256 (found ${JSON.stringify(e.sha256)}) — an unreadable hash cannot be ` +
+          `compared, and a comparison that silently fails is worse than one that refuses. The latch is LEFT IN PLACE.`
+      );
+    }
+  }
+  for (let i = 1; i < entries.length; i++) {
+    const prev = entries[i - 1].path;
+    const cur = entries[i].path;
+    if (cur === prev) {
+      throw refuse(
+        `duplicate baseline entry for '${cur}' — the baseline carries more than one entry claiming that (B) path, a duplicated claim has no single meaning, ` +
+          `and a first-match lookup would silently honour whichever was emitted first. The baseline is refused WHOLE. The latch is LEFT IN PLACE.`
+      );
+    }
+    if (cur < prev) {
+      throw refuse(
+        `the baseline entries are not sorted in strictly ascending path order ('${cur}' is listed after '${prev}') — sortedness is what makes duplication ` +
+          `and completeness checkable by inspection rather than by trusting a parser. The baseline is refused WHOLE. The latch is LEFT IN PLACE.`
+      );
+    }
+  }
+  return entries;
+}
+
+// ---------------------------------------------------------------------------
+// THE EXACT-LIST COMPARISON (fe861066 D3/D5, and AC-R4/AC-R5/AC-R7).
+// THREE PROPERTIES, ALL REQUIRED:
+//   * EXACT SET EQUALITY IN BOTH DIRECTIONS. A listed subset is not enough
+//     (AC-R4), and a list claiming a (B) path the current surface does not have
+//     is not enough either (AC-R7). A one-directional check is a defect.
+//   * EXACT BYTES. Path presence alone attests nothing (AC-R5).
+//   * NO AMBIGUITY. Duplication and ordering are already refused WHOLE by
+//     `validateListShape` above, so this comparison never sees an ambiguous key
+//     and never resolves one by a first-match `find()`.
+// THERE IS NO DELETION ATTESTATION. fe861066 D1 fixes the entry shape at exactly
+// `{path, sha256}`: a path that no longer exists simply has NO ENTRY, and a list
+// still carrying one for it is the ordinary STALE-ENTRY case below. The old
+// `deleted:true` arm died with the stamp that produced it — do not reintroduce a
+// field the concrete design does not define.
+// EVERY ENTRY IS A (B) PATH, enforced by `validateListShape`; the list does not
+// cover the (A) surface (that half of the latch's domain is proven by git, in
+// `trackedSurfaceDirt`), so there is nothing here to skip.
+//
+// F5 — EVERY REFUSAL BELOW NAMES ITS OWN GUARD, in the vocabulary the test file
+// pins. The paired families (stale-entry vs incomplete) deliberately do not
+// share wording: an unattributable `{cleared:false}` is what let one pin go
+// hollow and another resolve to a different test's guard.
+// ---------------------------------------------------------------------------
+function verifyExactBaseline(list, current) {
+  const entries = validateListShape(list);
 
   const byPath = new Map();
-  for (const entry of stamp.entries) {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue; // not an entry at all; (A) validation owns its own refusals
-    if (typeof entry.path !== 'string') continue;
-    const rel = validateBaselineKey(entry.path);
-    if (!rel) continue; // not a (B) path — the (A) surface's business, not this manifest's
-    if (byPath.has(rel)) {
-      throw refuse(
-        `duplicate stamp entry for '${rel}' — the stamp carries more than one entry claiming that (B) path, a duplicated claim has no single meaning, and a ` +
-          `first-match lookup would silently honour whichever was emitted first. The stamp is refused WHOLE. The latch is LEFT IN PLACE.`
-      );
-    }
-    if (entry.deleted !== true && typeof entry.sha256 !== 'string') {
-      throw refuse(
-        `the stamp entry for the (B) path '${rel}' carries neither a string sha256 nor deleted:true — it attests nothing and cannot stand in an exact ` +
-          `manifest. The latch is LEFT IN PLACE.`
-      );
-    }
-    byPath.set(rel, entry);
-  }
+  for (const entry of entries) byPath.set(entry.path, entry);
 
-  // DIRECTION 1 — every stamped (B) claim must hold against the current surface.
+  // DIRECTION 1 — every listed (B) claim must hold against the current surface.
   for (const [rel, entry] of byPath) {
-    if (entry.deleted === true) {
-      if (current.has(rel)) {
-        throw refuse(
-          `'${rel}' is attested DELETED by the stamp but is present on disk — a deletion attestation says the producer OBSERVED the path go away, so a file ` +
-            `standing there again attests nothing about the bytes that are actually in it. Resurrecting an attested-deleted (B) path is not a clearable ` +
-            `state. The latch is LEFT IN PLACE.`
-        );
-      }
-      continue;
-    }
     if (!current.has(rel)) {
       throw refuse(
-        `'${rel}' is attested by the stamp but no longer exists on the current (B) surface — exactness runs BOTH directions, so a stamp that claims MORE ` +
-          `than the surface has is refused exactly like one that claims less. Re-stamp and reconcile again. The latch is LEFT IN PLACE.`
+        `'${rel}' is attested by the baseline but no longer exists on the current (B) surface — exactness runs BOTH directions, so a baseline that claims ` +
+          `MORE than the surface has is refused exactly like one that claims less. Re-adopt and reconcile again. The latch is LEFT IN PLACE.`
       );
     }
     if (current.get(rel) !== entry.sha256) {
       throw refuse(
-        `hash mismatch for '${rel}' — the stamped sha256 (${entry.sha256}) is not the sha256 of the bytes now on disk (${current.get(rel)}). The attested ` +
+        `hash mismatch for '${rel}' — the baseline sha256 (${entry.sha256}) is not the sha256 of the bytes now on disk (${current.get(rel)}). The attested ` +
           `bytes are not the bytes there. The latch is LEFT IN PLACE.`
       );
     }
@@ -1430,21 +1583,282 @@ function verifyExactManifest(stamp, current) {
 
   // DIRECTION 2 — every current (B) path must be attested. A subset is not exact.
   for (const rel of current.keys()) {
-    const entry = byPath.get(rel);
-    if (!entry) {
+    if (!byPath.has(rel)) {
       throw refuse(
-        `no stamp entry for '${rel}' (unattested) — an INCOMPLETE stamp cannot discharge the incident, because the unattested member is exactly where a ` +
-          `tamper would hide. Re-stamp and reconcile again. The latch is LEFT IN PLACE.`
-      );
-    }
-    if (entry.deleted === true) {
-      throw refuse(
-        `'${rel}' is attested DELETED by the stamp but is present on disk — the attested state is not the current one. The latch is LEFT IN PLACE.`
+        `no baseline entry for '${rel}' (unattested) — an INCOMPLETE baseline cannot discharge the incident, because the unattested member is exactly where ` +
+          `a tamper would hide. Re-adopt and reconcile again. The latch is LEFT IN PLACE.`
       );
     }
   }
 
   return byPath.size;
+}
+
+// ---------------------------------------------------------------------------
+// THE MINT (fe861066 D2/D5) — the list this clearer would write for the surface
+// verdict it is holding. Sorted strictly ascending by path, entries exactly
+// `{path, sha256}`, `minted_at` recorded but NEVER read back as authority.
+// ---------------------------------------------------------------------------
+function mintBaselineEntries(map) {
+  return [...map.entries()].map(([path, sha256]) => ({ path, sha256 })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+function sameEntryList(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].path !== b[i].path || a[i].sha256 !== b[i].sha256) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// ADOPT'S INSTALL (fe861066 D5). The ONLY write this file performs, and it is
+// reached ONLY through the explicit `adopt` flag behind the conductor gate.
+//
+// ATOMIC PUBLICATION THROUGH THE PINNED PARENT, in the order the anti-pattern
+// descriptor-pin-defeated-at-acquisition... (7760c328) prescribes: a uniquely
+// named temp created O_CREAT|O_EXCL|O_NOFOLLOW INSIDE the pinned `.sterling`
+// descriptor, written in full, fsynced, then renamed onto the authoritative name
+// THROUGH THE SAME PINNED PARENT. A write failure therefore cannot leave a
+// partial file at the name a later call will trust, and no step addresses
+// `.sterling` by pathname.
+//
+// THEN THE INSTALLED FILE IS RE-OPENED AND RETAINED, and its parsed entries are
+// required to equal the verdict this call is holding. RETAINING THE OLD
+// DESCRIPTOR ACROSS AN ATOMIC REPLACEMENT WOULD BIND NOTHING — it would keep
+// proving things about the inode the rename just unlinked — so the evidence must
+// bind the INSTALLED inode or it is not evidence at all.
+//
+// THE TEMP AND THE LIST ARE BOTH INVISIBLE TO THE (c) MEMBERSHIP PROOF by
+// construction: `relevantNames('sterling')` counts only `config.json`, so
+// publishing here cannot perturb the name set the verdict recorded. That is not
+// a lucky accident and it is checked here rather than assumed elsewhere — if a
+// future edit makes `.sterling`'s relevant name set wider, this install must
+// move before the enumeration that records it.
+// ---------------------------------------------------------------------------
+function installBaselineList(cwd, scope, entries) {
+  const parent = pinChain(cwd, STERLING_DIR, scope, LIST_WHAT);
+  if (parent.handle === null) {
+    throw refuse(
+      `'${parent.absentAt || STERLING_DIR}' is absent, so ${LIST_WHAT} cannot be installed — this file never CREATES a project directory, it only ` +
+        `publishes into one that already exists. Nothing was written. The latch is LEFT IN PLACE.`
+    );
+  }
+  const payload = Buffer.from(`${JSON.stringify({ version: LIST_VERSION, minted_at: new Date().toISOString(), entries })}\n`, 'utf8');
+  const tmpLeaf = `.enforcement-baseline.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  const tmpAnchored = `${parent.handle}/${tmpLeaf}`;
+
+  let fd = null;
+  let primary;
+  try {
+    fd = openSync(tmpAnchored, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o600);
+    let off = 0;
+    while (off < payload.length) {
+      const n = writeSync(fd, payload, off, payload.length - off);
+      if (!(n > 0)) {
+        throw refuse(`${LIST_WHAT} could not be written in full (the write returned ${n} at offset ${off}) — a partial baseline is never published. The latch is LEFT IN PLACE.`);
+      }
+      off += n;
+    }
+    fsyncSync(fd);
+  } catch (e) {
+    primary = e;
+    if (!(e instanceof ReconcileRefusal)) {
+      primary = refuse(`${LIST_WHAT} could not be written (${errText(e)}) — nothing was published and the latch is LEFT IN PLACE.`);
+    }
+  } finally {
+    closePinned(fd, primary);
+  }
+  if (primary) {
+    try {
+      unlinkSync(tmpAnchored);
+    } catch {}
+    throw primary;
+  }
+
+  try {
+    renameSync(tmpAnchored, `${parent.handle}/${LIST_LEAF}`);
+  } catch (e) {
+    try {
+      unlinkSync(tmpAnchored);
+    } catch {}
+    throw refuse(`${LIST_WHAT} could not be installed at its authoritative name (${errText(e)}) — the temporary file was removed and nothing was published. The latch is LEFT IN PLACE.`);
+  }
+  // THE DIRECTORY fsync IS BEST-EFFORT AND SAYS SO. fe861066 D5 states the
+  // durability claim honestly: any crash before the confirmed latch removal
+  // leaves the latch logically authoritative, and a subsequent run recovers even
+  // if the rename was not durable — so a filesystem that refuses to fsync a
+  // directory costs durability, never correctness, and must not turn a
+  // successful publication into a refusal.
+  if (parent.fd !== null && parent.fd !== undefined) {
+    try {
+      fsyncSync(parent.fd);
+    } catch {}
+  }
+
+  const h = classifyLeafAt(parent.handle, LIST_LEAF);
+  let retained = false;
+  let readErr;
+  try {
+    if (h.kind !== 'file') {
+      throw refuse(`${LIST_WHAT} is ${h.kind} immediately after being installed — something replaced it inside the publication window. The latch is LEFT IN PLACE.`);
+    }
+    const bytes = readClassifiedBytes(h, MAX_LIST_BYTES, LIST_WHAT);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    let doc = null;
+    let parsed = false;
+    try {
+      doc = JSON.parse(bytes.toString('utf8'));
+      parsed = true;
+    } catch {
+      parsed = false;
+    }
+    const installed = validateListShape({ present: true, kind: 'file', doc, parsed });
+    if (!sameEntryList(installed, entries)) {
+      throw refuse(
+        `${LIST_WHAT} was installed but does NOT read back as the surface verdict this call computed (${installed.length} entries on disk, ${entries.length} ` +
+          `minted) — the evidence must bind the INSTALLED file, so a list that is not the one this call authored discharges nothing. The latch is LEFT IN PLACE.`
+      );
+    }
+    scope.keep(h.fd);
+    retained = true;
+    return {
+      bound: { parentHandle: parent.handle, leaf: LIST_LEAF, fd: h.fd, anchored: h.anchored, dev: devOf(h.st), ino: inoOf(h.st), sha256 },
+      edges: parent.edges,
+      roots: parent.root ? [parent.root] : [],
+    };
+  } catch (e) {
+    readErr = e;
+    throw e;
+  } finally {
+    if (!retained) closePinned(h.fd, readErr);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE (A) HALF OF THE LATCH'S DOMAIN (fe861066 D5 LATCH DOMAIN). The ONE latch
+// records BOTH an (A) tracked-git-surface incident and a (B) list incident, so a
+// (B)-only verification must not discharge an (A) one.
+//
+// SCOPE IS THE UNION `hooks/**` + `ENFORCEMENT_SURFACE`, AND NOTHING WIDER. A
+// clearer that refused on ANY dirty tracked file would be unusable mid-branch —
+// an operator with an unrelated uncommitted edit anywhere in the repository
+// could never reconcile — so the pathspecs below are the scope, expressed once,
+// and git does the matching rather than a second glob notion here.
+//
+// FAIL-CLOSED ON AN UNANSWERABLE QUESTION: if git cannot answer (absent, not a
+// repository, non-zero exit) the (A) surface is UNKNOWN, and unknown is not
+// clean. VERIFY refuses; ADOPT — the deliberate human-acceptance operation that
+// proceeds even on KNOWN dirt — reports it loudly and continues, because
+// refusing there would make an unanswerable git the one thing that can never be
+// accepted.
+//
+// THE SPAWN IS HARDENED BECAUSE GIT EXECUTES REPO-LOCAL CONFIG. `git status`
+// honours `core.fsmonitor` — an arbitrary command — out of `.git/config`, which
+// a write-only actor can plant and which would then run UNDER THE CONDUCTOR'S
+// UID at exactly the moment reconciliation is trusted. `-c core.fsmonitor=`
+// overrides the repository value on the command line (command-line config beats
+// repo config), and `--no-optional-locks` keeps this read-only observation from
+// taking the index lock or refreshing state it has no business writing. Both are
+// argv elements, never a shell string.
+//
+// `-uno` — TRACKED/INDEX STATE ONLY, AND THAT SCOPE IS DELIBERATE. The (A) half
+// of the latch's domain is the GIT-VISIBLE surface: tracked modifications,
+// deletions and staged force-adds, ALL of which still appear under `-uno`.
+// Untracked bytes under the (B) globs are already governed EXACTLY by the
+// baseline list (that is the (B) half's whole job), and an untracked file under
+// `hooks/**` is inert unless something references it, with in-window creation
+// caught by the sweep. `-uall` bought nothing there and cost everything: any
+// target project holding an untracked `.claude/settings.json` — the normal
+// state, since those paths are gitignored — would make VERIFY refuse FOREVER,
+// eroding VERIFY into ADOPT-always in precisely the projects where the clearer
+// runs most.
+// ---------------------------------------------------------------------------
+function trackedSurfaceDirt(cwd) {
+  const args = ['--no-optional-locks', '-c', 'core.fsmonitor=', 'status', '--porcelain', '-z', '-uno', '--', ...A_SURFACE_GLOBS.map((g) => `:(glob)${g}`)];
+  let r;
+  try {
+    r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
+  } catch (e) {
+    return { known: false, why: errText(e), paths: [] };
+  }
+  if (r.error) return { known: false, why: errText(r.error), paths: [] };
+  if (r.status !== 0) {
+    return { known: false, why: `git status exited ${r.status === null ? `on signal ${r.signal}` : `with status ${r.status}`}: ${flatten(r.stderr)}`, paths: [] };
+  }
+  // `-z` output is NUL-terminated with NO quoting, so a path containing spaces,
+  // quotes or newlines survives intact. Each record is `XY <path>`; a rename or
+  // copy is followed by ONE MORE NUL-terminated field carrying the ORIGINAL
+  // path, which must be consumed as part of the same record rather than read as
+  // a status line of its own.
+  const fields = String(r.stdout || '').split('\0');
+  const paths = [];
+  for (let i = 0; i < fields.length; i++) {
+    const rec = fields[i];
+    if (rec.length < 4) continue;
+    const x = rec[0];
+    const y = rec[1];
+    paths.push(`${x}${y} ${rec.slice(3)}`);
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
+      i += 1;
+      if (fields[i]) paths.push(`${x}${y} ${fields[i]} (original name)`);
+    }
+  }
+  return { known: true, why: null, paths };
+}
+
+function flatten(s) {
+  return String(s ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// THE (A) REFUSAL, ONE WORDING, TWO MOMENTS. VERIFY consults the (A) surface
+// BEFORE the (B) passes and AGAIN inside the pre-unlink confirmation, and both
+// consultations refuse through here so the two cannot drift into differently
+// attributable verdicts. `when` names the moment, because a verdict that cannot
+// say WHEN it observed is not much better than one that cannot say WHAT.
+//
+// WHY THE SECOND MOMENT EXISTS: the first consultation happens before every (B)
+// enumeration and hash — hundreds of milliseconds of window on a large surface —
+// so a `hooks/**` file modified during it would otherwise be discharged by a
+// call that had already looked and moved on. This does NOT close 0ac7be95 R1
+// (nothing can), and it is deliberately NOT a claim of quiescence; it shrinks
+// the (A) window to the same moment-of-check floor the (B) binding already runs
+// at, immediately before the irreversible act.
+function requireCleanTrackedSurface(dirt, when) {
+  if (!dirt.known) {
+    throw refuse(
+      `the tracked (A) enforcement surface could not be established ${when} (${dirt.why}) — the one latch spans BOTH an (A) tracked-git-surface incident ` +
+        `and a (B) baseline incident, and an (A) surface this call cannot observe is UNKNOWN, never clean. The latch is LEFT IN PLACE.`
+    );
+  }
+  if (dirt.paths.length > 0) {
+    throw refuse(
+      `the tracked (A) enforcement surface has changed since HEAD (observed ${when}) — git reports ${dirt.paths.join('; ')} inside the (A) scope ` +
+        `(${A_SURFACE_GLOBS.join(', ')}). The one latch spans BOTH incident classes, so a (B)-only verification cannot discharge it however exactly the ` +
+        `(B) baseline agrees with the surface. Commit or revert those paths and reconcile again, or ADOPT them deliberately. The latch is LEFT IN PLACE.`
+    );
+  }
+}
+
+// ADOPT NEVER SWALLOWS (A) DIRT — it accepts it OUT LOUD, in the very string
+// that reports success (fe861066 D5). An empty note is only ever produced by a
+// (A) surface this call OBSERVED to be clean; an unanswerable git produces its
+// own note rather than silence, because "could not look" and "looked and found
+// nothing" must never read the same.
+function adoptDirtNote(dirt) {
+  if (!dirt.known) {
+    return (
+      ` LOUD: the tracked (A) enforcement surface could NOT be established (${dirt.why}), and ADOPT proceeded anyway because it is the deliberate ` +
+      `human-acceptance operation — but nothing in this call proves the (A) surface matches HEAD.`
+    );
+  }
+  if (dirt.paths.length === 0) return '';
+  return (
+    ` LOUD: the tracked (A) enforcement surface has changed since HEAD and was ADOPTED DELIBERATELY rather than verified — git reports ` +
+    `${dirt.paths.join('; ')} inside the (A) scope (${A_SURFACE_GLOBS.join(', ')}). Default VERIFY would have REFUSED this.`
+  );
 }
 
 function sameHashMap(a, b) {
@@ -1459,9 +1873,9 @@ function sameHashMap(a, b) {
 // latch's identity, so the window between "the evidence was proven current" and
 // "the incident was discharged" is as small as this process can make it.
 //
-// IT COMPARES AGAINST THE IN-MEMORY VERDICT, NEVER AGAINST THE ON-DISK STAMP.
+// IT COMPARES AGAINST THE IN-MEMORY VERDICT, NEVER AGAINST THE ON-DISK LIST.
 // That is the whole repair: an attacker who substitutes tampered bytes TOGETHER
-// WITH A MATCHING ATTACKER STAMP produces a perfectly self-consistent disk, so
+// WITH A MATCHING ATTACKER LIST produces a perfectly self-consistent disk, so
 // any check that re-derives its expectation from disk passes. These checks
 // cannot, because their expectation is the sha256 and the dev/ino this call
 // computed and has been holding open ever since.
@@ -1483,7 +1897,7 @@ function sameHashMap(a, b) {
 // nothing while the unlink proceeds (F8).
 // ---------------------------------------------------------------------------
 function confirmBoundEvidence(bound, { insideConfirm } = {}) {
-  const { leaves, dirs, stamp, edges, roots } = bound;
+  const { leaves, dirs, baseline, edges, roots } = bound;
 
   // (e) THE LIVE NAMESPACE, before anything is read through a retained fd.
   confirmBoundRoots(roots);
@@ -1499,7 +1913,7 @@ function confirmBoundEvidence(bound, { insideConfirm } = {}) {
   // BOTH turned it red. The attack the last position exists to stop starts
   // AFTER the first-position proof has already returned: the (a)/(b)/(c)/(d)
   // proofs that follow are ALL descriptor-addressed and therefore survive a
-  // namespace swap, and an attacker SIZES that window by inflating the stamped
+  // namespace swap, and an attacker SIZES that window by inflating the attested
   // surface toward MAX_BASELINE_TOTAL_BYTES so the re-hashing runs long enough
   // to swap `.claude` inside it.
   //
@@ -1555,9 +1969,10 @@ function confirmBoundEvidence(bound, { insideConfirm } = {}) {
     }
   }
 
-  // (d) THE STAMP ITSELF, held open across the verdict for exactly the same
-  // reason as every (B) leaf.
-  if (stamp) confirmBoundFile(stamp, `the enforcement stamp '${STAMP_REL}'`);
+  // (d) THE BASELINE LIST ITSELF, held open across the verdict for exactly the
+  // same reason as every (B) leaf. In ADOPT mode this is the descriptor on the
+  // file the rename INSTALLED, never the one it replaced.
+  if (baseline) confirmBoundFile(baseline, LIST_WHAT);
 
   // (e) AGAIN, AND LAST — F10. THE FIRST-POSITION CALL IS NOT THE DEFECT; BEING
   // ONLY FIRST IS. Running the namespace rebinding first is what makes (a)-(d)
@@ -1681,15 +2096,15 @@ function confirmBoundFile(bound, what) {
     throw refuse(
       `${what} CHANGED SINCE THE VERDICT was computed — the name no longer denotes the object that was verified (verified dev/ino ${bound.dev}/${bound.ino}, ` +
         `now ${devOf(byName)}/${inoOf(byName)}${byName.isSymbolicLink() ? ', and it is now a symlink' : ''}). A substitution performed after the verdict is ` +
-        `refused whether or not what replaced it agrees with the stamp. The latch is LEFT IN PLACE.`
+        `refused whether or not what replaced it agrees with the baseline. The latch is LEFT IN PLACE.`
     );
   }
   const { sha256 } = hashDescriptorBounded(bound, what);
   if (sha256 !== bound.sha256) {
     throw refuse(
       `${what} CHANGED SINCE THE VERDICT was computed — the bytes behind the descriptor this call held open across the verdict are no longer the bytes that ` +
-        `were verified (verified sha256 ${bound.sha256}, now ${sha256}). A SELF-CONSISTENT substitution — tampered bytes written together with a stamp that ` +
-        `attests them — is exactly what this binding exists to refuse: an incident is discharged only for bytes THIS call verified, never for bytes that ` +
+        `were verified (verified sha256 ${bound.sha256}, now ${sha256}). A SELF-CONSISTENT substitution — tampered bytes written together with a baseline ` +
+        `that attests them — is exactly what this binding exists to refuse: an incident is discharged only for bytes THIS call verified, never for bytes that ` +
         `merely agree with a manifest found on disk afterwards. The latch is LEFT IN PLACE.`
     );
   }
@@ -2010,10 +2425,22 @@ function validateTestSeams(options) {
 //     `callerRole` or the wrong one — NOT against a wrapper that forgets to
 //     thread IDENTITY, since an absent `callerAgentId` is explicitly accepted.
 //     Nor is it the last obstacle before a clear: the latch must exist, the
-//     stamp must match, both verification passes must agree, and the bound
-//     confirmation must hold, all independently of this argument. A real boundary
-//     requires authorization INJECTED from server-owned invocation context, and
+//     baseline list must match, both verification passes must agree, the (A)
+//     tracked surface must be clean, and the bound confirmation must hold, all
+//     independently of this argument. A real boundary requires authorization
+//     INJECTED from server-owned invocation context, and
 //     `callerRole`/`callerAgentId` must never appear in a public tool schema.
+//
+// `adopt` (default FALSE) SELECTS THE MODE, and it is deliberately an EXPLICIT
+// FLAG rather than a fallback the absence of a list could trigger (fe861066 D5):
+//   * FALSE — VERIFY. Reads the existing list, refuses if there is none, refuses
+//     on any (B) delta and on (A) dirt, writes NOTHING.
+//   * TRUE  — ADOPT. MINTS the list from the surface as it now is, which is an
+//     acceptance and not a verification. With no latch it initialises and
+//     removes nothing; with a latch it installs, binds the INSTALLED file, and
+//     then removes the latch LAST. It proceeds on (A) dirt and names it loudly.
+//   The gate above applies to BOTH modes: fe861066 D5 says ADOPT is
+//   conductor-gated too, and it is the mode that WRITES.
 //
 // TEST-ONLY SEAMS — production callers MUST NEVER pass any of them:
 //   `_testHookAfterEnumeration`   after the FIRST verdict, before the final pass.
@@ -2066,6 +2493,7 @@ export async function reconcileEnforcementTaint(options = {}) {
     cwd,
     callerRole,
     callerAgentId = null,
+    adopt = false,
     _testHookAfterEnumeration,
     _testHookBeforeRemoval,
     _testHookBeforeDirectoryOpen,
@@ -2199,11 +2627,15 @@ export async function reconcileEnforcementTaint(options = {}) {
         };
       }
 
-      // (2) THE LATCH FIRST. If there is no incident there is nothing to discharge,
-      // and reporting a clear that did not happen would tell a caller an incident
-      // was resolved when none existed (AC-R12).
+      // (2) THE LATCH FIRST — EXCEPT IN ADOPT MODE, WHOSE ORDERING fe861066 D2
+      // DELIBERATELY OVERTURNS. Under VERIFY, no latch means no incident, and
+      // reporting a clear that did not happen would tell a caller an incident was
+      // resolved when none existed (AC-R12). Under ADOPT the absence of a latch
+      // is the BOOTSTRAP case: there is a list to initialise even though there is
+      // nothing to discharge, so the mode must be consulted before the latch is
+      // allowed to end the call.
       const latch = await classifyLatch(cwd);
-      if (latch.state === 'absent') {
+      if (latch.state === 'absent' && !adopt) {
         return {
           cleared: false,
           reason:
@@ -2212,83 +2644,161 @@ export async function reconcileEnforcementTaint(options = {}) {
         };
       }
 
-      // (3) FIRST PASS — the stamp and the current (B) surface, in a scope of
-      // their own: nothing from this pass is carried into the verdict that
-      // authorizes the removal, it exists to establish a baseline the second pass
-      // must still agree with.
-      const first = await withScope(async (firstScope) => {
-        const stamp = readStampSnapshot(cwd, firstScope);
-        const { map } = await collectBaseline(cwd, firstScope, { retain: false, onBeforeDirectoryOpen: _testHookBeforeDirectoryOpen });
-        return { stamp, map };
-      });
+      // (2a) THE (A) HALF OF THE LATCH'S DOMAIN. Consulted in BOTH modes and
+      // acted on differently in each: VERIFY refuses on dirt (a (B)-only
+      // verification cannot discharge an (A) incident), ADOPT proceeds and says
+      // so LOUDLY, because deliberate acceptance is exactly what ADOPT is.
+      const dirt = trackedSurfaceDirt(cwd);
+      if (!adopt) requireCleanTrackedSurface(dirt, 'before verification');
 
-      // (4) THE FIRST VERDICT. Throws a refusal on anything less than exact.
-      verifyExactManifest(first.stamp, first.map);
+      // (3) THE SURFACE VERDICT. The two modes differ ONLY in where the (B)
+      // comparator comes from — read in VERIFY, MINTED in ADOPT — and share every
+      // binding, seam and removal step after it.
+      let attested;
+      let listBound;
+      let listEdges;
+      let listRoots;
+      let final;
 
-      // (5) SEAM 1 (`_testHookAfterEnumeration`) — after this verdict, before the final pass.
-      if (typeof _testHookAfterEnumeration === 'function') {
-        await _testHookAfterEnumeration();
+      if (adopt) {
+        // ADOPT — ONE retained pass IS the verdict (fe861066 D5: "enumerate/hash
+        // the surface via retained descriptors"). There is no prior list to
+        // disagree with, so a second unretained pass would compare the surface to
+        // itself and prove nothing the bound confirmation does not already prove.
+        final = await collectBaseline(cwd, scope, { retain: true, onBeforeDirectoryOpen: _testHookBeforeDirectoryOpen });
+        const minted = mintBaselineEntries(final.map);
+
+        // SEAM 1 — after the surface verdict, before anything is mutated.
+        if (typeof _testHookAfterEnumeration === 'function') {
+          await _testHookAfterEnumeration();
+        }
+
+        // LIST BEFORE LATCH. The install happens strictly before the removal
+        // walk, so the only crash state it can produce is "a fresh list plus a
+        // present latch" — continued denial, discharged by a subsequent VERIFY.
+        const installed = installBaselineList(cwd, scope, minted);
+        attested = minted.length;
+        listBound = installed.bound;
+        listEdges = installed.edges;
+        listRoots = installed.roots;
+
+        if (latch.state === 'absent') {
+          return {
+            cleared: false,
+            reason:
+              `baseline initialized; no latch removed — ${LIST_WHAT} now attests the current (B) surface (${attested} path${attested === 1 ? '' : 's'}, ` +
+              `exact set equality in both directions by construction). There was no (B) surface taint latch at '${LATCH_REL}', so nothing was discharged ` +
+              `and no latch was created.${adoptDirtNote(dirt)}`,
+          };
+        }
+      } else {
+        // (3a) FIRST PASS — the baseline list and the current (B) surface, in a
+        // scope of their own: nothing from this pass is carried into the verdict
+        // that authorizes the removal, it exists to establish a reading the
+        // second pass must still agree with.
+        const first = await withScope(async (firstScope) => {
+          const list = readBaselineList(cwd, firstScope);
+          const { map } = await collectBaseline(cwd, firstScope, { retain: false, onBeforeDirectoryOpen: _testHookBeforeDirectoryOpen });
+          return { list, map };
+        });
+
+        // (3b) THE FIRST VERDICT. Throws a refusal on anything less than exact.
+        verifyExactBaseline(first.list, first.map);
+
+        // (3c) SEAM 1 (`_testHookAfterEnumeration`) — after this verdict, before the final pass.
+        if (typeof _testHookAfterEnumeration === 'function') {
+          await _testHookAfterEnumeration();
+        }
+
+        // (3d) THE FINAL, BOUND PASS. Everything it opens — the pinned chains,
+        // every (B) leaf, every walked (B) directory, the baseline list — is
+        // RETAINED in this call's scope, so the verdict below is bound to
+        // descriptors that stay reachable through the removal. This is F1: a
+        // verdict whose evidence is released is a verdict that can be acted on
+        // for bytes nobody verified.
+        const listFinal = readBaselineList(cwd, scope, { retain: true });
+        if (listFinal.kind !== first.list.kind || listFinal.present !== first.list.present || listFinal.sha256 !== first.list.sha256) {
+          throw refuse(
+            `${LIST_WHAT} CHANGED DURING VERIFICATION (was ${first.list.kind}/${first.list.sha256 ?? 'n/a'}, now ` +
+              `${listFinal.kind}/${listFinal.sha256 ?? 'n/a'}) — a baseline that moves while it is being verified attests nothing, and the clear is ABORTED ` +
+              `rather than completed on a stale verdict. The latch is LEFT IN PLACE.`
+          );
+        }
+        final = await collectBaseline(cwd, scope, { retain: true, onBeforeDirectoryOpen: _testHookBeforeDirectoryOpen });
+        if (!sameHashMap(first.map, final.map)) {
+          throw refuse(
+            `the (B) enforcement surface CHANGED DURING VERIFICATION — the set or bytes enumerated before the verdict differ from the set or bytes ` +
+              `enumerated immediately before removal. The clear is ABORTED rather than completed on a stale verdict. The latch is LEFT IN PLACE.`
+          );
+        }
+
+        // (3e) THE VERDICT THAT AUTHORIZES THE REMOVAL, computed from the BOUND
+        // evidence rather than inherited from the first pass.
+        attested = verifyExactBaseline(listFinal, final.map);
+        listBound = listFinal.bound;
+        listEdges = listFinal.edges;
+        listRoots = listFinal.roots;
       }
 
-      // (6) THE FINAL, BOUND PASS. Everything it opens — the pinned chains, every
-      // (B) leaf, every walked (B) directory, the stamp — is RETAINED in this
-      // call's scope, so the verdict below is bound to descriptors that stay
-      // reachable through the removal. This is F1: a verdict whose evidence is
-      // released is a verdict that can be acted on for bytes nobody verified.
-      const stampFinal = readStampSnapshot(cwd, scope, { retain: true });
-      if (stampFinal.kind !== first.stamp.kind || stampFinal.present !== first.stamp.present || stampFinal.sha256 !== first.stamp.sha256) {
-        throw refuse(
-          `the enforcement stamp at '${STAMP_REL}' CHANGED DURING VERIFICATION (was ${first.stamp.kind}/${first.stamp.sha256 ?? 'n/a'}, now ` +
-            `${stampFinal.kind}/${stampFinal.sha256 ?? 'n/a'}) — a stamp that moves while it is being verified attests nothing, and the clear is ABORTED ` +
-            `rather than completed on a stale verdict. The latch is LEFT IN PLACE.`
-        );
-      }
-      const final = await collectBaseline(cwd, scope, { retain: true, onBeforeDirectoryOpen: _testHookBeforeDirectoryOpen });
-      if (!sameHashMap(first.map, final.map)) {
-        throw refuse(
-          `the (B) enforcement surface CHANGED DURING VERIFICATION — the set or bytes enumerated before the verdict differ from the set or bytes enumerated ` +
-            `immediately before removal. The clear is ABORTED rather than completed on a stale verdict. The latch is LEFT IN PLACE.`
-        );
-      }
-
-      // (7) THE VERDICT THAT AUTHORIZES THE REMOVAL, computed from the BOUND
-      // evidence rather than inherited from the first pass.
-      const attestedCount = verifyExactManifest(stampFinal, final.map);
-      // F6 — the binding now carries the NAMESPACE as well as the contents: every
-      // directory edge walked by BOTH the (B) enumeration and the stamp read,
-      // plus every anchor either of them resolved. Retained descriptors alone
-      // attest a tree that may have been renamed out from under the repository.
+      // F6 — the binding carries the NAMESPACE as well as the contents: every
+      // directory edge walked by BOTH the (B) enumeration and the list read/
+      // install, plus every anchor either of them resolved. Retained descriptors
+      // alone attest a tree that may have been renamed out from under the
+      // repository.
       const bound = {
         leaves: final.leaves,
         dirs: final.dirs,
-        stamp: stampFinal.bound,
-        edges: [...final.edges, ...(stampFinal.edges || [])],
-        roots: [...final.roots, ...(stampFinal.roots || [])],
+        baseline: listBound,
+        edges: [...final.edges, ...(listEdges || [])],
+        roots: [...final.roots, ...(listRoots || [])],
       };
 
-      // (8) SEAM 2 (`_testHookBeforeRemoval`) — the verdict is settled and nothing aimed
-      // at the latch has happened yet.
+      // (4) SEAM 2 (`_testHookBeforeRemoval`) — the verdict is settled, the list
+      // is on disk, and nothing aimed at the latch has happened yet. It fires on
+      // the ADOPT path too, in the same window.
       if (typeof _testHookBeforeRemoval === 'function') {
         await _testHookBeforeRemoval();
       }
 
-      // (9) CLEAR LAST (Ruling 10). The removal walk pins `.sterling`, re-confirms
-      // the latch's identity, then — as its last act before the unlink — proves
-      // through the RETAINED descriptors that the surface and the stamp are still
-      // the exact bytes and objects this call verified. No atomicity is required,
-      // because every intermediate state still denies.
+      // (5) CLEAR LAST. The removal walk pins `.sterling`, re-confirms the
+      // latch's identity, then — as its last act before the unlink — proves
+      // through the RETAINED descriptors that the surface and the baseline list
+      // are still the exact bytes and objects this call verified. No atomicity is
+      // required, because every intermediate state still denies.
       await removeLatch(cwd, latch, {
-        beforeUnlink: () => confirmBoundEvidence(bound, { insideConfirm: _testHookInsideConfirm }),
+        // BOTH HALVES OF THE LATCH'S DOMAIN ARE RE-PROVEN HERE, and this callback
+        // stays SYNCHRONOUS AND THROWS SYNCHRONOUSLY (F8/R6): `trackedSurfaceDirt`
+        // is `spawnSync` and `requireCleanTrackedSurface` throws, so nothing here
+        // schedules a microtask into the window it exists to close. The (A)
+        // re-check runs FIRST so that `confirmBoundEvidence` keeps its F10
+        // property of being ADJACENT to the unlink. ADOPT skips it: it already
+        // accepted the (A) surface deliberately and said so out loud.
+        beforeUnlink: () => {
+          // UNPINNED DEFENCE IN DEPTH, MEASURED AND DISCLOSED RATHER THAN
+          // ASSUMED (2026-08-30): disabling this line leaves the suite 55/55
+          // GREEN, because no fixture dirties a TRACKED `hooks/**` path inside
+          // the enumeration window — a pin would need a SEAM 2/SEAM 4 hook that
+          // writes one. It is kept because the window it closes is real (the
+          // first consultation precedes every hash), not because a test holds
+          // it; treat it as regressible until such a pin exists.
+          if (!adopt) requireCleanTrackedSurface(trackedSurfaceDirt(cwd), 'immediately before the removal');
+          confirmBoundEvidence(bound, { insideConfirm: _testHookInsideConfirm });
+        },
         beforeConfirm: _testHookBeforeConfirm,
       });
 
       return {
         cleared: true,
-        reason:
-          `CLEARED — the (B) surface taint latch at '${LATCH_REL}' was removed after the current (B) surface was enumerated and hashed twice and found to ` +
-          `agree with the enforcement stamp at '${STAMP_REL}' EXACTLY (${attestedCount} attested (B) path${attestedCount === 1 ? '' : 's'}, exact set ` +
-          `equality in both directions), and after the descriptors that produced that verdict were re-confirmed — bytes, identity and directory membership — ` +
-          `as the last act before the removal.`,
+        reason: adopt
+          ? `CLEARED (ADOPT) — ${LIST_WHAT} was minted from the current (B) surface (${attested} path${attested === 1 ? '' : 's'}), installed atomically, ` +
+            `re-opened and re-verified against the surface verdict, and only then was the (B) surface taint latch at '${LATCH_REL}' removed — after the ` +
+            `descriptors that produced that verdict were re-confirmed (bytes, identity, directory membership and namespace edges) as the last act before ` +
+            `the removal.${adoptDirtNote(dirt)}`
+          : `CLEARED — the (B) surface taint latch at '${LATCH_REL}' was removed after the current (B) surface was enumerated and hashed twice and found to ` +
+            `agree with ${LIST_WHAT} EXACTLY (${attested} attested (B) path${attested === 1 ? '' : 's'}, exact set equality in both directions), and after ` +
+            `the descriptors that produced that verdict were re-confirmed — bytes, identity and directory membership — as the last act before the removal. ` +
+            `The tracked (A) enforcement surface was OBSERVED to match HEAD at two moments — before verification and again immediately before the removal — ` +
+            `which is a moment-of-check observation on both halves, not a proof that nothing changed between or after them (0ac7be95 R1).`,
       };
     } catch (e) {
       if (e instanceof ReconcileRefusal) return { cleared: false, reason: `REFUSED — ${e.message}` };

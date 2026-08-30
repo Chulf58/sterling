@@ -648,37 +648,12 @@ for (const [label, bytes] of [
   });
 }
 
-// PIN-BOUNDED-IO-2-STAMP-CONTROL. Baseline for the STAMP tests: a
-// corrupt/oversize stamp lying on disk, IRRELEVANT because the enforcement
-// path never changes across the window, must not by itself cause a deny —
-// isolating "stamp is unusable AND was actually needed" (treatment, below)
-// from "a bad stamp file merely exists somewhere" (which must never matter on
-// its own).
-//
-// EXPECTED: GREEN NOW, most plausibly — an untouched enforcement path allows
-// via observation, without ever consulting the stamp (PIN-ALLOW's shipped
-// property). If today's Post reads the stamp unconditionally regardless of
-// whether it is needed, this control could be the one that goes RED instead
-// — which would itself be a finding worth reporting (an unnecessary stamp
-// read on the allow path is exactly the kind of unbounded work this board
-// item is about).
-//
-// SABOTAGE: make Post read the stamp unconditionally, before checking whether
-// the pre-dirty path is unchanged.
-test('PIN-BOUNDED-IO-2-STAMP-CONTROL: CONTROL — a garbage stamp file present but IRRELEVANT (path never dirtied in-window) does not by itself deny', { skip: GIT_SKIP }, () => {
-  const fx = makeGitProject();
-  const { dir, cleanup } = fx;
-  try {
-    mkdirSync(dirname(stampPath(dir)), { recursive: true });
-    writeFileSync(stampPath(dir), bigBuffer(OVERSIZE_RECORD_BYTES, 0x2a));
-    const L = lane('stamp-control');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre: bundle clean, never touched');
-    const r = h17(dir, 'PostToolUse', L);
-    assert.equal(r.code, 0, `CONTROL: an unrelated garbage stamp must not deny an untouched path — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4 (decision 78dc9bd6/fe861066): PIN-BOUNDED-IO-2-STAMP-CONTROL
+// planted a garbage enforcement-stamp file as an IRRELEVANT baseline for the
+// STAMP tests below — scripts/enforcement-stamp.mjs and the file it wrote to
+// are both deleted, so there is no longer a stamp artifact for this control to
+// isolate against. The CORRUPT/OVERSIZE tests below still stand as bounded-I/O
+// pins on the same disk location, independent of what that path used to mean.
 
 // PIN-BOUNDED-IO-2-STAMP-{CORRUPT,OVERSIZE} (board 55fcccac clause 2,
 // "enforcement stamp"). The classic clean-at-Pre, dirty-at-Post shape: a

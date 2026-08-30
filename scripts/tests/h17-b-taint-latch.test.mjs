@@ -317,16 +317,6 @@ function lane(tag) {
   return { agent_id: 'a1', tool_use_id: `toolu_${tag}_${randomUUID().replace(/-/g, '').slice(0, 16)}` };
 }
 
-function stampPath(dir) {
-  return join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-}
-
-function writeStamp(dir, entries) {
-  const p = stampPath(dir);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(entries));
-}
-
 function sha256Of(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
@@ -344,6 +334,28 @@ function settingsPath(dir) {
 }
 function configJsonPath(dir) {
   return join(dir, '.sterling', 'config.json');
+}
+
+// ADDED S4 — decision `b-baseline-hash-list-concrete-design` (fe861066), D1:
+// the persistent (B) baseline hash list at .sterling/enforcement-baseline.json
+// replaces the dead stamp/transient apparatus (stampPath/writeStamp deleted —
+// no remaining caller in this file). Shape: {version: exactly 1, minted_at
+// (diagnostic only), entries: [{path, sha256}] SORTED ASCENDING BY PATH}.
+function baselineListPath(dir) {
+  return join(dir, '.sterling', 'enforcement-baseline.json');
+}
+
+function writeBaselineList(dir, entries) {
+  const sorted = [...entries].map(({ path, sha256 }) => ({ path, sha256 })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  writeFileSync(baselineListPath(dir), JSON.stringify({ version: 1, minted_at: NOW, entries: sorted }));
+}
+
+function fullBaselineEntries(dir) {
+  return [
+    { path: CODER_REL, sha256: sha256Of(coderPath(dir)) },
+    { path: SETTINGS_REL, sha256: sha256Of(settingsPath(dir)) },
+    { path: CONFIG_REL, sha256: sha256Of(configJsonPath(dir)) },
+  ];
 }
 
 // THE LATCH — Ruling 7: `.sterling/enforcement-taint.json`, a plain file,
@@ -460,47 +472,15 @@ test('AC-L2: a new file appearing under a (B) glob (unauthorizedAdditions) ALSO 
   }
 });
 
-// ===========================================================================
-// AC-L3 — SET ON STAMP TAMPER EVEN WHEN NO (B) FILE CHANGED. A stamp change
-// inside a window with no (B) change at all is denied and invalidated
-// (already established by the sibling suite's AC9) — the NEW ground here is
-// that the latch must be set too, because "a command that tried to
-// manufacture its own attestation is an incident in its own right" (Ruling 9)
-// independent of whether any (B) file was actually touched.
-//
-// EXPECTED FAILURE SHAPE (RED): the deny + stamp-invalidation (deletion) for
-// an in-window stamp write is most plausibly already GREEN today (the
-// sibling suite's established AC9 ground). `existsSync(latchPath(dir))` after
-// Post comes back `false` — the new assertion this pin adds.
-//
-// SABOTAGE: set the latch on `baselineDenied`/`unauthorizedAdditions` only,
-// and skip it on `stampTampered` — `existsSync(latchPath(dir))` flips from
-// true to false for THIS fixture while AC-L1/AC-L2 stay green.
-// ===========================================================================
-test('AC-L3: an in-window stamp tamper with NO (B) file changed ALSO sets the taint latch', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const coder = coderPath(dir);
-    const originalBytes = readFileSync(coder);
-    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch exists before this call');
-    const L = lane('ac-l3-stamponly');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre: no stamp exists yet');
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists at Pre');
-
-    // a "correct-looking" stamp (attests the currently-unchanged bytes),
-    // written strictly inside the window — untrusted regardless of
-    // self-consistency, per fac9a69b Ruling 2.
-    writeStamp(dir, [{ path: CODER_REL, sha256: sha256Of(coder), at: NOW }]);
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `an in-window stamp write with no (B) change must still deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    assert.deepEqual(readFileSync(coder), originalBytes, 'the (B) path itself was never touched — isolating this from AC-L1/AC-L2');
-    assert.equal(existsSync(latchPath(dir)), true, 'THE RULING: EVERY stampTampered event sets the latch, even with no (B) file changed');
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4 (decision 78dc9bd6/fe861066): AC-L3 pinned latching on an
+// in-window enforcement-STAMP tamper — the whole stamp/attestation apparatus
+// is deleted, so there is no longer a stamp write to tamper. The general
+// property this arm was carving out ("a detection latches independent of
+// which trigger fired") is not lost: AC-L1 (baselineDenied) and AC-L2
+// (unauthorizedAdditions) already cover two of the corrected trigger set
+// (violations ∪ changedPreDirty ∪ baselineDenied ∪ unauthorizedAdditions ∪
+// listDenied, decision fe861066 D6), and h17-b-baseline-list.test.mjs pins
+// listDenied's own latch behaviour directly.
 
 // ===========================================================================
 // AC-L4 — THE HEADLINE. THE ADOPTION POINT IS CLOSED. Call N tampers a (B)
@@ -830,162 +810,75 @@ test('AC-L10: a latch-creation FAILURE (unwritable .sterling/) is disclosed in t
 });
 
 // ===========================================================================
-// AC-L11 — EXACT MANIFEST (Ruling 4). Where a stamp EXISTS, the current (B)
-// set is compared against its stamped subset on EVERY call, not only after an
-// in-window difference. Three arms, control (exact match) placed FIRST.
-// ===========================================================================
-
-function fullAttestedStamp(dir) {
-  return [
-    { path: CODER_REL, sha256: sha256Of(coderPath(dir)), at: NOW },
-    { path: SETTINGS_REL, sha256: sha256Of(settingsPath(dir)), at: NOW },
-    { path: CONFIG_REL, sha256: sha256Of(configJsonPath(dir)), at: NOW },
-  ];
-}
-
-// AC-L11-CONTROL: an exact stamp for every current (B) path, nothing changed
-// in-window, ALLOWS. Placed first: without it, a DENY in the two arms below
-// could equally be explained by "a stamp being present at all now denies
-// everything" rather than by the specific exactness violation each plants.
+// AC-L11-CONTROL — REWORKED S4 (decision `b-baseline-hash-list-concrete-
+// design`, fe861066, superseding decision 532a4383 Ruling 4's stamp-manifest
+// shape). The persistent (B) baseline hash list at
+// .sterling/enforcement-baseline.json now carries the EXACT-MATCH comparator
+// this control exercises: a list that exactly attests every current (B) path,
+// nothing changed in-window, ALLOWS.
+//
+// ARM-A (hash-different) and ARM-B (absent-from-list) — the MISMATCH arms of
+// the same comparator — are now pinned directly over the list file in
+// scripts/tests/h17-b-baseline-list.test.mjs (its "bytes-differ" and
+// "live-but-unlisted" arms), which is this comparator's dedicated suite. They
+// are not duplicated here.
 //
 // EXPECTED: GREEN today is plausible only by accident (HEAD's established
 // per-call detect-and-deny already allows an unchanged (B) surface without
-// even opening the stamp) — but Ruling 4 requires the exact-manifest
-// validation to run on EVERY call once a stamp exists, so a correct
+// even opening any list) — but decision fe861066 D3 requires the list
+// comparator to run on EVERY call once a list exists, so a correct
 // implementation must ALSO allow here, for a DIFFERENT reason (validated and
-// found exact, not merely "nothing changed, stamp not even consulted"). This
-// pin cannot distinguish those two reasons by itself — the two DENY arms
-// below are what prove the stamp is actually being read and validated on
-// every call, not skipped.
+// found exact, not merely "nothing changed, list not even consulted"). This
+// pin cannot distinguish those two reasons by itself — h17-b-baseline-list.
+// test.mjs's mismatch arms are what prove the list is actually being read and
+// validated on every call, not skipped.
 //
-// SABOTAGE: this control has no independent sabotage of its own — see the two
-// arms below, whose sabotage would also flip this control to deny if it were
-// naively "any stamp present -> deny" instead of "exact match -> allow,
-// mismatch -> deny".
-test('AC-L11-CONTROL (exact match): a stamp that exactly attests every current (B) path, nothing changed in-window, ALLOWS', { skip: GIT_SKIP }, () => {
+// SABOTAGE: this control has no independent sabotage of its own — see
+// h17-b-baseline-list.test.mjs's mismatch arms, whose sabotage would also flip
+// this control to deny if it were naively "any list present -> deny" instead
+// of "exact match -> allow, mismatch -> deny".
+test('AC-L11-CONTROL (exact list match): a persistent baseline list that exactly attests every current (B) path, nothing changed in-window, ALLOWS', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    writeStamp(dir, fullAttestedStamp(dir));
+    writeBaselineList(dir, fullBaselineEntries(dir));
     const L = lane('ac-l11-control-exact');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre allows');
     const r = h17(dir, 'PostToolUse', L);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `CONTROL: an exact stamp for every current (B) path must ALLOW even though it is validated on every call — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
-});
-
-// AC-L11-ARM-A (hash-different): the stamp names settings.local.json but with
-// a WRONG hash (not matching its actual current bytes); settings.local.json
-// itself is NEVER touched during the window. Per Ruling 4 this must still
-// DENY, because the exact-manifest check runs every call, independent of
-// whether anything changed in THIS window.
-//
-// EXPECTED FAILURE SHAPE (RED): HEAD's established per-call detect-and-deny
-// only consults the stamp AFTER detecting an in-window difference (fac9a69b's
-// GAP this decision closes) — with nothing changed in-window, HEAD allows
-// without ever looking at the stamp's exactness. `assert.equal(r.code, 2,
-// ...)` fires with actual 0.
-//
-// SABOTAGE: revert to "only consult the stamp when something changed
-// in-window" (Ruling 4's own named mistake) — the deny flips back to allow.
-test('AC-L11-ARM-A (hash-different): a stamp entry whose hash does NOT match its current (B) path denies, even with nothing changed in-window', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const wrongHash = createHash('sha256').update('not the real settings.local.json content').digest('hex');
-    writeStamp(dir, [
-      { path: CODER_REL, sha256: sha256Of(coderPath(dir)), at: NOW },
-      { path: SETTINGS_REL, sha256: wrongHash, at: NOW }, // deliberately wrong
-      { path: CONFIG_REL, sha256: sha256Of(configJsonPath(dir)), at: NOW },
-    ]);
-    const L = lane('ac-l11-arm-a-hashdiff');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre allows');
-    const settingsBefore = readFileSync(settingsPath(dir));
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(
-      r.code,
-      2,
-      `ARM A: a stamped (B) path whose hash does not match its current bytes must deny, even though nothing changed in this window — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
-    );
-    assert.deepEqual(readFileSync(settingsPath(dir)), settingsBefore, 'settings.local.json was genuinely never touched during the window — isolating the exactness violation from an in-window change');
-  } finally {
-    cleanup();
-  }
-});
-
-// AC-L11-ARM-B (absent from stamp): the stamp attests only two of the three
-// current (B) paths, omitting settings.local.json entirely even though it
-// currently exists on disk under the (B) glob. Per Ruling 4 this must deny.
-//
-// EXPECTED FAILURE SHAPE (RED): same reasoning as ARM A — HEAD only consults
-// the stamp on an in-window difference; with nothing changed, HEAD allows
-// without ever checking whether every current (B) path has a stamp entry.
-// `assert.equal(r.code, 2, ...)` fires with actual 0.
-//
-// SABOTAGE: validate only the stamped paths against current bytes (a
-// subset-only comparison) instead of exact-set (also checking that every
-// CURRENT (B) path has a stamp entry) — the deny flips to allow.
-test('AC-L11-ARM-B (absent from stamp): a current (B) path with NO stamp entry at all denies, even with nothing changed in-window', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    writeStamp(dir, [
-      { path: CODER_REL, sha256: sha256Of(coderPath(dir)), at: NOW },
-      { path: CONFIG_REL, sha256: sha256Of(configJsonPath(dir)), at: NOW },
-      // SETTINGS_REL deliberately omitted, though it currently exists on disk
-    ]);
-    const L = lane('ac-l11-arm-b-absent');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre allows');
-    const settingsBefore = readFileSync(settingsPath(dir));
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(
-      r.code,
-      2,
-      `ARM B: a current (B) path absent from the stamp must deny, even though nothing changed in this window — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
-    );
-    assert.deepEqual(readFileSync(settingsPath(dir)), settingsBefore, 'settings.local.json was genuinely never touched during the window — isolating the exactness violation from an in-window change');
+    assert.equal(r.code, 0, `CONTROL: an exact baseline list for every current (B) path must ALLOW even though it is validated on every call — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// AC-L12 — EAGERNESS. THE LATCH IS SET AT THE DETECTION SITE, NOT AT ONE LATE
-// BLOCK. Spec: decision `taint-latch-persists-eagerly-at-detection-because-deny-is-a-hard-exit`
-// (fd9d24af), RULING A — the three trigger producers (`observeStampTamper`,
-// `noteUnauthorizedAddition`, `noteBaselineDenied`) each call the create-only
-// latch-set IMMEDIATELY, before any ancillary work.
-//
-// WHY THIS IS NOT COVERED BY AC-L1/AC-L2/AC-L3 ABOVE: `deny()` is
+// AC-L12-CONTROL — EAGERNESS, THE SURVIVING HALF. Spec: decision
+// `taint-latch-persists-eagerly-at-detection-because-deny-is-a-hard-exit`
+// (fd9d24af), RULING A — trigger producers call the create-only latch-set
+// IMMEDIATELY, before any ancillary work, because `deny()` is
 // `process.stderr.write(...); process.exit(2)` (scripts/hooks/lib/common.mjs:108)
-// — A HARD EXIT, NOT A THROW. fd9d24af records ~14 unconditional deny() exits
-// sitting BETWEEN the earliest detection (`stampTampered`, h17-bash-write-sweep.mjs:4440)
-// and where the latch used to be written (:5196). Every latch test above uses a
-// fixture that sails through all of them and reaches that late block, so
-// REVERTING THE EAGER HELPERS TO A SINGLE LATE BLOCK LEAVES THE WHOLE FILE
-// GREEN. This pair is the only discrimination of WHERE the latch is written.
+// — A HARD EXIT, NOT A THROW — so a late composed latch block can be skipped
+// entirely by an earlier unrelated hard exit.
 //
-// THE FIXTURE VARIABLE that separates the two arms below is exactly one thing:
-// whether a qualifying detection occurs before the unrelated early denial. The
-// corrupted attribution record is held constant across both.
+// DELETED S4: this AC used to pair with AC-L12 (the discriminator), which
+// planted an in-window enforcement-STAMP write as its "earliest trigger" —
+// `stampTampered` was, per fd9d24af, the FIRST of the old trigger producers to
+// fire, well before the attribution-record hard exit this fixture also uses.
+// The whole stamp/attestation apparatus is deleted (decision 78dc9bd6/
+// fe861066), so that specific race (stampTampered fires before an unrelated
+// later attribution-parse hard exit) no longer exists to test, and this
+// author has no implementation-ordering knowledge (H4) of where the NEW
+// listDenied trigger sits relative to the attribution check to safely
+// reconstruct an equivalent race. That specific eagerness property —
+// decision fe861066 D3's own words, "early enough that later hard-exit
+// denials cannot preempt an observable list contradiction from latching" — is
+// instead pinned directly, without needing a race, in
+// scripts/tests/h17-b-baseline-list.test.mjs (a standing list/disk mismatch
+// present from the start denies+latches on the very first gated call).
 //
-// THE THIRD LEG of the triangle already exists and is NOT modified here: AC-L3
-// (detection, healthy attribution record, no early deny) pins detection ->
-// latch. AC-L12-CONTROL pins early-deny-without-detection -> NO latch. AC-L12
-// pins detection + early deny -> latch anyway. Only all three together mean
-// "the latch was written at the detection site".
-//
-// ATTRIBUTION RECORDS: reached through this file's existing `tempRecords`
-// helper (the `sterling-enforce-<projectTag>*` files in os.tmpdir() that
-// `makeGitProject`'s own cleanup already sweeps, and that fd9d24af's reproduced
-// exploit `rm`s). No implementation was read to find them. Both arms assert a
-// PRECONDITION that at least one such record actually exists after Pre — so a
-// wrong naming assumption fails LOUDLY on the precondition instead of passing
-// vacuously.
+// This CONTROL survives on its own merit: an unrelated denial that observes NO
+// incident must never spuriously create the taint latch — a real regression
+// guard independent of the discriminator it used to pair with.
 // ===========================================================================
 
 const CORRUPT_ATTRIBUTION_BYTES = Buffer.from('{ CORRUPTED-ATTRIBUTION-RECORD not valid json,,,');
@@ -1009,79 +902,6 @@ function corruptAttributionRecords(projectTag) {
   return paths.length;
 }
 
-// AC-L12 ONLY. Selects the four Pre record classes by EXACT FILENAME SUFFIX so
-// that only the attribution/dirty record can be corrupted. See AC-L12's comment
-// block for why the narrowing is load-bearing.
-//
-// THE FOUR CLASSES — MEASURED at scripts/hooks/h17-bash-write-sweep.mjs and
-// supplied by the conductor (this author's read wall, H4, forbids reading the
-// hook). All four live under os.tmpdir() and share the one
-// `sterling-enforce-<tag>-<runId>-call-<key>` stem that this file's existing
-// `tempRecords` helper matches on, where `key` is sha256(tool_use_id); each
-// also has a legacy no-`call-<key>` form (`sterling-enforce-<tag>-<runId>.dirty.json`):
-//   .baseline.json  (:1542)  THE (B) BASELINE
-//   .dirty.json     (:1572)  THE ATTRIBUTION / DIRTY RECORD   <- the only one corrupted
-//   .json           (:1616)  THE STATE RECORD (no extra suffix before .json)
-//   .stamp.json     (:1649)  THE STAMP WITNESS
-//
-// NOTE FOR THE NEXT READER: decision bab7d57d enumerates only THREE of these
-// (baselineFile :1542, dirtyFile :1572, stateFile :1616) and does not mention
-// the .stamp.json witness at :1649. That gap is what defeated this test's first
-// two fixtures — see AC-L12's comment block. Trust the four-class list here
-// over bab7d57d's three.
-//
-// THE WITNESS IS ITS OWN FILE, which is exactly why any blanket corruption of
-// the shared prefix destroys the evidence the stamp-tamper detection depends on.
-const DIRTY_SUFFIX = '.dirty.json';
-const STAMP_SUFFIX = '.stamp.json';
-const BASELINE_SUFFIX = '.baseline.json';
-
-function classifyPreRecords(projectTag) {
-  const all = tempRecords(projectTag).filter((p) => {
-    try {
-      return lstatSync(p).isFile();
-    } catch {
-      return false;
-    }
-  });
-  const dirty = all.filter((p) => p.endsWith(DIRTY_SUFFIX));
-  const stamp = all.filter((p) => p.endsWith(STAMP_SUFFIX));
-  const baseline = all.filter((p) => p.endsWith(BASELINE_SUFFIX));
-  const state = all.filter((p) => !p.endsWith(DIRTY_SUFFIX) && !p.endsWith(STAMP_SUFFIX) && !p.endsWith(BASELINE_SUFFIX));
-  return { all, dirty, stamp, baseline, state };
-}
-
-function classCounts(rec) {
-  return `total ${rec.all.length} — dirty ${rec.dirty.length}, stamp ${rec.stamp.length}, baseline ${rec.baseline.length}, state ${rec.state.length}`;
-}
-
-// ---------------------------------------------------------------------------
-// AC-L12-CONTROL — PLACED FIRST, AND IT PASSES FOR THE OPPOSITE REASON (latch
-// ABSENT, where AC-L12 requires it PRESENT).
-//
-// WHAT IT PINS, IN ONE SENTENCE: a call that hits the corrupted-attribution
-// denial with NO qualifying detection in its window creates NO latch.
-//
-// THE CAUSE IT RULES OUT: AC-L12's verdict ("it denied AND the latch exists")
-// has more than one possible cause — (a) the detection site latched eagerly,
-// which is the ruling, or (b) THE DENIAL ITSELF PRODUCED THE LATCH, either
-// because the corrupted-attribution path incidentally still runs the late
-// composed block, or because some implementation latches on every deny. Under
-// (b), AC-L12 would be green while pinning nothing about eagerness. This
-// control holds the corrupted record constant and removes ONLY the detection:
-// if the latch is still absent here, cause (b) is excluded and AC-L12's latch
-// can only have come from the detection — which, since the denial that fired is
-// this same early one, means it was written BEFORE that denial. Eagerness.
-//
-// EXPECTED: GREEN. Nothing in the window triggers a latch, so no latch exists
-// under either the eager or the old late-block implementation; the deny is the
-// fail-closed response to an enforcement artifact Post requires and cannot read.
-//
-// SABOTAGE: make any denial write the latch unconditionally — e.g. move the
-// latch-set into `deny()` in scripts/hooks/lib/common.mjs, or set it on the
-// corrupted/missing-attribution branch regardless of whether any trigger was
-// observed. `existsSync(latchPath(dir)) === false` flips to true here, and
-// AC-L12 below simultaneously loses all of its discriminating power.
 // ---------------------------------------------------------------------------
 test('AC-L12-CONTROL: a call denied for an UNRELATED reason (corrupted attribution record) with NO qualifying detection creates NO latch', { skip: GIT_SKIP }, () => {
   const { dir, projectTag, cleanup } = makeGitProject();
@@ -1095,11 +915,11 @@ test('AC-L12-CONTROL: a call denied for an UNRELATED reason (corrupted attributi
     assert.notEqual(
       corrupted,
       0,
-      "PRECONDITION: Pre must have written at least one sterling-enforce-<projectTag> attribution record into os.tmpdir() — if this fires, the record naming/location assumed by this file's own tempRecords helper is wrong and BOTH AC-L12 arms are vacuous"
+      "PRECONDITION: Pre must have written at least one sterling-enforce-<projectTag> attribution record into os.tmpdir() — if this fires, the record naming/location assumed by this file's own tempRecords helper is wrong"
     );
 
-    // NOTHING ELSE happens in this window: no stamp write, no (B) change.
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp is written in this window — no stampTampered detection');
+    // NOTHING ELSE happens in this window: no (B) change, no baseline list write.
+    assert.equal(existsSync(baselineListPath(dir)), false, 'PRECONDITION: no baseline list is written in this window — no listDenied detection');
     assert.deepEqual(readFileSync(coder), originalBytes, 'PRECONDITION: no (B) file changed in this window — no baselineDenied detection');
     assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch exists before Post');
 
@@ -1109,144 +929,21 @@ test('AC-L12-CONTROL: a call denied for an UNRELATED reason (corrupted attributi
     assert.equal(
       existsSync(latchPath(dir)),
       false,
-      'CONTROL: this denial observed NO incident, so it must NOT create the cross-call taint latch — otherwise AC-L12 below cannot distinguish "the detection site latched eagerly" from "every denial latches"'
+      'this denial observed NO incident, so it must NOT create the cross-call taint latch — a regression guard against "every denial latches"'
     );
   } finally {
     cleanup();
   }
 });
 
-// ---------------------------------------------------------------------------
-// AC-L12 — THE DISCRIMINATOR.
-//
-// WHAT IT PINS, IN ONE SENTENCE: a qualifying detection that is followed by an
-// UNRELATED, EARLIER denial still leaves the taint latch on disk — because the
-// latch is written at the detection site, not at a late block a hard exit can
-// skip.
-//
-// THE FIXTURE: an in-window enforcement-stamp write is the EARLIEST trigger
-// (fd9d24af: `stampTampered` observed at h17-bash-write-sweep.mjs:4440, calling
-// `observeStampTamper`), and a corrupted ATTRIBUTION record denies further down
-// the same arm (bab7d57d: the attribution exits at :4659/:4677/:4727, ~540
-// lines before the (B) stage at :5195 that used to hold the single latch
-// block). Detection first, unrelated hard-exit denial second, late composed
-// block never reached.
-//
-// WHY THE CORRUPTION IS NARROWED TO ONE RECORD — MEASURED TWICE, NOT PREDICTED.
-//
-// FIRST FIXTURE (blanket corruption of every `sterling-enforce-<projectTag>*`
-// record, as AC-L12-CONTROL above still does deliberately). MEASURED 2026-08-29
-// (`node --test-reporter=tap scripts/tests/h17-b-taint-latch.test.mjs`, 22
-// tests, this one the sole failure): RED with the latch absent — and the cause
-// was the FIXTURE, not the code. All the Pre records share one prefix, so a
-// blanket corruption destroys the STAMP WITNESS along with the attribution
-// record; the tamper comparison is guarded by
-// `if (!preWitness || typeof preWitness.kind !== 'string') { stampTrusted = false; }`,
-// so with no usable witness `stampTampered` is NEVER SET, no detection occurs,
-// and a latch at the detection site correctly does not appear.
-//
-// SECOND FIXTURE (select the attribution record BY CONTENT, on the assumption
-// that bab7d57d's three classes were the whole set). MEASURED 2026-08-29: the
-// precondition fired — "Found 2 such of 4 total" — because THERE ARE FOUR Pre
-// RECORD CLASSES, NOT THREE, and the stamp witness is its OWN `.stamp.json`
-// file (:1649) that bab7d57d never names. No content heuristic can separate
-// four classes it does not know exist.
-//
-// THIRD AND CURRENT FIXTURE: EXACT SUFFIX SELECTION over the measured four-class
-// list documented above `classifyPreRecords` — corrupt only `.dirty.json`, leave
-// `.baseline.json`, `.stamp.json` and the bare state `.json` intact. Narrowing
-// the corruption to the attribution record alone is what makes this test pin
-// EAGERNESS instead of accidentally re-testing evidence destruction. Both dead
-// fixtures are recorded here because each one FAILED LOUDLY ON A PRECONDITION
-// rather than producing an ambiguous red, and that is the property to preserve
-// if these record shapes ever change again.
-//
-// AND THAT BLANKET-CORRUPTION CASE IS A SEPARATE, STILL-OPEN DEFECT — DO NOT
-// ADD A TEST FOR IT HERE. Destroying the whole record set means the audit could
-// not be performed at all, which is the FOURTH-TRIGGER FAMILY
-// (`baselineAuditUnavailable`): ruled on in decision
-// `an-a-audit-failure-must-not-abort-the-b-audit-unverifiable-b-latches`
-// (bab7d57d) and assigned to SLICE S2, not S3. It is genuinely unlatched at
-// HEAD and is expected to stay so until S2 lands; S3 is the eager-latching
-// correctness fix only. AC-L12 deliberately steps around that open defect so
-// its verdict is about WHERE the latch is written.
-//
-// EXPECTED FAILURE SHAPE against the OLD single-late-block code (this is the
-// discrimination missing from the suite today):
-// `assert.equal(existsSync(latchPath(dir)), true, ...)` fires with actual
-// false — the process exited at the attribution denial before the late latch
-// block at :5196 ever ran. `r.code` is 2 in BOTH the old and the fixed code, so
-// the exit-code assertions alone prove nothing here; the latch assertion is the
-// whole pin. Against the fixed code (eager `observeStampTamper`) it is GREEN.
-//
-// WHY IT MATTERS, not merely "a latch file is missing": the next call's Pre
-// re-collects the (B) baseline from current disk state, so a discarded
-// detection means the tampered bytes are adopted as legitimate — and (B) is
-// `.claude/agents/**`, the agent GRANT DEFINITIONS. One swallowed detection
-// buys a permanent edit to live enforcement config.
-//
-// SABOTAGE (any one of these must turn this test RED, while every other test in
-// this file — all of which reach the late block unobstructed — stays GREEN):
-//   (1) remove the eager latch-set call from `observeStampTamper` in
-//       scripts/hooks/h17-bash-write-sweep.mjs (Ruling A's producer), leaving
-//       the other two helpers eager;
-//   (2) equivalently, revert all three helpers to a single composed latch block
-//       near the end of the Post arm — the original defect.
-// In both cases `existsSync(latchPath(dir))` flips from true to false, because
-// `deny()` is `process.exit(2)` and never unwinds to the late block.
-// ---------------------------------------------------------------------------
-test('AC-L12: a qualifying detection followed by an UNRELATED EARLIER deny STILL sets the latch — the latch is written at the detection site, not at a late block a hard exit skips', { skip: GIT_SKIP }, () => {
-  const { dir, projectTag, cleanup } = makeGitProject();
-  try {
-    const coder = coderPath(dir);
-    const L = lane('ac-l12-eager');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree with no latch allows');
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists at Pre, so the write below is unambiguously in-window');
-
-    // (i) THE EARLY DETECTION: an in-window enforcement-stamp write — the
-    // command manufacturing its own attestation. Sets `stampTampered` and calls
-    // `observeStampTamper`, the earliest of the three trigger producers.
-    writeStamp(dir, [{ path: CODER_REL, sha256: sha256Of(coder), at: NOW }]);
-
-    // (ii) THE UNRELATED, EARLIER DENIAL: the ATTRIBUTION record alone is left
-    // present but unparseable, so the arm hard-exits at bab7d57d's :4677 —
-    // well before the late composed block — while the (B) baseline and the
-    // stamp WITNESS survive so that step (i) is genuinely detected.
-    const rec = classifyPreRecords(projectTag);
-    assert.notEqual(
-      rec.all.length,
-      0,
-      "PRECONDITION: Pre must have written its sterling-enforce-<projectTag> records into os.tmpdir() — if this fires, the record naming/location assumed by this file's own tempRecords helper is wrong and this test proves nothing"
-    );
-    assert.notEqual(
-      rec.dirty.length,
-      0,
-      `FIXTURE DIAGNOSIS (not a code verdict): at least one ${DIRTY_SUFFIX} attribution record must exist to corrupt — found none. Classified: ${classCounts(rec)}. If this fires the record naming has changed; re-shape the fixture. It says NOTHING about eagerness`
-    );
-    assert.notEqual(
-      rec.stamp.length,
-      0,
-      `FIXTURE DIAGNOSIS (not a code verdict): at least one ${STAMP_SUFFIX} stamp-witness record MUST exist and SURVIVE this corruption, or stampTampered can never be set and there is no detection to be eager about. Classified: ${classCounts(rec)}. This is the exact fixture defect measured twice on 2026-08-29`
-    );
-    for (const p of rec.dirty) writeFileSync(p, CORRUPT_ATTRIBUTION_BYTES);
-    for (const p of rec.stamp) {
-      assert.notDeepEqual(readFileSync(p), CORRUPT_ATTRIBUTION_BYTES, `FIXTURE DIAGNOSIS (not a code verdict): the stamp witness at ${p} must be untouched by the corruption above`);
-    }
-
-    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch exists before Post — the latch asserted below can only have been created by this call');
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `the call must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    assert.equal(
-      existsSync(latchPath(dir)),
-      true,
-      "RULING A (fd9d24af): the detection was OBSERVED, so the latch must already be on disk when the unrelated attribution denial hard-exits. With a single late latch block, deny() is process.exit(2) and this detection is silently discarded — and the next call's Pre then re-baselines the tampered .claude/agents/** bytes as legitimate"
-    );
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4 (decision 78dc9bd6/fe861066): AC-L12 (the discriminator) planted
+// an in-window enforcement-STAMP write as the "earliest trigger" racing an
+// unrelated attribution-parse hard exit, relying on a `.stamp.json` witness
+// file surviving alongside the corrupted attribution record. The stamp
+// apparatus is deleted outright, so that witness will never exist again and
+// this fixture can never pass. See the note at AC-L12-CONTROL above (which
+// survives) for where the equivalent eagerness property for the NEW listDenied
+// trigger is pinned instead.
 
 // ===========================================================================
 // AC-L13 — THE CREATE-ONLY SET PRIMITIVE IS ACTUALLY EXERCISED. Spec: decision

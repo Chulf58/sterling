@@ -460,7 +460,9 @@ const BASELINE = {
     { statement: 'const MAX_WALK_NODES = 10_000;' },
     { statement: 'const MAX_WALK_DEPTH = 64;' },
     { statement: 'const MAX_RECORD_BYTES = 16 * 1024 * 1024;' },
-    { statement: 'const MAX_STAMP_BYTES = 8 * 1024 * 1024;' },
+    // DELETED 2026-08-30 (S4, 78dc9bd6/fe861066): MAX_STAMP_BYTES left with the
+    // stamp apparatus — a stale entry here fails the ratchet, so it is removed,
+    // not kept as history. The list read is bounded by the surviving record cap.
     { statement: "class WalkBudgetError extends Error { constructor(message, budget) { super(message); this.name = 'Wa … #00df15c1" },
     { statement: "class FileUnstableError extends Error { constructor(message) { super(message); this.name = 'FileUnst … #8bb9e374" },
     { statement: 'const WALK_BUDGET = newWalkBudget();' },
@@ -470,10 +472,11 @@ const BASELINE = {
     { statement: 'const secureIoReason = secureIoUnavailableReason(cwd);' },
     { statement: "if (secureIoReason) { deny( environmentDefectDenial( 'H17', `${secureIoReason} — this hook's descrip … #25b0f89d" },
     { statement: 'const event = input.hook_event_name;' },
-    // ROTATED 2026-08-30 (S3, #a98386cd → #64281cab): the Pre statement's
-    // interior changed with the restore excision (dc616f69). Same statement,
-    // same debt — a digest update, not a new hole.
-    { statement: "if (event === 'PreToolUse') { try { // THE TAINT LATCH IS CONSULTED FIRST — before the store, before … #64281cab" },
+    // ROTATED 2026-08-30 twice: (S3, #a98386cd → #64281cab) restore excision
+    // (dc616f69); (S4, #64281cab → #446d4683) stamp excision — Pre lost the
+    // stamp-witness write (78dc9bd6/fe861066). Same statement, same debt — a
+    // digest update, not a new hole.
+    { statement: "if (event === 'PreToolUse') { try { // THE TAINT LATCH IS CONSULTED FIRST — before the store, before … #446d4683" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H17', `[stdin] hook input could not be read or parsed (${(e && e.mes … #9c89b8db" },
     { statement: "deny-arg: deny( environmentDefectDenial('H17', `Enforcement verification failed (${(e && e.message) || e}) — f … #3c876005" },
   ],
@@ -515,7 +518,10 @@ const BASELINE = {
 // entry, and LOWER this number in the same change — the diff then shows the
 // ratchet turning the only direction it is allowed to turn. A number going UP in a
 // diff is an append, and it is meant to be as conspicuous as that sounds.
-const FOUNDING_BASELINE_TOTAL = 107;
+// 107 → 106 at S4 (2026-08-30): MAX_STAMP_BYTES deleted with the stamp
+// apparatus (78dc9bd6/fe861066); the Pre-statement entry rotated in place.
+// The ratchet only turns downward — fewer is a rotation, never a regression.
+const FOUNDING_BASELINE_TOTAL = 106;
 
 const CLASSES = new Set(['blocking', 'advisory', 'exempt']);
 const LABEL = 'fail-closed boundary';

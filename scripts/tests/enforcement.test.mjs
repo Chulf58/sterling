@@ -2,7 +2,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync, statSync, linkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -1114,47 +1114,9 @@ const GIT_SKIP = (() => {
   return !r.error && r.status === 0 ? false : 'git not available on this host';
 })();
 
-// SLICE 1 hardlink probe — copied in SHAPE from
-// h17-read-blob-restore.test.mjs's HARDLINK_SKIP (T11). Two tmpdir() siblings
-// so the probe (and every real test below that uses it) is same-device by
-// construction; on this host the checkout may be drvfs while tmpdir() is
-// ext4, so pairing a victim with the real checkout would fail EXDEV before
-// the primitive is ever exercised — indistinguishable, from a bare exception,
-// from "hard links aren't supported here". A genuine EXDEV during the probe
-// itself (i.e. the two tmpdir() siblings are NOT same-device) is a broken
-// fixture, not a skip, and must fail loudly rather than silently skip every
-// test that depends on it.
-const HARDLINK_SKIP = (() => {
-  let outsideProbe;
-  let targetProbe;
-  try {
-    outsideProbe = mkdtempSync(join(tmpdir(), 'sterling-enf-hlprobe-outside-'));
-    targetProbe = mkdtempSync(join(tmpdir(), 'sterling-enf-hlprobe-target-'));
-    const a = join(outsideProbe, 'a.txt');
-    const b = join(targetProbe, 'b.txt');
-    writeFileSync(a, 'x');
-    try {
-      linkSync(a, b);
-    } catch (e) {
-      if (e.code === 'EXDEV') {
-        throw new Error(
-          `BROKEN FIXTURE (not a skip): the outside-victim dir (${outsideProbe}) and the target tmpdir() shape (${targetProbe}) are on DIFFERENT devices — link() failed EXDEV. Both are meant to be tmpdir() siblings; fix the directory placement rather than letting this skip silently.`
-        );
-      }
-      throw e;
-    }
-    const ok = statSync(b).nlink >= 2 && statSync(a).ino === statSync(b).ino;
-    return ok
-      ? false
-      : `hard links are not supported between ${outsideProbe} and ${targetProbe} on this host/filesystem — the hardlink fixture cannot be constructed`;
-  } catch (e) {
-    if (typeof e.message === 'string' && e.message.startsWith('BROKEN FIXTURE')) throw e; // never swallow — must fail loudly, never skip
-    return `hard links are not supported on this host (${e.code ?? e.message})`;
-  } finally {
-    if (outsideProbe) rmSync(outsideProbe, { recursive: true, force: true });
-    if (targetProbe) rmSync(targetProbe, { recursive: true, force: true });
-  }
-})();
+// DELETED S4: the SLICE1 hardlink-clobber pair (the only consumers of this
+// probe) is deleted along with scripts/enforcement-stamp.mjs — see the note at
+// the old SLICE1 site. The probe itself has no remaining caller in this file.
 
 // run git in `dir` (setup helper — never silently swallows a setup failure: P5)
 function git(dir, args, { must = false } = {}) {
@@ -1887,339 +1849,23 @@ test('H17: a missing attribution record fails CLOSED — never silently unattrib
   }
 });
 
-// ---------------------------------------------------------------------------
-// THE ENFORCEMENT STAMP (decision h17-enforcement-stamp-conductor-attested-dirt,
-// knowledge_get 6e132e19-0da1-47c2-9fa5-710bc7365014): a CONDUCTOR-run stamp
-// (scripts/enforcement-stamp.mjs -> .sterling/transient/enforcement-stamp.json)
-// records, for each currently-dirty enforcement path, the sha256 of its bytes at
-// stamp time, so conductor-attested work-in-flight stops blocking agent Bash.
-//
-// WHERE THE STAMP STILL DECIDES, AND WHERE IT NO LONGER DOES. Since decision
-// h17-pre-state-snapshot-closes-false-denial-not-the-restore-hole (7021526c) the
-// stamp is NOT causally relevant to an UNCHANGED pre-existing dirty path: that
-// path is allowed by OBSERVATION, whatever any stamp says — so "a fresh stamp
-// allows unchanged pre-dirt" has ceased to be a distinct behaviour and is
-// deliberately NOT pinned as one anywhere (a test asserting it would pass while
-// pinning nothing: exactly the hollow-test trap board 5402a024 records). It
-// remains causally DECISIVE the moment the state CHANGED — that arm consults it
-// fresh against the CURRENT state and allows on an exact match (7021526c v2;
-// pinned in h17-pre-state-snapshot.test.mjs). Irrelevant on one arm, decisive on
-// the other, one order of operations, no contradiction. The tests immediately
-// below therefore pin the surviving, load-bearing halves:
-//   * a stamp of ANY shape — matching, mismatched, corrupt, non-array, absent —
-//     is irrelevant to an UNCHANGED pre-dirty path, which allows regardless
-//     (under the OLD ruling a mismatched/corrupt/absent stamp DENIED, so this is
-//     a real behavioural flip, not a restatement). The claim is scoped to the
-//     UNCHANGED arm deliberately: on a CHANGED pre-dirty path the same shapes
-//     are decisive, because a stamp that cannot be parsed or matched is not an
-//     attestation;
-//   * a stamp that is corrupt or the wrong shape still grants NO exemption where
-//     an exemption would actually matter — a CLEAN-at-Pre in-window change,
-//     which is restored to HEAD and denied (decision 4d9b76e8's arm, untouched
-//     by this ruling);
-//   * existence is a state term in both directions (deleted in-window; absent
-//     at Pre and recreated in-window), which is what the old deleted:true
-//     stamp-entry test was reaching for.
-//
-// EXPECTED FAILURE TODAY: every "must now ALLOW" assertion below fires against
-// the current always-deny-while-dirty behaviour (actual 2, expected 0). The
-// "must still DENY" tests are boundary/regression guards that already hold and
-// must keep holding. The two standalone scripts/enforcement-stamp.mjs CLI tests
-// are untouched by this ruling — their posture is whatever it already was.
-// ---------------------------------------------------------------------------
+// DELETED S4 (decision `b-baseline-hash-list-concrete-design`, fe861066; ruling
+// 78dc9bd6): scripts/enforcement-stamp.mjs and every stamp/attestation concept
+// are removed outright — a same-UID-forgeable attestation may never change a
+// verdict. The persistent (B) baseline hash list at
+// .sterling/enforcement-baseline.json is the cross-call comparator now; its
+// full pin suite lives in scripts/tests/h17-b-baseline-list.test.mjs. The two
+// standalone enforcement-stamp.mjs CLI tests that lived here are deleted with
+// it — there is no producer CLI to test.
 
-function runStampCli(dir) {
-  return spawnSync(process.execPath, [join(root, 'scripts', 'enforcement-stamp.mjs')], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
-}
-
-// INVERTED 2026-08-29 by decision fac9a69b (Ruling 1, refining Ruling D of
-// 532a4383): the fixture's (B) set — .claude/agents/coder.md,
-// .claude/settings.local.json, .sterling/config.json — is gitignored, so git
-// itself never reports it dirty; but Ruling 1 makes the stamp PRODUCER
-// enumerate the (B) family explicitly, independent of git status, so those
-// paths are ALWAYS attestable. A git-clean tracked tree (hooks/ untouched
-// since the init commit) therefore no longer means "nothing to attest" — the
-// (B) set alone gives the CLI something to stamp. This test used to assert the
-// opposite; it now asserts the (B) paths ARE attested.
-test('enforcement-stamp.mjs: a git-clean tracked tree still attests the always-enumerated (B) baseline set — never "nothing to attest"', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const r = runStampCli(dir);
-    // Sabotage: short-circuit the (B)-set enumeration in scripts/enforcement-stamp.mjs
-    // (e.g. make its path-listing function return [] unconditionally, or gate its
-    // call site behind `if (false)`) → the CLI falls back to git-dirty-tracked-paths
-    // only, finds none on this hooks-clean fixture, and this assertion goes red
-    // (status nonzero again, "nothing to attest").
-    assert.equal(r.status, 0, `the (B) set is always attestable, so the CLI must succeed even with hooks/ git-clean — ${oneLine(r.stderr)}`);
-    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    assert.ok(existsSync(stampPath), 'a stamp file IS written — the (B) set alone gives it something to attest');
-    const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e.sha256]));
-    // Sabotage: hash a placeholder/empty buffer instead of the (B) path's actual
-    // current bytes in the (B)-enumeration arm → any one of these three equalities
-    // goes red while status/existence stay green.
-    assert.equal(
-      byPath['.claude/agents/coder.md'],
-      createHash('sha256').update(readFileSync(join(dir, '.claude', 'agents', 'coder.md'))).digest('hex'),
-      'the (B) agents file is attested with its current bytes even though git never saw it as dirty'
-    );
-    assert.equal(
-      byPath['.claude/settings.local.json'],
-      createHash('sha256').update(readFileSync(join(dir, '.claude', 'settings.local.json'))).digest('hex'),
-      'the (B) settings.local.json is attested'
-    );
-    assert.equal(
-      byPath['.sterling/config.json'],
-      createHash('sha256').update(readFileSync(join(dir, '.sterling', 'config.json'))).digest('hex'),
-      'the (B) config.json is attested'
-    );
-    assert.equal(byPath['.sterling/sterling.db'], undefined, 'sterling.db is explicitly excluded from the (B) set and must never be stamped');
-    assert.equal(
-      Object.keys(byPath).filter((p) => p.startsWith('hooks/')).length,
-      0,
-      'hooks/ is git-clean and unchanged, so no hooks/ path is stamped — only the (B) set is'
-    );
-  } finally {
-    cleanup();
-  }
-});
-
-// Repaired 2026-08-29 (decision fac9a69b, Ruling 1): the stamp now ALWAYS carries
-// the (B) set (.claude/agents/coder.md, .claude/settings.local.json,
-// .sterling/config.json) alongside whatever is git-dirty, so the count is 4 after
-// the first run, not 1. Membership is asserted as the exact SET of paths rather
-// than a bare length — a bare `.length === 4` would stay green even if the wrong
-// four paths showed up (e.g. a duplicate hooks/ entry instead of a missing (B)
-// path), which is exactly the failure mode a length-only pin cannot catch.
-test('enforcement-stamp.mjs: stamps every dirty hooks/ path with the sha256 of its CURRENT bytes plus the always-enumerated (B) set, and a re-run overwrites rather than merges', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    writeFileSync(bundle, '// first dirty content\n');
-    let r = runStampCli(dir);
-    assert.equal(r.status, 0, `stamp CLI must succeed while hooks/ is dirty: ${oneLine(r.stderr)}`);
-    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    let stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    let paths = stamp.map((e) => e.path).sort();
-    // Sabotage: comment out or gate off the (B)-enumeration call in
-    // scripts/enforcement-stamp.mjs → the three (B) paths disappear from this list
-    // and this assertion goes red (actual would be ['hooks/h3-contract-gate.mjs']).
-    assert.deepEqual(
-      paths,
-      ['.claude/agents/coder.md', '.claude/settings.local.json', '.sterling/config.json', 'hooks/h3-contract-gate.mjs'].sort(),
-      'stamp lists exactly the one dirty hooks/ path plus the three always-attested (B) paths — never more, never fewer'
-    );
-    const byPath0 = Object.fromEntries(stamp.map((e) => [e.path, e]));
-    assert.equal(byPath0['hooks/h3-contract-gate.mjs'].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
-    assert.ok(typeof byPath0['hooks/h3-contract-gate.mjs'].at === 'string' && byPath0['hooks/h3-contract-gate.mjs'].at.length > 0);
-
-    // further drift + a second dirty path: re-running OVERWRITES with the fresh
-    // set, never appends the stale entry alongside the new ones
-    writeFileSync(bundle, '// SECOND, different dirty content\n');
-    const hooksJson = join(dir, 'hooks', 'hooks.json');
-    writeFileSync(hooksJson, JSON.stringify({ hooks: { PreToolUse: [] }, TAMPERED: true }));
-    r = runStampCli(dir);
-    assert.equal(r.status, 0, oneLine(r.stderr));
-    stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    // PREDICTION, not yet observed: this section sat behind the `stamp.length === 1`
-    // abort above and never actually ran under the old suite. By the same Ruling 1
-    // logic this second run's set should be BOTH now-dirty hooks/ paths PLUS the
-    // same three always-attested (B) paths = 5 members, not 2. Confirm on the real
-    // run; if it disagrees this is a fresh finding, not a rubber-stamped repair.
-    paths = stamp.map((e) => e.path).sort();
-    assert.deepEqual(
-      paths,
-      ['.claude/agents/coder.md', '.claude/settings.local.json', '.sterling/config.json', 'hooks/h3-contract-gate.mjs', 'hooks/hooks.json'].sort(),
-      'the fresh stamp lists both currently-dirty hooks/ paths plus the three always-attested (B) paths, not appended to the stale first-run set'
-    );
-    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e.sha256]));
-    assert.equal(byPath['hooks/h3-contract-gate.mjs'], createHash('sha256').update(readFileSync(bundle)).digest('hex'), "the NEW bytes are hashed, not the first stamp's stale hash");
-    assert.equal(byPath['hooks/hooks.json'], createHash('sha256').update(readFileSync(hooksJson)).digest('hex'));
-  } finally {
-    cleanup();
-  }
-});
-
-// =========================================================================
-// SLICE 1 — enforcement-stamp.mjs PRODUCER TRUNCATE-IN-PLACE HARDLINK CLOBBER
-// (conductor-verified live defect, found by an outside-family Codex consult;
-// same class as the deleted (B)-restore primitive `writeUnder`, whose
-// truncate-in-place hardlink clobber is pinned above at H17 T11 in
-// h17-read-blob-restore.test.mjs).
-//
-// enforcement-stamp.mjs:296 classifies the stamp target path via
-// classifyPathComponents, accepting kind 'file' or 'absent'; :303 then calls
-// plain `writeFileSync(stampPath, JSON.stringify(stamp))`. A HARDLINK IS A
-// REGULAR FILE TO lstat, so the classify check — built to catch a SYMLINK at
-// the stamp path — does not catch a hardlink. If an agent plants a hardlink
-// at `.sterling/transient/enforcement-stamp.json` pointing at any other file
-// on the filesystem, the PRODUCER'S OWN writeFileSync truncates and
-// overwrites that shared inode with stamp JSON — the conductor's own
-// attestation tool, run trusted, clobbers a victim file it was never told
-// about.
-//
-// CONTROL (placed first, NO producer involved): reproduces the exact
-// primitive the producer uses at :303 — a plain `writeFileSync` on an
-// EXISTING hardlinked leaf, no O_EXCL, no unlink-first — and proves it
-// actually clobbers the linked outside file ON THIS HOST. Without this
-// control a green TREATMENT result below is unfalsifiable: it would pass
-// identically if hard links simply don't work on this filesystem/mount
-// (mirrors T11's CONTROL rationale in h17-read-blob-restore.test.mjs:825-830).
-//
-// TREATMENT drives the REAL producer CLI end-to-end (spawnSync, same
-// `runStampCli` used by the two sibling CLI tests above) against a fixture
-// with a dirty (B) surface (makeGitProject already seeds
-// .claude/agents/coder.md, .claude/settings.local.json, .sterling/config.json
-// — see the "always-enumerated (B) baseline set" test above), plants the
-// hardlink, and asserts the SAFETY PROPERTY rather than one specific
-// implementation shape: either the victim's bytes survive byte-for-byte and
-// the stamp path is no longer the same inode as the victim (unlink-and-create
-// or temp-file-plus-rename), OR the producer refuses outright and leaves the
-// victim untouched. Never asserts on exit code alone.
-//
-// SABOTAGE (to re-redden after the fix lands): in scripts/enforcement-stamp.mjs,
-// change the stamp-writing line from an unlink-and-create (or
-// temp-file-plus-rename) shape back to a bare
-// `writeFileSync(stampPath, JSON.stringify(stamp))` on the classified target
-// — i.e. revert to writing directly at the existing path without first
-// removing/replacing the directory entry. That flips both TREATMENT
-// assertions red: the victim's bytes become the stamp JSON instead of
-// `VICTIM_BYTES`, and the victim path keeps sharing the stamp path's inode
-// (nlink stays >= 2, same ino).
-// =========================================================================
-
-test('SLICE1 CONTROL: on this host, writeFileSync on a hardlinked leaf really does clobber the linked outside file (no producer involved)', { skip: GIT_SKIP || HARDLINK_SKIP }, () => {
-  const probeDir = mkdtempSync(join(tmpdir(), 'sterling-enf-s1control-'));
-  const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-enf-s1control-outside-'));
-  try {
-    const outsideFile = join(outsideDir, 'victim.bin');
-    const victimBytes = Buffer.from('SLICE1-VICTIM-BYTES-MUST-SURVIVE\n');
-    writeFileSync(outsideFile, victimBytes);
-
-    const leaf = join(probeDir, 'enforcement-stamp.json');
-    linkSync(outsideFile, leaf);
-
-    // exact primitive shape used at enforcement-stamp.mjs:303 — a plain
-    // writeFileSync on the existing (hardlinked) leaf, no unlink first.
-    writeFileSync(leaf, JSON.stringify([{ path: 'irrelevant', sha256: 'deadbeef' }]));
-
-    const after = readFileSync(outsideFile);
-    assert.ok(
-      !after.equals(victimBytes),
-      'CONTROL: writeFileSync on a hardlinked leaf must actually change the OUTSIDE file bytes on this host, or the TREATMENT test below proves nothing about the fix defending against it'
-    );
-  } finally {
-    rmSync(probeDir, { recursive: true, force: true });
-    rmSync(outsideDir, { recursive: true, force: true });
-  }
-});
-
-test('SLICE1: enforcement-stamp.mjs producer does not clobber a victim file reached via a hardlink planted at the stamp path', { skip: GIT_SKIP || HARDLINK_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject(); // dirty (B) surface already seeded — something to attest
-  const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-enf-s1-outside-'));
-  try {
-    const victimFile = join(outsideDir, 'victim.bin');
-    const victimBytes = Buffer.from('SLICE1-VICTIM-BYTES-MUST-SURVIVE\n');
-    writeFileSync(victimFile, victimBytes);
-
-    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    mkdirSync(dirname(stampPath), { recursive: true });
-    linkSync(victimFile, stampPath); // plant the hardlink AT the stamp path
-
-    const preVictimIno = statSync(victimFile).ino;
-    assert.equal(statSync(stampPath).ino, preVictimIno, 'PRECONDITION: the stamp path and the victim share one inode before the producer runs');
-
-    const r = runStampCli(dir);
-
-    // never assert on exit code alone — the safety property is byte survival,
-    // whether the producer proceeds (exit 0) or refuses outright (nonzero).
-    assert.deepEqual(
-      readFileSync(victimFile),
-      victimBytes,
-      `SLICE1: THE LOAD-BEARING PROPERTY — the victim file's bytes must be UNTOUCHED after the producer runs; a truncate-in-place stamp write would have overwritten this shared inode with stamp JSON — producer exit ${r.status}, stderr: ${oneLine(r.stderr)}`
-    );
-
-    // acceptable fix shapes: (a) unlink-and-recreate / temp-file-plus-rename,
-    // so the victim no longer shares an inode with whatever now sits at the
-    // stamp path (even if the producer still wrote a stamp there); or
-    // (b) the producer refused outright and never touched the stamp path at
-    // all, in which case the hardlink itself still exists and nlink stays 2
-    // — but the bytes assertion above already proves no clobber happened
-    // either way. Assert the disjunction explicitly so a fix that DELETES the
-    // hardlink without writing anything also passes.
-    const stampStillLinkedToVictim = existsSync(stampPath) && statSync(stampPath).ino === preVictimIno && statSync(victimFile).nlink >= 2;
-    assert.ok(
-      !stampStillLinkedToVictim || r.status !== 0,
-      'SLICE1: if the producer reports success (exit 0), the stamp path must no longer be the same inode as the victim — writing "successfully" while still sharing the victim inode means the write went through the hardlink'
-    );
-  } finally {
-    rmSync(outsideDir, { recursive: true, force: true });
-    cleanup();
-  }
-});
-
-// Was: "a stamp matching every dirty hooks/ path's CURRENT bytes lets the
-// command proceed". That behaviour survives but has stopped being a behaviour OF
-// THE STAMP — an unchanged pre-dirty path allows whether or not any stamp exists
-// — so pinning the matching-stamp case here would pin nothing. What IS newly
-// pinnable, and what the old ruling got the other way round, is the negative: a
-// stamp that does NOT match, cannot be parsed, or is the wrong shape used to
-// force the denial, and now cannot, because the guard no longer needs the
-// attestation for a path it can compare itself.
-//
-// EXPECTED FAILURE SHAPE (RED): all three arms fire on `assert.equal(r.code, 0)`
-// with actual 2 — today any pre-dirty enforcement path denies, and specifically
-// these three stamp shapes are today's "no exemption" cases.
-//
-// CATCHES SABOTAGE: equality forced to always-UNEQUAL (`if (false) continue`),
-// and any implementation that keeps consulting the stamp before deciding an
-// unchanged pre-dirty path (all three arms would then deny again).
-test('H17 pre-state: a MISMATCHED, CORRUPT or NON-ARRAY stamp is irrelevant to an UNCHANGED pre-dirty path — it allows regardless', { skip: GIT_SKIP }, () => {
-  const cases = [
-    ['mismatched hash', () => JSON.stringify([{ path: 'hooks/h3-contract-gate.mjs', sha256: createHash('sha256').update('completely different bytes').digest('hex'), at: NOW }])],
-    ['corrupt json', () => '{ not json at all'],
-    ['non-array object', () => JSON.stringify({ path: 'hooks/h3-contract-gate.mjs', sha256: 'deadbeef' })],
-  ];
-  for (const [label, body] of cases) {
-    const { dir, cleanup } = makeGitProject();
-    try {
-      const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-      writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
-      const conductorBytes = readFileSync(bundle, 'utf8');
-      const stamp = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-      mkdirSync(dirname(stamp), { recursive: true });
-      writeFileSync(stamp, body());
-
-      const L = tu('stampshape');
-      h17(dir, 'PreToolUse', L);
-      const r = h17(dir, 'PostToolUse', L); // the command wrote nothing
-
-      assert.notEqual(r.code, 1, `[${label}] a security gate never fails with a non-blocking exit 1`);
-      assert.equal(r.code, 0, `[${label}] an unchanged pre-dirty path is verified by observation, so this stamp cannot make it deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-      assert.equal(readFileSync(bundle, 'utf8'), conductorBytes, `[${label}] and the uncommitted work survives`);
-    } finally {
-      cleanup();
-    }
-  }
-});
-
-test('H17 stamp fix: the normal write-sweep still catches a tamper made DURING the command even with a matching stamp for the pre-existing dirt', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
-    assert.equal(runStampCli(dir).status, 0);
-
-    h17(dir, 'PreToolUse', A1);
-    // the agent's own command ALSO tampers an out-of-contract source file — the
-    // stamp exempts only the pre-attested hooks/ dirt, never widens the sweep.
-    writeFileSync(join(dir, 'src', 'other.ts'), 'export const other = 999; // tampered\n');
-    const r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 2, 'the stamp narrows the enforcement-dirty exemption; it never widens the normal write-sweep');
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4: the second producer-CLI test, the SLICE1 hardlink-clobber pair,
+// and the two stamp-shape-irrelevance/stamp-fix pins that lived here all
+// exercised scripts/enforcement-stamp.mjs directly (runStampCli / a hand-
+// written .sterling/transient/enforcement-stamp.json) — the whole file and
+// concept are deleted (decision 78dc9bd6/fe861066). The hardlink-clobber
+// SAFETY PROPERTY this slice pinned is superseded by
+// h17-b-baseline-list.test.mjs's malformed/non-regular-file arms over the new
+// persistent .sterling/enforcement-baseline.json.
 
 // Was: "a dirty path MISSING from the stamp still denies". The stamp's
 // all-or-nothing shape over the whole pre-existing set was one of the reasons it
@@ -2360,92 +2006,12 @@ test('H17 pre-state: a pre-dirty enforcement path whose BYTES changed in-window 
   }
 });
 
-// ---------------------------------------------------------------------------
-// H17/enforcement-stamp PIN strengthening (upgrade-polish review round,
-// 2026-08-21) — additive, written against the FIX C spec above. The fixer
-// lands in parallel; postures are noted per test.
-// ---------------------------------------------------------------------------
-
-// Same subject as before — a CORRUPT stamp grants no exemption — moved to the
-// site where the stamp is still load-bearing: a path CLEAN at Pre and changed
-// INSIDE the window, which the fresh-stamp check (decision 4d9b76e8) is
-// consulted for before any restore. Asserted at the old site it would now be
-// hollow, because an unchanged pre-dirty path allows whatever the stamp says.
-//
-// EXPECTED FAILURE SHAPE: expected GREEN today (no exemption mechanism can be
-// fooled by a corrupt stamp today). The restored-bytes assertion is what keeps
-// it honest: it distinguishes "no exemption, swept normally" from an error-shaped
-// deny that never reaches the sweep.
-//
-// CATCHES SABOTAGE: any widening of the exemption to an unparseable stamp, and
-// (via the restored-bytes assertion) a corrupt stamp being promoted into an
-// AC9-style error deny that skips the restore.
-test('H17 stamp fix: a CORRUPT stamp file (invalid JSON) gives NO exemption to a CLEAN-at-Pre in-window change — restored to HEAD and denied', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    const committed = readFileSync(bundle, 'utf8'); // CLEAN at Pre
-    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    mkdirSync(dirname(stampPath), { recursive: true });
-    writeFileSync(stampPath, '{ not json at all');
-
-    const L = tu('corruptstamp');
-    h17(dir, 'PreToolUse', L);
-    const tampered = '// tampered in-window, "attested" by an unparseable stamp\n';
-    writeFileSync(bundle, tampered);
-    const r = h17(dir, 'PostToolUse', L);
-
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `a corrupt (unparseable) stamp file must not exempt an in-window change — ${oneLine(r.stderr)}`);
-    // dc616f69 R11: inverted from "restored to HEAD". Since NO stamp shape can
-    // exempt an (A) change any more, this block's remaining force is that a
-    // malformed stamp does not become an ERROR-shaped deny that skips detection
-    // — the byte assertion still separates "detected and left" from "never
-    // reached the sweep at all", which is exactly what it was written for.
-    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'and it is handled normally: denied and LEFT ON DISK, exactly as with no stamp at all');
-    assert.notEqual(readFileSync(bundle, 'utf8'), committed, 'never restored to HEAD');
-  } finally {
-    cleanup();
-  }
-});
-
-// Same move as the corrupt-JSON case above, for the wrong-SHAPE case: the stamp
-// is valid JSON but an object rather than an array, and the entry it carries
-// even names the tampered path. It must exempt nothing at the site where an
-// exemption would matter.
-//
-// EXPECTED FAILURE SHAPE: expected GREEN today; the restored-bytes assertion is
-// the honest half, as above.
-//
-// CATCHES SABOTAGE: a stamp reader that accepts an object as a single entry (or
-// coerces it), which would let one hand-written line attest a tamper.
-test('H17 stamp fix: a NON-ARRAY stamp file (a JSON object naming the tampered path) gives NO exemption to a CLEAN-at-Pre in-window change', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    const committed = readFileSync(bundle, 'utf8'); // CLEAN at Pre
-    const stampFile = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    mkdirSync(dirname(stampFile), { recursive: true });
-
-    const L = tu('nonarraystamp');
-    h17(dir, 'PreToolUse', L);
-    const tampered = '// tampered in-window, "attested" by a non-array stamp\n';
-    writeFileSync(bundle, tampered);
-    // the object even carries the CORRECT hash of the tampered bytes — shape
-    // alone must be enough to refuse it
-    writeFileSync(stampFile, JSON.stringify({ path: 'hooks/h3-contract-gate.mjs', sha256: createHash('sha256').update(readFileSync(bundle)).digest('hex') }));
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `a stamp file that is a JSON OBJECT, not an array, must not exempt anything — ${oneLine(r.stderr)}`);
-    // dc616f69 R11: inverted from "restored to HEAD" — same reasoning as the
-    // corrupt-JSON block above.
-    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'and it is handled normally: denied and LEFT ON DISK, exactly as with no stamp at all');
-    assert.notEqual(readFileSync(bundle, 'utf8'), committed, 'never restored to HEAD');
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4: both stamp-shape "no exemption" pins (CORRUPT / NON-ARRAY)
+// exercised the deleted enforcement-stamp apparatus directly. There is no
+// exemption route of any kind any more (decision 78dc9bd6 R11) — an in-window
+// (A)/(B) change is always detected and denied, unconditionally, so a test
+// asserting "this stamp shape grants no exemption" would pin nothing once no
+// stamp shape exists to be consulted in the first place.
 
 // Was: "a deleted:true stamp entry is honored iff the path is ABSENT". The
 // stamp entry has stopped being what decides this — EXISTENCE is one of the
@@ -2533,40 +2099,9 @@ test('H17 pre-state: a pre-dirty NON-hooks BRIEF-SCOPE violation that is unchang
   }
 });
 
-test('enforcement-stamp.mjs (widened, EXPECTED RED today): stamps a dirty non-hooks TRACKED file alongside hooks/**, and expands an untracked directory into its contained files rather than one dir-shaped entry', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    writeFileSync(bundle, '// dirty hooks bundle\n');
-    const other = join(dir, 'src', 'other.ts');
-    const dirtiedOther = readFileSync(other, 'utf8') + '\n// dirty tracked src file, non-hooks\n';
-    writeFileSync(other, dirtiedOther);
-    // an untracked directory with two files — must expand to per-file entries,
-    // not a single directory-shaped entry (mirrors AC3(c)'s `?? dir/` collapse handling)
-    const evilDir = join(dir, 'src', 'evildir');
-    mkdirSync(evilDir, { recursive: true });
-    writeFileSync(join(evilDir, 'a.ts'), 'export const a = 1;\n');
-    writeFileSync(join(evilDir, 'b.ts'), 'export const b = 1;\n');
-
-    const r = runStampCli(dir);
-    assert.equal(r.status, 0, `stamp CLI must succeed with hooks + non-hooks dirt: ${oneLine(r.stderr)}`);
-    const stamp = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json'), 'utf8'));
-    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e]));
-
-    assert.ok(byPath['hooks/h3-contract-gate.mjs']?.sha256, 'the hooks bundle is still stamped with its sha256 (unchanged)');
-    assert.equal(byPath['hooks/h3-contract-gate.mjs'].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
-
-    assert.ok(byPath['src/other.ts']?.sha256, 'the widened CLI now also stamps a dirty non-hooks tracked file');
-    assert.equal(byPath['src/other.ts'].sha256, createHash('sha256').update(readFileSync(other)).digest('hex'));
-
-    assert.ok(byPath['src/evildir/a.ts']?.sha256, 'an untracked directory expands to its contained files, not a single dir entry');
-    assert.ok(byPath['src/evildir/b.ts']?.sha256);
-    assert.equal(byPath['src/evildir/a.ts'].sha256, createHash('sha256').update(readFileSync(join(evilDir, 'a.ts'))).digest('hex'));
-    assert.ok(!stamp.some((e) => e.path === 'src/evildir' || e.path === 'src/evildir/'), 'no directory-shaped entry is written, only expanded per-file entries');
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4: the widened stamp-CLI EXPECTED-RED pin exercised the deleted
+// scripts/enforcement-stamp.mjs producer directly (runStampCli) — there is no
+// producer CLI, widened or otherwise, to pin any more.
 
 // RENAMED per dc616f69: there is no restore left to raise an fs-error. The
 // FIXTURE and the ASSERTIONS are unchanged and still live — a (B) path whose

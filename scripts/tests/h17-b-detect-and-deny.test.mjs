@@ -233,22 +233,17 @@ function lane(tag) {
   return { agent_id: 'a1', tool_use_id: `toolu_${tag}_${randomUUID().replace(/-/g, '').slice(0, 16)}` };
 }
 
+// DELETED S4: stampPath's own file (.sterling/transient/enforcement-stamp.json)
+// no longer exists as a concept, but the function itself stays — AC1/AC2/AC3
+// below still assert its PRECONDITION absence (harmlessly and trivially true
+// now, since nothing ever creates it), and those tests are left untouched per
+// this slice's disposition.
 function stampPath(dir) {
   return join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
 }
 
-function writeStamp(dir, entries) {
-  const p = stampPath(dir);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(entries));
-}
-
 function sha256Of(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
-
-function sha256OfBytes(bytes) {
-  return createHash('sha256').update(bytes).digest('hex');
 }
 
 function coderPath(dir) {
@@ -257,18 +252,6 @@ function coderPath(dir) {
 
 const CODER_REL = '.claude/agents/coder.md';
 
-// ---------------------------------------------------------------------------
-// ADDED 2026-08-29 for decision `b-surface-adoption-point-closes-with-an-
-// incident-bound-taint-latch-not-a-persisted-manifest` (bcd2cc09), RULING 4
-// (EXACT MANIFEST) and RULINGS 7-11 (THE TAINT LATCH). Copied in shape from
-// scripts/tests/h17-b-taint-latch.test.mjs's fullAttestedStamp/latchPath —
-// this file's own idiom, not an import (neither file exports anything).
-//
-// Ruling 4 makes a stamp a SET-EXACT manifest of the CURRENT (B) surface, so a
-// pin that needs a LEGITIMATE stamp must name EVERY current (B) member, not
-// just coder.md. The three members this fixture materializes are exactly
-// `.claude/agents/**`, `.claude/settings*.json` and `.sterling/config.json`.
-// ---------------------------------------------------------------------------
 const SETTINGS_REL = '.claude/settings.local.json';
 const CONFIG_REL = '.sterling/config.json';
 
@@ -280,19 +263,33 @@ function configJsonPath(dir) {
   return join(dir, '.sterling', 'config.json');
 }
 
-// A COMPLETE manifest, hashing the bytes that are ON DISK RIGHT NOW — which is
-// the only thing the sanctioned producer can emit (it enumerates every live (B)
-// member and hashes its CURRENT bytes; its own header calls the result a
-// snapshot of what the conductor "has just attested"). NEVER a future hash:
-// PRE-AUTHORIZATION IS DEAD — a stamp naming bytes that are not on disk is a
-// bearer capability, i.e. an authorization token for a future write, which is
-// exactly the "persist an authorizing artifact" shape decision bcd2cc09
-// rejected in favour of persisting the INCIDENT.
-function fullAttestedStamp(dir) {
+// ---------------------------------------------------------------------------
+// ADDED S4 — decision `b-baseline-hash-list-concrete-design` (fe861066), D1:
+// the persistent (B) baseline hash list at .sterling/enforcement-baseline.json
+// replaces the stamp manifest as the cross-call comparator. Shape:
+// {version: exactly 1, minted_at (diagnostic only), entries: [{path, sha256}]
+// SORTED ASCENDING BY PATH}. This helper mints a valid list by hand — driving
+// the real clearer (scripts/enforcement-reconcile.mjs) end-to-end lives in
+// h17-b-baseline-list.test.mjs, not here.
+// ---------------------------------------------------------------------------
+function baselineListPath(dir) {
+  return join(dir, '.sterling', 'enforcement-baseline.json');
+}
+
+function writeBaselineList(dir, entries) {
+  const sorted = [...entries].map(({ path, sha256 }) => ({ path, sha256 })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  writeFileSync(baselineListPath(dir), JSON.stringify({ version: 1, minted_at: NOW, entries: sorted }));
+}
+
+// A COMPLETE list, hashing the bytes that are ON DISK RIGHT NOW — the only
+// thing the sanctioned clearer can emit (it enumerates every live (B) member
+// via BASELINE_GLOBS and hashes its CURRENT bytes; a list naming a hash that
+// disagrees with disk is never legitimately mintable, only forged).
+function fullBaselineEntries(dir) {
   return [
-    { path: CODER_REL, sha256: sha256Of(coderPath(dir)), at: NOW },
-    { path: SETTINGS_REL, sha256: sha256Of(settingsPath(dir)), at: NOW },
-    { path: CONFIG_REL, sha256: sha256Of(configJsonPath(dir)), at: NOW },
+    { path: CODER_REL, sha256: sha256Of(coderPath(dir)) },
+    { path: SETTINGS_REL, sha256: sha256Of(settingsPath(dir)) },
+    { path: CONFIG_REL, sha256: sha256Of(configJsonPath(dir)) },
   ];
 }
 
@@ -302,18 +299,6 @@ function fullAttestedStamp(dir) {
 function latchPath(dir) {
   return join(dir, '.sterling', 'enforcement-taint.json');
 }
-
-// enforcement-stamp.mjs CLI runner, mirroring enforcement.test.mjs's runStampCli.
-function runStampCli(dir) {
-  return spawnSync(process.execPath, [join(root, 'scripts', 'enforcement-stamp.mjs')], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
-}
-
-const MIB = 1024 * 1024;
-const OVERSIZE_STAMP_BYTES = 24 * MIB; // mirrors h17-bounded-io.test.mjs's OVERSIZE_RECORD_BYTES judgment call
-function bigBuffer(bytes, fillByte) {
-  return Buffer.alloc(bytes, fillByte);
-}
-const CORRUPT_STAMP = Buffer.from('{ not valid json,,,');
 
 // ===========================================================================
 // AC1 — an unattested MODIFY of a (B) path is DENIED and the bytes are LEFT
@@ -434,61 +419,57 @@ test('AC3: the (B) denial wording is truthful — never claims a revert/rollback
 // AC4 — CONTROL then TREATMENT (both required; an allow-only test passes
 // trivially if (B) checking is disabled entirely).
 //
-// AC4-CONTROL: the exact same target bytes, with NO attesting stamp entry,
-// must still DENY.
-// AC4-TREATMENT (REWRITTEN 2026-08-29 — see below): the SANCTIONED WORKFLOW —
-// the (B) bytes are already at their current value, a COMPLETE stamp attests
-// the WHOLE current (B) set, and an agent window that changes nothing ALLOWS.
+// AC4-CONTROL: the exact same target bytes, with no persistent baseline list
+// present at all, must still DENY.
+// AC4-TREATMENT (REWORKED S4 — decision `b-baseline-hash-list-concrete-design`,
+// fe861066, superseding the retired stamp-manifest shape this test used to
+// exercise): the SANCTIONED WORKFLOW — the (B) bytes are already at their
+// current value, a persistent baseline list at .sterling/enforcement-
+// baseline.json exact-matches the WHOLE current (B) set, and an agent window
+// that changes nothing ALLOWS.
 //
-// WHY THE OLD TREATMENT FIXTURE IS RETIRED. It hand-wrote a stamp naming a
-// FUTURE hash for coder.md and then let the AGENT write those bytes. Decision
-// bcd2cc09 kills that shape outright: PRE-AUTHORIZATION IS DEAD — A STAMP
-// ATTESTS OBSERVED CURRENT STATE, NEVER FUTURE INTENT. A stamp naming bytes
-// that are not on disk is a bearer capability (an authorization token for a
-// future write), the very "persist an authorizing artifact" design that
-// objective rejected in favour of persisting the INCIDENT; and the sanctioned
-// producer cannot emit such a stamp at all, since it enumerates the live (B)
-// members and hashes their CURRENT bytes. The old fixture also named only ONE
-// (B) path, which Ruling 4's set-exact comparison now denies on its own.
-// THE REPLACEMENT WORKFLOW, which this test expresses: the CONDUCTOR edits (B)
-// itself (an agent never writes its own grant definitions — there is no
-// legitimate case for it), then runs the producer, which attests the COMPLETE
-// current set; a later agent window that changes nothing then allows.
+// WHY THE FIXTURE CHANGED. The old fixture minted the list-equivalent via
+// scripts/enforcement-stamp.mjs (a per-call, forgeable "stamp"); that whole
+// apparatus is deleted (decision 78dc9bd6/fe861066) in favour of a plain,
+// persistent hash list minted ONLY by the clearer
+// (scripts/enforcement-reconcile.mjs), conductor-gated. This test hand-writes
+// the list file directly — driving the real clearer end-to-end is out of
+// scope for this suite (it lives in scripts/tests/h17-b-baseline-list.test.mjs)
+// — but the property pinned is unchanged: THE CONDUCTOR edits (B) itself, then
+// a COMPLETE, exact-matching baseline list is on disk, and a later agent
+// window that changes nothing then allows.
 //
 // EXPECTED: CONTROL is most plausibly GREEN today (today's (B) arm denies on
 // any change, attested or not — there is no exemption route yet at all).
 // TREATMENT is most plausibly GREEN today TOO, and deliberately so: with
-// nothing changed in-window it allows on HEAD without the stamp ever being
-// opened. Its job is to pin that Ruling 4's EVERY-CALL exact-manifest
-// comparison does not FALSELY DENY the conductor's normal workflow once it
-// lands. DISCLOSED HONESTLY: an ALLOW here has two possible causes — "the
-// manifest was validated and found exact" and "nothing changed in-window, so
-// the stamp was never consulted" — and this test alone cannot tell them apart.
-// The discriminator is AC10 below (a COMPLETE manifest that DISAGREES with
-// disk must DENY with nothing changed in-window), which is red under exactly
-// the "never consult the stamp" implementation this test cannot see.
+// nothing changed in-window it allows on HEAD without any list ever being
+// opened. Its job is to pin that the persistent list comparator does not
+// FALSELY DENY the conductor's normal workflow once it lands. DISCLOSED
+// HONESTLY: an ALLOW here has two possible causes — "the list was validated
+// and found exact" and "nothing changed in-window, so the list was never
+// consulted" — and this test alone cannot tell them apart. The discriminator
+// lives in h17-b-baseline-list.test.mjs (a list that disagrees with disk must
+// DENY with nothing changed in-window).
 //
 // SABOTAGE (CONTROL): disable (B) checking entirely (always allow) — CONTROL
 // flips from deny (2) to allow (0), which is exactly the "checking disabled"
 // hypothesis this control rules out.
-// SABOTAGE (TREATMENT): invert the exact-manifest verdict — make the presence
-// of a stamp, or an exact set/hash match, DENY instead of attest (e.g. flip
-// the `mismatch -> deny, exact -> allow` comparison, or add a freshness rule
-// rejecting any stamp not written inside the current call). The allow flips to
-// deny, which is the false-denial-of-the-sanctioned-workflow failure this pin
-// exists to catch. NOTE, stated plainly rather than overclaimed: this test
-// does NOT go red under "never consult the stamp for (B)" — that mutation is
-// AC10's to catch, not this one's.
+// SABOTAGE (TREATMENT): invert the exact-list verdict — make the presence of a
+// baseline list, or an exact set/hash match, DENY instead of attest. The allow
+// flips to deny, which is the false-denial-of-the-sanctioned-workflow failure
+// this pin exists to catch. NOTE, stated plainly rather than overclaimed: this
+// test does NOT go red under "never consult the list for (B)" — that mutation
+// is h17-b-baseline-list.test.mjs's CONTROL to catch, not this one's.
 // ===========================================================================
 const AC4_NEW_BYTES = Buffer.from('---\nname: attested-change\n---\n# (B) content the conductor pre-authorized\n');
 
-test('AC4-CONTROL: a (B) modify with NO attesting stamp entry is DENIED (proves checking is not disabled)', { skip: GIT_SKIP }, () => {
+test('AC4-CONTROL: a (B) modify with NO baseline list present is DENIED (proves checking is not disabled)', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const coder = coderPath(dir);
     const L = lane('ac4-control');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0);
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists for this arm');
+    assert.equal(existsSync(baselineListPath(dir)), false, 'PRECONDITION: no baseline list exists for this arm');
     writeFileSync(coder, AC4_NEW_BYTES);
 
     const r = h17(dir, 'PostToolUse', L);
@@ -499,7 +480,7 @@ test('AC4-CONTROL: a (B) modify with NO attesting stamp entry is DENIED (proves 
   }
 });
 
-test('AC4-TREATMENT: the SANCTIONED WORKFLOW — a COMPLETE stamp attesting the whole CURRENT (B) set, and an agent window that changes nothing, ALLOWS and keeps the conductor\'s bytes', { skip: GIT_SKIP }, () => {
+test('AC4-TREATMENT: the SANCTIONED WORKFLOW — a COMPLETE persistent baseline list attesting the whole CURRENT (B) set, and an agent window that changes nothing, ALLOWS and keeps the conductor\'s bytes', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const coder = coderPath(dir);
@@ -514,17 +495,16 @@ test('AC4-TREATMENT: the SANCTIONED WORKFLOW — a COMPLETE stamp attesting the 
     // set is attested.
     writeFileSync(coder, AC4_NEW_BYTES);
 
-    // STEP 2 — the conductor runs the producer, which enumerates every live (B)
-    // member and hashes its CURRENT bytes. Hand-mirrored here as a COMPLETE
-    // manifest (the REAL CLI is driven end-to-end by AC5 below, so this file does
-    // not rest on a hand-written stamp alone).
-    writeStamp(dir, fullAttestedStamp(dir));
+    // STEP 2 — the persistent baseline list now exact-matches every live (B)
+    // member's CURRENT bytes (decision fe861066 D1: {version:1, minted_at,
+    // entries: sorted ascending by path}). writeBaselineList sorts for us.
+    writeBaselineList(dir, fullBaselineEntries(dir));
     assert.deepEqual(
-      fullAttestedStamp(dir)
+      fullBaselineEntries(dir)
         .map((e) => e.path)
         .sort(),
       [CODER_REL, CONFIG_REL, SETTINGS_REL].sort(),
-      'FIXTURE SELF-CHECK: the manifest is COMPLETE — every current (B) member is attested, so no missing-path violation can be what this arm observes'
+      'FIXTURE SELF-CHECK: the list is COMPLETE — every current (B) member is attested, so no missing-path violation can be what this arm observes'
     );
 
     // STEP 3 — the agent's window changes NOTHING. An agent never writes (B).
@@ -535,7 +515,7 @@ test('AC4-TREATMENT: the SANCTIONED WORKFLOW — a COMPLETE stamp attesting the 
 
     const r = h17(dir, 'PostToolUse', L);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `TREATMENT: an exact, COMPLETE attestation of the current (B) set must ALLOW — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+    assert.equal(r.code, 0, `TREATMENT: an exact, COMPLETE persistent baseline list for the current (B) set must ALLOW — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
     assert.deepEqual(readFileSync(coder), AC4_NEW_BYTES, "the conductor's attested bytes are KEPT — never restored, never rewritten by H17");
     assert.doesNotMatch(oneLine(r.stderr), new RegExp(CODER_REL.replace(/\./g, '\\.')), 'no denial names the attested path');
     assert.equal(existsSync(latchPath(dir)), false, 'and no taint latch is created: an exactly-attested (B) surface is not an incident (Rulings 7-9)');
@@ -561,383 +541,17 @@ test('AC4-TREATMENT: the SANCTIONED WORKFLOW — a COMPLETE stamp attesting the 
 // (drop the BASELINE_GLOBS enumeration Ruling 1 adds) — the entry lookup
 // returns undefined and `assert.ok(entry, ...)` fires.
 // ===========================================================================
-test('AC5: the enforcement-stamp producer CLI enumerates a dirty (B) path and attests its CURRENT bytes (not just git-visible dirt)', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const coder = coderPath(dir);
-    writeFileSync(coder, Buffer.from('# dirtied (B) content, no tracked dirt anywhere else\n'));
-    assert.equal(git(dir, ['status', '--porcelain']).stdout.trim(), '', 'PRECONDITION: git sees a fully clean tracked tree — the ONLY dirt is the gitignored (B) path');
-
-    const r = runStampCli(dir);
-    assert.equal(existsSync(stampPath(dir)), true, `the producer must emit a stamp attesting the (B) path even though git status is clean — CLI exit ${r.status}, output: ${oneLine((r.stdout || '') + (r.stderr || ''))}`);
-
-    const stamp = JSON.parse(readFileSync(stampPath(dir), 'utf8'));
-    const entry = Array.isArray(stamp) ? stamp.find((e) => e.path === CODER_REL) : undefined;
-    assert.ok(entry, `the stamp must carry an entry for ${CODER_REL} — got: ${JSON.stringify(stamp)}`);
-    assert.equal(entry.sha256, sha256Of(coder), 'the attested hash matches the (B) path\'s CURRENT bytes');
-  } finally {
-    cleanup();
-  }
-});
-
+// DELETED S4 (decision 78dc9bd6/fe861066): AC5 (the producer-CLI test), AC6
+// (the ABSENT/CORRUPT/OVERSIZE stamp-shape CONTROL+DENY families), AC7
+// (one-call self-attestation forgery), AC8 (two-call stamp-forgery laundering
+// — its "the adoption point is closed" property is instead pinned, via a real
+// (B) file modify rather than a forged stamp, by h17-b-taint-latch.test.mjs's
+// AC-L4), AC9 (the stamp path's own protection) and AC10 (a stamp hash
+// disagreeing with disk) all exercised the deleted enforcement-stamp
+// apparatus directly. The set-exact/mismatch comparator property AC10 pinned
+// now lives in h17-b-baseline-list.test.mjs over the persistent
+// .sterling/enforcement-baseline.json list instead.
 // ===========================================================================
-// AC6 — FAIL-CLOSED IS "NO EXEMPTION", NOT "DENY EVERYTHING". CONTROL arms
-// (placed FIRST, per stamp shape) prove an unusable stamp does not by itself
-// deny an UNCHANGED (B) surface; DENY arms (placed after) prove the same
-// unusable stamp shapes deny a CHANGED (B) path with no attestation route.
-// ===========================================================================
-
-const STAMP_SHAPES = [
-  ['ABSENT', null],
-  ['CORRUPT', CORRUPT_STAMP],
-  ['OVERSIZE', bigBuffer(OVERSIZE_STAMP_BYTES, 0x2a)],
-];
-
-// CONTROLs — EXPECTED: most plausibly GREEN today (an unrelated/unusable
-// stamp with nothing changed about the (B) path should not matter under
-// today's Pre/Post-compare-then-restore-on-change logic either). Kept as
-// controls, not treated as required-red, per the h17-bounded-io convention.
-//
-// SABOTAGE (each): make the hook deny whenever the stamp is unusable
-// regardless of whether the (B) surface changed — the ALLOW assertion flips
-// to DENY (actual 2, not 0).
-for (const [label, bytes] of STAMP_SHAPES) {
-  test(`AC6-CONTROL-${label}: an ${label} stamp with an UNCHANGED (B) surface still ALLOWS, without consulting the stamp`, { skip: GIT_SKIP }, () => {
-    const { dir, cleanup } = makeGitProject();
-    try {
-      const coder = coderPath(dir);
-      const original = readFileSync(coder);
-      if (bytes !== null) {
-        mkdirSync(dirname(stampPath(dir)), { recursive: true });
-        writeFileSync(stampPath(dir), bytes);
-      }
-      const L = lane(`ac6-control-${label.toLowerCase()}`);
-      assert.equal(h17(dir, 'PreToolUse', L).code, 0, `Pre with a ${label} stamp present`);
-
-      const r = h17(dir, 'PostToolUse', L); // nothing touches the (B) path
-      assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-      assert.equal(r.code, 0, `CONTROL: an ${label} stamp must not deny an UNCHANGED (B) surface — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-      assert.deepEqual(readFileSync(coder), original, 'the untouched (B) path survives byte-identical');
-    } finally {
-      cleanup();
-    }
-  });
-}
-
-// DENYs — EXPECTED FAILURE SHAPE (RED): today's restore-bytes (B) arm most
-// plausibly still denies (2) for a changed path regardless of stamp shape,
-// but RESTORES to `original` — so the byte-identity assertion (kept as
-// `newBytes`, left in place) fires. Disclosed rather than asserted as fact,
-// per the sibling PIN5 idiom (this author cannot execute the suite).
-//
-// SABOTAGE (each): treat an unusable stamp as an implicit exemption (fail
-// open) — the DENY flips to ALLOW (actual 0, not 2); or keep restoring
-// bytes on deny — the kept-bytes assertion fires.
-for (const [label, bytes] of STAMP_SHAPES) {
-  test(`AC6-DENY-${label}: a CHANGED (B) path with an ${label} stamp DENIES and leaves the command's bytes in place (no exemption possible)`, { skip: GIT_SKIP }, () => {
-    const { dir, cleanup } = makeGitProject();
-    try {
-      const coder = coderPath(dir);
-      if (bytes !== null) {
-        mkdirSync(dirname(stampPath(dir)), { recursive: true });
-        writeFileSync(stampPath(dir), bytes);
-      }
-      const L = lane(`ac6-deny-${label.toLowerCase()}`);
-      assert.equal(h17(dir, 'PreToolUse', L).code, 0, `Pre with a ${label} stamp present`);
-
-      const newBytes = Buffer.from(`# tampered in-window, only a ${label} stamp exists\n`);
-      writeFileSync(coder, newBytes);
-
-      const r = h17(dir, 'PostToolUse', L);
-      assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-      assert.equal(r.code, 2, `a ${label} stamp gives NO exemption to a CHANGED (B) path — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-      assert.deepEqual(readFileSync(coder), newBytes, 'the bytes are LEFT EXACTLY AS THE COMMAND WROTE THEM — never restored');
-      assert.match(oneLine(r.stderr), new RegExp(CODER_REL.replace(/\./g, '\\.')), 'the denial names the specific (B) path');
-    } finally {
-      cleanup();
-    }
-  });
-}
-
-// ===========================================================================
-// AC7 — ONE-CALL SELF-ATTESTATION FORGERY. A single Bash call that changes a
-// (B) file AND writes a matching forged stamp in the SAME window must DENY;
-// the forged stamp must never be honoured in that same Post (ordering:
-// stamp-integrity check precedes the exemption consult), and the forged
-// stamp is invalidated (deleted) before the hook returns.
-//
-// EXPECTED FAILURE SHAPE (RED): no ordering/invalidation discipline exists
-// today — the stamp is simply never consulted for (B), so the change is
-// unconditionally restored (byte-identity assertion fires, reverted not
-// kept-as-newBytes) and the forged stamp file is left untouched on disk
-// (`existsSync(stampPath(dir))` fires, actual true not false).
-//
-// SABOTAGE: consult the exemption BEFORE checking whether the stamp itself
-// changed within the window — the forged stamp gets honoured (code flips to
-// 0); or skip invalidating a stamp written/changed within the window — the
-// existsSync(false) assertion fires.
-// ===========================================================================
-test('AC7: a single call that both tampers a (B) path and writes a matching forged stamp is DENIED — the forged stamp is not honoured and is invalidated', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const coder = coderPath(dir);
-    const L = lane('ac7-forge-onecall');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists at Pre');
-
-    const newBytes = Buffer.from('# tampered AND self-attested in the same window\n');
-    writeFileSync(coder, newBytes);
-    writeStamp(dir, [{ path: CODER_REL, sha256: sha256OfBytes(newBytes), at: NOW }]); // forged self-attestation
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `a forged same-window self-attestation must NOT be honoured — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    assert.deepEqual(readFileSync(coder), newBytes, 'the (B) bytes are left exactly as the command left them (denied, not restored)');
-    assert.match(oneLine(r.stderr), new RegExp(CODER_REL.replace(/\./g, '\\.')), 'the denial names the (B) path');
-    assert.equal(existsSync(stampPath(dir)), false, 'the forged in-window stamp is INVALIDATED (deleted) before the hook returns');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// AC8 — TWO-CALL LAUNDERING, REWRITTEN 2026-08-29 TO THE ADOPTION CLOSURE
-// (decision bcd2cc09, RULINGS 7-11). Call N writes ONLY a forged stamp (no (B)
-// change) -> DENY, the forged stamp is invalidated, AND the incident is
-// LATCHED. Call N+1 is then DENIED AT PRE, BEFORE EXECUTION, BY THE LATCH.
-//
-// WHY THE OLD SHAPE IS RETIRED. It asserted that call N+1's Pre ALLOWS and
-// that the laundering attempt was caught only afterwards, at Post. That is
-// EXACTLY the adoption point decision bcd2cc09 exists to close: a denial with
-// no cross-call consequence lets the next call's Pre re-collect whatever the
-// last one left and carry on. Under Rulings 6-9 the incident is durable —
-// `stampTampered` latches unconditionally (`invalidateStamp` is best-effort,
-// and a command that tried to manufacture its own attestation is an incident
-// whether or not the deletion succeeded) — and while the latch stands EVERY
-// subsequent agent tool call is denied BEFORE it runs. So call N+1's command
-// never executes, and this test must not simulate its execution: no Post, and
-// no (B) write, after a denied Pre.
-//
-// EXPECTED FAILURE SHAPE (RED): against HEAD there is no latch mechanism at
-// all. Two assertions fire, in order: (1) after call N,
-// `existsSync(latchPath(dir))` comes back false where true is asserted; (2)
-// call N+1's `pre2.code` comes back 0 (Pre adopts the state and allows) where
-// 2 is asserted. Assertion (2) is the headline — it is the executable
-// statement of "the adoption point is closed". Note per anti-pattern f1d66bef
-// that (1) firing MASKS (2): when this goes red, fix the first and re-run
-// before concluding anything about the second.
-//
-// WHICH GUARD CARRIES THE VERDICT: two distinct guards, one assertion each,
-// and neither is defence-in-depth for the other.
-// SABOTAGE (a) — restrict latch creation to `baselineDenied` /
-// `unauthorizedAdditions` and skip it on `stampTampered` (Ruling 9's named
-// mistake): the post-call-N `existsSync(latchPath(dir))` assertion flips true
-// -> false. Sibling AC-L1/AC-L2 in h17-b-taint-latch.test.mjs stay green,
-// which is what makes this arm's coverage specific rather than redundant.
-// SABOTAGE (b) — with the latch still created, drop the latch consult at Pre
-// (the "deny before execution while latched" check): `pre2.code` flips 2 -> 0,
-// reproducing the original defect exactly while (a) stays fixed.
-// ===========================================================================
-test('AC8: call N forges ONLY a stamp (denied + invalidated + LATCHED); call N+1 is DENIED AT PRE by the latch — the adoption point is closed', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const coder = coderPath(dir);
-    const originalBytes = readFileSync(coder);
-    const futureBytes = Buffer.from('# the bytes the agent intended to launder in call N+1\n');
-    const forgedHash = sha256OfBytes(futureBytes);
-
-    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch exists before call N');
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists before call N');
-
-    // --- call N: forge ONLY the stamp, no (B) change ---
-    // CONTROL ARM, PLACED FIRST, passing for the OPPOSITE reason: this same
-    // fixture, this same lane shape, this same read-only command ALLOWS at Pre
-    // while no incident is on record. Without it, call N+1's Pre denial below
-    // could equally be explained by "this fixture/mode denies every Pre".
-    const L1 = lane('ac8-launder-calln');
-    const pre1 = h17(dir, 'PreToolUse', L1);
-    assert.notEqual(pre1.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(pre1.code, 0, `CONTROL: with no incident on record, Pre must ALLOW — actual ${pre1.code}, stderr: ${oneLine(pre1.stderr)}`);
-
-    writeStamp(dir, [{ path: CODER_REL, sha256: forgedHash, at: NOW }]); // a FUTURE hash: the dead pre-authorization shape, forged in-window
-
-    const r1 = h17(dir, 'PostToolUse', L1);
-    assert.notEqual(r1.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r1.code, 2, `call N: an in-window stamp write with no corresponding (B) change must deny — actual ${r1.code}, stderr: ${oneLine(r1.stderr)}`);
-    assert.equal(existsSync(stampPath(dir)), false, 'call N: the forged stamp is INVALIDATED (deleted) before Post returns');
-    assert.deepEqual(readFileSync(coder), originalBytes, 'call N: the (B) path itself was never touched');
-    assert.equal(existsSync(latchPath(dir)), true, 'call N: a stamp tamper is an INCIDENT IN ITS OWN RIGHT — the durable taint latch is set (Ruling 9: latch EVERY stampTampered, invalidation succeeded or not)');
-
-    // --- call N+1: THE ADOPTION CLOSURE. Denied BEFORE execution, at Pre. ---
-    const L2 = lane('ac8-launder-calln1');
-    const pre2 = h17(dir, 'PreToolUse', L2);
-    assert.notEqual(pre2.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(
-      pre2.code,
-      2,
-      `THE ADOPTION CLOSURE: with the surface latched by call N, call N+1 is denied BEFORE EXECUTION even though nothing has changed in its own window — the laundering command never gets to run. Against the pre-latch behaviour this Pre ALLOWS and the forged hash reaches disk. Actual ${pre2.code}, stderr: ${oneLine(pre2.stderr)}`
-    );
-    assert.match(oneLine(pre2.stderr), /taint|latch/i, 'the denial names the ONGOING taint, not a fresh (B) violation (there is none in this window)');
-
-    // Deliberately NO Post and NO (B) write for call N+1: a denied Pre means the
-    // command never ran, so writing futureBytes here would assert against a state
-    // production can never reach.
-    assert.deepEqual(readFileSync(coder), originalBytes, 'call N+1 never executed: the (B) path still holds its original bytes and the forged hash was never realized on disk');
-    assert.equal(existsSync(latchPath(dir)), true, 'the latch SURVIVES an ordinary call — only a separate conductor reconciliation clears it, never an ordinary Pre/Post and never the stamp producer (Rulings 3/5/10)');
-    assert.equal(existsSync(stampPath(dir)), false, 'and no stamp has reappeared to attest anything');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// AC9 — a stamp change inside a window with NO (B) change at all is DENIED
-// and INVALIDATED, proving the stamp path itself is protected (it is
-// currently in neither the (A) ENFORCEMENT_SURFACE nor (B) BASELINE_GLOBS,
-// per decision fac9a69b's RESIDUAL note).
-//
-// EXPECTED FAILURE SHAPE (RED): the stamp path is entirely unprotected today
-// — writing to it in-window is not flagged at all, so with nothing else
-// changed the call is most plausibly ALLOWED (`assert.equal(r.code, 2)`
-// fires, actual 0) and the stamp file survives (`existsSync(...)` fires,
-// actual true not false).
-//
-// SABOTAGE: leave the stamp path outside both protected sets — the deny
-// flips to allow and the invalidation never happens.
-// ===========================================================================
-test('AC9: a stamp change inside a window with NO (B) change at all is DENIED and the stamp is invalidated — the stamp path itself is protected', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const coder = coderPath(dir);
-    const originalBytes = readFileSync(coder);
-    const L = lane('ac9-stamponly');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists at Pre');
-
-    // a "correct-looking" stamp (attests the CURRENTLY unchanged bytes) written
-    // strictly inside the window — even self-consistent, it is untrusted here.
-    writeStamp(dir, [{ path: CODER_REL, sha256: sha256Of(coder), at: NOW }]);
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `an in-window stamp write with no (B) change must still deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    assert.match(oneLine(r.stderr), /enforcement-stamp\.json/, 'the denial names the STAMP path itself');
-    assert.equal(existsSync(stampPath(dir)), false, 'the in-window stamp write is INVALIDATED (deleted)');
-    assert.deepEqual(readFileSync(coder), originalBytes, 'the (B) path itself was never touched — the deny is about the stamp, not a false-flagged (B) change');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// AC10 — NEGATIVE PIN, REPLACING A NOW-FORBIDDEN PROPERTY (2026-08-29,
-// decision bcd2cc09 RULING 4 + the pre-authorization ruling).
-//
-// WHAT WAS RETIRED, AND WHY. This slot used to assert that "a future stamp
-// survives a quiet window without denial": a stamp naming bytes that were NOT
-// on disk was written between windows, sat through a completed quiet window,
-// and then EXEMPTED the agent's own write of those bytes. That property is now
-// FORBIDDEN, not merely unpinned. A stamp naming bytes that are not on disk is
-// a BEARER CAPABILITY — an authorization token for a future write — and the
-// sanctioned producer cannot emit one, because it enumerates the live (B)
-// members and hashes their CURRENT bytes. The conductor's normal workflow does
-// not need pre-authorization: the conductor edits (B) itself and then attests
-// the complete resulting state (that is AC4-TREATMENT above).
-//
-// WHAT IS PINNED INSTEAD: a manifest naming a hash that DISAGREES with disk
-// DENIES while the disagreement stands, and it does so on an ORDINARY call
-// with NOTHING changed inside the window — Ruling 4's "compare the current (B)
-// set against the stamp on EVERY call, not only after an in-window
-// difference".
-//
-// CAUSE ISOLATION — THIS IS THE DISCRIMINATION THAT MATTERS. A denial here
-// could in principle be produced by three different guards, and only one of
-// them is this pin's subject:
-//   (i) THE HASH-MISMATCH ARM (the subject) — a stamped path whose hash does
-//       not match its current bytes.
-//   (ii) the MISSING-PATH arm — a current (B) path absent from the stamp.
-//        ISOLATED OUT by construction: the manifest is COMPLETE (one entry per
-//        current (B) member) and an explicit FIXTURE SELF-CHECK below asserts
-//        both that every stamped path exists on disk and that EXACTLY ONE
-//        entry disagrees. Without that, the test would pass identically under
-//        an implementation that only ever checks for missing paths.
-//   (iii) the IN-WINDOW STAMP-TAMPER arm (AC9) — isolated out because the
-//        stamp is written BEFORE Pre, never inside the window, and the (B)
-//        files are never touched at all.
-// The CONTROL that must pass for the OPPOSITE reason is AC4-TREATMENT above,
-// which appears EARLIER in this file: same fixture, same complete manifest,
-// same do-nothing window, but every hash agreeing — and it must ALLOW. The two
-// together are what make a green here mean "the exact-manifest comparison ran
-// and found a hash mismatch", rather than "a stamp being present denies".
-//
-// EXPECTED FAILURE SHAPE (RED): HEAD consults the stamp for (B) only AFTER
-// detecting an in-window difference, and there is none here, so the call is
-// allowed without the manifest ever being compared — the deny assertion fires
-// with actual 0.
-//
-// SABOTAGE (the load-bearing guard): revert the (B) stamp consult to fire
-// ONLY when an in-window difference was detected (Ruling 4's own named
-// mistake), or drop the per-entry hash comparison while keeping the set
-// comparison — either flips this deny back to an allow. NOTE the second one is
-// the specific guard this arm names: the set-exactness guard alone does NOT
-// carry this verdict, because the manifest here is set-exact.
-// ===========================================================================
-test('AC10: a COMPLETE manifest whose entry hash DISAGREES with the bytes on disk DENIES while the disagreement stands, with nothing changed in-window', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const coder = coderPath(dir);
-    const onDisk = readFileSync(coder);
-    const neverWrittenBytes = Buffer.from('# bytes that are NOT on disk — a stamp naming them would be a bearer capability\n');
-    assert.notDeepEqual(onDisk, neverWrittenBytes, 'PRECONDITION: the stamped hash really is the hash of bytes that are NOT on disk');
-
-    // A COMPLETE manifest — every CURRENT (B) member present — in which exactly
-    // one entry's hash disagrees with disk. Written BEFORE Pre, so it is not an
-    // in-window stamp tamper either.
-    const manifest = fullAttestedStamp(dir).map((e) => (e.path === CODER_REL ? { ...e, sha256: sha256OfBytes(neverWrittenBytes) } : e));
-    writeStamp(dir, manifest);
-
-    assert.deepEqual(
-      manifest.map((e) => e.path).sort(),
-      [CODER_REL, CONFIG_REL, SETTINGS_REL].sort(),
-      'FIXTURE SELF-CHECK: the manifest is SET-EXACT against the current (B) surface — the missing-path arm cannot be what fires'
-    );
-    for (const e of manifest) {
-      assert.equal(existsSync(join(dir, e.path)), true, `FIXTURE SELF-CHECK: every stamped path exists on disk (${e.path})`);
-    }
-    assert.equal(
-      manifest.filter((e) => e.sha256 !== sha256Of(join(dir, e.path))).length,
-      1,
-      'FIXTURE SELF-CHECK: EXACTLY ONE entry disagrees with disk — the isolation this pin rests on'
-    );
-
-    const L = lane('ac10-hash-disagreement');
-    const pre = h17(dir, 'PreToolUse', L);
-    assert.notEqual(pre.code, 1, 'a security gate never fails with a non-blocking exit 1 (Pre)');
-
-    // PHASE-AGNOSTIC ON PURPOSE, and FLAGGED as an ambiguity rather than guessed:
-    // Ruling 4 says the comparison runs on EVERY CALL; it does not say whether the
-    // (B) manifest verdict lands at Pre or at Post. Pinning a phase the ruling
-    // does not name would make this test go red for a reason that is not a defect.
-    // Post therefore runs ONLY if Pre allowed — never simulate execution after a
-    // denied Pre.
-    const post = pre.code === 2 ? null : h17(dir, 'PostToolUse', L);
-    if (post) assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1 (Post)');
-    const denied = post ?? pre;
-    assert.equal(
-      denied.code,
-      2,
-      `A manifest entry disagreeing with disk must DENY on an ordinary call, with nothing changed in-window (Ruling 4: compared on EVERY call, not only after an in-window difference) — Pre ${pre.code}, Post ${post ? post.code : 'not run (Pre denied)'}, stderr: ${oneLine(denied.stderr)}`
-    );
-    assert.match(oneLine(denied.stderr), new RegExp(CODER_REL.replace(/\./g, '\\.')), 'the denial names the DISAGREEING path specifically, not merely "a stamp problem"');
-    assert.deepEqual(
-      readFileSync(coder),
-      onDisk,
-      'and H17 takes NO write action: the disk bytes are never "corrected" to match the manifest — a stamp is an OBSERVATION of current state, never an instruction to produce it'
-    );
-  } finally {
-    cleanup();
-  }
-});
 
 // ===========================================================================
 // AC11 — HARDLINK REGRESSION PIN. A (B) path replaced by a hardlink to a
