@@ -412,7 +412,17 @@ test('AC3: the (B) denial wording is truthful — never claims a revert/rollback
 
     const r = h17(dir, 'PostToolUse', L);
     assert.equal(r.code, 2, `a (B) modify with no attesting stamp must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    const err = oneLine(r.stderr);
+    // dc616f69 (2026-08-30): the (A) arm now emits an explicit NON-action
+    // DISCLAIMER — "NOTHING WAS REVERTED" — as part of its own detect-and-deny
+    // wording. This fixture is (B)-only (`.claude/agents/` is gitignored, so the
+    // (A) git-status sweep never sees it) and should not carry that sentence at
+    // all; the strip below makes the assertion say what it MEANS — no ACTION
+    // CLAIM — so a co-firing message could never satisfy it by accident nor fail
+    // it for stating the truth. Strength is unchanged: a disclaimer that nothing
+    // was reverted is the opposite of a false claim that something was.
+    // LITERAL disclaimer only (security review LOW): an unbounded uppercase-run
+    // mask would also swallow a genuine all-caps false claim beside it.
+    const err = oneLine(r.stderr).replace(/NOTHING WAS REVERTED/g, ' ');
     assert.doesNotMatch(err, /reverted|rolled\s*back/i, 'FALSE ACTION CLAIM: the file was NOT reverted — this wording must never appear for the new detect-and-deny (B) disposition');
     assert.match(err, /left (in place|on disk|untouched|as[- ]is)/i, 'the denial must state the TRUE disposition — left in place / left on disk');
   } finally {

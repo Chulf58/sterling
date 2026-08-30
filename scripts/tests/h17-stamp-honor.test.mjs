@@ -1,7 +1,18 @@
 // H17 "honor a fresh conductor attestation for an IN-WINDOW change" (board
-// 2af7a75f-8793-4835-a6d9-635683bf4f67) — NOT YET IMPLEMENTED.
+// 2af7a75f-8793-4835-a6d9-635683bf4f67).
 //
-// SETTLED DESIGN (test-writer brief, 2026-08-22):
+// *** RE-CUT 2026-08-30 — BOTH FIXES BELOW ARE NOW REVERSED RULINGS. ***
+// dc616f69 R11 DELETES the (A) stamp exemption outright ("the same-UID findings
+// establish the stamp cannot prove authorship, so keeping it as a 'do not latch'
+// authority reintroduces the very attestation premise this decision rejects"),
+// and R12 DELETES `mintRestorePerformed` because `restore_performed` has no
+// consumer. 78dc9bd6 then demotes H17 to a tripwire and deletes the stamp
+// apparatus wholesale. So FIX-A is INVERTED here (a matching fresh stamp no
+// longer exempts anything) and FIX-B's pins are REPLACED by their negatives (no
+// restore happens, therefore no item may be minted). The historical design
+// statement is kept below as the record of what these pins used to assert.
+//
+// SETTLED DESIGN (test-writer brief, 2026-08-22 — HISTORICAL, superseded above):
 //   FIX-A: at Post, before restoring an in-window tracked enforcement
 //     violation (a path NOT in the Pre dirty-set), H17 reads the enforcement
 //     stamp (.sterling/transient/enforcement-stamp.json) FRESH and hashes the
@@ -235,27 +246,43 @@ function sha256Of(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+// FIXTURE HAZARD (dc616f69): an (A) detection now LATCHES eagerly at
+// `.sterling/enforcement-taint.json`, and the latch denies the NEXT Pre. Every
+// test remaining in this file runs exactly ONE Pre/Post pair on a fresh
+// fixture, so none needs a between-case latch cleanup — anything added here
+// that invokes the hook twice on one fixture MUST rm the latch between windows
+// (see PIN 4's retirement note). The latch's own contract is pinned by
+// enforcement.test.mjs AC8-LATCH and h17-b-surface-survives-a-sweep PIN 2.
+
 // =========================================================================
-// PIN 1 — STAMP HONORED: a fresh stamp matching the CURRENT (in-window
-// tampered) bytes exempts the path — no restore, no deny naming it.
+// PIN 1 — INVERTED per dc616f69 R11 ("ALSO REMOVE THE (A) STAMP EXEMPTION as an
+// authorization decision"). This block used to pin FIX-A: a fresh stamp matching
+// the CURRENT bytes exempts an in-window change. It now pins the OPPOSITE, and
+// this fixture is the ONLY one that can prove the exemption is gone: the stamp
+// matches EXACTLY, so a deny here has exactly one possible cause — no stamp can
+// authorize an (A) change any more.
 //
-// EXPECTED FAILURE TODAY (RED): H17 has no notion of a fresh, at-Post stamp
-// check for in-window changes yet — it always restores + denies any tracked
-// hooks/** change made during the command, regardless of any stamp file.
-// So `r.code` will be 2 (not the asserted 0), and the file will have been
-// reverted to `origJson` (not the asserted `newBytes`) — both assertions
-// below fire.
+// READ WITH PIN 2, WHICH IS ITS CONTROL: PIN 2's stamp does NOT match, so PIN 2
+// denies under BOTH the old and the new hook and can never distinguish them.
+// PIN 1 is the treatment; PIN 2 rules out "this path denies for some unrelated
+// reason". (Control-arm discipline, decision cf863d84 — kept in file order
+// rather than physically re-ordered so the diff stays reviewable.)
+//
+// EXPECTED FAILURE SHAPE: `r.code === 2` fires with actual 0 if the stamp
+// consult is ever restored to the clean-at-Pre arm; the byte assertion fires if
+// a restore returns.
+// SABOTAGE: re-add `if (stampAttestsPath(rel)) continue;` to the clean-at-Pre
+// branch -> this test goes RED on the exit code while PIN 2 stays GREEN.
 // =========================================================================
 
-test('PIN1 (FIX-A): a fresh stamp matching the CURRENT bytes of an in-window hooks.json change is honored — not restored, not denied', { skip: GIT_SKIP }, () => {
+test('PIN1 (dc616f69 R11): a fresh stamp matching the CURRENT bytes of an in-window hooks.json change NO LONGER exempts it — denied, latched, left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'Pre snapshot succeeds');
 
-    // conductor-style edit, made DURING the window (after Pre, before Post) —
-    // the exact shape H17 today always treats as a must-deny tamper.
+    // conductor-style edit, made DURING the window (after Pre, before Post)
     const newBytes = JSON.stringify({ hooks: { PreToolUse: [] }, CONDUCTOR_EDIT: true }) + '\n';
     writeFileSync(hooksJson, newBytes);
 
@@ -264,41 +291,52 @@ test('PIN1 (FIX-A): a fresh stamp matching the CURRENT bytes of an in-window hoo
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `a matching fresh stamp for an in-window change must let the command proceed — actual ${r.code}, stderr: ${r.stderr}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), newBytes, 'the attested new bytes are KEPT, not reverted to HEAD');
-    assert.doesNotMatch(r.stderr, /hooks\.json/, 'no deny names the attested path');
+    assert.equal(
+      r.code,
+      2,
+      `an exact fresh stamp is NOT an authorization — a same-UID-forgeable attestation may never change the verdict (dc616f69 R11) — actual ${r.code}, stderr: ${r.stderr}`
+    );
+    assert.equal(readFileSync(hooksJson, 'utf8'), newBytes, 'and the bytes are left exactly as the command wrote them — denied, never reverted');
+    assert.match(r.stderr, /hooks\.json/, 'the denial names the path so a human can adjudicate it');
+    assert.match(r.stderr, /left on disk/i, 'and STATES the disposition');
   } finally {
     cleanup();
   }
 });
 
 // =========================================================================
-// PIN 2 — NO MATCH RESTORES: a stamp is present but hashes DIFFERENT bytes
-// than what's currently on disk — falls back to today's restore + deny.
+// PIN 2 — THE CONTROL FOR PIN 1, restore assertion inverted per dc616f69. A
+// stamp is present but hashes DIFFERENT bytes than what's on disk. This denies
+// under the OLD hook (mismatch -> no exemption) and under the NEW one (no
+// exemption exists at all), so on its own it proves nothing about the ruling —
+// which is exactly its job: it establishes that this fixture and this path deny
+// for the ordinary reason, so PIN 1's deny cannot be explained away.
 //
-// EXPECTED (may already be GREEN today): no stamp-honoring mechanism exists
-// yet for in-window changes, so this is the pre-existing, unconditional
-// restore+deny behavior (mirrors enforcement.test.mjs's H17 AC1). This pin
-// exists to lock that fallback in place once FIX-A lands, so a mismatched
-// stamp can never be mistaken for a match.
+// EXPECTED FAILURE SHAPE: if detection is dropped entirely, `r.code === 2`
+// fires with actual 0 — and PIN 1 fires with it, which is the signature of a
+// broken sweep rather than a restored exemption.
+// SABOTAGE: none unique to this arm; it is a control, and it must NOT go red
+// under PIN 1's sabotage.
 // =========================================================================
 
-test('PIN2 (FIX-A regression guard): a stamp hashing DIFFERENT bytes than the CURRENT file still restores + denies', { skip: GIT_SKIP }, () => {
+test('PIN2 CONTROL: a stamp hashing DIFFERENT bytes than the CURRENT file denies — and the tampered bytes are left on disk (dc616f69)', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
     const origJson = readFileSync(hooksJson, 'utf8');
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
+    const tampered = JSON.stringify({ hooks: {}, TAMPERED: true });
+    writeFileSync(hooksJson, tampered);
 
     // a stamp exists but attests bytes that do NOT match what's on disk now
     writeStamp(dir, [{ path: 'hooks/hooks.json', sha256: createHash('sha256').update('completely different bytes').digest('hex'), at: NOW }]);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `a stamp hash mismatch must fall back to the existing denial — ${r.stderr}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'restored to HEAD despite the (non-matching) stamp being present');
+    assert.equal(r.code, 2, `a stamp hash mismatch must deny — ${r.stderr}`);
+    assert.equal(readFileSync(hooksJson, 'utf8'), tampered, 'and the bytes stay as the command wrote them — the restore arm is deleted (dc616f69 R11)');
+    assert.notEqual(readFileSync(hooksJson, 'utf8'), origJson, 'specifically NOT put back to the committed image');
     assert.match(r.stderr, /hooks\.json/, 'the denial names the path');
   } finally {
     cleanup();
@@ -306,16 +344,25 @@ test('PIN2 (FIX-A regression guard): a stamp hashing DIFFERENT bytes than the CU
 });
 
 // =========================================================================
-// PIN 3 — QUEUE MINT: an actual restore mints exactly one open
-// restore_performed maintenance item naming the path, agent, and time.
+// PIN 3 — REPLACED BY ITS NEGATIVE per dc616f69 R12 and R16(iii). FIX-B's mint
+// pin ("an actual restore mints exactly one restore_performed item") cannot be
+// inverted mechanically, because there is no restore to mint for: R12 deletes
+// `mintRestorePerformed` on the finding that `restore_performed` HAS NO
+// CONSUMER, while RETAINING the schema enum so existing items elsewhere stay
+// readable. What is worth pinning is that the lane is now DEAD ON THE WRITE
+// SIDE: a real (A) violation, with a working store attached, mints nothing.
 //
-// EXPECTED FAILURE TODAY (RED): H17 has no maintenance-queue mint on restore
-// yet, so `items.length` will be 0, not the asserted 1 — the `deepEqual`/
-// `match` assertions on `items[0]` never even run (they'd throw on undefined
-// first, which still fails the test as expected).
+// This is not a vacuous green — the fixture produces a genuine violation (the
+// exit-code assertion proves the detection ran), so a zero here is a statement
+// about the mint, not about the sweep failing to fire.
+//
+// EXPECTED FAILURE SHAPE: `items.length === 0` fires with actual 1 if any mint
+// is reintroduced on the (A) path.
+// SABOTAGE: re-add `mintRestorePerformed(...)` (or any `enqueueSystemTodo` with
+// system_reason 'restore_performed') to the (A) detection branch -> RED.
 // =========================================================================
 
-test('PIN3 (FIX-B): an actual restore mints exactly one open restore_performed item naming the path/agent/time', { skip: GIT_SKIP }, () => {
+test('PIN3 (dc616f69 R12): a real (A) violation mints NO restore_performed maintenance item — the lane is dead on the write side', { skip: GIT_SKIP }, () => {
   const { dir, store, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
@@ -323,56 +370,36 @@ test('PIN3 (FIX-B): an actual restore mints exactly one open restore_performed i
     writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
 
     const r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 2, `an actual restore must occur for this pin to test anything — ${r.stderr}`);
+    assert.equal(r.code, 2, `PRECONDITION: a genuine (A) violation must be detected, or a zero mint count below proves nothing — ${r.stderr}`);
 
     const items = store.query({ types: ['todo'], cap: 100 }).filter((t) => t.source === 'system' && t.system_reason === 'restore_performed');
-    assert.equal(items.length, 1, 'exactly one restore_performed maintenance item is minted on an actual restore');
-    assert.deepEqual([...items[0].file_keys].sort(), ['hooks/hooks.json'], 'file_keys names the restored path');
-    assert.match(items[0].text, /hooks\/hooks\.json/, 'the item text names the restored path');
-    assert.match(items[0].text, /a1/, 'the item text names the attributed agent_id');
-    assert.match(items[0].text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, 'the item text carries a timestamp');
+    assert.equal(items.length, 0, 'no restore_performed item is minted — nothing is restored, so nothing may claim a restore was performed');
   } finally {
     cleanup();
   }
 });
 
 // =========================================================================
-// PIN 4 — PER-PATH DEDUP: two separate restore events for the SAME path
-// still leave exactly one open restore_performed item for that path.
+// PIN 4 — RETIRED per dc616f69 R12 / R16(iii). Its entire subject was the
+// PER-PATH DEDUP of a mint that no longer exists; with no item minted at all
+// there is nothing to dedup, and the assertion `items.length === 1` asserts the
+// behaviour the ruling removed. PIN 3's negative covers the whole lane in one
+// assertion. (Its two-window fixture would also now be poisoned by its own
+// first-round latch — the second Pre would deny — which is the fixture hazard
+// R16 warns about for every reused fixture.)
+// =========================================================================
+
+// =========================================================================
+// PIN 5 — RETIRED per dc616f69 R12 / R16(iii): its subject was FIX-B's
+// fail-OPEN mint under a broken store, and both the mint and the restore it
+// guarded are deleted. The surviving property it shared — a broken store still
+// denies and never exits 1 — is pinned by enforcement.test.mjs's H17 AC9d, by
+// h17-stamp-honor-hardening.test.mjs's PIN H1 (which additionally pins the
+// loud environment-defect wording), and by h17-b-surface-survives-a-sweep's
+// PIN 5. Nothing is lost by removing it. Historical comment retained below.
 //
-// EXPECTED FAILURE TODAY (RED): with no mint mechanism at all, `items.length`
-// is 0 (not 1). Once a naive (non-deduped) mint exists, this pin would still
-// fail RED at 2 (not 1) until the per-path dedup choke point is wired —
-// exactly the failure this pin exists to catch.
-// =========================================================================
-
-test('PIN4 (FIX-B): two restores of the SAME path across two Pre/Post windows still leave exactly one open restore_performed item', { skip: GIT_SKIP }, () => {
-  const { dir, store, cleanup } = makeGitProject();
-  try {
-    const hooksJson = join(dir, 'hooks', 'hooks.json');
-
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true, round: 1 }));
-    let r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 2, `round 1 restore — ${r.stderr}`);
-
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true, round: 2 }));
-    r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 2, `round 2 restore of the SAME path — ${r.stderr}`);
-
-    const items = store
-      .query({ types: ['todo'], cap: 100 })
-      .filter((t) => t.source === 'system' && t.system_reason === 'restore_performed' && (t.file_keys || []).includes('hooks/hooks.json'));
-    assert.equal(items.length, 1, 'a second restore of the same path refreshes/reuses the open item rather than minting a second one');
-  } finally {
-    cleanup();
-  }
-});
-
-// =========================================================================
-// PIN 5 — FAIL-OPEN: an unopenable store never breaks the restore or the
-// deny, and never crashes (no non-blocking exit 1, no hang/kill).
+// PIN 5 (HISTORICAL) — FAIL-OPEN: an unopenable store never breaks the restore
+// or the deny, and never crashes (no non-blocking exit 1, no hang/kill).
 //
 // Uses the SAME store-corruption technique enforcement.test.mjs's existing
 // "H17 AC9d: store/resolveRun throw (corrupt sterling.db)" test uses
@@ -397,32 +424,6 @@ test('PIN4 (FIX-B): two restores of the SAME path across two Pre/Post windows st
 // conductor should re-check this pin's actual failure message once red.
 // =========================================================================
 
-test('PIN5 (FIX-B fail-open): an unopenable store never breaks the restore/deny and never crashes', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup, closeStore, dbPath } = makeGitProject();
-  try {
-    const hooksJson = join(dir, 'hooks', 'hooks.json');
-    const origJson = readFileSync(hooksJson, 'utf8');
-
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
-
-    // corrupt the store AFTER the tamper exists but BEFORE Post runs — same
-    // technique as enforcement.test.mjs's AC9d.
-    closeStore();
-    rmSync(dbPath + '-wal', { force: true });
-    rmSync(dbPath + '-shm', { force: true });
-    writeFileSync(dbPath, 'this is not a sqlite database — the restore_performed mint must not crash or fail closed here');
-
-    const r = h17(dir, 'PostToolUse', A1);
-    assert.notEqual(r.code, null, 'the process must exit deterministically — never crash/hang without a status');
-    assert.notEqual(r.code, 1, 'a broken store must never produce a non-blocking exit 1');
-    assert.equal(r.code, 2, `the deny must still fire even though the mint's store write cannot succeed — ${r.stderr}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'the file is still restored to HEAD despite the store being unopenable for the mint');
-  } finally {
-    cleanup();
-  }
-});
-
 // =========================================================================
 // PIN 6 — GREEN regression guard: an attested PRE-EXISTING dirty path (FIX
 // C's existing contract — see enforcement.test.mjs's "H17 stamp fix: a
@@ -437,6 +438,19 @@ test('PIN5 (FIX-B fail-open): an unopenable store never breaks the restore/deny 
 // asserted 0. Once FIX C ships this specific pin should read GREEN even
 // before FIX-A/FIX-B land; it stays in this file to catch FIX-A/FIX-B from
 // breaking it on the way in.
+//
+// KEPT UNCHANGED at the dc616f69 re-cut (2026-08-30) — R11 removes the (A)
+// stamp exemption only; the PRE-EXISTING/degraded-fallback attestation path
+// survives, so this block still describes live behaviour.
+// HONEST NOTE ON WHICH GUARD CARRIES THIS VERDICT, since a comment naming a
+// non-load-bearing guard is how a hollow pin escapes notice: the path here is
+// dirty at Pre and UNCHANGED across the window, so under decision 7021526c it
+// ALLOWS by OBSERVATION with no stamp consulted at all (that is exactly what
+// h17-pre-state-snapshot.test.mjs PIN-ALLOW pins). The stamp written below is
+// therefore NOT what makes this green. Read this as a cheap same-file tripwire
+// on "an untouched pre-dirty path still allows"; the real pin for the surviving
+// stamp exemption is enforcement.test.mjs's FIX C suite. It is left in place
+// rather than deleted because that tripwire still has value.
 // =========================================================================
 
 test('PIN6 (regression guard for FIX C while FIX-A/B land): an attested pre-existing dirty path is still allowed, not restored', { skip: GIT_SKIP }, () => {

@@ -334,6 +334,12 @@ function stampPath(dir) {
   return join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
 }
 
+// dc616f69: the incident marker an (A) detection writes eagerly. This fixture
+// builds a real `.sterling/` with a live sterling.db, so the latch persists.
+function latchPath(dir) {
+  return join(dir, '.sterling', 'enforcement-taint.json');
+}
+
 function settingsPath(dir) {
   return join(dir, '.claude', 'settings.local.json');
 }
@@ -675,27 +681,33 @@ test('PIN-BOUNDED-IO-2-STAMP-CONTROL: CONTROL — a garbage stamp file present b
 });
 
 // PIN-BOUNDED-IO-2-STAMP-{CORRUPT,OVERSIZE} (board 55fcccac clause 2,
-// "enforcement stamp"). The classic clean-at-Pre, dirty-at-Post shape
-// (decision 4d9b76e8): with no valid stamp to consult, the "otherwise" arm
-// must restore-and-deny. A corrupt or oversize stamp must reach that SAME
-// verdict — fail closed, never crash the readFileSync+JSON.parse in readStamp
-// (board 55fcccac names this exact function).
+// "enforcement stamp"). The classic clean-at-Pre, dirty-at-Post shape: a
+// corrupt or oversize stamp must FAIL CLOSED and must never crash the
+// readFileSync+JSON.parse in readStamp (board 55fcccac names this exact
+// function). THE BOUNDED-READ PROPERTY IS THIS PIN'S SUBJECT and is untouched
+// by any ruling — a 32MiB or unparseable file handed to a hook must produce a
+// deterministic exit 2, not an OOM, a hang, or a non-blocking exit 1.
 //
-// EXPECTED: the CORRUPT shape is most plausibly GREEN NOW (an unparseable
-// stamp is presumably already treated as "no stamp"); the OVERSIZE shape is
-// the newer ground per Q5's reasoning — flagged, not asserted, since the
-// suite cannot be executed from here.
+// RE-CUT 2026-08-30 per dc616f69 (the (A) arm stops restoring): the restore
+// half of the old verdict is deleted, so "deny + restore" becomes "deny + left
+// on disk + latched". Note what this does NOT change: with the (A) stamp
+// exemption also deleted (R11), a changed enforcement path denies whether the
+// stamp is readable or not — so the EXIT CODE alone can no longer distinguish
+// "the bad stamp was handled" from "stamps are ignored". That is fine here and
+// deliberately so, because this pin was never about the stamp's VERDICT; it is
+// about the READ not blowing up, which `assertNoFailOpenCrash` carries and
+// which PIN-BOUNDED-IO-2-STAMP-CONTROL (garbage stamp present, path never
+// dirtied -> ALLOW) keeps honest as the opposite-cause arm.
 //
-// SABOTAGE (both): readStamp() swallows the read/parse error and returns an
-// object that satisfies the attested-match check anyway (e.g. `catch { return
-// tamperedBytesDigest }` by accident) — the deny flips to an ALLOW and
-// `assert.equal(r.code, 2)` fires with actual 0; or the bundle is NOT
-// restored to committedBytes, which the final equality catches separately.
+// SABOTAGE: make readStamp() read unbounded / without its try-catch — the
+// OVERSIZE arm crashes or hangs and `assertNoFailOpenCrash` fires (exit null
+// or 1), which is the arm's real verdict carrier. Separately: reintroduce a
+// restore on the (A) violation path -> the byte-identity assertion goes RED.
 for (const [label, bytes] of [
   ['CORRUPT', CORRUPT_SMALL],
   ['OVERSIZE', bigBuffer(OVERSIZE_RECORD_BYTES, 0x2a)],
 ]) {
-  test(`PIN-BOUNDED-IO-2-STAMP-${label}: board 55fcccac clause 2 — a ${label} enforcement stamp fails closed (deny + restore), never crash/hang`, { skip: GIT_SKIP }, () => {
+  test(`PIN-BOUNDED-IO-2-STAMP-${label}: board 55fcccac clause 2 — a ${label} enforcement stamp fails closed (deny, left on disk), never crash/hang`, { skip: GIT_SKIP }, () => {
     const fx = makeGitProject();
     const { dir, cleanup } = fx;
     try {
@@ -705,14 +717,21 @@ for (const [label, bytes] of [
       writeFileSync(stampPath(dir), bytes);
 
       const L = lane(`stamp-${label.toLowerCase()}`);
+      assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch stands before this window');
       assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre: bundle clean at Pre');
 
-      writeFileSync(bundle, '// tampered in-window, only a bad stamp exists\n');
+      const tampered = Buffer.from('// tampered in-window, only a bad stamp exists\n');
+      writeFileSync(bundle, tampered);
 
       const r = h17(dir, 'PostToolUse', L);
       assertNoFailOpenCrash(r, `Post consulting a ${label} enforcement stamp`);
       assert.equal(r.code, 2, `a changed enforcement path with no readable stamp must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-      assert.deepEqual(readFileSync(bundle), committedBytes, 'and the changed path is restored to HEAD, as the unattested "otherwise" arm does today');
+      // dc616f69 R11: inverted from "restored to HEAD". The bounded read still
+      // completed and the sweep still reached its verdict — the difference is
+      // that the verdict no longer writes to the tree.
+      assert.deepEqual(readFileSync(bundle), tampered, 'and the changed path is LEFT ON DISK exactly as written — H17 performs no restore');
+      assert.notDeepEqual(readFileSync(bundle), committedBytes, 'specifically NOT put back to the committed image');
+      assert.equal(existsSync(latchPath(dir)), true, 'and the detection latched — proving the sweep reached its verdict rather than dying inside the oversize read');
     } finally {
       cleanup();
     }

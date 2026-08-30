@@ -465,20 +465,30 @@ test('PIN-B-SYMLINKED-DIRECTORY: a symlink under .claude/agents/** pointing at a
 // Post; both decode to the identical U+FFFD replacement text under
 // readFileSync(path,'utf8'), so a UTF-8-string comparison sees no change.
 //
-// EXPECTED FAILURE SHAPE TODAY (RED): `h17(dir,'PostToolUse',L).code` comes
+// EXPECTED FAILURE SHAPE (RED): `h17(dir,'PostToolUse',L).code` comes
 // back 0 (allow, since the decoded strings compare equal) — the
-// `assert.equal(post.code, 2, ...)` line fires with actual 0. (The file is
-// also left holding UTF8_B_POST rather than being restored to UTF8_B_PRE,
-// which the final assert.deepEqual would independently catch.)
+// `assert.equal(post.code, 2, ...)` line fires with actual 0.
 //
-// SABOTAGE (once fixed: (B) stores the file's original bytes losslessly —
-// needed because, unlike (A), it RESTORES from them — and compares via a
-// digest or direct comparison over those raw bytes, never a decoded string):
-// change the comparison to decode first — e.g. `readFileSync(abs,'utf8')`
-// fed into the comparison instead of the raw Buffer/bytes. That one-line
-// substitution must turn this pin red again. (This test asserts only on
-// observable file bytes and exit codes — nothing about the baseline's
-// internal storage representation.)
+// SABOTAGE: (B) compares a DECODED string instead of the raw bytes — e.g.
+// `readFileSync(abs,'utf8')` fed into the comparison instead of the raw
+// Buffer/digest. That one-line substitution makes the two sequences compare
+// EQUAL, the call ALLOWS, and the exit-code assertion goes red. (This test
+// asserts only on observable file bytes and exit codes — nothing about the
+// baseline's internal storage representation.)
+//
+// *** RE-CUT 2026-08-30, AND THE TIMELINE MATTERS. *** This block's final
+// assertion — "a detected (B) change is restored to the baseline bytes" — was
+// invalidated by 532a4383 Ruling D / fac9a69b, the EARLIER detect-and-deny
+// slice, which made (B) changes DETECTED, DENIED and LEFT ON DISK. It was never
+// adjudicated then and has been RED at HEAD since; dc616f69's (A) excision only
+// brought it to the surface. So it is inverted here to leave-as-written.
+// NOTE WHAT DOES NOT CHANGE: the byte-level-comparison property this pin exists
+// for is untouched by either ruling, and its verdict carrier was always the
+// EXIT CODE (a decoded comparison ALLOWS), never the restore — so the pin loses
+// no teeth in the inversion. The comment above about (B) needing lossless bytes
+// "because, unlike (A), it RESTORES from them" is now wrong in its reason and
+// right in its requirement: (B) still needs the original bytes to COMPARE
+// against, it just no longer writes them back.
 // =========================================================================
 
 const UTF8_B_PRE = Buffer.from([0xff, 0xfe]);
@@ -501,7 +511,10 @@ test('PIN-B-UTF8-BYTES: two different invalid-UTF-8 byte sequences at a (B) path
     const post = h17(dir, 'PostToolUse', L);
     assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(post.code, 2, `a byte-level change at a (B) path invisible to UTF-8 decoding must still deny — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
-    assert.deepEqual(readFileSync(settingsPath), UTF8_B_PRE, 'a detected (B) change is restored to the baseline bytes');
+    assert.match(oneLine(post.stderr), /settings\.local\.json/, 'and the denial names the (B) path whose raw bytes moved — so the deny is ABOUT this comparison, not an unrelated fail-closed exit');
+    // 532a4383 Ruling D: inverted from "restored to the baseline bytes".
+    assert.deepEqual(readFileSync(settingsPath), UTF8_B_POST, 'and the (B) bytes are LEFT ON DISK exactly as written — detect-and-deny never restores');
+    assert.notDeepEqual(readFileSync(settingsPath), UTF8_B_PRE, 'specifically NOT put back to the Pre-time baseline bytes');
   } finally {
     cleanup();
   }

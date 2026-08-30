@@ -259,7 +259,11 @@ function sha256Of(path) {
 // error" phrase) — the regex simply does not match today's stderr string.
 // =========================================================================
 
-test('PIN H1 (loud restore under a broken store): deny stderr carries BOTH the environment-defect wording and the restored path in the same message', { skip: GIT_SKIP }, () => {
+// RE-CUT per dc616f69: the restore is deleted, so the "restored path" half of
+// this pin becomes "the path named in the SAME message, bytes left on disk".
+// The load-bearing property is unchanged and untouched by the ruling: a broken
+// store must not make the finding invisible.
+test('PIN H1 (loud detection under a broken store): deny stderr carries BOTH the environment-defect wording and the offending path in the same message', { skip: GIT_SKIP }, () => {
   const { dir, cleanup, closeStore, dbPath } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
@@ -267,7 +271,8 @@ test('PIN H1 (loud restore under a broken store): deny stderr carries BOTH the e
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'Pre snapshot succeeds');
     // unstamped in-window tracked enforcement-file change — no stamp at all
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
+    const tampered = JSON.stringify({ hooks: {}, TAMPERED: true });
+    writeFileSync(hooksJson, tampered);
 
     // break the store so resolveRun throws (same technique as the sibling
     // suite's PIN5 / enforcement.test.mjs AC9d): close the fixture's handle,
@@ -279,14 +284,17 @@ test('PIN H1 (loud restore under a broken store): deny stderr carries BOTH the e
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a broken store must never produce a non-blocking exit 1');
-    assert.equal(r.code, 2, `restore must still deny under a broken store — ${r.stderr}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'the tracked file is still restored to HEAD despite the store throw');
+    assert.equal(r.code, 2, `detection must still deny under a broken store — ${r.stderr}`);
+    // dc616f69 R11: inverted from "restored to HEAD" — the bytes stay exactly
+    // as the command wrote them, and the deny must say so out loud anyway.
+    assert.equal(readFileSync(hooksJson, 'utf8'), tampered, 'the tracked file is LEFT ON DISK as written despite the store throw — no restore, ever');
+    assert.notEqual(readFileSync(hooksJson, 'utf8'), origJson, 'and specifically NOT put back to the committed image');
     assert.match(
       r.stderr,
       /Enforcement verification failed \(store\/resolveRun threw \(/,
       'the deny carries the pinned environment-defect wording verbatim'
     );
-    assert.match(r.stderr, /hooks\.json/, 'the SAME deny message names the restored path');
+    assert.match(r.stderr, /hooks\.json/, 'the SAME deny message names the offending path');
   } finally {
     cleanup();
   }
@@ -306,7 +314,13 @@ test('PIN H1 (loud restore under a broken store): deny stderr carries BOTH the e
 // mint is wired to fire on every actual (A) restore regardless of (B).
 // =========================================================================
 
-test('PIN H2 (mint survives a subsequent baseline deny): the restore_performed item for the (A)-restored path exists even though (B) independently denies', { skip: GIT_SKIP }, () => {
+// RE-CUT per dc616f69 R12 / R16(iii): the MINT half of this pin is retired (the
+// lane has no consumer and `mintRestorePerformed` is deleted) and replaced by
+// its NEGATIVE. What the block still uniquely covers, and the reason it is not
+// deleted outright, is the CO-FIRING case: an (A) detection and an independent
+// (B) baseline denial in the SAME Post call must collapse into ONE deny while
+// BOTH dispositions stay truthful — neither path is mutated.
+test('PIN H2 (co-firing (A)+(B) in one Post): both are detected, one deny is emitted, NEITHER path is mutated, and no restore_performed item is minted', { skip: GIT_SKIP }, () => {
   const { dir, store, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
@@ -315,15 +329,20 @@ test('PIN H2 (mint survives a subsequent baseline deny): the restore_performed i
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
 
-    // (A) a tracked enforcement path tampered, unstamped — must restore
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
+    // (A) a tracked enforcement path tampered, unstamped — must be detected
+    const tamperedJson = JSON.stringify({ hooks: {}, TAMPERED: true });
+    writeFileSync(hooksJson, tamperedJson);
     // (B) a NEW gitignored baseline-set file — an independent (B)-stage deny
     // (mirrors enforcement.test.mjs's AC8 "new gitignored agent file" shape)
     writeFileSync(evilAgent, '# smuggled agent (hooks stripped)\n');
 
     const r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 2, `both (A) restore and (B) baseline deny must still produce a single deny — ${r.stderr}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'the (A) tracked path is restored to HEAD');
+    assert.equal(r.code, 2, `both the (A) detection and the (B) baseline deny must still produce a single deny — ${r.stderr}`);
+    // dc616f69 R11: inverted from "restored to HEAD". The (A) path now gets the
+    // SAME disposition the (B) path always had — detected, denied, left alone —
+    // which is precisely the symmetry the ruling was made to create.
+    assert.equal(readFileSync(hooksJson, 'utf8'), tamperedJson, 'the (A) tracked path is LEFT ON DISK byte-identical, never restored');
+    assert.notEqual(readFileSync(hooksJson, 'utf8'), origJson, 'and specifically NOT put back to the committed image');
     // Re-cut 2026-08-27 per user ruling: (B) additions are DETECTED + DENIED
     // and LEFT ON DISK, never deleted — deleting is irreversible and H17
     // cannot tell a malicious plant from a legitimate file the conductor
@@ -350,10 +369,15 @@ test('PIN H2 (mint survives a subsequent baseline deny): the restore_performed i
     // this assertion goes red even though the existsSync check above would
     // still pass.
 
+    // dc616f69 R12: inverted from `=== 1`. Nothing is restored, so nothing may
+    // claim a restore was performed — not even on the co-firing path, where the
+    // old design deliberately minted regardless of the (B) denial.
+    // Sabotage: re-add any `enqueueSystemTodo` with system_reason
+    // 'restore_performed' to the (A) branch → this assertion goes red.
     const items = store
       .query({ types: ['todo'], cap: 100 })
       .filter((t) => t.source === 'system' && t.system_reason === 'restore_performed' && (t.file_keys || []).includes('hooks/hooks.json'));
-    assert.equal(items.length, 1, 'the restore_performed mint for the (A)-restored path must exist even though (B) also denied in the same Post call');
+    assert.equal(items.length, 0, 'no restore_performed item is minted for the (A) path — the lane is dead on the write side (dc616f69 R12)');
   } finally {
     cleanup();
   }
@@ -379,7 +403,20 @@ test('PIN H2 (mint survives a subsequent baseline deny): the restore_performed i
 // asserted `false`.
 // =========================================================================
 
-test('PIN H4 (attested deletion honored): a deleted:true stamp for an in-window-deleted tracked file is honored — not resurrected, no deny', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69 R11 (the (A) stamp exemption is deleted). A
+// `deleted:true` stamp no longer authorizes an in-window deletion of a
+// clean-at-Pre tracked enforcement file: it is DETECTED and DENIED. The
+// NON-RESURRECTION half survives verbatim and is now the state-unchanged arm of
+// the R16 oracle — the exact pre-Post state here is ABSENT, and H17 must leave
+// it absent. This is the deletion-shaped case of "the bytes stay as the command
+// left them", which no other pin in these suites covers.
+// EXPECTED FAILURE SHAPE: `r.code === 2` fires with actual 0 if the deleted:true
+// exemption is ever restored; `existsSync(bundle) === false` fires with actual
+// true if any resurrection returns.
+// SABOTAGE: re-add the deleted:true stamp consult to the (A) arm -> the exit
+// code assertion goes RED. Re-add a `git checkout HEAD --` on the violation set
+// -> the existence assertion goes RED. Two guards, two distinct reds.
+test('PIN H4 (dc616f69 R11): a deleted:true stamp for an in-window-deleted tracked file NO LONGER exempts it — denied, and the file is still NOT resurrected', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
@@ -394,9 +431,9 @@ test('PIN H4 (attested deletion honored): a deleted:true stamp for an in-window-
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `an attested in-window deletion must be honored, not restored+denied — ${r.stderr}`);
-    assert.equal(existsSync(bundle), false, 'the deleted file is NOT resurrected by a restore');
-    assert.doesNotMatch(r.stderr, /h3-contract-gate/, 'no deny names the attested-deleted path');
+    assert.equal(r.code, 2, `a same-UID-forgeable deleted:true stamp may not authorize an (A) change — it must deny (dc616f69 R11) — ${r.stderr}`);
+    assert.equal(existsSync(bundle), false, 'THE STATE-UNCHANGED HALF: the deletion the command performed stands — H17 never resurrects');
+    assert.match(r.stderr, /h3-contract-gate/, 'and the denial names the path so a human can adjudicate the deletion');
   } finally {
     cleanup();
   }
@@ -416,7 +453,16 @@ test('PIN H4 (attested deletion honored): a deleted:true stamp for an in-window-
 // (removed) rather than the asserted `true`.
 // =========================================================================
 
-test('PIN H5a (stamped untracked directory preserved): every child of an in-window untracked directory stamp-attested — the directory survives, no deny', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69 R11: a fully-attested untracked directory is no longer
+// exempt. It is DETECTED and DENIED, and — separately, by R11's deletion of
+// `removeTreeAt` — it is left on disk. The survival assertion is now defended BY
+// DELETION rather than by a stamp exemption; the DENY is the live pin here, and
+// H5b below is its control (denial does not depend on the stamp at all).
+// EXPECTED FAILURE SHAPE: `r.code === 2` fires with actual 0 if any untracked
+// stamp exemption returns.
+// SABOTAGE: re-add the untracked-directory stamp consult -> RED on the exit
+// code, while H5b (unstamped) stays green.
+test('PIN H5a (dc616f69 R11): a fully stamp-attested in-window untracked directory is NO LONGER exempt — denied, and left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const newDir = join(dir, 'hooks', 'newdir');
@@ -425,14 +471,16 @@ test('PIN H5a (stamped untracked directory preserved): every child of an in-wind
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
 
     mkdirSync(newDir, { recursive: true });
-    writeFileSync(childPath, '// conductor-created, fully attested\n');
+    const childBytes = '// conductor-created, fully attested\n';
+    writeFileSync(childPath, childBytes);
     writeStamp(dir, [{ path: 'hooks/newdir/a.mjs', sha256: sha256Of(childPath) }]);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `a fully-attested untracked directory must be honored, not swept — ${r.stderr}`);
-    assert.equal(existsSync(childPath), true, 'the attested child file survives (directory not rmSync-ed)');
-    assert.doesNotMatch(r.stderr, /newdir/, 'no deny names the attested directory');
+    assert.equal(r.code, 2, `a fully-attested untracked directory must still DENY — a forgeable stamp never authorizes (dc616f69 R11) — ${r.stderr}`);
+    assert.equal(existsSync(childPath), true, 'and it is left on disk — nothing is swept any more (defended by deletion of removeTreeAt, not by the stamp)');
+    assert.equal(readFileSync(childPath, 'utf8'), childBytes, 'byte-identical to what was written');
+    assert.match(r.stderr, /newdir/, 'the denial names the directory so a human can adjudicate it');
   } finally {
     cleanup();
   }
@@ -452,7 +500,11 @@ test('PIN H5a (stamped untracked directory preserved): every child of an in-wind
 // accidentally widen the exemption to cover a partially-attested directory.
 // =========================================================================
 
-test('PIN H5b (regression guard alongside H5a): an unstamped child in an otherwise-attested untracked directory still sweeps + denies the whole directory', { skip: GIT_SKIP }, () => {
+// KEPT as H5a's CONTROL, sweep assertion inverted per dc616f69 R11. It denies
+// under both the old and the new hook, so it can never distinguish them on its
+// own — which is exactly what makes it the control that keeps H5a's deny from
+// being read as "this fixture denies everything".
+test('PIN H5b (control alongside H5a): an unstamped child in an otherwise-attested untracked directory still denies — and the directory is left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const newDir = join(dir, 'hooks', 'newdir');
@@ -470,7 +522,11 @@ test('PIN H5b (regression guard alongside H5a): an unstamped child in an otherwi
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(r.code, 2, `an unstamped child alongside an attested one must still deny the directory — ${r.stderr}`);
-    assert.equal(existsSync(newDir), false, 'the directory is removed recursively when any child lacks a matching stamp');
+    // dc616f69 R11: inverted from `=== false`. Recursive removal is deleted;
+    // the directory and BOTH children are left exactly as the command left them.
+    assert.equal(existsSync(newDir), true, 'the directory is LEFT ON DISK — H17 no longer removes anything');
+    assert.equal(readFileSync(unattested, 'utf8'), '// NOT attested\n', 'and the unattested child is byte-identical to what was written');
+    assert.equal(readFileSync(attested, 'utf8'), '// attested\n', 'as is the attested one');
   } finally {
     cleanup();
   }

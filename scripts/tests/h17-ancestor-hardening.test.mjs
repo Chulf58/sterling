@@ -624,77 +624,23 @@ test(
 // a safety-net pin (the shape the sibling file uses) rather than a guard pin.
 // =========================================================================
 
-test(
-  'PIN-A-TRACKED-RESTORE-NO-CHECKOUT-THROUGH-LINKED-ANCESTOR: CONTROL — a deleted tracked enforcement path under a REAL directory is denied AND restored from HEAD',
-  { skip: GIT_SKIP },
-  () => {
-    const { dir, cleanup } = makeGitProject();
-    try {
-      const tracked = join(dir, 'hooks', 'sub', 'h3-extra.mjs');
-      assert.equal(readFileSync(tracked, 'utf8'), TRACKED_SUB_BYTES, 'PRECONDITION: the tracked enforcement path is committed and pristine');
-
-      const L = lane('tracked-control');
-      assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree');
-
-      rmSync(tracked, { force: true }); // the audited command deletes it, ancestor left a REAL directory
-      assert.match(porcelain(dir), /h3-extra\.mjs/, 'PRECONDITION: git reports the deletion, so the (A) sweep has this path in front of it');
-      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — this deny lands on the restore arm, never the attested arm');
-
-      const post = h17(dir, 'PostToolUse', L);
-
-      assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
-      assert.equal(post.code, 2, `deleting a tracked enforcement path in-window must deny — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
-      assert.equal(
-        existsSync(tracked),
-        true,
-        'CONTROL: the restore primitive really does write to this path when its ancestor is a REAL directory — this is what stops the treatment arm below from passing because the sweep never looked'
-      );
-      assert.equal(readFileSync(tracked, 'utf8'), TRACKED_SUB_BYTES, 'and it is byte-restored from HEAD');
-    } finally {
-      cleanup();
-    }
-  }
-);
-
-test(
-  'PIN-A-TRACKED-RESTORE-NO-CHECKOUT-THROUGH-LINKED-ANCESTOR: a tracked enforcement path whose ANCESTOR is now a symlink is never checked out through it',
-  { skip: GIT_SKIP || SYMLINK_SKIP },
-  () => {
-    const { dir, cleanup } = makeGitProject();
-    const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-h17-ah-tracked-'));
-    try {
-      const canary = Buffer.from('OUTSIDE-REPO CANARY — a git checkout must never land beside this\n');
-      writeFileSync(join(outsideDir, 'canary.txt'), canary);
-      const beforeTree = treeOf(outsideDir);
-
-      const subDir = join(dir, 'hooks', 'sub');
-      const L = lane('tracked-linked');
-      assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree, with hooks/sub a REAL directory');
-
-      // inside the window: the audited command removes the directory holding a
-      // TRACKED enforcement file and points that ancestor out of the repository
-      rmSync(subDir, { recursive: true, force: true });
-      symlinkSync(outsideDir, subDir);
-      assert.equal(lstatSync(subDir).isSymbolicLink(), true, 'PRECONDITION: the tracked path\'s ancestor is now a symlink');
-      assert.match(porcelain(dir), /h3-extra\.mjs|sub/, 'PRECONDITION: git still reports the tracked path (or its ancestor) as changed, so the (A) sweep reaches the restore');
-      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
-
-      const post = h17(dir, 'PostToolUse', L);
-
-      assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
-      assert.equal(post.code, 2, `a tracked restore whose ancestor is a symlink must deny — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
-      assert.deepEqual(
-        treeOf(outsideDir),
-        beforeTree,
-        'the out-of-repo directory gained NO entry — a checkout through the linked ancestor would leave `h3-extra.mjs` in it'
-      );
-      assert.deepEqual(readFileSync(join(outsideDir, 'canary.txt')), canary, 'and the file already there is byte-unchanged');
-    } finally {
-      cleanup();
-      rmSync(outsideDir, { recursive: true, force: true });
-    }
-  }
-);
+// *** BOTH ARMS RETIRED 2026-08-30 per dc616f69 R16(ii) — RESTORE-PRIMITIVE
+// SAFETY, retired rather than inverted. *** The whole subject of this pair was
+// making `restoreTracked`'s CHECKOUT WRITE safe when an ancestor is swapped for
+// a symlink; R11 deletes `restoreTracked`, `materializeHeadBlob` and the entire
+// HEAD-blob chain, so there is no write left to aim anywhere. The CONTROL arm
+// asserted the primitive genuinely writes ("the restore really does write to
+// this path when its ancestor is a REAL directory") — that behaviour is gone by
+// ruling, so the control can no longer pass for the opposite reason, and without
+// it the treatment arm's "the outside tree gained no entry" is exactly the
+// vacuous green R16(ii) names: it passes because the primitive does not exist.
+// The comment block above records the residual-cause analysis that produced the
+// pair and is retained for provenance only.
+//
+// STILL COVERED ELSEWHERE: that deleting a tracked enforcement path in-window
+// DENIES is pinned by h17-stamp-honor-hardening.test.mjs PIN H4 (which also
+// pins that the deletion is NOT undone) and by
+// h17-pre-state-snapshot.test.mjs PIN-EXISTENCE-GONE.
 
 // =========================================================================
 // PIN 5 — PIN-STAMP-NO-READ-THROUGH-LINK (board site 4, the READ half). The
@@ -980,86 +926,17 @@ test('PIN-STAMP-NO-WRITE-THROUGH-LINKED-STERLING: with .sterling/transient a sym
 // surviving byte-for-byte.
 // =========================================================================
 
-test(
-  'PIN-A-UNTRACKED-RESTORE-NO-RMSYNC-THROUGH-LINKED-ANCESTOR: CONTROL — a genuinely new untracked enforcement path under a REAL ancestor directory is denied AND removed by restoreTracked\'s rmSync arm',
-  { skip: GIT_SKIP },
-  () => {
-    const { dir, cleanup } = makeGitProject();
-    try {
-      assert.equal(porcelain(dir), '', 'PRECONDITION: the tree is clean — hooks/newdir-a does not exist yet at Pre');
-      const L = lane('untracked-rm-control');
-      assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree');
-
-      const newDir = join(dir, 'hooks', 'newdir-a');
-      mkdirSync(newDir, { recursive: true });
-      const fresh = join(newDir, 'evil.mjs');
-      writeFileSync(fresh, "// genuinely new untracked enforcement file, created inside this command's own window\n");
-      git(dir, ['add', '-A'], { must: true });
-      assert.match(porcelain(dir), /A\s+hooks\/newdir-a\/evil\.mjs/, 'PRECONDITION: the new file is staged and individually visible, not present in HEAD');
-      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — this deny must land on the restore arm, never the attested arm');
-
-      const post = h17(dir, 'PostToolUse', L);
-
-      assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
-      assert.equal(post.code, 2, `a genuinely new untracked enforcement write must deny — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
-      assert.equal(
-        existsSync(fresh),
-        false,
-        "CONTROL: restoreTracked's rmSync arm really does remove this path when its ancestor is a REAL directory — this is what stops the treatment arm below from passing because the arm never reached the path at all"
-      );
-    } finally {
-      cleanup();
-    }
-  }
-);
-
-test(
-  'PIN-A-UNTRACKED-RESTORE-NO-RMSYNC-THROUGH-LINKED-ANCESTOR: a genuinely new untracked enforcement path whose ANCESTOR is now a symlink is never rmSync-ed through it',
-  { skip: GIT_SKIP || SYMLINK_SKIP },
-  () => {
-    const { dir, cleanup } = makeGitProject();
-    const outsideDir = mkdtempSync(join(tmpdir(), 'sterling-h17-ah-untrackedrm-'));
-    try {
-      const outsideBytes = Buffer.from('OUTSIDE-REPO FILE, same-named as the swept leaf — must SURVIVE an rmSync through the linked ancestor\n');
-      writeFileSync(join(outsideDir, 'evil.mjs'), outsideBytes);
-      const beforeTree = treeOf(outsideDir);
-      assert.deepEqual(beforeTree, ['evil.mjs'], 'PRECONDITION: the outside directory holds exactly its same-named file — any change proves a destructive descent');
-
-      const newDir = join(dir, 'hooks', 'newdir-a');
-      const L = lane('untracked-rm-linked');
-      assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree — hooks/newdir-a does not exist yet');
-
-      // inside the window: the audited command creates a genuinely new
-      // untracked enforcement file, stages it (so its full nested path stays
-      // the git-reported violation), then re-points its ANCESTOR directory
-      // out of the repository, leaving a same-named file sitting there
-      mkdirSync(newDir, { recursive: true });
-      writeFileSync(join(newDir, 'evil.mjs'), '// genuinely new untracked enforcement file\n');
-      git(dir, ['add', '-A'], { must: true });
-      assert.match(porcelain(dir), /A\s+hooks\/newdir-a\/evil\.mjs/, 'PRECONDITION: staged and individually visible, same shape as the control');
-
-      rmSync(newDir, { recursive: true, force: true });
-      symlinkSync(outsideDir, newDir);
-      assert.equal(lstatSync(newDir).isSymbolicLink(), true, "PRECONDITION: the new entry's ANCESTOR directory is now a symlink, left there by the audited command");
-      assert.match(porcelain(dir), /evil\.mjs|newdir-a/, 'PRECONDITION: git still reports the staged path (or its ancestor) as changed, so the (A) sweep has it in front of it');
-      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — nothing may exempt this');
-
-      const post = h17(dir, 'PostToolUse', L);
-
-      assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
-      assert.equal(post.code, 2, `restoreTracked's rmSync arm on a new entry whose ancestor is a linked directory must deny — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
-      assert.deepEqual(
-        treeOf(outsideDir),
-        beforeTree,
-        'the out-of-repo directory reached through the linked ancestor is INTACT — an unguarded rmSync would have removed the same-named file sitting there'
-      );
-      assert.deepEqual(readFileSync(join(outsideDir, 'evil.mjs')), outsideBytes, 'and the file itself is byte-unchanged');
-    } finally {
-      cleanup();
-      rmSync(outsideDir, { recursive: true, force: true });
-    }
-  }
-);
+// *** BOTH ARMS RETIRED 2026-08-30 per dc616f69 R16(ii) — RESTORE-PRIMITIVE
+// SAFETY. *** Their subject was making `restoreTracked`'s rmSync arm safe when
+// the leaf's ancestor is a symlink to an outside directory. R11 deletes
+// `restoreTracked` and `removeTreeAt`, so no rmSync arm remains. The CONTROL
+// asserted the removal genuinely happens under a REAL ancestor — behaviour the
+// ruling removed — and without it the treatment's "the outside directory is
+// INTACT" is the vacuous green R16(ii) names.
+//
+// STILL COVERED ELSEWHERE: that a genuinely new untracked enforcement write
+// DENIES (and is now left on disk) is pinned by
+// h17-b-surface-survives-a-sweep.test.mjs PIN 1 and enforcement.test.mjs AC3(b).
 
 // =========================================================================
 // PIN 9 — PIN-A-TRACKED-RESTORE-LEAF-KIND-NOT-RESTRICTED (board site 3,
@@ -1098,45 +975,17 @@ test(
 // touching the path) — the planted link survives.
 // =========================================================================
 
-test(
-  'PIN-A-TRACKED-RESTORE-LEAF-KIND-NOT-RESTRICTED: a tracked enforcement path replaced by a SYMLINK to an outside file is unlinked, not followed, and restored to pristine HEAD bytes',
-  { skip: GIT_SKIP || SYMLINK_SKIP },
-  () => {
-    const { dir, cleanup } = makeGitProject();
-    const outsideTarget = join(tmpdir(), 'sterling-h17-ah-leafkind-' + randomUUID().slice(0, 8));
-    try {
-      const outsideContent = Buffer.from('OUTSIDE-REPO TARGET of a symlink planted AT a tracked enforcement path — must be untouched by the restore\n');
-      writeFileSync(outsideTarget, outsideContent);
-
-      const tracked = join(dir, ...TRACKED_SUB_REL.split('/'));
-      assert.equal(readFileSync(tracked, 'utf8'), TRACKED_SUB_BYTES, 'PRECONDITION: the tracked enforcement path is committed and pristine');
-
-      const L = lane('leafkind');
-      assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree — hooks/sub is a REAL directory throughout this pin; only the LEAF kind changes (see PIN 4 for the ancestor dimension)');
-
-      // inside the window: the audited command removes the tracked file and
-      // plants a symlink to an outside file in its place — a KIND transition,
-      // not a content edit and not a plain deletion
-      rmSync(tracked, { force: true });
-      symlinkSync(outsideTarget, tracked);
-      assert.equal(lstatSync(tracked).isSymbolicLink(), true, 'PRECONDITION: the tracked enforcement path is now a symlink');
-      assert.match(porcelain(dir), /h3-extra\.mjs/, 'PRECONDITION: git reports the tracked path as changed (a type change), so the (A) sweep has it in front of it');
-      assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp exists — this deny must land on the restore arm, never the attested arm');
-
-      const post = h17(dir, 'PostToolUse', L);
-
-      assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
-      assert.equal(post.code, 2, `a tracked enforcement path swapped for a symlink must deny — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
-      assert.equal(
-        lstatSync(tracked).isSymbolicLink(),
-        false,
-        'THE PIN: the planted link must be UNLINKED, not left in place — restoreTracked applies no leaf-kind restriction, it removes whatever occupies the path before restoring from HEAD'
-      );
-      assert.equal(existsSync(tracked), true, 'and the path exists again, restored');
-      assert.equal(readFileSync(tracked, 'utf8'), TRACKED_SUB_BYTES, 'restored byte-for-byte from HEAD — proving the checkout ran AFTER the unlink, never a write through the link');
-      assert.deepEqual(readFileSync(outsideTarget), outsideContent, 'and the outside target the link pointed at is byte-unchanged — the unlink removed the link itself, it never followed it');
-    } finally {
-      cleanup([outsideTarget]);
-    }
-  }
-);
+// *** RETIRED 2026-08-30 per dc616f69 R16(ii) — RESTORE-PRIMITIVE SAFETY. ***
+// This pin's own words name its subject: "the question this pin adds is what
+// restoreTracked does to the LEAF ITSELF while denying". With `restoreTracked`
+// deleted, restoreTracked does nothing to the leaf, so the pin has no subject.
+// Its verdict carriers were "the planted link must be UNLINKED" and "restored
+// byte-for-byte from HEAD" — both assert the ruling's forbidden behaviour, and
+// its remaining assertion (the outside target is byte-unchanged) is exactly the
+// vacuous green R16(ii) forbids. Do not invert it: "the planted symlink
+// survives" is TRUE now but is a statement about deletion, not about a guard.
+//
+// STILL COVERED ELSEWHERE: that a tracked enforcement path swapped for a symlink
+// in-window DENIES is pinned by h17-pre-state-snapshot.test.mjs PIN-TYPE (the
+// pre-dirty arm) and PIN-CLEAN-AT-PRE-UNCHANGED (the clean-at-Pre arm, which
+// after the re-cut also pins that whatever the command left is left).

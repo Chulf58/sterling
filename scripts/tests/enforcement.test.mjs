@@ -1311,10 +1311,19 @@ function h17(dir, event, over = {}) {
 const A1 = { agent_id: 'a1' };
 
 // ---------------------------------------------------------------------------
-// AC1 — tracked bundled hooks (hooks.json + a bundled hook): tamper → deny + git-checkout-HEAD restore
+// AC1 — tracked bundled hooks (hooks.json + a bundled hook): tamper → DETECT,
+// DENY, LEAVE ON DISK. INVERTED per dc616f69 (the (A) arm stops restoring):
+// automatic rollback is unavailable while the conductor and agents share a
+// worktree, and no narrowing of the restore is safe, so the observed bytes stay
+// exactly where the command put them. Multi-path denial (both files named in
+// ONE message) is unchanged and is what this AC still uniquely covers.
+// EXPECTED FAILURE SHAPE: if any restore returns, the two byte-identity
+// assertions fire with the committed images on disk.
+// SABOTAGE: re-add a `git checkout HEAD --` over the violation set → both byte
+// assertions go RED while the exit code and both name assertions stay green.
 // ---------------------------------------------------------------------------
 
-test('H17 AC1: tampering tracked hooks/hooks.json + a bundled hooks/*.mjs → exit 2 + HEAD restore', { skip: GIT_SKIP }, () => {
+test('H17 AC1: tampering tracked hooks/hooks.json + a bundled hooks/*.mjs → exit 2, both named, bytes LEFT ON DISK', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
@@ -1323,76 +1332,114 @@ test('H17 AC1: tampering tracked hooks/hooks.json + a bundled hooks/*.mjs → ex
     const origHook = readFileSync(bundled, 'utf8');
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'Pre snapshot succeeds');
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
-    writeFileSync(bundled, '// TAMPERED — enforcement neutered\nprocess.exit(0);\n');
+    const tamperedJson = JSON.stringify({ hooks: {}, TAMPERED: true });
+    const tamperedHook = '// TAMPERED — enforcement neutered\nprocess.exit(0);\n';
+    writeFileSync(hooksJson, tamperedJson);
+    writeFileSync(bundled, tamperedHook);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(r.code, 2, `hooks/** tamper must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'hooks.json restored via git checkout HEAD');
-    assert.equal(readFileSync(bundled, 'utf8'), origHook, 'bundled hook restored via git checkout HEAD');
+    assert.equal(readFileSync(hooksJson, 'utf8'), tamperedJson, 'dc616f69: hooks.json is LEFT ON DISK exactly as observed — never checked out from HEAD');
+    assert.equal(readFileSync(bundled, 'utf8'), tamperedHook, 'dc616f69: the bundled hook likewise');
+    assert.notEqual(readFileSync(hooksJson, 'utf8'), origJson, 'and specifically NOT put back to the committed image');
+    assert.notEqual(readFileSync(bundled, 'utf8'), origHook, 'nor is the bundled hook');
     assert.match(r.stderr, /hooks\.json/, 'the denial names hooks.json');
     assert.match(r.stderr, /h3-contract-gate/, 'the denial names the bundled hook');
+    assert.match(r.stderr, /left on disk/i, 'and STATES the disposition rather than claiming a rollback');
   } finally {
     cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// AC2 — out-of-contract tracked FROZEN test tampered → deny + restore (caught via scopeCheck)
+// AC2 — out-of-contract tracked FROZEN test tampered → deny, left on disk
+// (caught via scopeCheck). INVERTED per dc616f69: detection is the AC, the
+// restore was the mechanism, and the mechanism is deleted. NOTE the consequence
+// this AC now carries and must not hide: a weakened frozen test SURVIVES the
+// denial on disk — the tripwire stops the next call, it does not undo the edit
+// (dc616f69 R14, the bounded claim).
+// SABOTAGE: re-add the checkout on scope violations → the byte assertion RED.
 // ---------------------------------------------------------------------------
 
-test('H17 AC2: out-of-contract tracked frozen test tampered → exit 2 + checkout restore', { skip: GIT_SKIP }, () => {
+test('H17 AC2: out-of-contract tracked frozen test tampered → exit 2, edit LEFT ON DISK', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const frozen = join(dir, 'tests', 'frozen.test.mjs');
     const orig = readFileSync(frozen, 'utf8');
+    const weakened = orig + "\ntest('injected', () => {}); // weakened via node --test writer\n";
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(frozen, orig + "\ntest('injected', () => {}); // weakened via node --test writer\n");
+    writeFileSync(frozen, weakened);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1);
     assert.equal(r.code, 2, `out-of-blast-radius test edit must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(frozen, 'utf8'), orig, 'frozen test restored to HEAD');
+    assert.equal(readFileSync(frozen, 'utf8'), weakened, 'dc616f69: the frozen test is LEFT as the command wrote it — H17 is a tripwire, not a rollback');
+    assert.notEqual(readFileSync(frozen, 'utf8'), orig, 'and specifically NOT restored to HEAD');
   } finally {
     cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// AC3 — out-of-contract source: modified→checkout; untracked FILE→deleted; untracked DIR→removed recursively
+// AC3 — out-of-contract source, all three SHAPES still DETECTED and DENIED;
+// none is mutated. INVERTED per dc616f69: (a) was checkout-restored, (b) and (c)
+// were deleted/removed recursively — `restoreTracked` and `removeTreeAt` are
+// gone, so all three are now left exactly as observed. The AC still earns its
+// place because the three shapes reach detection by three different porcelain
+// routes (M / ?? file / ?? dir-collapse), which is what it always tested.
+//
+// FIXTURE HAZARD (dc616f69, and the reason for the clearLatch calls): each arm
+// runs its own Pre/Post pair on ONE fixture, and each violating Post now leaves
+// a taint latch. Without the clears, arm (b)'s Pre would be denied by arm (a)'s
+// incident and the arm would prove nothing about its own subject.
+// SABOTAGE: re-add removal of not-in-HEAD (A) paths → (b) and (c) go RED;
+// re-add the checkout → (a) goes RED.
 // ---------------------------------------------------------------------------
 
-test('H17 AC3: out-of-contract source — modified→checkout, untracked file→delete, untracked dir(?? dir/)→rm -r', { skip: GIT_SKIP }, () => {
+test('H17 AC3: out-of-contract source — modified, untracked file, untracked dir(?? dir/) — all DENIED and all LEFT ON DISK', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    // (a) tracked out-of-contract source MODIFIED → restore via checkout
+    // (a) tracked out-of-contract source MODIFIED → denied, left as written
     const other = join(dir, 'src', 'other.ts');
     const origOther = readFileSync(other, 'utf8');
+    const tamperedOther = origOther + '\n// out-of-contract tamper\n';
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(other, origOther + '\n// out-of-contract tamper\n');
+    writeFileSync(other, tamperedOther);
     let r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `modified out-of-contract source must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(other, 'utf8'), origOther, 'modified source restored via git checkout HEAD');
+    assert.equal(readFileSync(other, 'utf8'), tamperedOther, 'modified source LEFT ON DISK — no checkout (dc616f69)');
+    assert.notEqual(readFileSync(other, 'utf8'), origOther, 'and specifically NOT restored');
 
-    // (b) UNTRACKED out-of-contract FILE → deleted
+    // (b) UNTRACKED out-of-contract FILE → denied, survives
+    // ISOLATION, previously supplied BY THE RESTORE ITSELF: each arm used to
+    // start from a clean tree because H17 had just put arm (a)'s file back.
+    // It no longer does, so the TEST restores the tree — otherwise arm (b) runs
+    // with a pre-dirty src/other.ts and its denial has two possible causes.
+    clearLatch(dir); // arm (a) latched; this arm must be denied by its OWN violation
+    git(dir, ['checkout', 'HEAD', '--', 'src/other.ts'], { must: true });
     const evilFile = join(dir, 'src', 'evil.mjs');
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'PRECONDITION: with the previous incident cleared, Pre allows again');
     writeFileSync(evilFile, 'console.log("planted");\n');
     r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `untracked out-of-contract file must deny — ${oneLine(r.stderr)}`);
-    assert.equal(existsSync(evilFile), false, 'untracked out-of-contract file deleted');
+    assert.equal(existsSync(evilFile), true, 'untracked out-of-contract file LEFT ON DISK — H17 deletes nothing (dc616f69)');
+    assert.equal(readFileSync(evilFile, 'utf8'), 'console.log("planted");\n', 'byte-identical to what the command wrote');
 
-    // (c) UNTRACKED out-of-contract DIR — git collapses to `?? src/evildir/` → removed recursively
+    // (c) UNTRACKED out-of-contract DIR — git collapses to `?? src/evildir/`
+    clearLatch(dir);
+    rmSync(evilFile, { force: true }); // same isolation as above: the sweep no longer clears it
     const evilDir = join(dir, 'src', 'evildir');
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'PRECONDITION: with the previous incident cleared, Pre allows again');
     mkdirSync(evilDir, { recursive: true });
     writeFileSync(join(evilDir, 'a.ts'), 'x');
     writeFileSync(join(evilDir, 'b.ts'), 'y');
     r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `untracked out-of-contract dir must deny — ${oneLine(r.stderr)}`);
-    assert.equal(existsSync(evilDir), false, 'untracked dir removed recursively (?? dir/ collapse handled)');
+    assert.equal(existsSync(evilDir), true, 'the collapsed untracked dir is LEFT ON DISK — no recursive removal (dc616f69)');
+    assert.equal(readFileSync(join(evilDir, 'a.ts'), 'utf8'), 'x', 'and its children are untouched');
+    assert.equal(readFileSync(join(evilDir, 'b.ts'), 'utf8'), 'y', 'both of them');
   } finally {
     cleanup();
   }
@@ -1492,6 +1539,15 @@ test('H17 AC5: no agent_id (conductor) → exit 0, nothing touched, short-circui
 // plain file, deliberately outside the sealed DB and outside BASELINE_GLOBS.
 function latchPath(dir) {
   return join(dir, '.sterling', 'enforcement-taint.json');
+}
+
+// dc616f69: BOTH the clean-at-Pre violation arm and the changed-pre-dirty arm
+// now LATCH eagerly at detection, and a standing latch denies the NEXT Pre
+// before it re-baselines. Any fixture that runs more than ONE Pre/Post pair
+// after a violation must clear the latch between windows, or the later Pre is
+// denied by the EARLIER case's incident rather than by its own subject.
+function clearLatch(dir) {
+  rmSync(latchPath(dir), { force: true });
 }
 
 test('H17 AC8-DB-CONTROL: a sterling.db change is NOT in the (B) set and is NOT flagged (the ALLOW control for every AC8 arm below)', { skip: GIT_SKIP }, () => {
@@ -1785,21 +1841,30 @@ test('H17: a PRE-EXISTING dirty hooks/ file that is UNCHANGED across the window 
   }
 });
 
-test('H17: a write made DURING the command is still reverted and attributed — the gate is not weakened', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69 on TWO counts, both of them the ruling's point.
+// (1) The write is no longer reverted — it is denied and left on disk.
+// (2) The message no longer CLAIMS AUTHORSHIP: R13 forbids "BY THIS COMMAND"
+// because authorship is unprovable in a shared worktree (a same-UID hook has no
+// non-forgeable author signal), so the honest vocabulary is OBSERVED-in-window.
+// The old `/BY THIS COMMAND/` assertion is deleted rather than re-pointed: it
+// pinned a false claim, and pinning its replacement wording would re-pin the
+// exact phrasing the ruling is still settling.
+test('H17: a write made DURING the command is DETECTED, denied and left on disk — the gate is not weakened, and it claims no authorship', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
     const committed = readFileSync(bundle, 'utf8');
+    const tampered = '// tampered by the agent mid-command\n';
 
     h17(dir, 'PreToolUse', A1); // clean at Pre
-    writeFileSync(bundle, '// tampered by the agent mid-command\n'); // the bypass H17 exists to catch
+    writeFileSync(bundle, tampered); // the bypass H17 exists to catch
     const r = h17(dir, 'PostToolUse', A1);
 
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /BY THIS COMMAND/, 'attributed to the command that made it');
     assert.match(r.stderr, /hooks\/h3-contract-gate\.mjs/);
     assert.match(r.stderr, /only the last is amendable by scope/, 'and names which of the three predicates can be amended');
-    assert.equal(readFileSync(bundle, 'utf8'), committed, 'reverted to HEAD');
+    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'dc616f69: left on disk exactly as observed');
+    assert.notEqual(readFileSync(bundle, 'utf8'), committed, 'and specifically NOT reverted to HEAD');
   } finally {
     cleanup();
   }
@@ -2326,12 +2391,19 @@ test('H17 stamp fix: a CORRUPT stamp file (invalid JSON) gives NO exemption to a
 
     const L = tu('corruptstamp');
     h17(dir, 'PreToolUse', L);
-    writeFileSync(bundle, '// tampered in-window, "attested" by an unparseable stamp\n');
+    const tampered = '// tampered in-window, "attested" by an unparseable stamp\n';
+    writeFileSync(bundle, tampered);
     const r = h17(dir, 'PostToolUse', L);
 
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(r.code, 2, `a corrupt (unparseable) stamp file must not exempt an in-window change — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(bundle, 'utf8'), committed, 'and it is swept normally: restored to HEAD, exactly as with no stamp at all');
+    // dc616f69 R11: inverted from "restored to HEAD". Since NO stamp shape can
+    // exempt an (A) change any more, this block's remaining force is that a
+    // malformed stamp does not become an ERROR-shaped deny that skips detection
+    // — the byte assertion still separates "detected and left" from "never
+    // reached the sweep at all", which is exactly what it was written for.
+    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'and it is handled normally: denied and LEFT ON DISK, exactly as with no stamp at all');
+    assert.notEqual(readFileSync(bundle, 'utf8'), committed, 'never restored to HEAD');
   } finally {
     cleanup();
   }
@@ -2366,7 +2438,10 @@ test('H17 stamp fix: a NON-ARRAY stamp file (a JSON object naming the tampered p
     const r = h17(dir, 'PostToolUse', L);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(r.code, 2, `a stamp file that is a JSON OBJECT, not an array, must not exempt anything — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(bundle, 'utf8'), committed, 'and it is swept normally: restored to HEAD, exactly as with no stamp at all');
+    // dc616f69 R11: inverted from "restored to HEAD" — same reasoning as the
+    // corrupt-JSON block above.
+    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'and it is handled normally: denied and LEFT ON DISK, exactly as with no stamp at all');
+    assert.notEqual(readFileSync(bundle, 'utf8'), committed, 'never restored to HEAD');
   } finally {
     cleanup();
   }
@@ -2493,20 +2568,27 @@ test('enforcement-stamp.mjs (widened, EXPECTED RED today): stamps a dirty non-ho
   }
 });
 
-test('H17 AC9c: restore fs-error (deterministic EISDIR dir-swap) → deny, not exit 1', { skip: GIT_SKIP }, () => {
+// RENAMED per dc616f69: there is no restore left to raise an fs-error. The
+// FIXTURE and the ASSERTIONS are unchanged and still live — a (B) path whose
+// TYPE was swapped file→directory in-window is an fs-shaped can't-verify, and
+// AC9's universal rule (every can't-verify path denies, never a non-blocking
+// exit 1) is what this block has always been for. Only the CAUSE named in the
+// title moved, from the restore write to the read/classify layer.
+// SABOTAGE: make the type-swap path fall through to exit 0 or exit 1 → RED.
+test('H17 AC9c: an fs-error on an enforcement path (deterministic EISDIR dir-swap) → deny, not exit 1', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const configPath = join(dir, '.sterling', 'config.json');
     // Pre snapshots config.json as a FILE...
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    // ...then swap the file for a DIRECTORY of the same name: on restore, h17's
-    // read/write of that path throws EISDIR — a deterministic restore fs-error.
+    // ...then swap the file for a DIRECTORY of the same name, so h17's read of
+    // that path throws EISDIR — a deterministic fs-error on a (B) path.
     rmSync(configPath, { force: true });
     mkdirSync(configPath, { recursive: true });
     writeFileSync(join(configPath, 'blocker'), 'x');
     const r = h17(dir, 'PostToolUse', A1);
-    assert.notEqual(r.code, 1, 'a restore fs-error must not fail open');
-    assert.equal(r.code, 2, `restore fs-error → deny — ${oneLine(r.stderr)}`);
+    assert.notEqual(r.code, 1, 'an fs-error must not fail open');
+    assert.equal(r.code, 2, `fs-error → deny — ${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }
@@ -2592,7 +2674,17 @@ test('H17 AC10: crafted baseline with ../ + absolute keys → deny + NO out-of-t
 // AC11 — rename R dual-path (git mv restore); spaced path via -z; multiple violations → one deny naming each
 // ---------------------------------------------------------------------------
 
-test('H17 AC11 (rename): staged out-of-contract rename (R, dual-path) → deny + origin restored', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69. The AC's subject — `-z` DUAL-PATH parsing of an `R`
+// entry, i.e. that H17 sees BOTH sides of a staged rename — survives intact and
+// is now carried by the DENIAL NAMING BOTH PATHS rather than by undoing the
+// rename. That is a strictly better oracle for this AC: the old
+// `existsSync(origin)` assertion could be satisfied by a restore that never
+// parsed the second path at all, whereas naming both proves the parse.
+// EXPECTED FAILURE SHAPE: if `-z` dual-path parsing regresses to space-splitting
+// or to the first path only, one of the two `match` assertions fires.
+// SABOTAGE: parse the R entry as a single path → the `/other\.ts/` assertion
+// goes RED while the exit code stays green.
+test('H17 AC11 (rename): staged out-of-contract rename (R, dual-path) → deny naming BOTH paths, rename left in place', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const origin = join(dir, 'src', 'other.ts'); // out-of-contract tracked
@@ -2606,47 +2698,65 @@ test('H17 AC11 (rename): staged out-of-contract rename (R, dual-path) → deny +
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1);
     assert.equal(r.code, 2, `staged rename of an out-of-contract file must deny — ${oneLine(r.stderr)}`);
-    assert.ok(existsSync(origin), 'rename origin restored (dual-path handled)');
-    assert.equal(readFileSync(origin, 'utf8'), origContent, 'origin content restored');
-    assert.equal(existsSync(target), false, 'rename destination removed');
+    // THE STATE-UNCHANGED HALF: the rename the command performed stands.
+    assert.equal(existsSync(origin), false, 'dc616f69: the rename is NOT undone — the origin stays gone');
+    assert.ok(existsSync(target), 'and the destination stays on disk');
+    assert.equal(readFileSync(target, 'utf8'), origContent, 'byte-identical to what was moved');
+    // THE DUAL-PATH HALF: both sides of the R entry were parsed and reported.
+    assert.match(r.stderr, /renamed\.ts/, 'the denial names the rename destination');
+    assert.match(r.stderr, /other\.ts/, 'AND the origin — proving the `R new\\0old` dual-path parse (this is what the AC is for)');
   } finally {
     cleanup();
   }
 });
 
-test('H17 AC11 (spaced path): out-of-contract path with a space parsed via -z → deny + restore', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69. As with the rename arm, the AC's real subject is `-z`
+// NUL parsing (no space-split), and the surviving oracle for it is that the
+// denial names the WHOLE spaced path — a space-split parse would name `a` or
+// `b.ts`, never `a b.ts`.
+// SABOTAGE: parse porcelain on whitespace instead of NUL → the full-path
+// `match` assertion goes RED.
+test('H17 AC11 (spaced path): out-of-contract path with a space parsed via -z → deny naming the whole path, bytes left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const spaced = join(dir, 'src', 'a b.ts'); // out-of-contract, embedded space
     const orig = readFileSync(spaced, 'utf8');
+    const tampered = orig + '\n// tamper on a spaced path\n';
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(spaced, orig + '\n// tamper on a spaced path\n');
+    writeFileSync(spaced, tampered);
     const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `spaced-path change must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(spaced, 'utf8'), orig, 'spaced path restored — proves -z NUL parsing (no space-split)');
+    assert.match(r.stderr, /a b\.ts/, 'the denial names the WHOLE spaced path — proves -z NUL parsing (no space-split)');
+    assert.equal(readFileSync(spaced, 'utf8'), tampered, 'and the bytes are left on disk (dc616f69)');
   } finally {
     cleanup();
   }
 });
 
-test('H17 AC11 (multiple): two out-of-contract violations → ONE deny naming each + both restored', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69: ONE deny naming each survives untouched (it was always
+// the AC's subject); "both restored" becomes "both left on disk".
+// SABOTAGE: deny on the first violation and return before collecting the rest
+// → the `/old\.ts/` assertion goes RED.
+test('H17 AC11 (multiple): two out-of-contract violations → ONE deny naming each, both left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const other = join(dir, 'src', 'other.ts'); // outside blast radius
     const legacy = join(dir, 'src', 'legacy', 'old.ts'); // out_of_scope
     const origOther = readFileSync(other, 'utf8');
     const origLegacy = readFileSync(legacy, 'utf8');
+    const tamperedOther = origOther + '\n// tamper 1\n';
+    const tamperedLegacy = origLegacy + '\n// tamper 2\n';
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(other, origOther + '\n// tamper 1\n');
-    writeFileSync(legacy, origLegacy + '\n// tamper 2\n');
+    writeFileSync(other, tamperedOther);
+    writeFileSync(legacy, tamperedLegacy);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `multiple violations must deny — ${oneLine(r.stderr)}`);
     assert.match(r.stderr, /other\.ts/, 'the single deny names the first violation');
     assert.match(r.stderr, /old\.ts/, 'the single deny names the second violation');
-    assert.equal(readFileSync(other, 'utf8'), origOther, 'first violation restored');
-    assert.equal(readFileSync(legacy, 'utf8'), origLegacy, 'second violation restored');
+    assert.equal(readFileSync(other, 'utf8'), tamperedOther, 'first violation LEFT ON DISK (dc616f69)');
+    assert.equal(readFileSync(legacy, 'utf8'), tamperedLegacy, 'second violation LEFT ON DISK');
   } finally {
     cleanup();
   }
@@ -2786,17 +2896,24 @@ test('H17 (amendment): a run.scope_amendments path is in-contract — the edit s
   }
 });
 
-// H17 ordering: an amended path that ALSO matches out_of_scope is still swept + restored.
-test('H17 (amendment ordering): an amended path that ALSO matches out_of_scope stays swept + restored', { skip: GIT_SKIP }, () => {
+// H17 ordering: an amended path that ALSO matches out_of_scope is still DENIED.
+// INVERTED per dc616f69 (restore → left on disk). The ORDERING property — that
+// out_of_scope beats the amendment — is carried entirely by the exit code, and
+// reads against the amendment test above it, which allows on the same fixture
+// shape with a non-out_of_scope amended path. That pairing is what keeps this
+// verdict single-caused now that the disk outcome no longer distinguishes them.
+test('H17 (amendment ordering): an amended path that ALSO matches out_of_scope is still DENIED — and left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject({ amendments: [{ path: 'src/legacy/old.ts', reason: 'stray amendment', at: NOW }] });
   try {
     const legacy = join(dir, 'src', 'legacy', 'old.ts'); // out_of_scope AND amended
     const orig = readFileSync(legacy, 'utf8');
+    const tampered = orig + '\n// tamper on an out_of_scope path\n';
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(legacy, orig + '\n// tamper on an out_of_scope path\n');
+    writeFileSync(legacy, tampered);
     const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `out_of_scope beats the amendment — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(legacy, 'utf8'), orig, 'out_of_scope amended path still restored to HEAD');
+    assert.match(r.stderr, /old\.ts/, 'and the denial names the out_of_scope amended path');
+    assert.equal(readFileSync(legacy, 'utf8'), tampered, 'left on disk — the amendment ordering is a CLASSIFICATION rule, and classification no longer mutates anything (dc616f69)');
   } finally {
     cleanup();
   }

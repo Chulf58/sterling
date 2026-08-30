@@ -21,8 +21,28 @@
 //     otherwise DENY. Either way, deliberately NOT restored (a pre-image restore
 //     would clobber a concurrent lane's legitimate write; that hole stays open
 //     and is a separate, deferred slice).
-//   * clean at Pre, dirty at Post        -> unchanged behaviour: fresh-stamp
-//     check (decision 4d9b76e8), else restore to HEAD and deny.
+//   * clean at Pre, dirty at Post        -> DENY, LATCH, LEAVE ON DISK.
+//
+// *** RE-CUT 2026-08-30 — dc616f69 + 78dc9bd6. ***
+// The pre-state snapshot SEMANTICS above are untouched and every mechanism pin
+// for them stands: "dirty at Pre" still means COMPARE AGAINST THE PRE SNAPSHOT
+// (decision 7021526c), and the four state terms, the per-call keying and the
+// fail-closed record branches are all unchanged. THREE things moved:
+//   (1) THE (A) ARM STOPS RESTORING. `restoreTracked`/`removeTreeAt` and the
+//       whole restore chain are deleted (dc616f69 R11), so a clean-at-Pre
+//       in-window change is DETECTED, DENIED, LATCHED and LEFT ON DISK. Every
+//       "restored to HEAD" assertion below is inverted to leave-alone.
+//   (2) THE (A) STAMP EXEMPTION IS DELETED, on BOTH arms — the clean-at-Pre
+//       fresh-stamp consult (4d9b76e8) AND the changed-pre-dirty consult
+//       (7021526c step 2). A same-UID-forgeable attestation may never change a
+//       verdict, so a changed pre-dirty path now ALWAYS denies. Blocks whose
+//       ONLY subject was that exemption are retired rather than inverted.
+//       The PRE-EXISTING/degraded-fallback attestation path is NOT affected.
+//   (3) DETECTION LATCHES. Both the clean-at-Pre arm and the changed-pre-dirty
+//       arm write `.sterling/enforcement-taint.json` eagerly, and a standing
+//       latch denies the NEXT Pre — so any fixture running a second hook pair
+//       after a violation must `clearLatch(dir)` between windows. The degraded
+//       blanket pre-existing arm does NOT latch.
 // THE STAMP CONSULT ON THE CHANGED ARM (decision 7021526c v2, settling an
 // interaction v1 left open — 4d9b76e8 wins and its rule is GENERAL, not confined
 // to the clean-at-Pre branch): a stamp can be written ONLY by a deliberate
@@ -1098,31 +1118,31 @@ test('PIN-FALLBACK-SKEW (boundary guard): a tool_use_id present at Pre and absen
 });
 
 // =========================================================================
-// PIN-STAMP-BEFORE-RESTORE — same-file tripwire for decision 4d9b76e8. The
-// clean-at-Pre arm is explicitly UNCHANGED by this ruling: an in-window change
-// to a path that was CLEAN at Pre still consults the fresh stamp first, and
-// only restores to HEAD when no entry matches the CURRENT bytes. This slice
-// edits exactly that code region, so the tripwire lives here beside it;
-// primary coverage stays h17-stamp-honor.test.mjs PIN1 (the established
-// duplicated-tripwire idiom, cf. that file's PIN6).
+// PIN-STAMP-BEFORE-RESTORE — INVERTED per dc616f69 R11, which DELETES the (A)
+// stamp exemption ("keeping it as a 'do not latch' authority reintroduces the
+// very attestation premise this decision rejects"). Decision 4d9b76e8 is
+// superseded on this arm. The block is kept rather than retired because this
+// fixture is one of only two that can prove the exemption is GONE rather than
+// merely unreachable: the stamp matches the CURRENT bytes EXACTLY, so a deny
+// here has exactly one possible cause. Its sibling is
+// h17-stamp-honor.test.mjs PIN1 (the established duplicated-tripwire idiom).
 //
-// EXPECTED: GREEN today, and green after — confirmed by run, 2026-08-22.
-// Decision 4d9b76e8's fresh-stamp consult IS built; only board 0b848342's
-// findings (1)/(2)/(3) — the pre-image restore, the gitignored-baseline
-// attestation branch, the generation-bound stamp id — remain unbuilt. Do NOT
-// read this as an expected-failure pin: a red here is a REAL regression.
+// EXPECTED FAILURE SHAPE: `r.code === 2` fires with actual 0 if any
+// stamp consult returns to this arm; the bytes assertion fires if a restore
+// returns.
 //
-// CATCHES SABOTAGE: the fresh-stamp check before a clean-at-Pre restore forced
-// to `if (false)` — the attested edit is then restored and denied, firing both
-// the code and the bytes assertion.
+// CATCHES SABOTAGE: re-add the fresh-stamp check to the clean-at-Pre arm ->
+// RED on the exit code. Re-add `restoreTracked` -> RED on the bytes. Two
+// mutations, two distinct assertions; neither reds both.
 // =========================================================================
 
-test('PIN-STAMP-BEFORE-RESTORE (tripwire): a CLEAN-at-Pre in-window change matching a fresh stamp is still honored — not restored, not denied', { skip: GIT_SKIP }, () => {
+test('PIN-STAMP-BEFORE-RESTORE (dc616f69 R11): a CLEAN-at-Pre in-window change matching a fresh stamp is NO LONGER honored — denied, latched, left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json'); // CLEAN at Pre
 
     const L = lane('stamp');
+    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch stands before this window');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0);
 
     const newBytes = JSON.stringify({ hooks: { PreToolUse: [] }, CONDUCTOR_EDIT: true }) + '\n';
@@ -1131,21 +1151,41 @@ test('PIN-STAMP-BEFORE-RESTORE (tripwire): a CLEAN-at-Pre in-window change match
 
     const r = h17(dir, 'PostToolUse', L);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `a matching fresh stamp must still exempt a clean-at-Pre in-window change — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), newBytes, 'the attested bytes are KEPT, not reverted to HEAD');
+    assert.equal(
+      r.code,
+      2,
+      `an exact fresh stamp is NOT an authorization — a same-UID-forgeable attestation may never change the verdict — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(hooksJson, 'utf8'), newBytes, 'and the bytes are LEFT ON DISK exactly as written — denied, never reverted');
+    assert.match(oneLine(r.stderr), /left on disk/i, 'the denial STATES the disposition');
+    assert.equal(existsSync(latchPath(dir)), true, 'and the incident is LATCHED eagerly at detection');
   } finally {
     cleanup();
   }
 });
 
 // =========================================================================
-// PIN-STAMP-ON-CHANGED-PREDIRT — THE ADJUDICATED ARM (decision 7021526c v2,
-// settling the interaction its v1 left open; decision 4d9b76e8 WINS and its
-// rule is GENERAL, not confined to the clean-at-Pre branch). Post's order is:
-//   1. state UNCHANGED  -> allow, no stamp consulted (PIN-ALLOW);
-//   2. state CHANGED    -> consult the stamp FRESH and hash the CURRENT state;
-//                          exact match -> ALLOW, attested, and still NO restore;
-//   3. otherwise        -> DENY, and still no restore.
+// PIN-STAMP-ON-CHANGED-PREDIRT — INVERTED per dc616f69 R11. The adjudicated
+// step 2 below is DELETED: the stamp consult is gone from the changed-pre-dirty
+// arm exactly as it is gone from the clean-at-Pre arm, so Post's order is now:
+//   1. state UNCHANGED  -> allow, nothing consulted (PIN-ALLOW);
+//   2. state CHANGED    -> DENY and LATCH, unconditionally, and still no
+//                          restore. No attestation can move this verdict.
+// ARM 2 (stamp attests the PRE image) is unchanged and is now the CONTROL: it
+// denies under BOTH the old and the new hook, so it can never distinguish them
+// on its own — which is what makes it a control. ARM 1 (stamp attests the
+// CURRENT bytes exactly) is INVERTED from allow to deny and is the only arm in
+// this file that isolates the exemption's removal on the pre-dirty branch.
+//
+// EXPECTED FAILURE SHAPE: ARM 1's `r.code === 2` fires with actual 0 if the
+// changed-pre-dirty stamp consult returns.
+// CATCHES SABOTAGE: re-add the fresh-stamp consult to the changed arm -> ARM 1
+// RED, ARM 2 GREEN (the asymmetry is the evidence). Drop the changed-pre-dirty
+// deny entirely -> BOTH arms RED, which is the signature of a broken comparison
+// rather than a restored exemption.
+//
+// HISTORICAL RATIONALE for the deleted step 2, retained because it explains why
+// the arm existed at all (decision 7021526c v2 / 4d9b76e8):
 // THE WHY, which is what makes step 2 safe rather than a hole: a stamp can be
 // written ONLY by a deliberate conductor-run CLI and never from a Bash-invoked
 // rebuild (decision 6e132e19 — auto-stamping from build-hooks.mjs was rejected
@@ -1187,7 +1227,7 @@ test('PIN-STAMP-BEFORE-RESTORE (tripwire): a CLEAN-at-Pre in-window change match
 // arm — one order of operations, no contradiction.
 // =========================================================================
 
-test('PIN-STAMP-ON-CHANGED-PREDIRT: a pre-dirty path CHANGED in-window whose CURRENT bytes match a fresh stamp is conductor-attested — allow, and still no restore', { skip: GIT_SKIP }, () => {
+test('PIN-STAMP-ON-CHANGED-PREDIRT (dc616f69 R11): a pre-dirty path CHANGED in-window DENIES even when its CURRENT bytes match a fresh stamp — attestation no longer exempts, and still no restore', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const bundle = bundlePath(dir);
@@ -1206,10 +1246,15 @@ test('PIN-STAMP-ON-CHANGED-PREDIRT: a pre-dirty path CHANGED in-window whose CUR
 
     let r = h17(dir, 'PostToolUse', L2);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `a stamp matching the PRE image rather than the CURRENT bytes attests nothing — must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+    assert.equal(r.code, 2, `CONTROL: a changed pre-dirty path denies — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
     assert.equal(readFileSync(bundle, 'utf8'), laterBytes, 'and the deny still performs no restore on a pre-dirty path');
+    assert.equal(existsSync(latchPath(dir)), true, 'dc616f69: the changed-pre-dirty arm latches eagerly too');
 
-    // ARM 1 (expected RED today) — the stamp attests the CHANGED bytes
+    // ARM 1 — the stamp attests the CHANGED bytes EXACTLY, and must still deny.
+    // FIXTURE HAZARD (dc616f69): arm 2 above just latched, and a standing latch
+    // denies the next Pre. Without this clear, ARM 1's Pre fails its exit-0
+    // assertion and the arm never reaches its own subject.
+    clearLatch(dir);
     const L1 = lane('attested-change');
     assert.equal(h17(dir, 'PreToolUse', L1).code, 0); // Pre snapshots Z
     const conductorBytes = '// Y: the conductor continued its own rebuild INSIDE the window\n';
@@ -1219,16 +1264,31 @@ test('PIN-STAMP-ON-CHANGED-PREDIRT: a pre-dirty path CHANGED in-window whose CUR
 
     r = h17(dir, 'PostToolUse', L1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `a fresh stamp matching the CHANGED bytes is a conductor attestation and must allow — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(bundle, 'utf8'), conductorBytes, 'and the bytes are left exactly as the conductor wrote them: attested, and still NO restore');
+    assert.equal(
+      r.code,
+      2,
+      `THE PIN: a fresh stamp matching the CHANGED bytes EXACTLY is no longer an authorization — a same-UID-forgeable attestation may never suppress a denial (dc616f69 R11) — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
+    );
+    assert.equal(readFileSync(bundle, 'utf8'), conductorBytes, 'and the bytes are left exactly as they were written: denied, and still NO restore');
+    assert.equal(existsSync(latchPath(dir)), true, 'and this detection latches as well');
   } finally {
     cleanup();
   }
 });
 
 // =========================================================================
-// PIN-STAMP-PER-PATH-ON-CHANGED — step 2 is PER PATH, and this is the only
-// place that shows it. Two pre-dirty enforcement paths, BOTH changed in-window,
+// PIN-STAMP-PER-PATH-ON-CHANGED — *** RETIRED 2026-08-30 per dc616f69 R11 +
+// R16. *** Its ONLY subject was the GRANULARITY of step 2's stamp exemption
+// (per-path rather than all-or-nothing), and step 2 is deleted: no stamp
+// exempts any (A) path, so there is no granularity left to observe. Inverting
+// it would produce a block asserting only "two changed pre-dirty paths both
+// deny and both are named", which PIN-STAMP-ON-CHANGED-PREDIRT and
+// PIN-ALLOW already cover between them — a vacuous green wearing the name of a
+// pin that once carried a real distinction. The historical rationale is kept
+// below because it records WHY the distinction mattered while it existed.
+//
+// HISTORICAL — step 2 is PER PATH, and this was the only
+// place that showed it. Two pre-dirty enforcement paths, BOTH changed in-window,
 // only ONE of them stamped.
 //
 // THE EXIT CODE CANNOT CARRY THIS TEST, which is why the assertions are about
@@ -1270,75 +1330,95 @@ test('PIN-STAMP-ON-CHANGED-PREDIRT: a pre-dirty path CHANGED in-window whose CUR
 // /hooks\.json/ positive and the code assertion.
 // =========================================================================
 
-test('PIN-STAMP-PER-PATH-ON-CHANGED: two pre-dirty paths BOTH changed in-window with only ONE stamped — the unstamped one is named, the ATTESTED one is not, and neither is restored', { skip: GIT_SKIP }, () => {
+// =========================================================================
+// PIN-CLEAN-AT-PRE-UNCHANGED — THE PIN dc616f69 NAMED BY LINE NUMBER as
+// "a test currently PINS THE UNSAFE CONTRACT", and therefore the primary
+// contract inversion of this whole slice. It keeps its original job — the
+// negative boundary that stops the comparison being written as "compare only
+// what was dirty" — and gains the full R16 oracle in place of the restore:
+// exact pre-Post bytes recorded, exit 2, bytes UNCHANGED, disposition STATED,
+// no false action claim, incident LATCHED, next Pre DENIED before it can
+// re-baseline the surviving bytes. Its clean control is PIN-CLEAN-CONTROL
+// immediately below.
+//
+// WHY THE RESTORE WENT, in one line, so nobody re-adds it as an obvious
+// improvement: authorship is unprovable in a shared worktree, so restoring
+// "the agent's" write destroys the conductor's uncommitted work whenever the
+// attribution is wrong — and no heuristic can make it right (dc616f69).
+//
+// EXPECTED FAILURE SHAPE, per assertion: restore returns -> the bytes assertion
+// fires with `committed` on disk; latch write dropped -> the latch assertion
+// fires; Pre latch consult dropped -> the next-Pre assertion fires with 0.
+//
+// CATCHES SABOTAGE: (a) any change routing clean-at-Pre paths through the
+// pre-dirty "unchanged -> allow" arm -> exit-code RED; (b) `git checkout HEAD
+// --` re-added over the violation set -> bytes RED; (c) latch write removed ->
+// latch RED; (d) Pre latch consult removed -> next-Pre RED. Four mutations,
+// four distinct assertions — no single one of them reds the whole block, which
+// is what makes each assertion load-bearing rather than decorative.
+// =========================================================================
+
+test('PIN-CLEAN-AT-PRE-UNCHANGED (dc616f69): a path CLEAN at Pre and changed in-window is DENIED, LATCHED and LEFT ON DISK — never restored to HEAD', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    const attestedPath = bundlePath(dir); // hooks/h3-contract-gate.mjs — distinctive name
-    const unattestedPath = join(dir, 'hooks', 'hooks.json');
-    writeFileSync(attestedPath, '// X1: parallel lane rebuild, uncommitted\n');
-    writeFileSync(unattestedPath, JSON.stringify({ hooks: { PreToolUse: [] }, rebuilt: true }, null, 2) + '\n');
+    const bundle = bundlePath(dir); // clean at Pre
+    const committed = readFileSync(bundle, 'utf8');
+    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp — nothing may exempt this');
+    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch stands before this window');
 
-    const L = lane('mixed-attestation');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre snapshots both pre-dirty paths');
-
-    // BOTH change inside the window
-    const attestedAfter = '// Y1: the conductor continued its own rebuild INSIDE the window\n';
-    const unattestedAfter = JSON.stringify({ hooks: {}, TAMPERED: true });
-    writeFileSync(attestedPath, attestedAfter);
-    writeFileSync(unattestedPath, unattestedAfter);
-
-    // exactly ONE of the two is attested, on its CURRENT bytes
-    writeStamp(dir, [{ path: BUNDLE_REL, sha256: sha256Of(attestedPath), at: NOW }]);
-    const stamp = JSON.parse(readFileSync(stampPath(dir), 'utf8'));
-    assert.equal(stamp.length, 1, 'PRECONDITION: exactly ONE of the two changed paths is stamped — otherwise this test cannot distinguish per-path from all-or-nothing');
-    assert.equal(stamp[0].path, BUNDLE_REL, 'PRECONDITION: and it is the distinctively-named one');
+    const L = lane('cleanpre');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
+    const tampered = '// tampered by the agent mid-command\n';
+    writeFileSync(bundle, tampered);
+    assert.notEqual(tampered, committed, 'PRECONDITION: the bytes genuinely moved');
 
     const r = h17(dir, 'PostToolUse', L);
-
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `the UNSTAMPED changed path still denies, so the command denies either way — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /hooks\.json/, 'the unattested changed path IS named');
-    assert.doesNotMatch(
-      r.stderr,
-      /h3-contract-gate/,
-      'THE PIN: the attested changed path is NOT reported as a violation or as unverified — attestation is PER PATH, so one unstamped path cannot collapse it for the whole set'
-    );
-    assert.equal(readFileSync(attestedPath, 'utf8'), attestedAfter, 'the attested path keeps the conductor bytes — no restore');
-    assert.equal(readFileSync(unattestedPath, 'utf8'), unattestedAfter, 'and the denied pre-dirty path is not restored either (the pre-image restore stays a deferred slice)');
+    assert.equal(r.code, 2, `an in-window tamper of a clean-at-Pre enforcement path must deny — ${oneLine(r.stderr)}`);
+
+    // --- THE VERDICT CARRIER: the state H17 observed is the state it leaves ---
+    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'THE RULING: LEFT ON DISK exactly as observed — H17 performs no restore (dc616f69 R11)');
+    assert.notEqual(readFileSync(bundle, 'utf8'), committed, 'and specifically NOT put back to the committed image');
+    assert.match(oneLine(r.stderr), /left on disk/i, 'the denial STATES the disposition rather than implying a rollback');
+
+    // --- the durable half: persisted at detection, and the next call is stopped ---
+    assert.equal(existsSync(latchPath(dir)), true, 'the incident is LATCHED eagerly at .sterling/enforcement-taint.json');
+    const pre2 = h17(dir, 'PreToolUse', lane('cleanpre-next'));
+    assert.notEqual(pre2.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(pre2.code, 2, `THE ADOPTION CLOSURE: the NEXT Pre denies BEFORE re-baselining the surviving bytes — actual ${pre2.code}, stderr: ${oneLine(pre2.stderr)}`);
+    assert.match(oneLine(pre2.stderr), /taint|latch/i, 'and names the STANDING incident, not a fresh in-window violation');
   } finally {
     cleanup();
   }
 });
 
 // =========================================================================
-// PIN-CLEAN-AT-PRE-UNCHANGED — the negative boundary that keeps the whole
-// comparison from being written as "compare only what was dirty". A path CLEAN
-// at Pre and CHANGED in-window is still swept, restored to HEAD and denied,
-// with no stamp present. The pre-state comparison must not become a way in.
+// PIN-CLEAN-CONTROL — the opposite-cause arm for the pin above (dc616f69 R16:
+// "assert a clean control produces NO marker"; decision cf863d84). Every deny
+// in this file now shares one observable outcome — nothing on disk changes —
+// so "H17 denied and left the bytes alone" is satisfied identically by an
+// implementation that denies and latches UNCONDITIONALLY. This is the arm that
+// rules that out: same fixture, same lane shape, a window that writes nothing.
 //
-// EXPECTED FAILURE SHAPE: expected GREEN today (this is enforcement.test.mjs
-// :1485's contract, restated here as a same-file tripwire because this slice
-// rewrites the branch that sits immediately beside it).
-//
-// CATCHES SABOTAGE: any change that routes clean-at-Pre paths through the new
-// pre-dirty "unchanged -> allow" arm — e.g. treating an absent per-path
-// snapshot entry as "unchanged" instead of "was clean, must be swept".
+// EXPECTED FAILURE SHAPE: `post.code === 0` fires with actual 2, or the
+// `existsSync(latchPath) === false` assertion fires.
+// CATCHES SABOTAGE: hoist the latch write out of the detection branch, or make
+// the Post arm deny whenever a per-call record exists -> RED here and GREEN
+// everywhere else in the file, which is precisely the discrimination the other
+// pins cannot make for themselves.
 // =========================================================================
 
-test('PIN-CLEAN-AT-PRE-UNCHANGED (tripwire): a path CLEAN at Pre and changed in-window is still restored to HEAD and denied', { skip: GIT_SKIP }, () => {
+test('PIN-CLEAN-CONTROL: a window that changes NOTHING allows and leaves NO latch — the denials above are not unconditional', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    const bundle = bundlePath(dir); // clean at Pre
-    const committed = readFileSync(bundle, 'utf8');
-    assert.equal(existsSync(stampPath(dir)), false, 'PRECONDITION: no stamp — nothing may exempt this');
-
-    const L = lane('cleanpre');
+    assert.equal(porcelain(dir), '', 'PRECONDITION: the tree is clean at Pre');
+    const L = lane('cleancontrol');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0);
-    writeFileSync(bundle, '// tampered by the agent mid-command\n');
 
-    const r = h17(dir, 'PostToolUse', L);
-    assert.equal(r.code, 2, `an in-window tamper of a clean-at-Pre enforcement path must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(bundle, 'utf8'), committed, 'restored to HEAD (unchanged behaviour)');
+    const post = h17(dir, 'PostToolUse', L); // the audited command wrote nothing
+    assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(post.code, 0, `CONTROL: a clean window must ALLOW — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
+    assert.equal(existsSync(latchPath(dir)), false, 'CONTROL: and no incident is persisted — the latch is minted by DETECTION, never by the Post call itself');
   } finally {
     cleanup();
   }
@@ -1402,6 +1482,20 @@ test('PIN-CLEAN-AT-PRE-UNCHANGED (tripwire): a path CLEAN at Pre and changed in-
 // here is a fixture failure and must be loud (P5)
 function porcelain(dir) {
   return git(dir, ['status', '--porcelain'], { must: true }).stdout;
+}
+
+// dc616f69: the incident marker an (A) detection now writes eagerly.
+function latchPath(dir) {
+  return join(dir, '.sterling', 'enforcement-taint.json');
+}
+
+// FIXTURE HAZARD, dc616f69: a violating Post LEAVES A LATCH, and a standing
+// latch denies the NEXT Pre before it re-baselines. A fixture that runs more
+// than one Pre/Post pair after a violation must clear it between windows, or the
+// later arm is denied by the EARLIER arm's incident and proves nothing about its
+// own subject. (Only the degraded blanket pre-existing arm never latches.)
+function clearLatch(dir) {
+  rmSync(latchPath(dir), { force: true });
 }
 
 // The single per-call snapshot record, for the tests that TAMPER it. Asserting
@@ -1495,7 +1589,16 @@ test('PIN-REVERT-TO-CLEAN: a pre-dirty enforcement path REVERTED to HEAD inside 
       `dirty-at-Pre + CLEAN-at-Post is a STATE CHANGE — the conductor's uncommitted enforcement work was destroyed inside this window — and must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
     );
     assert.match(r.stderr, /h3-contract-gate/, 'and the denial names the path whose RECORDED pre-dirty state changed');
-    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'a CHANGED pre-dirty path is still never restored — the destroyed pre-image is NOT resurrected (that stays the deferred slice)');
+    // KEPT AS WRITTEN at the dc616f69 re-cut: this arm never restored, so the
+    // ruling changes nothing here — it only makes the leave-alone disposition
+    // universal instead of exceptional. The assertion below is now defended BY
+    // DELETION of the restore chain rather than by the pre-dirty branch
+    // declining to call it, which is a strictly stronger guarantee.
+    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'a CHANGED pre-dirty path is still never restored — the destroyed pre-image is NOT resurrected');
+    // NEW per dc616f69: the changed-pre-dirty arm latches like the clean-at-Pre
+    // arm does. Sabotage: remove the latch write from this branch -> RED here
+    // while every other assertion in this block stays green.
+    assert.equal(existsSync(latchPath(dir)), true, 'and the incident is LATCHED — a destroyed pre-image is exactly the state a human must adjudicate');
   } finally {
     cleanup();
   }
@@ -1581,6 +1684,11 @@ test('PIN-REVERT-TO-CLEAN-DEGRADED: degraded mode (unusable tool_use_id) still D
       `degraded mode keeps the BLANKET pre-existing denial (AC14) — and a command that cleaned the dirt is exactly when it must fire, not when it lapses — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
     );
     assert.match(r.stderr, /tool_use_id/, 'DEGRADED-LOUD: and it still names the reason it could not verify (AC14 — a silent degrade is a defect)');
+    // KEPT AS WRITTEN at the dc616f69 re-cut, and NOTE THE ASYMMETRY that makes
+    // this block's control arm still valid: the degraded BLANKET pre-existing
+    // denial does NOT latch (only the clean-at-Pre and changed-pre-dirty
+    // detections do), so the control arm above cannot be poisoned by the pin
+    // arm below, and no clearLatch is needed between them.
     assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'and the destroyed pre-image is not resurrected');
   } finally {
     cleanup();
@@ -2112,71 +2220,20 @@ test('PIN-LARGE-MIDFILE-FLIP: ONE byte flipped 3 MiB into a 4 MiB pre-dirty file
 // cannot be explained away as "the stamp was never attesting."
 // =========================================================================
 
-test('PIN-STAMP-SYMLINK-CLEAN-AT-PRE: a CLEAN-at-Pre path replaced in-window by a SYMLINK to an OUT-OF-REPO file holding the stamped bytes is NOT attested — DENIES and is restored (control: the same bytes as a regular file ARE attested)', { skip: GIT_SKIP || SYMLINK_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  const decoy = join(tmpdir(), 'sterling-h17-cleanpre-decoy-' + randomUUID().slice(0, 8));
-  try {
-    const bundle = bundlePath(dir);
-    const headBytes = readFileSync(bundle, 'utf8');
-    const decoyBytes = '// Z: content the hook loader would execute, from OUTSIDE the repo\n';
-    writeFileSync(decoy, decoyBytes);
-
-    // ONE stamp, used by BOTH arms. Hashed from the bytes directly, never
-    // through a path, so the fixture cannot accidentally hash a link.
-    const stampEntries = [{ path: BUNDLE_REL, sha256: createHash('sha256').update(decoyBytes).digest('hex'), at: NOW }];
-
-    // ---- CONTROL ARM (expected ALLOW): the stamp genuinely attests these
-    // bytes at this path when they arrive as a REGULAR FILE. Without this, a
-    // deny in the pin arm proves nothing.
-    assert.equal(porcelain(dir), '', 'PRECONDITION: the path is CLEAN at Pre — this arm is the clean-at-Pre branch, not the pre-dirty one');
-    const C = lane('cleanpre-control');
-    assert.equal(h17(dir, 'PreToolUse', C).code, 0);
-
-    writeFileSync(bundle, decoyBytes); // a plain regular-file write of the stamped bytes
-    writeStamp(dir, stampEntries);
-    const stampText = readFileSync(stampPath(dir), 'utf8');
-    assert.equal(lstatSync(bundle).isFile(), true, 'PRECONDITION: the control arm writes a REGULAR FILE');
-
-    const control = h17(dir, 'PostToolUse', C);
-    assert.notEqual(control.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(
-      control.code,
-      0,
-      `CONTROL: a fresh stamp matching the CURRENT bytes of a clean-at-Pre in-window change must be honored (decision 4d9b76e8) — if THIS fails the pin arm below cannot be trusted, because the stamp is not attesting at all — actual ${control.code}, stderr: ${oneLine(control.stderr)}`
-    );
-    assert.equal(readFileSync(bundle, 'utf8'), decoyBytes, 'CONTROL: and the attested bytes are KEPT, not restored to HEAD');
-
-    // ---- back to CLEAN, so the pin arm runs the same branch as the control
-    git(dir, ['checkout', 'HEAD', '--', BUNDLE_REL], { must: true });
-    assert.equal(porcelain(dir), '', 'PRECONDITION: the path is CLEAN at Pre again for the pin arm');
-    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'PRECONDITION: and back to its committed bytes');
-
-    // ---- PIN ARM: the SAME stamped bytes, now reachable only THROUGH a link
-    const S = lane('cleanpre-symlink');
-    assert.equal(h17(dir, 'PreToolUse', S).code, 0);
-
-    rmSync(bundle, { force: true });
-    symlinkSync(decoy, bundle);
-    writeStamp(dir, stampEntries); // the conductor stamps mid-window, exactly as in the control
-    assert.equal(readFileSync(stampPath(dir), 'utf8'), stampText, 'THE CONTROL\'S FORCE: the stamp is BYTE-IDENTICAL to the one that just attested — same path key, same sha256, same freshness');
-    assert.equal(lstatSync(bundle).isSymbolicLink(), true, 'PRECONDITION: the repo path is now a SYMLINK, not a regular file');
-    assert.equal(readFileSync(bundle, 'utf8'), decoyBytes, 'PRECONDITION: following the link yields the STAMPED bytes — a link-following consult finds an exact match');
-
-    const r = h17(dir, 'PostToolUse', S);
-    assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
-    assert.equal(
-      r.code,
-      2,
-      `a symlink is not a regular file and the stamp must NOT attest it — attesting it would let the hook loader execute content from outside the repo that no sweep covers — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
-    );
-    assert.equal(lstatSync(bundle).isSymbolicLink(), false, 'the clean-at-Pre arm RESTORES an unattested in-window change — so the symlink is gone');
-    assert.equal(readFileSync(bundle, 'utf8'), headBytes, 'and the path holds its committed bytes again');
-    assert.equal(existsSync(decoy), true, 'the out-of-repo target still exists — a restore must never delete through a link');
-    assert.equal(readFileSync(decoy, 'utf8'), decoyBytes, 'and its bytes are untouched — a restore that writes THROUGH a link is an arbitrary-write primitive outside the repo (AC10)');
-  } finally {
-    cleanup([decoy]);
-  }
-});
+// *** RETIRED 2026-08-30 per dc616f69 R11 + R16(ii). *** This block was two
+// things, and the ruling removes BOTH. Its CONTROL arm asserted the clean-at-Pre
+// fresh-stamp exemption (allow) — deleted by R11, so the control can no longer
+// pass for the opposite reason and the block's whole discriminating structure
+// collapses: both arms would now deny, for the same reason, proving nothing.
+// Its PIN arm was RESTORE-PRIMITIVE SAFETY — "the symlink is gone", "the
+// out-of-repo target still exists", "a restore that writes THROUGH a link is an
+// arbitrary-write primitive" — which R16(ii) says to RETIRE rather than invert,
+// because "the outside victim survived" passes vacuously once the primitive is
+// deleted. What survives elsewhere: PIN-TYPE pins that a regular→symlink swap
+// is a state CHANGE on a pre-dirty path, and PIN-CLEAN-AT-PRE-UNCHANGED pins
+// that any clean-at-Pre in-window change denies regardless of its shape.
+// (The comment above is retained as the record of the hollowness analysis that
+// produced this block; do not read it as describing live behaviour.)
 
 // #########################################################################
 // ##  BOARD 7dd39b85 (HIGH) — CURRENTLY LIVE, TWO PINS BELOW             ##
@@ -2267,13 +2324,29 @@ test('PIN-CHILD-SURVIVES-STAGE: a file inside a pre-dirty untracked enforcement-
     assert.equal(
       control.code,
       2,
-      `CONTROL: a genuinely new enforcement-surface write must still deny — if THIS fails, the pin arm below proves nothing, because nothing would distinguish a working sweep from one that simply stopped deleting anything under hooks/ — actual ${control.code}, stderr: ${oneLine(control.stderr)}`
+      `CONTROL: a genuinely new enforcement-surface write must still deny — actual ${control.code}, stderr: ${oneLine(control.stderr)}`
     );
-    assert.equal(existsSync(freshFile), false, 'CONTROL: and it is genuinely new (no pre-dirty ancestor), so it is swept — removed, since it is not in HEAD');
+    // INVERTED per dc616f69: this arm asserted `existsSync(freshFile) === false`
+    // (a genuinely new write is REMOVED). Nothing is removed any more, so the
+    // control's original discriminating power — "the sweep did not simply stop
+    // deleting under hooks/" — is dead BY DESIGN and cannot be restated on disk.
+    // What it still controls for is CLASSIFICATION: a genuinely new write is
+    // still DETECTED (exit 2 above), so the pin arm's survival below cannot be
+    // explained by the (A) sweep having stopped looking at hooks/ altogether.
+    // The "denies everything" cause is ruled out by PIN-CLEAN-CONTROL.
+    assert.equal(existsSync(freshFile), true, 'CONTROL: and it is left on disk — H17 removes nothing (dc616f69)');
 
     // ---- PIN ARM: the child was ALREADY THERE, inside a directory that was
     // already dirty (untracked) at Pre — only staging makes it individually
     // visible to porcelain.
+    // ISOLATION, previously supplied BY THE SWEEP ITSELF: the control arm's file
+    // used to be deleted by H17, leaving a clean slate. It now survives, and the
+    // control's detection latched, so the test must restore both conditions or
+    // the pin arm's Pre is denied by the control's incident and its window opens
+    // with unrelated dirt.
+    clearLatch(dir);
+    git(dir, ['reset', '-q'], { must: true });
+    rmSync(controlDir, { recursive: true, force: true });
     const newDir = join(dir, 'hooks', 'newdir');
     mkdirSync(newDir, { recursive: true });
     const child = join(newDir, 'a.mjs');
@@ -2295,6 +2368,11 @@ test('PIN-CHILD-SURVIVES-STAGE: a file inside a pre-dirty untracked enforcement-
       `staging a pre-dirty untracked enforcement-surface path is still a violation and must deny — survival must not be bought by turning this into an allow — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
     );
     assert.match(r.stderr, /newdir/, 'the denial names the offending enforcement-surface path');
+    // dc616f69: this survival is now defended BY DELETION of the restore chain,
+    // not by the ancestor-coverage check it was written to pin — no mutation of
+    // the coverage logic can red it any more. Kept as a cheap regression
+    // tripwire against a restore arm returning; the coverage logic's own live
+    // consequence is the CLASSIFICATION (deny) asserted above.
     assert.equal(
       existsSync(child),
       true,
@@ -2333,6 +2411,12 @@ test('PIN-CHILD-SURVIVES-STAGE: a file inside a pre-dirty untracked enforcement-
 // unrecorded, so the shallow check still fails membership and the file is
 // still deleted, flipping both the existence and byte-identical assertions to
 // red.
+//
+// KEPT, WITH THE SABOTAGE ABOVE NOW DEAD (dc616f69): nothing is deleted, so a
+// shallow-coverage regression can no longer red this block — the survival
+// assertions are defended by deletion of the restore chain, exactly as in
+// PIN-CHILD-SURVIVES-STAGE. It stays as a regression tripwire against a restore
+// arm returning; the live consequence of the coverage walk is the deny.
 // =========================================================================
 
 test('PIN-CHILD-SURVIVES-STAGE-NESTED: a GRANDCHILD two levels below a pre-dirty untracked enforcement-surface directory survives `git add -A` staging it individually — denies, but does not destroy it', { skip: GIT_SKIP }, () => {
@@ -2407,45 +2491,24 @@ test('PIN-CHILD-SURVIVES-STAGE-NESTED: a GRANDCHILD two levels below a pre-dirty
 // sabotage, which is exactly why neither existing sibling pin can catch it.)
 // =========================================================================
 
-test('PIN-SIBLING-PREFIX-NOT-COVERED: a NEW sibling directory whose name string-prefixes a pre-dirty untracked enforcement-surface directory is NOT covered by it — denies, and the sibling is swept while the recorded directory\'s own child survives in the same run', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const newDir = join(dir, 'hooks', 'newdir');
-    mkdirSync(newDir, { recursive: true });
-    const child = join(newDir, 'a.mjs');
-    const childBytes = '// pre-dirty untracked enforcement-surface file, uncommitted\n';
-    writeFileSync(child, childBytes);
-    assert.match(porcelain(dir), /\?\?\s+hooks\/newdir\//, 'PRECONDITION: the untracked directory collapses to ONE entry at Pre, exactly as the defect describes');
-
-    const L = lane('siblingprefix');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0);
-
-    const sibDir = join(dir, 'hooks', 'newdir2');
-    mkdirSync(sibDir, { recursive: true });
-    const sibFile = join(sibDir, 'x.mjs');
-    writeFileSync(sibFile, "// genuinely new sibling directory whose name merely starts with the recorded one\n");
-    git(dir, ['add', '-A'], { must: true });
-    assert.match(porcelain(dir), /A\s+hooks\/newdir2\/x\.mjs/, 'PRECONDITION: staging makes the sibling file individually visible to porcelain');
-    assert.match(porcelain(dir), /A\s+hooks\/newdir\/a\.mjs/, 'PRECONDITION: the recorded directory\'s own child is ALSO staged, in the same window, against the same record');
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(
-      r.code,
-      2,
-      `a window containing a genuinely new enforcement-surface write must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`
-    );
-    assert.equal(
-      existsSync(sibFile),
-      false,
-      `THE PIN: a sibling directory sharing only a STRING PREFIX with a recorded pre-dirty directory is NOT covered by it — it is genuinely new and must still be swept — actual: file survived, stderr: ${oneLine(r.stderr)}`
-    );
-    assert.equal(existsSync(child), true, "CONTROL: the recorded directory's own child still survives in the same run — the coverage check did not simply stop working, it correctly declined to extend across a sibling boundary");
-    assert.equal(readFileSync(child, 'utf8'), childBytes, 'and its bytes are byte-identical — untouched by the sweep');
-  } finally {
-    cleanup();
-  }
-});
+// *** RETIRED 2026-08-30 per dc616f69 R16(ii). *** Its verdict carrier was
+// `existsSync(sibFile) === false` — the uncovered sibling is SWEPT — and
+// sweeping is deleted. That assertion is the ONLY thing in the block that could
+// tell a boundary-correct ancestor walk from a bare string-prefix test: both
+// paths deny either way, and after the ruling both are also left on disk, so
+// coverage classification has no remaining observable difference here. Inverting
+// it yields "both files survive", which is true under the prefix bug it was
+// written to catch — precisely the vacuous green R16(ii) forbids, and worse than
+// no pin because it would carry the name of a guard it no longer guards.
+//
+// SURFACED, NOT SOLVED (the coverage walk itself is untouched by this ruling and
+// still runs): if the ancestor-boundary walk needs a live pin after the
+// excision, the only candidate oracle left is DENIAL CONTENT — whether the
+// sibling is reported as a fresh violation while the covered child is reported
+// as pre-dirty. That is a new oracle against wording this slice is still
+// settling, so it is NOT authored here; it belongs to whoever owns the
+// classification's next slice.
+// =========================================================================
 
 // #########################################################################
 // ##  TWO REVIEW FINDINGS ON THE ANCESTOR-AWARE COVERAGE FIX ABOVE       ##
@@ -2491,14 +2554,21 @@ test('PIN-SIBLING-PREFIX-NOT-COVERED: a NEW sibling directory whose name string-
 // to guard it against being undone, not to chase a live defect). Do not
 // expect or try to make this test red.
 //
-// CATCHES SABOTAGE: recordedChild absent falling through to the destructive
+// CATCHES SABOTAGE (HISTORICAL — the mutation below is no longer reachable):
+// recordedChild absent falling through to the destructive
 // arm instead of the deny-only arm — concretely,
 //   if (!recordedChild) { restoreTracked(cwd, p); violations.push(rel); restoredPaths.push(rel); continue; }
-// in place of a deny-without-restore branch. That is the most destructive
-// edit reachable in this change (it deletes a file the record never proved
-// was new), and today the entire rest of the suite stays green under it —
-// only this pin's `existsSync(b) === true` assertion catches it, flipping to
-// actual `false`.
+// in place of a deny-without-restore branch. That was the most destructive
+// edit reachable in that change.
+//
+// KEPT UNCHANGED at the dc616f69 re-cut, and it is one of the few blocks the
+// ruling makes STRONGER rather than weaker: the rule it pins — "absence from
+// the recorded children map does not prove the audited command created it, so
+// DENY without destroying" — is exactly the reasoning dc616f69 generalized to
+// every (A) path. Both files now survive because `restoreTracked` is deleted
+// rather than because this branch declines to call it, so the sabotage above
+// cannot be applied any more; the block stays as the regression tripwire for a
+// restore arm returning, and its DENY assertion remains fully live.
 // =========================================================================
 
 test('PIN-CHILD-ABSENT-FROM-RECORD: a file created IN-WINDOW under a pre-dirty untracked enforcement-surface directory, ABSENT from the recorded children map, DENIES and is NOT restored — while its sibling recorded at Pre survives untouched in the same run', { skip: GIT_SKIP }, () => {

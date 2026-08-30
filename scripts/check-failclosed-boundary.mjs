@@ -470,7 +470,10 @@ const BASELINE = {
     { statement: 'const secureIoReason = secureIoUnavailableReason(cwd);' },
     { statement: "if (secureIoReason) { deny( environmentDefectDenial( 'H17', `${secureIoReason} — this hook's descrip … #25b0f89d" },
     { statement: 'const event = input.hook_event_name;' },
-    { statement: "if (event === 'PreToolUse') { try { // THE TAINT LATCH IS CONSULTED FIRST — before the store, before … #a98386cd" },
+    // ROTATED 2026-08-30 (S3, #a98386cd → #64281cab): the Pre statement's
+    // interior changed with the restore excision (dc616f69). Same statement,
+    // same debt — a digest update, not a new hole.
+    { statement: "if (event === 'PreToolUse') { try { // THE TAINT LATCH IS CONSULTED FIRST — before the store, before … #64281cab" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H17', `[stdin] hook input could not be read or parsed (${(e && e.mes … #9c89b8db" },
     { statement: "deny-arg: deny( environmentDefectDenial('H17', `Enforcement verification failed (${(e && e.message) || e}) — f … #3c876005" },
   ],
@@ -491,7 +494,11 @@ const BASELINE = {
     { statement: "const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');" },
     { statement: 'const store = openStore(input.cwd);' },
     { statement: 'if (!store) allow();' },
-    { statement: 'try { const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS); if (terms.length < AXIS_MIN_HITS) al … #f96e3634' },
+    // ROTATED 2026-08-30 (#f96e3634 → #f084420c): commit 7404cbf wired the
+    // advisory firing counter into h20's top-level try WITHOUT rotating this
+    // entry, so the check was red at HEAD; the S3 commit absorbs the repair and
+    // says so. Same statement, same debt — the counter swallows its own errors.
+    { statement: 'try { const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS); if (terms.length < AXIS_MIN_HITS) al … #f084420c' },
   ],
   // The two entries the outside review named: under the old first-line identity
   // BOTH were the bare string 'try {', so the multiset could not tell them apart
