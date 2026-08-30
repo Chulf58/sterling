@@ -435,6 +435,59 @@ export type ToolStore = Pick<
  *  implementation in scripts/domain-doctor.mjs (MAX_BODY_COMPARE_DEPTH). */
 const MAX_BODY_COMPARE_DEPTH = 64;
 
+/** THE ONE DEFINITION OF THE KEY-PATH NOTATION every refusal in this file
+ *  reports: an array index appends '[i]', an object key appends '.key', and the
+ *  ROOT arm emits a bare field name because a divergence in the record body
+ *  itself has no parent to dot onto ('slug', not '.slug').
+ *
+ *  Single-sourced ON PURPOSE. Three producers render these addresses —
+ *  droppedKeyPaths (post-parse loss), allKeyPathsUnder (a whole subtree made
+ *  unaddressable by a type change) and unrecognizedKeyPaths (a STRICT object
+ *  that refused the key outright) — and an operator reading any of the three
+ *  gets an address they can paste back into the record. Two hand-rolled
+ *  renderings of one notation drift the moment either is touched, and the drift
+ *  is invisible until a caller cannot find the field it was told about. */
+function appendPathSegment(path: string, segment: string | number): string {
+  if (typeof segment === 'number') return `${path}[${segment}]`;
+  return path ? `${path}.${segment}` : segment;
+}
+
+/** Every key path BENEATH a container value, in the same dotted/indexed
+ *  notation droppedKeyPaths reports — 'files[0]', 'files[0].note'.
+ *
+ *  Used for one case only: `before` is a container and `after` is not the same
+ *  kind of container, so nothing under `before` is addressable any more and the
+ *  whole subtree is loss. Both the containers and their leaves are emitted,
+ *  because 'files[0]' and 'files[0].note' are separately lost addresses and a
+ *  caller told only about the outer one still cannot see what it must restore.
+ *
+ *  Carries the SAME depth bound as droppedKeyPaths, and for the same reason:
+ *  the input is a caller-supplied body nothing upstream has capped, so the walk
+ *  that reports the loss must not itself blow the stack on a pathological
+ *  shape. The empty-path arm lives in appendPathSegment and matters when the
+ *  divergence is at the ROOT — the record body itself — where paths are bare
+ *  field names. */
+function allKeyPathsUnder(value: unknown, path: string, depth: number, out: string[]): string[] {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (value === null || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const here = appendPathSegment(path, i);
+      out.push(here);
+      allKeyPathsUnder(value[i], here, depth + 1, out);
+    }
+    return out;
+  }
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    const here = appendPathSegment(path, key);
+    out.push(here);
+    allKeyPathsUnder((value as Record<string, unknown>)[key], here, depth + 1, out);
+  }
+  return out;
+}
+
 /** Every key path present in `before` that is ABSENT from `after` — the LOSS
  *  half of a round-trip comparison, and deliberately only that half.
  *
@@ -459,24 +512,52 @@ const MAX_BODY_COMPARE_DEPTH = 64;
  *  false-positive here.
  *
  *  A source array LONGER than its parsed counterpart counts as loss too, so a
- *  dropped element cannot hide behind index-wise walking. */
+ *  dropped element cannot hide behind index-wise walking.
+ *
+ *  A TYPE CHANGE IS TOTAL LOSS OF EVERYTHING BENEATH IT (board 9f8d4c03). Both
+ *  container arms used to `return out` bare when `after` was not the same kind
+ *  of container, which reported ZERO loss for array→scalar and object→scalar:
+ *  every key that lived inside the old container was gone and the write said
+ *  SUCCESS — the exact false success this comparison exists to prevent. Such a
+ *  divergence now enumerates every key path that existed under `before` (see
+ *  allKeyPathsUnder), because after the change not one of them is addressable.
+ *  Reporting stays reporting: this function RETURNS the paths and never throws
+ *  on loss; assertNoFieldLoss decides what a loss means. */
 export function droppedKeyPaths(before: unknown, after: unknown, path = '', depth = 0, out: string[] = []): string[] {
   if (depth > MAX_BODY_COMPARE_DEPTH) {
     throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
   }
+  // THE REVERSE DIRECTIONS (scalar→array, scalar→object) ARE DELIBERATELY NOT
+  // SYMMETRIC, and this line is where they land. A scalar `before` has no key
+  // paths beneath it, so a scalar that becomes a container LOSES NOTHING — it
+  // only gains addresses. Emitting anything here would be symmetry for its own
+  // sake, and it would contradict the one-directional containment above that
+  // keeps schema DEFAULTS (which likewise only ADD keys) from false-positiving.
+  // The two directions differ because the question is not "did the shape
+  // change?" but "is a path that existed before now unreachable?" — and a
+  // widening change leaves the answer no. A scalar whose VALUE became a
+  // container is still a value change, which this function never reports.
   if (before === null || typeof before !== 'object') return out;
   if (Array.isArray(before)) {
-    if (!Array.isArray(after)) return out;
+    // Array → anything-not-an-array (scalar, null, or a plain object): no index
+    // of `before` survives, so every path under it is dropped.
+    if (!Array.isArray(after)) return allKeyPathsUnder(before, path, depth, out);
     for (let i = 0; i < before.length; i++) {
-      if (i >= after.length) out.push(`${path}[${i}]`);
-      else droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+      const here = appendPathSegment(path, i);
+      if (i >= after.length) out.push(here);
+      else droppedKeyPaths(before[i], after[i], here, depth + 1, out);
     }
     return out;
   }
-  if (after === null || typeof after !== 'object' || Array.isArray(after)) return out;
+  // Object → scalar, null, or ARRAY: object keys are not array indices, so an
+  // object that became an array loses its whole key set just as one that became
+  // a scalar does.
+  if (after === null || typeof after !== 'object' || Array.isArray(after)) {
+    return allKeyPathsUnder(before, path, depth, out);
+  }
   const parsed = after as Record<string, unknown>;
   for (const key of Object.keys(before as Record<string, unknown>)) {
-    const here = path ? `${path}.${key}` : key;
+    const here = appendPathSegment(path, key);
     if (!Object.prototype.hasOwnProperty.call(parsed, key)) out.push(here);
     else droppedKeyPaths((before as Record<string, unknown>)[key], parsed[key], here, depth + 1, out);
   }
@@ -515,6 +596,47 @@ export function assertNoFieldLoss(op: string, before: Record<string, unknown>, a
       `Refused before the write — NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid ` +
       `set) or add the field to the registered schema; a write must never report success for what it discarded.`
   );
+}
+
+/** The unknown keys a STRICT sub-schema REFUSED, rendered in the same
+ *  dotted/indexed notation droppedKeyPaths reports — 'current_ac[0].untestable_because.deeper'.
+ *
+ *  WHY THIS EXISTS BESIDE assertNoFieldLoss. The loss walk only ever sees keys
+ *  zod STRIPPED, because it compares the body against the parse RESULT. A
+ *  `.strict()` sub-schema (current_ac[].untestable_because, board 6a8507f8)
+ *  never produces a result to compare: the parse THROWS, and the walk at the
+ *  create call site never runs. The refusal was therefore already correct — the
+ *  key WAS identified — but zod's ZodError carries the address in two
+ *  fragments, `path: ['current_ac', 0, 'untestable_because']` and
+ *  `keys: ['deeper']`, and it renders as raw issue JSON. An operator needs ONE
+ *  address to open, not two fragments to join by hand, so the two fragments are
+ *  joined HERE, through the same appendPathSegment every other refusal in this
+ *  file uses.
+ *
+ *  DUCK-TYPED, not `instanceof z.ZodError`: a monorepo can resolve more than one
+ *  physical zod copy, and an instanceof that silently misses would degrade the
+ *  message back to raw JSON without any signal. Anything that is not a
+ *  recognizable issue list yields [] and the original error is rethrown
+ *  untouched — this function narrows a MESSAGE, it never decides a refusal.
+ *
+ *  Reports the refused key ITSELF and not the subtree beneath it, matching what
+ *  droppedKeyPaths does for a stripped key: one address names the thing to
+ *  remove or register. */
+export function unrecognizedKeyPaths(error: unknown): string[] {
+  const issues = (error as { issues?: unknown } | null | undefined)?.issues;
+  if (!Array.isArray(issues)) return [];
+  const out: string[] = [];
+  for (const raw of issues) {
+    const issue = raw as { code?: unknown; keys?: unknown; path?: unknown };
+    if (issue.code !== 'unrecognized_keys' || !Array.isArray(issue.keys)) continue;
+    const segments = Array.isArray(issue.path) ? (issue.path as Array<string | number>) : [];
+    const base = segments.reduce<string>(
+      (acc, segment) => appendPathSegment(acc, typeof segment === 'number' ? segment : String(segment)),
+      ''
+    );
+    for (const key of issue.keys) out.push(appendPathSegment(base, String(key)));
+  }
+  return out;
 }
 
 /**
@@ -1129,7 +1251,29 @@ export class SterlingStore {
           `Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`
       );
     }
-    const record = validateRecord(prepared.input);
+    // A `.strict()` sub-schema REFUSES an unknown key instead of stripping it,
+    // so the parse throws and the loss walk below never runs. The refusal is
+    // right; only its RENDERING was not — zod splits the address into
+    // `path: [...]` + `keys: [...]` and prints raw issue JSON. Rethrow it as
+    // the same one-address refusal a stripped key gets, keeping the ZodError as
+    // `cause` so nothing about the original diagnosis is lost. Any other parse
+    // failure (invalid_type, missing required field) is rethrown UNTOUCHED —
+    // this narrows a message, it never changes what is refused.
+    let record: DurableRecord;
+    try {
+      record = validateRecord(prepared.input);
+    } catch (err) {
+      const refused = unrecognizedKeyPaths(err);
+      if (refused.length === 0) throw err;
+      const type = typeof prepared.input.type === 'string' ? prepared.input.type : 'unknown';
+      throw new Error(
+        `create: record type '${type}' does not define ${refused.length === 1 ? 'this field' : 'these fields'}, and the ` +
+          `schema REFUSED the write rather than storing ${refused.length === 1 ? 'it' : 'them'}: ${refused.join(', ')}. ` +
+          `Refused before the write — NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid ` +
+          `set) or add the field to the registered schema; a write must never report success for what it discarded.`,
+        { cause: err }
+      );
+    }
     // Board bd3f0acf: the parse above STRIPS unknown keys at every depth. Compare
     // key-path presence pre- vs post-parse and refuse if anything was lost —
     // BEFORE tx() opens, so a refusal leaves no row and no activity entry. The
