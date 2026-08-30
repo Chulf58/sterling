@@ -1137,7 +1137,7 @@ export class SterlingTools {
 
   private refuseServerOwnedFields(
     fields: Record<string, unknown>,
-    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede'
+    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede' | 'knowledge_array_remove'
   ): void {
     const attempted = SterlingTools.WRITE_REFUSED_FIELDS.filter((k) => k in fields);
     if (attempted.length === 0) return;
@@ -2213,6 +2213,202 @@ export class SterlingTools {
         ...this.citedIdWarnings(replace),
         ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
       ],
+    };
+  }
+
+  /**
+   * knowledge_array_remove — the DELETE verb the append/edit family never had
+   * (board 39673f6a, article `knowledge-array-element-removal`).
+   *
+   * knowledge_append only ADDS to files[]/history/current_ac; knowledge_edit's
+   * `arr[key=value].sub` selector replaces one STRING inside one element but
+   * cannot remove the element. So dropping a single stale path meant a
+   * knowledge_update retransmitting the whole array — exactly the shape that
+   * produced anti-pattern d25f5a9e, a silent truncation where the write
+   * succeeds and the article quietly loses entries nobody re-sent. The
+   * asymmetry was the smell: append is protected from retransmission, edit is
+   * protected from retransmission, and removal — the one operation that
+   * DESTROYS content — was the one demanding you re-send everything correctly.
+   *
+   * SAME SELECTOR GRAMMAR, ONE LEVEL SHORTER: `arr[key=value]` with no trailing
+   * `.sub`, because the whole matched element goes, not one of its strings. A
+   * destroying operation with its own bespoke addressing form is how a wrong
+   * target gets selected, so this reuses knowledge_edit's grammar rather than
+   * inventing a second one — and its refuse-on-any-count-but-one contract.
+   *
+   * EXACT FULL ID ONLY. Every path that DESTROYS demands the exact full id
+   * (anti-pattern `no-bounded-trail-guard-for-destructive-addressing`, severity
+   * block — the collision-guard design that tried to make a forgiving form safe
+   * was retracted the same day it shipped). An unambiguous 8-char prefix
+   * resolves fine on knowledge_get/knowledge_update, whose worst case is a
+   * recoverable edit; here the worst case is content gone from an array too
+   * large to have read in full, so the ladder stops at the door.
+   *
+   * VERSIONED, and expected_version is REQUIRED rather than optional: the
+   * caller of a destroy states which version it read, and a stale token refuses
+   * naming BOTH versions instead of silently removing an element from a body
+   * the caller never saw.
+   */
+  knowledgeArrayRemove(
+    id: string,
+    selector: string,
+    expectedVersion: number,
+    resolves?: string[]
+  ): { record: DurableRecord; removed: { selector: string; element: unknown }; warnings: string[] } {
+    // EXACT FULL ID ONLY — checked FIRST, before any lookup, so a prefix is
+    // refused on its SHAPE and never gets the chance to resolve to something.
+    if (!SterlingTools.FULL_UUID_RE.test(id)) {
+      throw new Error(
+        `knowledge_array_remove: '${id}' is not a full uuid — this call DESTROYS an array element, so it addresses records by their EXACT ` +
+          `full id only (no slug, no 8-char citation prefix), even though knowledge_get, knowledge_update and knowledge_edit resolve all three. ` +
+          `An abbreviation whose worst case is a recoverable edit is not the same abbreviation on a call that removes content you may not be able ` +
+          `to re-read; that is why the full id is required here (anti-pattern no-bounded-trail-guard-for-destructive-addressing). ` +
+          `Re-read the record with knowledge_get and re-issue with its full uuid; nothing was written.`
+      );
+    }
+    const old = this.store.get(id);
+    if (!old) {
+      throw new Error(
+        `knowledge_array_remove: no record '${id}' — this tool matches the EXACT full uuid only (no slug, no 8-char citation prefix), ` +
+          `because it destroys content. Look the record up with knowledge_get and re-issue with its full uuid; nothing was written.`
+      );
+    }
+    this.refuseStaleAddress(old, id, 'knowledge_array_remove');
+    // expected_version is REQUIRED here (it is optional on knowledge_update):
+    // a destroy states what it read, or it is not a conditional write at all.
+    // INVALID ARGUMENT, not a CAS conflict — and it is checked HERE rather than
+    // left to server.ts's `.int().positive()`, because this method is directly
+    // callable and a guarantee that exists only at the MCP surface is not a
+    // guarantee of the method. The two refusals are deliberately distinct: no
+    // record is ever at version 0, -1 or 1.5, so calling a garbage token a
+    // "version conflict" would teach the caller to retry with the current
+    // version when the real fix is to pass a real token.
+    if (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 1) {
+      throw new Error(
+        `knowledge_array_remove: 'expected_version' is REQUIRED and must be a positive integer (got ${String(expectedVersion)}) — pass the ` +
+          `version you read, so a removal can never land on a body you never saw. This is an invalid argument, not a stale token: no record is ` +
+          `ever at version 0 or below, so re-reading the record will not help until a real version is supplied. Nothing was written.`
+      );
+    }
+    const currentVersion = (old as unknown as { version?: number }).version;
+    // A record carrying NO stored version cannot satisfy the CAS contract that
+    // `expected_version` exists to provide: there is nothing for the stated
+    // token to be checked against, so ANY token — right, wrong or invented —
+    // would be accepted, which is precisely the outcome the required token is
+    // there to forbid. Skipping the check on a DESTROYING call is therefore the
+    // one thing that must not happen; an unversionable record is not
+    // destroyable through this door.
+    if (currentVersion === undefined) {
+      throw new Error(
+        `knowledge_array_remove: record '${id}' carries no stored version, so this destroying removal is REFUSED — 'expected_version' is a ` +
+          `conditional-write token and an unversioned record cannot be version-checked against it: any token at all would be accepted, which is ` +
+          `exactly the guarantee the required token exists to provide. Nothing was written; repair the record's version before removing from it.`
+      );
+    }
+    if (expectedVersion !== currentVersion) {
+      throw new Error(
+        `knowledge_array_remove: version conflict — the caller supplied expected_version ${expectedVersion} but record '${id}' is at version ` +
+          `${currentVersion}: it moved while you held it. Nothing was written; re-read the record and retry against version ${currentVersion}.`
+      );
+    }
+    // `arr[key=value]` — knowledge_edit's grammar minus the `.sub` tail.
+    const parsed = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]$/.exec(selector);
+    if (!parsed) {
+      throw new Error(
+        `knowledge_array_remove: selector '${selector}' is not of the form arr[key=value] (e.g. "files[path=scripts/prep.mjs]") — removal takes ` +
+          `the WHOLE matched element, so it carries NO trailing '.sub'; that longer form is knowledge_edit's in-place string edit. Nothing was written.`
+      );
+    }
+    const [, base, key, value] = parsed;
+    // Both refusals name THIS tool: a caller mistyping a base field on a
+    // knowledge_array_remove call was previously told "knowledge_update:",
+    // sending them to read the wrong tool's contract.
+    this.refuseServerOwnedFields({ [base]: [] }, 'knowledge_array_remove');
+    this.refuseUnknownFields(old.type, { [base]: [] }, 'knowledge_array_remove');
+    const arr = (old as unknown as Record<string, unknown>)[base];
+    if (!Array.isArray(arr)) {
+      throw new Error(
+        `knowledge_array_remove: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector ` +
+          `addresses array elements. Nothing was written.`
+      );
+    }
+    // OWNERSHIP FIRST, then value. `String(el[key]) === value` alone reads an
+    // ABSENT key as the string 'undefined', so `[anykey=undefined]` matched
+    // every element LACKING that key — on a destroying call that turns "this
+    // property does not exist" into "delete this element". The fix is an
+    // ownership test, NOT a ban on the token `undefined` (an element whose
+    // value genuinely IS the string "undefined" stays selectable) and NOT a
+    // ban on optional keys (a present optional key stays selectable by its
+    // real value). A missing key simply matches nothing, so the outcome is
+    // zero matches and the refusal below already covers it.
+    const hits = arr.filter((el) => {
+      if (!el || typeof el !== 'object') return false;
+      const rec = el as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
+      return String(rec[key]) === value;
+    });
+    if (hits.length !== 1) {
+      throw new Error(
+        `knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, ` +
+          `nothing was written. ` +
+          (hits.length === 0
+            ? `Confirm the ${key} value against the live array.`
+            : `A blind delete inside an array too large to read is exactly the unreviewable write this grammar exists to prevent — select on a key whose value is unique in the array.`)
+      );
+    }
+    // THE SCHEMA FLOOR, mirrored from knowledge_split's own refusal: a
+    // feature_article must retain at least one owned file. featureArticleSchema
+    // does not put .min(1) on files[], so an empty array would validate and the
+    // article would silently become un-ownable territory — the floor has to be
+    // stated here, as knowledge_split states it, and for the same reason (full
+    // donation is retire-and-replace, rejected by decision 8b87efcb).
+    if (old.type === 'feature_article' && base === 'files' && arr.length === 1) {
+      throw new Error(
+        `knowledge_array_remove: this would remove the LAST entry of feature_article.files — the article must retain at least one owned file ` +
+          `(an empty files[] leaves the code it describes unowned; emptying an article is retire-and-replace, not a removal, and knowledge_split ` +
+          `refuses a full donation for the same reason). Nothing was written.`
+      );
+    }
+    // THE AUDIT-TRAIL FLOOR — A POLICY FLOOR, NOT A SCHEMA FACT. Stated
+    // precisely because the first version of this comment got it wrong and an
+    // independent security review caught it: `featureArticleSchema` puts NO
+    // `.min(1)` on `history`, a `history: []` article parses, and there is a
+    // green test proving exactly that (packages/schemas/src/tests/schemas.test.ts
+    // ~:593). So the earlier claim that "no record is born without history" was
+    // FALSE, and a maintainer who checked the schema would have found the
+    // rationale contradicted and been entitled to delete this floor.
+    //
+    // The floor stands on POLICY instead, which is the stronger ground anyway:
+    // `history` is the record's own account of what happened to it, and
+    // anti-pattern no-bounded-trail-guard-for-destructive-addressing rests its
+    // whole protection on that trail surviving — so a destroying call able to
+    // empty it is that anti-pattern's root case, not an exception to it.
+    //
+    // The asymmetry with current_ac and live_test_refs is deliberate and rests
+    // on a DIFFERENT footing, which is schema-real: both are routinely BORN
+    // empty, so a removal returning one to a birth-legal state is refused by
+    // nothing. History being schema-legal-empty too is why this floor must be
+    // justified as policy rather than smuggled in as a schema consequence.
+    if (base === 'history' && arr.length === 1) {
+      throw new Error(
+        `knowledge_array_remove: this would remove the LAST entry of ${old.type}.history — the record must retain at least one history entry ` +
+          `(history is the record's audit trail; a destroying call that can empty it is the root case of anti-pattern ` +
+          `no-bounded-trail-guard-for-destructive-addressing, whose whole protection rests on that trail surviving). The selector DID match — ` +
+          `this is the floor refusing, not a failed selection. Nothing was written.`
+      );
+    }
+    const el = hits[0];
+    // Filter by IDENTITY, not by re-testing the predicate: the surviving
+    // elements are the same object references in their original order, so
+    // nothing is reordered, renormalised, or re-serialised on the way through.
+    const nextArr = arr.filter((e) => e !== el);
+    const { record } = this.splitSameSubject(
+      this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, expectedVersion, 'knowledge_array_remove')
+    );
+    return {
+      record,
+      removed: { selector, element: el },
+      warnings: [...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
     };
   }
 
@@ -4889,6 +5085,50 @@ export class SterlingTools {
 
   // -- board (§3.2.7) ----------------------------------------------------------
 
+  /**
+   * A RE-CHECKABLE REFERENCE, in any one of the accepted forms (board fd0e0907,
+   * article `board-add-evidence-notice`).
+   *
+   * A board item states its EVIDENCE, not its conclusion: "the view faces one
+   * fixed direction (camera.gd:1591 writes an identity basis)" can be re-checked
+   * in one grep; "the facing is broken" cannot, and rots invisibly. MEASURED in
+   * a consuming project (2026-08-28): of eight open defects re-audited, two were
+   * already fixed and three had changed shape — 5 of 8 wrong, and none of it
+   * failed loudly; it failed by sending a session at work that did not need
+   * doing.
+   *
+   * ANY ONE FORM SUFFICES, and the notice therefore fires only on the absence of
+   * ALL of them together. The signal is deliberately NOT "contains a number" —
+   * the board item names that heuristic as too weak, because dates, ids and
+   * priorities are all numbers. What counts is something a later reader can go
+   * and CHECK.
+   *
+   * DELIBERATELY GENEROUS. A noisy advisory gets ignored, and the true positive
+   * goes with it, so every form here errs toward ACCEPTING the text: a false
+   * alarm costs the author's trust in the whole channel, while a missed
+   * evidence-free item costs one un-warned write.
+   */
+  private hasCheckableEvidence(text: string): boolean {
+    return [
+      // a repo-relative path — a token carrying a separator and an extension
+      /[\w.-]+\/[\w./-]*\.\w{1,8}\b/,
+      // a path with a line number (the canonical form the contract quotes)
+      /[\w.-]+\.\w{1,8}:\d+/,
+      // a double-quoted literal, quoted from code or output
+      /"[^"\n]+"/,
+      // a backticked literal
+      /`[^`\n]+`/,
+      // a measured number carrying a unit or a counted noun (never a bare digit)
+      /\b\d[\d,]*(\.\d+)?\s*%/,
+      /\b\d[\d,]*(\.\d+)?\s+[A-Za-z]{3,}/,
+      // a spelled-out count with the thing counted — the AC's worked example
+      // ("three commits") is exactly this shape
+      /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)\s+[A-Za-z]{3,}/i,
+      // a record id, or the 8-char citation prefix this repo cites by
+      /\b[0-9a-f]{8}\b/,
+    ].some((re) => re.test(text));
+  }
+
   boardAdd(args: Record<string, unknown>): CreateResult & { notice?: string } {
     const { text, source, objective, measured_at_head, ...rest } = args;
     // Objective grouping (decision a8d2ce6c): a grouping key for the human's
@@ -4939,6 +5179,26 @@ export class SterlingTools {
       // caller identity, so a refusal could lose a user-stated task).
       notices.push(
         `objective undeclared — saved as standalone; if this task is a slice of a larger objective, set it via board_update {objective: "<name>"}`
+      );
+    }
+    // EVIDENCE, NOT CONCLUSION (board fd0e0907). A NOTICE, NEVER A REFUSAL:
+    // some legitimate items genuinely have no file evidence yet — a design
+    // question, a user ruling to obtain, a coordinating parent — and a refusal
+    // would force either ceremony or a fake citation, both worse than the gap.
+    // It also has to be a notice for the same reason the objective default is:
+    // the server has no caller identity, so refusing could lose a user-stated
+    // task outright. Write time is the only cheap moment to fix this — the
+    // author is still holding the evidence they are about to omit.
+    //
+    // USER ITEMS ONLY (AC4): the maintenance queue is mechanism-minted and
+    // carries a registered system_reason, not prose evidence. Noticing it would
+    // fire on every enqueue forever, which is how a channel gets ignored.
+    if (source === 'user' && !this.hasCheckableEvidence(String(text ?? ''))) {
+      notices.push(
+        `no checkable evidence in this item's text — it reads as a CONCLUSION rather than the evidence for one, so a later reader cannot re-check ` +
+          `it and it will rot invisibly (measured: of eight defects re-audited in one consuming project, 5 of 8 were wrong at HEAD). ` +
+          `Quote the deciding reference: a file:line citation such as src/foo.ts:42, a repo-relative path, the literal string you saw, ` +
+          `a measured count, or the id of the record this concerns. The item WAS saved — fix it in place with board_edit.`
       );
     }
     // NO HANDLE COULD BE DERIVED — SAY SO (review finding 3, 2026-08-29). The

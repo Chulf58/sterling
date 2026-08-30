@@ -27,6 +27,13 @@ const SERVED_TOOLS = [
   // The string sibling of append — a surgical edit inside a field too large to
   // retransmit (board fd6d8da9).
   'knowledge_edit',
+  // The DESTROYING sibling of edit/append: removes ONE element from a
+  // feature_article's files[] by the same arr[key=value] selector, so a
+  // single-entry removal no longer demands a whole-array retransmit (the
+  // shape that produced anti-pattern d25f5a9e's silent truncation).
+  // expected_version is REQUIRED here, unlike knowledge_update — a destroy
+  // states what it read (board 39673f6a).
+  'knowledge_array_remove',
   // Mechanized article split enforcing the 8b87efcb invariants in one
   // transaction (board 136091d2, decision compaction-tooling-windowed-read-plus-split).
   'knowledge_split',

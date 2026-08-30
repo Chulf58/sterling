@@ -423,6 +423,30 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_array_remove',
+    {
+      description:
+        'Remove ONE element from an ARRAY field (canonically a feature_article\'s files[]) by selector — the DELETE verb the append/edit family never had (board 39673f6a). knowledge_append only ADDS and knowledge_edit\'s arr[key=value].sub only replaces a STRING inside one element, so dropping a single stale path previously meant a knowledge_update retransmitting the whole array — the exact shape that produced a silent truncation (anti-pattern d25f5a9e), where the write succeeds and the article quietly loses entries nobody re-sent. SAME SELECTOR GRAMMAR as knowledge_edit, one level shorter: \'arr[key=value]\' with NO trailing \'.sub\' (e.g. "files[path=scripts/prep.mjs]"), because the WHOLE matched element goes. Same refuse-on-any-count-but-one contract: zero matches and multiple matches are both refused with the count, nothing written. THIS CALL DESTROYS, so it is shaped accordingly: the EXACT FULL UUID ONLY — no slug, no 8-char citation prefix, even though knowledge_get/knowledge_update/knowledge_edit resolve all three (anti-pattern no-bounded-trail-guard-for-destructive-addressing: an abbreviation whose worst case is a recoverable edit is not the same abbreviation on a call that removes content) — and expected_version is REQUIRED rather than optional, a stale token refusing by naming BOTH versions. A non-positive or non-integer token is refused as an INVALID ARGUMENT rather than a version conflict (no record is ever at version 0, so retrying with the current version is not the fix), and a record carrying NO stored version refuses the removal outright — an unversionable record cannot satisfy the conditional-write contract the required token exists to provide, so ANY token would otherwise be accepted. A selector matches only elements that actually HAVE the named key: [key=undefined] never addresses a key-absent element (zero matches, not a deletion), while an element whose value genuinely IS the string "undefined" stays selectable. A feature_article must RETAIN AT LEAST ONE owned file, so removing the last files[] entry is refused (emptying an article is retire-and-replace; knowledge_split refuses a full donation for the same reason), and history may not be emptied either — the last history entry is floored because the audit trail is what every other destroying-call guard rests on. That floor is a POLICY choice, not a schema constraint: the schema permits an empty history, so the floor is stated here as policy rather than as a fact about record validity. current_ac and live_test_refs MAY be emptied, and that asymmetry rests on a schema-real difference: records are routinely born with those two empty, so a removal returning one to a birth-legal state is floored by nothing. Surviving elements keep their original order and bytes exactly. Otherwise it rides the ONE versioned update path — version bump, retained prior version, baseline re-baseline, and resolves\'s explicit claim contract. The echo defaults to a one-line digest receipt carrying the removed element; pass projection:"full" for the whole stored record.',
+      inputSchema: strict({
+        id: z.string().describe('the EXACT full uuid — this call destroys, so no slug and no 8-char prefix is accepted'),
+        selector: z.string().describe("arr[key=value] — knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
+        expected_version: z
+          .number()
+          .int()
+          .positive()
+          .describe('REQUIRED: the version you read — a stale token refuses naming both versions, with nothing written'),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe('open reconcile_needed/refresh_reference item ids this write discharges — validated before the write'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
+    },
+    ({ id, selector, expected_version, resolves, projection }) =>
+      json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection))
+  );
+
+  server.registerTool(
     'knowledge_promote',
     {
       description:

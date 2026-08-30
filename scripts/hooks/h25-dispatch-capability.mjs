@@ -81,7 +81,8 @@ const PLATFORM_TOOLS = [
 ];
 const MCP_SHORT_NAMES = [
   'knowledge_query', 'knowledge_get', 'knowledge_create', 'knowledge_update',
-  'knowledge_append', 'knowledge_edit', 'knowledge_link', 'knowledge_retire',
+  'knowledge_append', 'knowledge_edit', 'knowledge_split',
+  'knowledge_extract', 'knowledge_array_remove', 'knowledge_link', 'knowledge_retire',
   'knowledge_supersede', 'knowledge_promote', 'knowledge_schema',
   'knowledge_stats', 'knowledge_preflight', 'board_add', 'board_edit',
   'board_get', 'board_query', 'board_remove', 'board_update',
