@@ -437,13 +437,16 @@ test('H13: appends normalized read-evidence to the correct ledger (run vs conduc
     // boundary; evidence now expires with the file, not the prompt.
     const before = JSON.parse(readFileSync(conductorLedger, 'utf8'));
     assert.ok(before.every((e) => e.sha256), 'h13-reads-ledger stamps a content hash on every entry');
-    r = runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    // pruneUnhashed(ledgerPath) absorbed from h13-clear-conductor.mjs (deleted) into
+    // h19-delivery-drain.mjs — same UserPromptSubmit event, decision 04982f45
+    // (s7-small-hook-absorption-measured-two-fold-two-keep). Behavior byte-preserved.
+    r = runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     assert.equal(r.code, 0);
     assert.equal(existsSync(conductorLedger), true, 'hashed entries survive the prompt clear');
     // seed a hashless legacy entry beside it — the prompt clear prunes exactly that one
     const mixed = [...JSON.parse(readFileSync(conductorLedger, 'utf8')), { agent_id: 'conductor', path: 'src/legacy-read.ts', at: NOW }];
     writeFileSync(conductorLedger, JSON.stringify(mixed));
-    r = runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    r = runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     assert.equal(r.code, 0);
     const after = JSON.parse(readFileSync(conductorLedger, 'utf8'));
     assert.ok(after.every((e) => e.sha256), 'hashless legacy entries are pruned at the prompt boundary');
@@ -453,6 +456,58 @@ test('H13: appends normalized read-evidence to the correct ledger (run vs conduc
   }
 });
 
+// AGENT-LEDGER UNTOUCHED (outside-family review finding): pruneUnhashed's
+// absorbed call targets the CONDUCTOR ledger path specifically (decision
+// 04982f45 — h13-clear-conductor.mjs was conductor-only by name). This pins
+// that an AGENT/run ledger — a DIFFERENT file, addressed by (runId, agentId)
+// — is never reached by the same prompt-boundary prune, even when it also
+// holds a hashless legacy entry: proof the targeting is a fixed conductor
+// path, not an accidental sweep of every ledger under .sterling/runs/**.
+test("H19 delivery-drain: pruneUnhashed targets ONLY the conductor ledger — an AGENT/run ledger's hashless entry survives untouched", () => {
+  const { dir, cleanup } = makeProject({ withRun: true });
+  try {
+    const conductorLedger = join(dir, '.sterling', 'transient', 'conductor-reads.json');
+    mkdirSync(dirname(conductorLedger), { recursive: true });
+    writeFileSync(
+      conductorLedger,
+      JSON.stringify([
+        { agent_id: 'conductor', path: 'src/legacy-read.ts', at: NOW },
+        { agent_id: 'conductor', path: 'src/feature.ts', at: NOW, sha256: 'deadbeef' },
+      ])
+    );
+    // an AGENT/run ledger with its OWN hashless entry, seeded via the same
+    // helper h13-reads-ledger's tests use for the run-scoped path.
+    const agentLedger = seedLedger(dir, 'r-1', 'a1', ['src/agent-legacy-read.ts']);
+    const agentBefore = readFileSync(agentLedger, 'utf8');
+
+    const r = runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    assert.equal(r.code, 0, oneLine(r.stderr));
+
+    const conductorAfter = JSON.parse(readFileSync(conductorLedger, 'utf8'));
+    assert.ok(!conductorAfter.some((e) => e.path === 'src/legacy-read.ts'), 'the hashless CONDUCTOR entry is pruned');
+    assert.ok(conductorAfter.some((e) => e.path === 'src/feature.ts'), 'the hashed CONDUCTOR entry survives');
+
+    assert.equal(
+      readFileSync(agentLedger, 'utf8'),
+      agentBefore,
+      "the AGENT/run ledger is byte-identical — untouched by the conductor-scoped prune"
+    );
+    const agentAfter = JSON.parse(readFileSync(agentLedger, 'utf8'));
+    assert.ok(
+      agentAfter.some((e) => e.path === 'src/agent-legacy-read.ts'),
+      "the agent ledger's own hashless entry survives — this hook never targets it"
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: resolving the prune path from the hook input's own agent/run
+// identity (an "undefined,undefined" targeting bug — e.g. falling through to
+// whatever ledgerPath(run_id, agent_id) happens to produce instead of a
+// FIXED conductor-only path), or globbing every ledger under
+// .sterling/runs/**/reads/*.json, flips the agent-ledger-survives assertions
+// above red.
+
 test('H3 [direct mode]: evidence expires with the FILE — a hashed read survives prompts and dies on content change (board 776d2b65)', () => {
   const { dir, cleanup } = makeProject({ withRun: false });
   try {
@@ -460,8 +515,9 @@ test('H3 [direct mode]: evidence expires with the FILE — a hashed read survive
     // real read through the hook so the entry carries the live content hash
     let r = runHook('h13-reads-ledger.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: target } }), dir);
     assert.equal(r.code, 0, oneLine(r.stderr));
-    // prompt boundary: hashed evidence survives …
-    runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    // prompt boundary: hashed evidence survives … (pruneUnhashed absorbed into
+    // h19-delivery-drain.mjs, decision 04982f45 — same event, byte-preserved)
+    runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: target } }), dir);
     assert.equal(r.code, 0, `byte-current file read before an earlier prompt must stay editable: ${oneLine(r.stderr)}`);
     // … until the FILE changes, which is the actual staleness
@@ -495,8 +551,9 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
     // NAME THE LEDGER AND ITS WINDOW. ledgerPath resolves three different files, so
     // one sentence used to cover "never read it", "read it in an earlier prompt
     // turn" and "a different agent read it" — and the conductor case reads as a
-    // falsehood, because h13-clear-conductor wipes that ledger on every user
-    // prompt. An agent's denial must say the ledger is the AGENT's own.
+    // falsehood, because h19-delivery-drain (absorbed pruneUnhashed, decision
+    // 04982f45) wipes that ledger on every user prompt. An agent's denial must
+    // say the ledger is the AGENT's own.
     assert.match(r.stderr, /Checked .*reads/, 'the ledger actually consulted is named');
     assert.match(r.stderr, /0 entries/, 'with how much evidence it held');
     assert.match(r.stderr, /this AGENT's own ledger/);
@@ -1052,7 +1109,7 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
       'h7-file-touch.mjs': 'PostToolUse',
       'h9-stop-backstop.mjs': 'Stop',
       'h10-direct-capture.mjs': 'Stop',
-      'h13-clear-conductor.mjs': 'UserPromptSubmit',
+      'h19-delivery-drain.mjs': 'UserPromptSubmit',
       'h13-reads-ledger.mjs': 'PostToolUse',
     };
     for (const [file, event] of Object.entries(events)) {

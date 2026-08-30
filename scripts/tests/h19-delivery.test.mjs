@@ -330,6 +330,46 @@ test('self-healing: corrupt guard resets and delivers; corrupt queue is discarde
   }
 });
 
+// SHARED-FATE (outside-family review finding; decision 04982f45 absorbed
+// h13-clear-conductor's pruneUnhashed(ledgerPath) into THIS hook, same
+// UserPromptSubmit event as the pending-delivery drain below). A failure in
+// the ABSORBED prune half must not swallow this hook's OWN pending-delivery
+// drain — the two concerns share an event, not a fate. Failure is injected
+// the same way the "ordering" tests above force enqueuePending to throw
+// EISDIR: the target path exists but is a DIRECTORY, so the prune's own
+// readFileSync throws before it ever reaches the pending-delivery drain.
+test('shared-fate: a forced prune failure (unreadable conductor ledger) does not swallow a pending delivery', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    // queue a real pending delivery via the normal enqueue path
+    const enq = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(enq.code, 0, enq.stderr);
+    assert.equal(pendingOf(dir).length, 1, 'a delivery is queued and waiting to be drained');
+
+    // force the ABSORBED prune to fail: the conductor read-evidence ledger
+    // exists but is a directory, so pruneUnhashed's readFileSync throws EISDIR
+    mkdirSync(join(dir, '.sterling', 'transient', 'conductor-reads.json'), { recursive: true });
+
+    const drain = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
+    assert.equal(drain.code, 0, `a prune failure must never block the prompt: ${drain.stderr}`);
+    const out = JSON.parse(drain.stdout);
+    assert.match(
+      out.hookSpecificOutput.additionalContext,
+      /alpha does the alpha thing/,
+      'the pending delivery still drains and injects even though the absorbed prune half failed'
+    );
+    assert.equal(pendingOf(dir).length, 0, 'the queue is still emptied on this successful drain');
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: letting the prune's thrown EISDIR propagate uncaught past the
+// whole handler (instead of catching it around ONLY the prune half) crashes
+// the drain before it reaches the pending-delivery logic — the
+// additionalContext match above goes red. RED AT THE CURRENT TREE until the
+// fold isolates the two absorbed concerns' failure paths.
+
 test('unknown injection_rung falls back to prompt (enqueue), never to a silently different mode', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'sideways' });
   try {

@@ -7675,10 +7675,27 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
 
 // scripts/hooks/h19-dispatch-staging.mjs
 var SUBJECT_MAX_DECISIONS = 5;
+var EXEMPT_AGENT_TYPES = /* @__PURE__ */ new Set(["statusline-setup"]);
+var RETURN_CONTRACT = "STERLING DEFAULT RETURN CONTRACT \u2014 Explicit output requirements in your agent definition or dispatch brief take precedence. Otherwise, return the conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw logs, or step-by-step narration. Report only the outcome, decisive evidence, relevant files/tests, and unresolved risks.";
 var input = readStdin();
+var emitted = false;
+function combinedContext(payload) {
+  const out = [];
+  if (payload) out.push(payload);
+  if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
+  return out.join("\n\n");
+}
+function finish(payload) {
+  const out = combinedContext(payload);
+  if (out) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
+    emitted = true;
+  }
+  allow();
+}
 try {
   const store = openStore(input.cwd);
-  if (!store) allow();
+  if (!store) finish("");
   const prompts = lastDispatchPrompts(input.transcript_path);
   const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
   const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
@@ -7707,14 +7724,14 @@ try {
     }
   }
   subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
-  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) allow();
+  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) finish("");
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
   const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
   const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) allow();
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) finish("");
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
   const parts = [];
   if (freshOwners.length || freshHazards.length || freshDecisions.length) {
@@ -7750,10 +7767,27 @@ try {
     ...cappedHazards(subjectHazards),
     ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS)
   ];
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: payload } }));
+  const out = combinedContext(payload);
+  if (out) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
+    emitted = true;
+  }
   guard.records.push(...fresh.map((r) => r.id));
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
-  warnNonBlocking(`H19: dispatch staging failed: ${e && e.message || e}`);
+  try {
+    process.stderr.write(`H19: dispatch staging failed: ${e && e.message || e}
+`);
+  } catch {
+  }
+  if (!emitted) {
+    const out = combinedContext("");
+    if (out) {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
+      emitted = true;
+    }
+  }
+  if (emitted) allow();
+  warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
 }

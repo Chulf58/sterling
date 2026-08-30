@@ -4,8 +4,7 @@
       {
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h28-return-contract.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" }
         ]
       }
     ],
@@ -29,7 +28,6 @@
       {
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h2-selection-inject.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-clear-conductor.mjs\"" },
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-delivery-drain.mjs\"" }
         ]
       }

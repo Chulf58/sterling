@@ -202,7 +202,6 @@ const MANIFEST = {
   'h8-dispatch-cap.mjs': 'blocking',
   'h9-stop-backstop.mjs': 'blocking',
   'h10-direct-capture.mjs': 'blocking',
-  'h13-clear-conductor.mjs': 'advisory',
   'h13-reads-ledger.mjs': 'advisory',
   'h14-bash-allowlist.mjs': 'blocking',
   'h15-store-guard.mjs': 'blocking',
@@ -227,7 +226,6 @@ const MANIFEST = {
   'h25-dispatch-capability.mjs': 'advisory',
   'h26-dispatch-overlap.mjs': 'advisory',
   'h27-dispatch-signatures.mjs': 'blocking',
-  'h28-return-contract.mjs': 'advisory',
   'h29-codex-consult-failure.mjs': 'advisory',
   'h30-bare-id-legibility.mjs': 'advisory',
 };

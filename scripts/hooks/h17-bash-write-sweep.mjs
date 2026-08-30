@@ -3834,7 +3834,7 @@ try {
   // THE WHOLE BLOCK EXISTED TO PROTECT AN EXEMPTION, so deleting the exemption
   // deleted its reason: it ordered the integrity check BEFORE every consult so a
   // stamp forged inside the window could not excuse a path in the same Post. With
-  // no consult left there is nothing to order and nothing to forge for. An
+  // no consult left there is nothing to order and nothing worth counterfeiting. An
   // in-window (B) change now denies UNCONDITIONALLY.
   // THE ACCEPTED CONSEQUENCE IS UNCHANGED AND STILL DISCLOSED: conductor edits to
   // the enforcement surface belong BETWEEN audited Bash windows, not inside one —
