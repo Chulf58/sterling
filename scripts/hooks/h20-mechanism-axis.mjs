@@ -75,7 +75,7 @@ import {
   markDelivered,
   DENY_RULING_TYPES,
   STRICT_MIN_HITS,
-  STRICT_MIN_RECORD_TERMS,
+  hasFullNarrowCentralityCoverage,
   DELTA_MIN_NEW_TERMS,
   subQuestionText,
   denyLedgerPath,
@@ -211,7 +211,12 @@ try {
           (x) =>
             x.hits.length >= STRICT_MIN_HITS &&
             hasDiscriminatingHit(x.hits) &&
-            hasRecordCentralityHit(x.record, subText, { minTerms: STRICT_MIN_RECORD_TERMS })
+            // FULL coverage of the record's PRE-UNION narrow top-K. NOT
+            // hasRecordCentralityHit: this rung exits 2 and blocks the user's
+            // question, so it must never see the title-union central set (a
+            // bigger set makes full coverage a weaker per-term demand — see
+            // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
+            hasFullNarrowCentralityCoverage(x.record, subText)
         );
       // Truthy fallback, not nullish (fix 3, dual-review finding): header:''
       // is falsy but not nullish, so `??` let an empty-string header win over
