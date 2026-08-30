@@ -49,6 +49,7 @@
 // theirs — this hook's own contract requires exit 0 even there), a missing
 // tool_response, an unrecognised tool name, and any internal failure.
 import { readStdin, allow, openStore, repoRel } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
@@ -172,6 +173,7 @@ try {
   // SIDE EFFECT FIRST, GUARD SECOND (the H19/H20 rule): writing the guard
   // before the enqueue lands turns any failure into permanent silent loss,
   // since the next touch would see the record already marked seen.
+  recordAdvisoryFire(input.cwd, 'h23', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   enqueuePending(pendingPath(input.cwd), {
     kind: 'output_axis_pointers',
     rel: input.tool_input?.file_path ?? input.tool_input?.command ?? '',

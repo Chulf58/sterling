@@ -54,6 +54,7 @@
 // that a match matching ONLY generic terms (test, check, file, ...) cannot
 // clear on its own.
 import { readStdin, allow, deny, warnNonBlocking, openStore } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
@@ -297,6 +298,7 @@ try {
     // further is owed on it) exactly as much as a never-matched one.
     if (unresolved.length) {
       const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
+      recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
       deny(renderDenyOnceMessage(unresolved, questions.length, open));
     }
     // Every ruled sub-question was validly overridden (or never ruled at
@@ -435,6 +437,7 @@ try {
   // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19 (council wf_db9a59aa-0af):
   // the guard is what makes delivery once-per-session, so writing it before the
   // delivery lands turns any failure into permanent silent loss with no retry.
+  recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join('\n\n') },

@@ -46,6 +46,7 @@
 // edit mid-work if the dispatch proceeds anyway — this catches the
 // misdispatch before the spawn, exactly like the capability advisory above.
 import { readStdin, allow, warnNonBlocking, loadConfig } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { hasUnsuppressedMatch, isReviewerClass, escapeRe as escapeReShared } from './lib/dispatch-advisory.mjs';
 import { PIPELINE_AGENT_TYPES, matchesGlob } from '@sterling/schemas';
 import { existsSync, readFileSync } from 'node:fs';
@@ -262,6 +263,7 @@ try {
 }
 
 function emit(additionalContext) {
+  recordAdvisoryFire(input.cwd, 'h25', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext },
