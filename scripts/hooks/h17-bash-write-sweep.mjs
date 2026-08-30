@@ -1641,7 +1641,7 @@ function stateFile(cwd, runId, key) {
 // this about the content baseline ("these records live in os.tmpdir() and are
 // writable by the audited command"). So the stamp-integrity comparison is
 // DETECTION resting on an attacker-writable input, not prevention: an agent that
-// overwrites its own witness to describe a stamp it is about to forge defeats it.
+// overwrites its own witness to describe a stamp it is about to counterfeit defeats it.
 // Unfixable at this layer — hook and command share a UID with no privilege
 // boundary (research_finding 79942bda) — so it is named here rather than implied.
 function stampWitnessFile(cwd, runId, key) {
@@ -2338,7 +2338,7 @@ function readStampSnapshot(cwd) {
 // already says so in as many words ("these records live in os.tmpdir() and are
 // writable by the audited command, so a crafted baseline is conduct, not
 // environment"). An agent that rewrites its own witness to match a stamp it plans
-// to forge defeats this comparison. NOT FIXABLE HERE: hook and command run as the
+// to counterfeit defeats this comparison. NOT FIXABLE HERE: hook and command run as the
 // SAME UID with no privilege boundary between them (research_finding 79942bda),
 // so there is no location this process can write that the command cannot. Named
 // rather than silently implied, because a detection mechanism whose own input is
@@ -4223,7 +4223,7 @@ if (event === 'PreToolUse') {
     // the audited command can compute and OVERWRITE — the same same-UID exposure
     // the (B) content baseline and the (A) attribution/state records carry, and
     // which the (B) denial states outright. An agent that rewrites its own witness
-    // to match a stamp it intends to forge defeats the comparison at Post. There is
+    // to match a stamp it intends to counterfeit defeats the comparison at Post. There is
     // no location this hook can write that the command cannot (79942bda), so the
     // residual is NAMED, not closed — see `stampWitness` for the full statement.
     writeFileSync(stampWitnessFile(cwd, runId, key), JSON.stringify(stampWitness(cwd)));
