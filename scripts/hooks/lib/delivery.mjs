@@ -4,7 +4,8 @@
 // .sterling/transient/delivery/ is cleared by h19-clear-session at SessionStart
 // — the delivered-guard's TTL is the whole session by design (grill answer:
 // whole session, no expiry; re-arm rides per-file/per-record keying).
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync, statSync, readdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
 
 export function deliveryDir(cwd) {
@@ -374,6 +375,32 @@ function renderOverrideLine(ids) {
   return `Cite ${idsText} + the unresolved delta or it stays denied — a re-ask with no delta is denied again, and every override is logged.`;
 }
 
+/** THE ONE LIFECYCLE-STATUS SPELLING (decision db3392db, part 1). The bracket
+ *  CONTENT `status·scope[, superseded_by: <id>]` was born inline in
+ *  renderDenyOnceMessage below and is now shared verbatim with every pointer
+ *  surface, so a reader never has to learn a second spelling for the same fact.
+ *  Absent status/scope render as 'unknown' rather than being dropped: a pointer
+ *  that cannot say what a record's lifecycle is must say THAT, not stay silent
+ *  (P5). Never conflate this with a feature_article's own `state` field —
+ *  'built'/'active' there describes the TERRITORY's build state, this describes
+ *  the RECORD's lifecycle, and renderArticle prints both. */
+export function statusBracket(record) {
+  const status = record?.status ?? 'unknown';
+  const scope = record?.scope ?? 'unknown';
+  return `${status}·${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ''}`;
+}
+
+/** The same bracket as a POINTER-SURFACE suffix (leading space included, or ''):
+ *  SUPPRESSED for status 'active' because an [active] tag on every pointer line
+ *  is noise on the one channel that fires constantly (P1) — the deny-once
+ *  renderer keeps annotating unconditionally, where scope is material to the
+ *  denial itself. Anything NOT exactly 'active' annotates, including an absent
+ *  or unrecognised status: suppressing an unknown lifecycle would hide exactly
+ *  the case the annotation exists for. */
+export function statusAnnotation(record) {
+  return record?.status === 'active' ? '' : ` [${statusBracket(record)}]`;
+}
+
 export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
   const lines = [
     'STERLING DENY-ONCE (H20, decision 68332e4b) — this question was NOT shown to the user; read the settled ruling(s) below, then act on them before resubmitting.',
@@ -403,8 +430,11 @@ export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
       const clippedText = clip(normalizeWs(text), 160);
       const normalizedMarker = normalizeWs(marker);
       const substance = normalizedMarker ? `${clippedText}${clippedText ? ' ' : ''}${normalizedMarker}` : clippedText;
-      const bracket = `${d.status ?? 'unknown'}·${d.scope ?? 'unknown'}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ''}`;
-      lines.push(`— "${label}" → ${kind} [${d.id}] [${bracket}]: ${substance}`);
+      // UNCONDITIONAL here (decision db3392db part 1): the pointer surfaces
+      // suppress the bracket for an active record, this one never does — scope
+      // is material to the denial, and a denied question's reader must be able
+      // to see the ruling's lifecycle without a second lookup.
+      lines.push(`— "${label}" → ${kind} [${d.id}] [${statusBracket(d)}]: ${substance}`);
     }
   }
   const idList = [...new Set(citedIds)];
@@ -428,26 +458,34 @@ export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
 // so it doubles as a lock with no extra dependency. Age-based staleness ONLY —
 // a lock whose mtime is older than LOCK_STALE_MS is reclaimed as abandoned by
 // a crashed holder; never PID-liveness (anti_pattern 8e603e23: a recycled PID
-// gives a false lock identity). On deadline expiry this PROCEEDS WITHOUT THE
-// LOCK rather than blocking the hook forever — delivery is an aid, never a
-// gate, so degraded beats blocked. A caller that never acquired the lock also
-// never releases it, so a slow/expired waiter can't rip an active holder's
-// lock out from under it.
+// gives a false lock identity).
+//
+// TWO CALLER SEMANTICS, deliberately different (fixer F2):
+//   PRODUCERS (enqueuePending) keep the ORIGINAL degrade-to-unlocked behavior
+//     (decision cdb50670 untouched): on deadline expiry they PROCEED WITHOUT THE
+//     LOCK rather than blocking the hook forever — a lost append costs one
+//     duplicate/late pointer, and delivery is an aid, never a gate.
+//   THE DRAIN (drainPending) is LOCK-REQUIRED: it MUTATES the queue by claiming
+//     it away, so proceeding unlocked can delete a producer's just-appended
+//     entry whose guard already marked those records delivered — permanent
+//     silent loss. Without the lock it SKIPS the drain entirely and leaves the
+//     queue intact for the next prompt.
+// A caller that never acquired the lock also never releases it, so a slow/
+// expired waiter can't rip an active holder's lock out from under it.
 // ---------------------------------------------------------------------------
 const LOCK_DEADLINE_MS = 2000;
 const LOCK_STALE_MS = 5000;
 const LOCK_POLL_MS = 5;
 
-function withFileLock(targetPath, fn) {
-  mkdirSync(dirname(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
+/** Poll for the lock directory until the deadline. Returns whether it was taken
+ *  — the ONE acquisition path both semantics above share, so they can never
+ *  drift on staleness reclamation or poll behavior. */
+function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
-  let acquired = false;
   while (Date.now() < deadline) {
     try {
       mkdirSync(lockPath);
-      acquired = true;
-      break;
+      return true;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       try {
@@ -462,16 +500,40 @@ function withFileLock(targetPath, fn) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
+  return false;
+}
+
+function releaseLock(lockPath) {
+  try {
+    rmSync(lockPath, { recursive: true, force: true });
+  } catch {
+    // best-effort release; a leftover lock self-heals via the staleness check
+  }
+}
+
+/** PRODUCER semantics: runs `fn` whether or not the lock was taken. */
+function withFileLock(targetPath, fn) {
+  mkdirSync(dirname(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  const acquired = acquireLock(lockPath);
   try {
     return fn();
   } finally {
-    if (acquired) {
-      try {
-        rmSync(lockPath, { recursive: true, force: true });
-      } catch {
-        // best-effort release; a leftover lock self-heals via the staleness check
-      }
-    }
+    if (acquired) releaseLock(lockPath);
+  }
+}
+
+/** DRAIN semantics: runs `fn` ONLY under the lock. Returns
+ *  `{acquired, value}` so the caller can distinguish "did nothing because the
+ *  queue was empty" from "did nothing because another writer held the lock". */
+function withRequiredFileLock(targetPath, fn) {
+  mkdirSync(dirname(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  if (!acquireLock(lockPath)) return { acquired: false, value: undefined };
+  try {
+    return { acquired: true, value: fn() };
+  } finally {
+    releaseLock(lockPath);
   }
 }
 
@@ -486,22 +548,182 @@ export function enqueuePending(path, entry) {
   });
 }
 
-/** Read-and-remove: the queue is one-shot (P4 — consumed by the event that
- *  ends its life, the next prompt's drain). Self-healing: a corrupt queue is
- *  removed LOUDLY (stderr) and drains empty — one lost delivery beats a queue
- *  wedged until session restart (delivery is an aid, never a gate). */
-export function drainPending(path) {
-  if (!existsSync(path)) return [];
-  let entries;
+// ---------------------------------------------------------------------------
+// RENAME-BASED CLAIM (fixer F2, tightening decision db3392db part 2). The drain
+// no longer reads-then-deletes under the lock: it RENAMES pending.json to a
+// uniquely-named claimed-*.json INSIDE the lock, releases immediately, and
+// processes the claimed copy OUTSIDE it. Three properties that buys:
+//
+//   (a) THE LOCK IS HELD FOR A RENAME, not for the whole store re-resolve — the
+//       drain now opens the store and re-reads every queued id, which is far too
+//       long to hold a lock producers must take on every PostToolUse.
+//   (b) A CRASH MID-PROCESSING RE-SERVES INSTEAD OF LOSING. The claimed file is
+//       deleted only AFTER the payload has been rendered and written (the caller
+//       calls release()). A drain that dies in between leaves claimed-*.json on
+//       disk, and the NEXT drain picks leftovers up FIRST.
+//       ACCEPTED DIRECTION OF FAILURE: that recovery can DUPLICATE a delivery
+//       (the crash may have happened after stdout was written but before the
+//       delete). Duplicating knowledge the reader already has costs context;
+//       losing it is silent and undetectable, and the producer's guard has
+//       already marked those records delivered so nothing else would ever retry.
+//       Duplicate-and-loud beats lose-and-silent.
+//   (c) NO UNLOCKED MUTATION EVER. If the lock is not granted by the deadline
+//       the drain SKIPS this turn with a one-line stderr note and touches
+//       nothing — it never proceeds unlocked and never deletes unlocked.
+//
+// Re-claiming a LEFTOVER needs no lock: renameSync is itself the exclusive
+// claim (only one racing drain can move a given source name), and no producer
+// ever touches a claimed-* file.
+// ---------------------------------------------------------------------------
+const CLAIM_PREFIX = 'claimed-';
+const PARK_PREFIX = 'corrupt-';
+let claimSeq = 0;
+
+function claimByRename(src, dir) {
+  claimSeq += 1;
+  const target = join(
+    dir,
+    `${CLAIM_PREFIX}${process.pid}-${Date.now()}-${claimSeq}-${Math.random().toString(36).slice(2, 8)}.json`
+  );
   try {
-    entries = JSON.parse(readFileSync(path, 'utf8'));
+    renameSync(src, target);
+    return target;
   } catch {
-    process.stderr.write(`H19: corrupt pending-delivery queue at ${path} — discarded\n`);
-    rmSync(path);
-    return [];
+    return null; // another drain claimed it first, or it vanished — not ours
   }
-  rmSync(path);
-  return entries;
+}
+
+/** A batch whose JSON is unreadable (unparseable, or valid JSON that is NOT an
+ *  array — fixer F6) is PARKED under a name the drain never picks up again, not
+ *  deleted: the old behavior rmSync'd the whole queue, and the producers' guards
+ *  had already marked those records delivered, so the content was gone with no
+ *  detector. Parked files are still lifecycle-bound (P4) — h19-clear-session
+ *  clears the whole delivery directory at SessionStart. Returns ONE synthetic
+ *  entry so the reader is TOLD the batch was lost (the banner arm), rather than
+ *  the drain silently injecting nothing.
+ *
+ *  RETURNS `{entry, retain}`. `retain: true` means the park RENAME FAILED, so the
+ *  batch is still sitting at its CLAIMED name and must be excluded from
+ *  release()'s delete list (fixer M2): otherwise the one recoverable copy of an
+ *  unreadable batch is destroyed by the very path that exists to preserve it. The
+ *  name carries a randomUUID segment because PID+millisecond alone collides — two
+ *  parks inside one millisecond silently OVERWRITE on POSIX and throw EEXIST on
+ *  Windows, and that Windows throw was precisely what reached the delete. */
+function parkCorruptBatch(file, reason) {
+  const parked = join(dirname(file), `${PARK_PREFIX}${process.pid}-${Date.now()}-${randomUUID()}.json`);
+  let parkedAt = parked;
+  try {
+    renameSync(file, parked);
+  } catch (e) {
+    parkedAt = null;
+    process.stderr.write(`H19: parking the corrupt queue at ${file} failed (${(e && e.message) || e})\n`);
+  }
+  process.stderr.write(
+    `H19: corrupt pending-delivery queue at ${file} — ${reason}; ` +
+      `${parkedAt ? `PARKED at ${parkedAt}` : `left CLAIMED at ${file} (could NOT be parked, and is NOT deleted)`} rather than discarded\n`
+  );
+  return {
+    retain: !parkedAt,
+    entry: {
+      kind: 'corrupt_batch',
+      payload: '(no entry from this queued delivery batch could be recovered)',
+      unverified_reason:
+        `a queued delivery batch could not be read (${reason})` +
+        `${
+          parkedAt
+            ? `, so it was PARKED at ${parkedAt} instead of discarded`
+            : `, and parking it failed — it is left in place at ${file}, undeleted`
+        } — nothing from it was served, so any knowledge it carried must be re-queried`,
+    },
+  };
+}
+
+/** `{entries, retain}` — `retain` true keeps the source file out of release()'s
+ *  delete list (see parkCorruptBatch). */
+function readClaimedBatch(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    const { entry, retain } = parkCorruptBatch(file, 'its JSON could not be parsed');
+    return { entries: [entry], retain };
+  }
+  // F6: a valid-JSON NON-ARRAY is treated exactly like a parse failure. Without
+  // this, `for (const e of {…})` throws (or a string is iterated per character)
+  // and the whole drain dies on a shape no producer can legally write.
+  if (!Array.isArray(parsed)) {
+    const shape = parsed === null ? 'null' : typeof parsed;
+    const { entry, retain } = parkCorruptBatch(file, `its JSON parsed as ${shape}, not the expected array of entries`);
+    return { entries: [entry], retain };
+  }
+  return { entries: parsed, retain: false };
+}
+
+/** Claim every pending batch and return `{entries, release}`. The queue is
+ *  one-shot (P4) but the DELETE is deferred to `release()`, which the caller
+ *  invokes only AFTER the drained payload has actually been written — process
+ *  then delete, so a crash re-serves rather than loses (see (b) above). */
+export function drainPending(path) {
+  const dir = dirname(path);
+  const claimed = [];
+
+  // (1) LEFTOVERS FIRST — a claimed batch from a crashed prior drain, then the
+  // live queue. What this ordering guarantees is exactly that: leftovers before
+  // the live queue, stable within the directory listing (sorted for determinism).
+  // It does NOT guarantee oldest-first ACROSS processes — the claim name leads
+  // with the PID, so a lower-PID drain's newer batch sorts ahead of a higher-PID
+  // drain's older one. Append order within any ONE batch is preserved regardless,
+  // which is what AC9 pins.
+  let names = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    names = []; // no delivery dir yet: nothing has ever been queued here
+  }
+  for (const name of names.filter((n) => n.startsWith(CLAIM_PREFIX) && n.endsWith('.json')).sort()) {
+    const mine = claimByRename(join(dir, name), dir);
+    if (mine) claimed.push(mine);
+  }
+
+  // (2) THE LIVE QUEUE — claimed under a REQUIRED lock, then released at once.
+  if (existsSync(path)) {
+    const { acquired, value } = withRequiredFileLock(path, () =>
+      // Re-checked INSIDE the lock: another drain may have claimed the batch
+      // between the existsSync above and the lock being granted.
+      existsSync(path) ? claimByRename(path, dir) : null
+    );
+    if (!acquired) {
+      process.stderr.write(
+        `H19: pending-delivery queue lock at ${path}.lock not acquired within ${LOCK_DEADLINE_MS}ms — ` +
+          'drain SKIPPED this turn (queue left intact; it drains at the next prompt)\n'
+      );
+    } else if (value) {
+      claimed.push(value);
+    }
+  }
+
+  const entries = [];
+  // `disposable` is the subset release() may delete — a batch whose park rename
+  // FAILED is deliberately excluded (fixer M2), so the unreadable file survives
+  // for inspection instead of being destroyed by the recovery path.
+  const disposable = [];
+  for (const file of claimed) {
+    const { entries: batch, retain } = readClaimedBatch(file);
+    entries.push(...batch);
+    if (!retain) disposable.push(file);
+  }
+  return {
+    entries,
+    release: () => {
+      for (const file of disposable) {
+        try {
+          rmSync(file, { force: true }); // a parked batch is already gone — force makes that a no-op
+        } catch {
+          // a claimed file we cannot delete re-serves next prompt: duplicate, never lost
+        }
+      }
+    },
+  };
 }
 
 function clip(text, cap) {
@@ -538,6 +760,29 @@ function normalizeWs(text) {
   return String(text ?? '').replace(/\s+/g, ' ').trim();
 }
 
+/** LINE-SAFE flatten (fixer F4): collapse every LINE BREAK and tab to a single
+ *  space, WITHOUT trimming or collapsing ordinary space runs. Used on text that
+ *  is already a whole rendered line (a pointer line replayed at drain), where
+ *  normalizeWs would eat the leading indentation that line's own format carries,
+ *  while the property we need is only "this can never become two lines".
+ *  Interpolated FRAGMENTS (an id, a status bracket) use normalizeWs instead —
+ *  trimming a fragment is correct, trimming a line is not.
+ *
+ *  The character class below is CR, LF, tab, form feed, vertical tab and the
+ *  two Unicode separators U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR
+ *  (a reader that splits on them sees a new line). Ordinary spaces are NOT in
+ *  the class, which is what preserves a pointer line's own indentation.
+ *
+ *  It is built with `new RegExp(<string>)` rather than a regex literal because
+ *  U+2028/U+2029 are LineTerminators in JS source. WHAT IS ACTUALLY IN THE
+ *  STRING: backslash-u ESCAPE TEXT for both separators (the string parser
+ *  resolves them to the real characters at load) — the source file is plain
+ *  ASCII here, per anti-pattern d7e03137's posture. Verified 2026-08-31: a
+ *  raw-control-byte grep over this file matches nothing. */
+function flattenToOneLine(text) {
+  return String(text ?? '').replace(new RegExp('[\\r\\n\\t\\f\\v\u2028\u2029]+', 'g'), ' ');
+}
+
 /** One-hop pointer line for a sibling slug: resolved from the store when the
  *  slug matches exactly, marked absent otherwise — never invented.
  *
@@ -551,13 +796,17 @@ function normalizeWs(text) {
  *  them the neighbour does not exist, so they neither read it nor reconcile it. */
 function pointerLine(store, kind, slug) {
   let head = '(not in store)';
+  let annotation = '';
   try {
     const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
-    if (match) head = clip(match.what_it_does, 140);
+    if (match) {
+      head = clip(match.what_it_does, 140);
+      annotation = statusAnnotation(match);
+    }
   } catch {
     head = '(lookup failed)';
   }
-  return `  → ${kind} [[${slug}]]: ${head}`;
+  return `  → ${kind} [[${slug}]]: ${head}${annotation}`;
 }
 
 /** Budget for the untestable_because reason clip, same class as
@@ -599,7 +848,10 @@ export function renderArticle(store, article, charCap) {
   // pathological slug/family could push the digested block past the ~8192-byte
   // delivery ceiling that clipping the body alone otherwise guarantees. Real
   // kebab slugs sit far under this bound, so normal rendering is unchanged.
-  const header = `▸ article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ''})`;
+  // `state` is the ARTICLE's build state, the trailing bracket is the RECORD's
+  // lifecycle status (decision db3392db part 1) — two different facts, printed
+  // side by side rather than collapsed into one token.
+  const header = `▸ article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ''})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? '');
   // OVERSIZE (board 725299c8): digest the body and POINT to the full record
   // instead of rendering the article whole. Withholding intended_behavior, the
@@ -687,22 +939,29 @@ export function cappedHazards(hazards, cap = HAZARD_CAP) {
  *  one-way-latch bug in territory that had a stored one-way-latch anti_pattern.
  *  Substance (trigger + right_way), not a pointer: a pointer to a hazard the
  *  reader must choose to follow reproduces the skippable step delivery deletes. */
-export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
+/** `total` / `suppressed` (fixer F3) exist for the DRAIN, which is handed only
+ *  the ids that were SHOWN in the original payload (some of which may since have
+ *  died) and must still replay the ORIGINAL '+N more' tail rather than deriving
+ *  a new one from the survivors it happens to have left. Omitted, both fall back
+ *  to today's derivation, so every producer call is byte-identical. */
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map((ap) =>
     [
-      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ''} (full record: knowledge_get ${ap.id})`,
+      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ''} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
     ].join('\n')
   );
-  if (hazards.length > shown.length) {
+  if (dropped > 0) {
     // `remedy` overrides the widening query for callers whose match was not a
     // file_keys join (the subject channel has no file answer at all — a
     // file_keys:[] query would be unrunnable; review finding 4, 2026-08-10).
     const keys = fileKeys.map((k) => `"${k}"`).join(',');
-    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
-    blocks.push(`… ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+    blocks.push(`… ${dropped} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return blocks;
 }
@@ -770,25 +1029,29 @@ export const DECISION_REJECTED_CLIP = 140;
  *  untouched: it ruled on rendering decision BODIES, not on which field is
  *  clipped. alternatives_rejected needs no wider read — SterlingStore.query
  *  rehydrates whole bodies (packages/store/src/index.ts:289). */
-export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
+export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
   const shown = decisions.slice(0, cap);
+  // `total` / `suppressed` (fixer F3) — see renderHazards' note: the drain holds
+  // only the shown slice and replays the original count and tail.
+  const fullTotal = total ?? decisions.length;
+  const dropped = suppressed ?? decisions.length - shown.length;
   const lines = [
-    `▸ DECISIONS for this path (${decisions.length}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
+    `▸ DECISIONS for this path (${fullTotal}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
   ];
   for (const d of shown) {
     const authorityMarker = d.authority ? `[${d.authority}] ` : '';
-    lines.push(`  → ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})`);
+    lines.push(`  → ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})${statusAnnotation(d)}`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
       .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
       .filter(Boolean)
       .join('; ');
     if (rejected) lines.push(`    ✗ ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
-  if (decisions.length > shown.length) {
+  if (dropped > 0) {
     // Same remedy override as renderHazards: a subject match has no file_keys
     // answer, so the widening query must come from the caller there.
-    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
-    lines.push(`  … ${decisions.length - shown.length} more NOT shown (cap ${cap}) — ${widen} for the full set`);
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${fullTotal}`;
+    lines.push(`  … ${dropped} more NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return lines.join('\n');
 }
@@ -815,6 +1078,27 @@ function suspectLabel(record) {
   return record.title ?? record.id;
 }
 
+/** The line-suspect block DECOMPOSED into `{header, lines: [{id, line}], footer}`
+ *  — the same shape bashPointerBlock uses, and for the same reason (fixer M1).
+ *
+ *  Each advisory line is RECORD-DERIVED: suspectLabel interpolates the record's
+ *  own title/slug/id. Replaying the block verbatim at drain therefore serves
+ *  cached per-record text for a record that may have been superseded or deleted
+ *  since enqueue — the exact leak the pointer channel was fixed for, arriving
+ *  through the field the recipe called "advisory text about the FILE". Keyed by
+ *  id, the drain can re-resolve each line instead. */
+export function lineSuspectBlock(suspects, charCap) {
+  return {
+    header:
+      "⚠ LINE-SUSPECT (H19 advisory) — cited line position(s) below may have rotted: the citing record predates this file's current version.",
+    lines: (suspects ?? []).map(({ record, tokens }) => ({
+      id: record.id,
+      line: `  → ${suspectLabel(record)} cites ${clip(tokens.join(', '), charCap)} — this position may no longer be accurate.`,
+    })),
+    footer: '  Line numbers rot as a file changes — cite an anchor (function/slug/passage) instead where possible.',
+  };
+}
+
 /** One trailing block naming every stale-citing record and the token(s) it
  *  cites. `suspects` is `{record, tokens}[]`, already filtered to the stale
  *  ones by the caller's scan — this only renders what it is handed. Returns
@@ -822,24 +1106,36 @@ function suspectLabel(record) {
  *  render* helpers' empty-array-means-nothing-to-add convention. */
 export function renderLineSuspects(suspects, charCap) {
   if (!suspects?.length) return [];
-  const lines = [
-    "⚠ LINE-SUSPECT (H19 advisory) — cited line position(s) below may have rotted: the citing record predates this file's current version.",
-  ];
-  for (const { record, tokens } of suspects) {
-    lines.push(`  → ${suspectLabel(record)} cites ${clip(tokens.join(', '), charCap)} — this position may no longer be accurate.`);
-  }
-  lines.push('  Line numbers rot as a file changes — cite an anchor (function/slug/passage) instead where possible.');
-  return [lines.join('\n')];
+  return [joinSuspectBlock(lineSuspectBlock(suspects, charCap))];
+}
+
+/** Join a decomposed suspect block. Returns '' when NO line survives: the header
+ *  promises "cited line position(s) BELOW" and the footer advises about them, so
+ *  a header+footer with nothing between them is an advisory about nothing. */
+export function joinSuspectBlock({ header, lines = [], footer } = {}) {
+  if (!lines.length) return '';
+  return [header, ...lines.map((l) => l.line), footer].filter((s) => typeof s === 'string' && s).join('\n');
 }
 
 /** The delivery envelope. `unowned` swaps the header for the frontier signal:
  *  hazards and decisions can attach to territory NO article owns, and claiming
  *  'owning knowledge for X' above them would be false. With no blocks at all the
- *  unowned payload is exactly the frontier notice — the pre-hazard behavior. */
-export function renderPayload(rel, blocks, { unowned = false } = {}) {
+ *  unowned payload is exactly the frontier notice — the pre-hazard behavior.
+ *
+ *  `substantiveCount` (fixer F5) is how many of `blocks` are SUBSTANTIVE —
+ *  hazards, owners, decision pointers, trailing advisories. It exists because
+ *  renderFrontier's `hasOtherKnowledge` sentence promises "the store DOES hold
+ *  the hazards and/or decisions below", and at the DRAIN a block list can consist
+ *  entirely of DISCLOSURES about records that died since enqueue. Deriving the
+ *  promise from blocks.length there prints the assurance above nothing but
+ *  tombstones — precisely the false-assurance failure renderFrontier's own
+ *  comment (decision ca23c811) exists to prevent, arriving from the other side.
+ *  Omitted, it falls back to blocks.length, so producer calls are unchanged. */
+export function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
+  const substantive = substantiveCount ?? blocks.length;
   return [
     unowned
-      ? renderFrontier(rel, { hasOtherKnowledge: blocks.length > 0 })
+      ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 })
       : `STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
     ...blocks,
   ].join('\n\n');
@@ -916,24 +1212,505 @@ export function extractCommandPathCandidates(command) {
  * list for the same reason they lead renderArticle's payload: "do not do this
  * here" outranks "here is what this is".
  */
-export function renderBashPointers(entries) {
-  const lines = [
+/** The Bash pointer block, DECOMPOSED into `{header, lines}` where each line is
+ *  keyed by the record id it describes (fixer F1). The drain needs per-record
+ *  lines, not one pre-joined blob: to serve a still-active pointer verbatim while
+ *  REPLACING a superseded one with a stub, it must know which line belongs to
+ *  which id. `header` is producer chrome (two fixed sentences, no record field
+ *  interpolated), which is why it can be replayed verbatim at drain. */
+export function bashPointerBlock(entries) {
+  const header = [
     'STERLING KNOWLEDGE POINTERS (H19) — governed paths named in a Bash command.',
     'This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here.',
-  ];
+  ].join('\n');
+  const lines = [];
   for (const e of entries) {
     for (const h of e.hazards) {
       const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : (h.title ?? h.slug ?? h.id);
-      lines.push(`  • ${e.rel} — ⚠ HAZARD anti_pattern '${hazardLabel}' · knowledge_get ${h.id}`);
+      lines.push({
+        id: h.id,
+        line: `  • ${e.rel} — ⚠ HAZARD anti_pattern '${hazardLabel}' · knowledge_get ${h.id}${statusAnnotation(h)}`,
+      });
     }
     for (const o of e.owners) {
       const kind = o.type === 'reference_material' ? 'reference' : 'article';
       const label = o.title && o.slug ? `${o.title} [${o.slug}]` : (o.slug ?? o.title ?? o.id);
+      // `state` (article build state) and the status bracket are distinct facts
+      // — see renderArticle's header comment.
       const state = o.state ? ` (${o.state})` : '';
-      lines.push(`  • ${e.rel} — ${kind} '${label}'${state} · knowledge_get ${o.id}`);
+      lines.push({
+        id: o.id,
+        line: `  • ${e.rel} — ${kind} '${label}'${state} · knowledge_get ${o.id}${statusAnnotation(o)}`,
+      });
     }
   }
-  return lines.join('\n');
+  return { header, lines };
+}
+
+/** Join a `{header, lines, tail}` pointer block into the payload text. ONE
+ *  definition (invariant 1) shared by both pointer producers and by the payload
+ *  they cache for the drain's fail-open arm. */
+export function joinPointerBlock({ header, lines = [], tail } = {}) {
+  return [header, ...lines.map((l) => l.line), ...(tail ? [tail] : [])].filter((s) => typeof s === 'string' && s).join('\n');
+}
+
+export function renderBashPointers(entries) {
+  return joinPointerBlock(bashPointerBlock(entries));
+}
+
+// ---------------------------------------------------------------------------
+// DRAIN RE-RESOLVE (decision db3392db part 2). The 'prompt' rung injects one
+// turn AFTER the touch, so a queue entry's PRE-RENDERED payload can describe a
+// ruling that has since been superseded, retired or deleted — the queue was the
+// one delivery surface able to serve a dead ruling as live. Every producer now
+// attaches a STRUCTURED RENDER RECIPE beside the payload; the drain re-reads the
+// recipe's ids from ONE store snapshot and serves per verdict:
+//
+//   still-active  → RE-RENDERED from the current record for a substance entry;
+//                   for a POINTER entry, the per-record line captured at enqueue
+//                   is replayed verbatim (a flagged_stale record is SERVED,
+//                   disclosed by statusAnnotation's bracket / a trailing line).
+//   superseded    → the cached body is WITHHELD and replaced by a stub naming
+//                   the QUEUED id and its successor. Never a silent redirect:
+//                   rendering the successor's body as though it were the record
+//                   the reader was queued is the laundering shape the decision
+//                   rejects outright.
+//   missing       → body dropped, one-line disclosure naming the id.
+//   unverifiable  → the STORED payload plus a per-entry UNVERIFIED banner
+//                   (store unavailable, no recipe, or a contained render
+//                   failure). Fail-open: delivery is an aid, never a gate, so a
+//                   broken store degrades to a disclosed cache read, never to
+//                   silence and never to an indefinite requeue.
+//
+// The payload is RETAINED as the fallback precisely so the unverifiable arm has
+// something honest to serve. Recipes are versioned: an entry from before this
+// upgrade (or from a newer one) takes the unverifiable arm rather than being
+// parsed on a guess.
+//
+// NO CACHED PER-RECORD TEXT IS EVER SERVED FOR A TERMINAL RECORD, on EITHER mode
+// (fixer F1) — and that claim now holds for EVERY channel in a recipe, which is
+// what it did not do when it was first written (fixer M1). The substance mode
+// never replays cache for hazards/owners/decisions; the pointer mode is rebuilt
+// line by line, and a superseded or missing record's line is REPLACED by its
+// stub/disclosure rather than footnoted beneath a line that still asserts it; the
+// line-suspect advisory is likewise keyed by id and its dead lines are DROPPED
+// (warn-only, so no tombstone). The one field exempt from re-resolution is
+// `trailing_blocks`, and it is exempt only because nothing record-derived may be
+// put in it — a record-derived line placed there would reintroduce this leak,
+// which is why the line-suspect block was moved OUT of it.
+// ---------------------------------------------------------------------------
+
+/** Bumped only when a recipe's SHAPE changes incompatibly. An entry whose
+ *  version this drain does not recognise is served payload+banner, never
+ *  interpreted optimistically.
+ *
+ *  VERSION 2 (fixer pass on decision db3392db part 2) changed BOTH modes:
+ *   - pointer_verify now carries the per-record rendered LINE keyed by id, so
+ *     the drain REBUILDS the pointer block instead of replaying the whole cached
+ *     blob and appending footnotes beneath it (v1 replayed a superseded record's
+ *     cached line as live text, which is the very defect the re-resolve exists to
+ *     close — the appended disclosure sat under a line still asserting the
+ *     record).
+ *   - rerender now carries the SHOWN (post-cap) id sets plus the original
+ *     suppressed-tail counts, instead of the uncapped fresh sets: re-capping an
+ *     uncapped list against a changed store can PROMOTE a record the reader was
+ *     never shown into the drained payload.
+ *  A v1 entry therefore takes the payload+UNVERIFIED-banner arm: its shape cannot
+ *  answer either question, and guessing is what this version field prevents. */
+export const DELIVERY_RECIPE_VERSION = 2;
+
+/** Recipe for a substance-bearing entry (H19 file-touch delivery + frontier):
+ *  the drain rebuilds the WHOLE payload from current records, so no cached body
+ *  survives re-resolution.
+ *
+ *  Ids are the SHOWN slice — exactly what the original payload rendered — and
+ *  `tails` carries what the original payload SUPPRESSED, so the drain replays the
+ *  same '… N more NOT shown' line without ever rendering a record the reader was
+ *  not shown.
+ *
+ *  TWO DIFFERENT KINDS OF TRAILING TEXT, and conflating them was a leak (M1):
+ *   - `suspects` is the line-suspect advisory, DECOMPOSED to {id, line} because
+ *     every one of its lines names a RECORD (suspectLabel interpolates the
+ *     record's title/slug/id). The drain re-resolves each id and DROPS the line
+ *     of a record that died — warn-only advisory needs no tombstone, but it must
+ *     not be replayed as though the record still said it.
+ *   - `trailing_blocks` is for text that genuinely describes only the FILE, with
+ *     no record id anywhere in it. Nothing populates it today; it is kept so a
+ *     future file-only advisory has an honest home rather than being smuggled in
+ *     beside record-derived lines. */
+export function rerenderRecipe({
+  rel,
+  unowned,
+  charCap,
+  hazardIds,
+  ownerIds,
+  decisionIds,
+  hazardTail,
+  decisionTail,
+  suspects,
+  trailingBlocks,
+}) {
+  return {
+    version: DELIVERY_RECIPE_VERSION,
+    mode: 'rerender',
+    rel,
+    unowned: !!unowned,
+    char_cap: charCap,
+    hazard_ids: hazardIds ?? [],
+    owner_ids: ownerIds ?? [],
+    decision_ids: decisionIds ?? [],
+    tails: { hazards: hazardTail ?? 0, decisions: decisionTail ?? 0 },
+    suspects: suspects
+      ? {
+          header: suspects.header ?? '',
+          entries: (suspects.lines ?? []).map((l) => ({ id: l?.id, line: l?.line })),
+          footer: suspects.footer ?? '',
+        }
+      : null,
+    trailing_blocks: trailingBlocks ?? [],
+  };
+}
+
+/** Recipe for a POINTER-ONLY entry (Bash pointers, H23 output-axis). `entries`
+ *  is `{id, line}[]` — the LINE THE PRODUCER RENDERED for that record, captured
+ *  at enqueue — plus optional `header`/`tail` for the block's non-per-record
+ *  chrome (the producer's fixed preamble; H23's '(+N more matched)' remainder).
+ *
+ *  Storing the line per id is what lets the drain REBUILD rather than annotate:
+ *  a live record's line is replayed verbatim, a superseded one is REPLACED by the
+ *  stub, a missing one by the disclosure. v1's shape (bare `record_ids` + the
+ *  whole cached blob) could only APPEND beneath text that still asserted the dead
+ *  record — a stale serve with a footnote. */
+export function pointerVerifyRecipe({ header, entries, tail } = {}) {
+  return {
+    version: DELIVERY_RECIPE_VERSION,
+    mode: 'pointer_verify',
+    header: typeof header === 'string' ? header : '',
+    entries: (entries ?? []).map((e) => ({ id: e?.id, line: e?.line })),
+    tail: typeof tail === 'string' ? tail : '',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// RECIPE VALIDATION (fixer F7). A recipe is JSON off disk: nothing guarantees
+// its fields have the shape this drain iterates. The measured hazard is a STRING
+// where an array was expected — `for (const id of "abc")` iterates PER CHARACTER
+// and issues one store lookup per letter, each of which "resolves to nothing",
+// producing a payload full of fabricated missing-record disclosures. Every v2
+// field is therefore type-checked BEFORE use, and any malformation routes to the
+// payload+banner arm — the same fail-open landing as an unknown version.
+// ---------------------------------------------------------------------------
+const isStr = (v) => typeof v === 'string';
+const isStrArray = (v) => Array.isArray(v) && v.every(isStr);
+/** SAFE INTEGER, not merely finite (fixer M3). A FRACTIONAL cap is not a
+ *  harmless rounding question here: clip() stops only on `count === cap`, so
+ *  char_cap: 0.5 is never reached and the field renders UNBOUNDED — the exact
+ *  payload-flooding failure the cap exists to prevent, reachable from a JSON file.
+ *  A non-integer tail count would likewise render '… 2.5 more hazard(s)'. */
+const isCount = (v) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+
+function validateRerenderRecipe(r) {
+  if (!isStr(r.rel)) return 'rel is not a string';
+  if (typeof r.unowned !== 'boolean') return 'unowned is not a boolean';
+  if (!isCount(r.char_cap)) return 'char_cap is not a non-negative safe integer';
+  for (const key of ['hazard_ids', 'owner_ids', 'decision_ids']) {
+    if (!isStrArray(r[key])) return `${key} is not an array of strings`;
+  }
+  if (!isStrArray(r.trailing_blocks)) return 'trailing_blocks is not an array of strings';
+  // `suspects` is OPTIONAL (absent/null = no advisory block), but present means
+  // fully shaped — a half-valid suspect block routes to the banner arm like any
+  // other malformation rather than being partially iterated.
+  if (r.suspects !== undefined && r.suspects !== null) {
+    const s = r.suspects;
+    if (typeof s !== 'object' || Array.isArray(s)) return 'suspects is not an object';
+    if (!isStr(s.header) || !isStr(s.footer)) return 'suspects.header/footer is not a string';
+    if (!Array.isArray(s.entries)) return 'suspects.entries is not an array';
+    for (const e of s.entries) {
+      if (!e || typeof e !== 'object' || Array.isArray(e)) return 'a suspects.entries element is not an object';
+      if (!isStr(e.id) || !e.id) return 'a suspects.entries element carries no string id';
+      if (!isStr(e.line)) return 'a suspects.entries element carries no string line';
+    }
+  }
+  const tails = r.tails;
+  if (!tails || typeof tails !== 'object' || Array.isArray(tails)) return 'tails is not an object';
+  if (!isCount(tails.hazards ?? 0) || !isCount(tails.decisions ?? 0)) {
+    return 'tails carries a count that is not a non-negative safe integer';
+  }
+  return null;
+}
+
+function validatePointerVerifyRecipe(r) {
+  if (r.header !== undefined && !isStr(r.header)) return 'header is not a string';
+  if (r.tail !== undefined && !isStr(r.tail)) return 'tail is not a string';
+  if (!Array.isArray(r.entries)) return 'entries is not an array';
+  for (const e of r.entries) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return 'an entries element is not an object';
+    if (!isStr(e.id) || !e.id) return 'an entries element carries no string id';
+    if (!isStr(e.line)) return 'an entries element carries no string line';
+  }
+  return null;
+}
+
+function unverifiedBanner(payload, reason) {
+  return [
+    `⚠ UNVERIFIED AT DRAIN (H19): ${reason}. The text below is the payload CACHED when this was queued, NOT a fresh read — a ruling superseded or deleted since then would still read as live here. Re-query (knowledge_query / knowledge_get) before relying on it.`,
+    payload,
+  ].join('\n');
+}
+
+// EVERY LINE BELOW IS BUILT AT DRAIN AND INTERPOLATES STORED RECORD FIELDS, so
+// each such fragment goes through normalizeWs first (fixer F4): a status, scope,
+// superseded_by or id that carries an embedded newline would otherwise let stored
+// prose fabricate an ADDITIONAL delivery line inside the drain's own output —
+// a forged '⚠ SUPERSEDED AT DRAIN' or '(+N more)' row is indistinguishable from
+// a real one to the reader. Scoped deliberately to the drain-built lines; the
+// wider renderer-escaping question is boarded separately.
+
+/** One-line disclosure for a queued id that no longer resolves at all. Names the
+ *  id (the reader's only handle on what went missing) and states in words that
+ *  the body was DROPPED rather than served from cache. */
+function missingDisclosure(id) {
+  return (
+    `⚠ STALE AT DRAIN (H19): queued record ${normalizeWs(id)} NO LONGER RESOLVES in the store — it was present when this delivery was queued and is now missing, ` +
+    `so its cached body is WITHHELD rather than served as current.`
+  );
+}
+
+/** The superseded stub. Names the QUEUED id first and the successor as a FORWARD
+ *  POINTER — the reader is never handed the successor's body as if it were what
+ *  they touched. A chain whose successor is absent or does not resolve is
+ *  disclosed IN WORDS: the old shape (`see ${record.superseded_by}`) renders
+ *  "see null" on a dangling chain, which reads as a real target and sends the
+ *  reader nowhere. */
+function supersededDisclosure(store, record) {
+  const successorId = record.superseded_by;
+  let successor;
+  if (successorId) {
+    try {
+      successor = store.get(successorId);
+    } catch {
+      successor = undefined;
+    }
+  }
+  if (successorId && successor) {
+    return (
+      `⚠ SUPERSEDED AT DRAIN (H19): queued record ${normalizeWs(record.id)} was live when this delivery was queued and is now SUPERSEDED [${normalizeWs(statusBracket(record))}] — ` +
+      `its cached body is WITHHELD. Forward pointer only, not the successor rendered as the original: read the replacement with knowledge_get ${normalizeWs(successorId)}.`
+    );
+  }
+  const named = successorId ? ` (${normalizeWs(successorId)})` : '';
+  return (
+    `⚠ SUPERSEDED AT DRAIN (H19): queued record ${normalizeWs(record.id)} is now SUPERSEDED, and its successor${named} is UNRESOLVABLE — a dangling supersession chain, ` +
+    `so no forward target can be named and its cached body is WITHHELD. Re-query this territory (knowledge_query) rather than trusting either half of the chain.`
+  );
+}
+
+/** Lifecycle disclosure for a record that is STILL SERVED but no longer plainly
+ *  active (flagged_stale, and any status this drain does not recognise). The
+ *  pointer above stands and the body is never touched — 'flagged_stale is
+ *  disclosed AND served' (decision db3392db part 2), so this line deliberately
+ *  avoids any withheld/dropped wording, which belongs only to the terminal and
+ *  missing arms.
+ *
+ *  CLAIMS ONLY WHAT THE CODE CHECKED (fixer F8). The arm that reaches this line
+ *  tests exactly one thing: the status is not 'active'. It does NOT establish
+ *  that the store "flags it for re-verification" — that reads the flagged_stale
+ *  meaning onto every non-active status, including one this build has never
+ *  heard of, and a disclosure that over-claims is a small lie in the one place
+ *  whose entire job is telling the reader what is uncertain. The sentence now
+ *  states the status it saw, points at the bracket, and asks for re-verification. */
+function staleServedDisclosure(record) {
+  return (
+    `ⓘ LIFECYCLE AT DRAIN (H19): queued record ${normalizeWs(record.id)} is SERVED exactly as pointed at above, but its status is NOT 'active' — ` +
+    `[${normalizeWs(statusBracket(record))}] is the non-active status the store reports for it; re-verify (knowledge_get ${normalizeWs(record.id)}) before relying on it.`
+  );
+}
+
+/** Read one queued id from the drain's single store snapshot. Returns either a
+ *  served record or the disclosure line that replaces it. A store read that
+ *  THROWS for one id is treated as that id being unreadable, never as a reason
+ *  to lose the rest of the entry. */
+function resolveQueuedId(store, id) {
+  let record;
+  try {
+    record = store.get(id);
+  } catch {
+    record = undefined;
+  }
+  if (!record) return { served: null, disclosure: missingDisclosure(id) };
+  // 'superseded' is the store's DERIVED terminal status (lifecycle 'retired'
+  // included — retirement derives status 'superseded'). Everything else,
+  // 'flagged_stale' explicitly among it, is still SERVED: a stale ruling is the
+  // best answer the store has and withholding it delivers nothing. Its bracket
+  // rides the ordinary pointer annotation.
+  if (record.status === 'superseded') return { served: null, disclosure: supersededDisclosure(store, record) };
+  return { served: record, disclosure: null };
+}
+
+function rerenderFromRecipe(store, recipe) {
+  const charCap = recipe.char_cap;
+  const disclosures = [];
+  const take = (ids) => {
+    const served = [];
+    for (const id of ids ?? []) {
+      const { served: record, disclosure } = resolveQueuedId(store, id);
+      if (record) served.push(record);
+      else disclosures.push(disclosure);
+    }
+    return served;
+  };
+  // Resolved in the entry's own semantic order (hazards, owners, decisions) so
+  // the disclosure list reads in the same order the payload would have.
+  const hazards = take(recipe.hazard_ids);
+  const owners = take(recipe.owner_ids);
+  const decisions = take(recipe.decision_ids);
+
+  // F3: the recipe's id arrays ARE the original shown slice, so the original
+  // totals are (shown ids) + (suppressed tail) — computed from the RECIPE, never
+  // from the survivors, or a record that died since enqueue would silently
+  // shrink the '… N more' arithmetic the reader is being handed.
+  const hazardTail = recipe.tails?.hazards ?? 0;
+  const decisionTail = recipe.tails?.decisions ?? 0;
+  const hazardTotal = recipe.hazard_ids.length + hazardTail;
+  const decisionTotal = recipe.decision_ids.length + decisionTail;
+
+  // LINE-SUSPECT ADVISORY, RE-RESOLVED (fixer M1). Each line names a record, so a
+  // line whose record no longer resolves — or has gone terminal — is DROPPED
+  // rather than replayed: the advisory is warn-only, so a tombstone would cost
+  // more attention than the dropped hint was worth, but serving the cached line
+  // would assert that a dead record still cites that position. joinSuspectBlock
+  // returns '' when nothing survives, which is what keeps a header-and-footer
+  // shell promising "position(s) below" out of the payload.
+  const suspectEntries = recipe.suspects?.entries ?? [];
+  const survivingSuspects = suspectEntries.filter((e) => resolveQueuedId(store, e.id).served);
+  const suspectText = recipe.suspects
+    ? joinSuspectBlock({ header: recipe.suspects.header, lines: survivingSuspects, footer: recipe.suspects.footer })
+    : '';
+
+  // SUBSTANTIVE blocks only (fixer F5/L1) — the disclosure block is appended after
+  // and is deliberately NOT counted, so an unowned entry whose every record died
+  // renders the plain frontier notice instead of promising hazards below it. The
+  // suspect block counts only when a line actually SURVIVED (suspectText is ''
+  // otherwise, and the filter below drops it from the count as well as the output).
+  const substantive = [
+    ...renderHazards(hazards, charCap, { fileKeys: [recipe.rel], total: hazardTotal, suppressed: hazardTail }),
+    ...owners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
+    ...(decisions.length || decisionTail
+      ? [renderDecisionPointers(recipe.rel, decisions, DECISION_POINTER_CAP, { total: decisionTotal, suppressed: decisionTail })]
+      : []),
+    ...(recipe.trailing_blocks ?? []),
+    suspectText,
+  ].filter((b) => typeof b === 'string' && b);
+  const blocks = [
+    ...substantive,
+    // Disclosures TRAIL the knowledge that did survive: what is still true
+    // outranks the footnote about what changed under it.
+    ...(disclosures.length ? [disclosures.join('\n')] : []),
+  ];
+  return renderPayload(recipe.rel, blocks, { unowned: recipe.unowned, substantiveCount: substantive.length });
+}
+
+/** REBUILD the pointer block from the recipe's per-record lines (fixer F1) —
+ *  never the cached blob with footnotes appended beneath it.
+ *
+ *  Per record, one of four outcomes, and the terminal ones REPLACE the line
+ *  rather than annotating it:
+ *    live 'active'          → the captured line, verbatim.
+ *    non-active, non-terminal (flagged_stale, or an unrecognised status)
+ *                           → the captured line PLUS staleServedDisclosure.
+ *    superseded (incl. retired, which derives status 'superseded')
+ *                           → the STUB naming the queued id and its successor,
+ *                             INSTEAD of the line.
+ *    no longer resolves     → the one-line disclosure, INSTEAD of the line.
+ *
+ *  That last pair is the whole point of v2: v1 replayed the cached line for a
+ *  dead record and appended a disclosure below it, so the reader was handed a
+ *  line still asserting the record's title/id as current, footnoted. A pointer
+ *  is a short line and readers act on it — the assertion has to GO. */
+function rebuildPointerPayload(store, recipe) {
+  const out = [];
+  // header/tail are producer chrome (fixed sentences, H23's '(+N more matched)'
+  // remainder) with no record field interpolated, so they replay verbatim.
+  if (recipe.header) out.push(recipe.header);
+  for (const entry of recipe.entries) {
+    const { served, disclosure } = resolveQueuedId(store, entry.id);
+    if (!served) {
+      out.push(disclosure); // stub (superseded) or missing disclosure — REPLACES the line
+      continue;
+    }
+    // F4: the captured line is record-derived (a title/slug was interpolated into
+    // it at enqueue), so it is flattened to one line before being replayed — a
+    // newline in stored prose must not fabricate an extra pointer row here.
+    out.push(flattenToOneLine(entry.line));
+    // SERVED but not plainly active: the line stands and the lifecycle is
+    // DISCLOSED. The non-active test IS statusAnnotation's own output, never a
+    // second predicate beside it, so the two can never drift apart.
+    if (statusAnnotation(served)) out.push(staleServedDisclosure(served));
+  }
+  if (recipe.tail) out.push(recipe.tail);
+  return out.join('\n');
+}
+
+/**
+ * What ONE queued entry injects at drain. NEVER THROWS — per-entry containment
+ * (decision db3392db part 2): the batch is already claimed and deleted by the
+ * time this runs, so an exception escaping here would destroy every OTHER
+ * entry's delivery too. A contained failure degrades to that entry's stored
+ * payload plus the UNVERIFIED banner, which is the same fail-open arm the
+ * store-unavailable case takes.
+ *
+ * `store` null means the drain could not open the store at all; `storeReason`
+ * carries why, so the banner says which of "absent" and "unreadable" happened
+ * instead of making the reader guess.
+ */
+export function renderDrainEntry(store, entry, storeReason) {
+  const payload = typeof entry?.payload === 'string' ? entry.payload : '';
+  try {
+    // A BATCH-level failure the claim step already diagnosed (an unparseable or
+    // non-array queue file, fixer F6): it carries its own reason and never had an
+    // entry to re-resolve, so it lands on the same disclosed banner arm rather
+    // than being dropped from the injection silently.
+    if (isStr(entry?.unverified_reason) && entry.unverified_reason) {
+      return unverifiedBanner(payload, entry.unverified_reason);
+    }
+    if (!store) {
+      return unverifiedBanner(payload, storeReason ?? 'the project store could not be read at drain');
+    }
+    const recipe = entry?.recipe;
+    if (!recipe || recipe.version !== DELIVERY_RECIPE_VERSION) {
+      return unverifiedBanner(
+        payload,
+        recipe
+          ? `this entry carries a render recipe version this drain does not know (${JSON.stringify(recipe.version)}), so its ids were not re-read`
+          : 'this entry carries no render recipe (queued before the re-resolve upgrade, or by a producer that attaches none), so its ids could not be re-read'
+      );
+    }
+    // SHAPE-CHECKED BEFORE USE (fixer F7): a malformed field lands on the banner
+    // arm, never on optimistic iteration.
+    if (recipe.mode === 'rerender') {
+      const bad = validateRerenderRecipe(recipe);
+      if (bad) {
+        return unverifiedBanner(
+          payload,
+          `this entry's v${DELIVERY_RECIPE_VERSION} rerender recipe is malformed (${bad}), so its ids were not re-read`
+        );
+      }
+      return rerenderFromRecipe(store, recipe);
+    }
+    if (recipe.mode === 'pointer_verify') {
+      const bad = validatePointerVerifyRecipe(recipe);
+      if (bad) {
+        return unverifiedBanner(
+          payload,
+          `this entry's v${DELIVERY_RECIPE_VERSION} pointer_verify recipe is malformed (${bad}), so its ids were not re-read`
+        );
+      }
+      return rebuildPointerPayload(store, recipe);
+    }
+    return unverifiedBanner(payload, `this entry's render recipe names an unknown mode (${JSON.stringify(recipe.mode)}), so its ids were not re-read`);
+  } catch (e) {
+    return unverifiedBanner(payload, `re-resolving this entry against the store failed (${(e && e.message) || e})`);
+  }
 }
 
 /** The unowned-territory notice. `hasOtherKnowledge` is load-bearing, not

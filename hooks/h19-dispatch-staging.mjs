@@ -7534,7 +7534,7 @@ function lastDispatchPrompts(transcriptPath) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync, renameSync, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync, renameSync, statSync as statSync2, readdirSync as readdirSync2 } from "node:fs";
 import { join as join3, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join3(cwd, ".sterling", "transient", "delivery");
@@ -7561,6 +7561,14 @@ function writeGuard(path, guard) {
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
+function statusBracket(record) {
+  const status = record?.status ?? "unknown";
+  const scope = record?.scope ?? "unknown";
+  return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
+}
+function statusAnnotation(record) {
+  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+}
 function clip(text, cap) {
   const s2 = String(text ?? "");
   let out = "";
@@ -7574,20 +7582,24 @@ function clip(text, cap) {
 }
 function pointerLine(store, kind, slug) {
   let head = "(not in store)";
+  let annotation = "";
   try {
     const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
-    if (match) head = clip(match.what_it_does, 140);
+    if (match) {
+      head = clip(match.what_it_does, 140);
+      annotation = statusAnnotation(match);
+    }
   } catch {
     head = "(lookup failed)";
   }
-  return `  \u2192 ${kind} [[${slug}]]: ${head}`;
+  return `  \u2192 ${kind} [[${slug}]]: ${head}${annotation}`;
 }
 var UNTESTABLE_REASON_CLIP = 140;
 var ARTICLE_BODY_FLOOR = 4096;
 var ARTICLE_DIGEST_EXCERPT = 1200;
 var ARTICLE_SLUG_CLIP = 256;
 function renderArticle(store, article, charCap) {
-  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})`;
+  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
   if (body.length > ARTICLE_BODY_FLOOR) {
     return [
@@ -7627,45 +7639,50 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
     (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})`,
+      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
   );
-  if (hazards.length > shown.length) {
+  if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
-    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+    blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
   const shown = decisions.slice(0, cap);
+  const fullTotal = total ?? decisions.length;
+  const dropped = suppressed ?? decisions.length - shown.length;
   const lines = [
-    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
+    `\u25B8 DECISIONS for this path (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
     const authorityMarker = d.authority ? `[${d.authority}] ` : "";
-    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
+    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
-  if (decisions.length > shown.length) {
-    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
-    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  if (dropped > 0) {
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${fullTotal}`;
+    lines.push(`  \u2026 ${dropped} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }
-function renderPayload(rel, blocks, { unowned = false } = {}) {
+function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
+  const substantive = substantiveCount ?? blocks.length;
   return [
-    unowned ? renderFrontier(rel, { hasOtherKnowledge: blocks.length > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
+    unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
     ...blocks
   ].join("\n\n");
 }

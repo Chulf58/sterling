@@ -7497,7 +7497,7 @@ function recordAdvisoryFire(root, hook, sessionId) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync, readdirSync } from "node:fs";
 import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
@@ -7530,16 +7530,12 @@ function writeGuard(path, guard) {
 var LOCK_DEADLINE_MS = 2e3;
 var LOCK_STALE_MS = 5e3;
 var LOCK_POLL_MS = 5;
-function withFileLock(targetPath, fn) {
-  mkdirSync3(dirname3(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
+function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
-  let acquired = false;
   while (Date.now() < deadline) {
     try {
       mkdirSync3(lockPath);
-      acquired = true;
-      break;
+      return true;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
@@ -7553,15 +7549,22 @@ function withFileLock(targetPath, fn) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
+  return false;
+}
+function releaseLock(lockPath) {
+  try {
+    rmSync(lockPath, { recursive: true, force: true });
+  } catch {
+  }
+}
+function withFileLock(targetPath, fn) {
+  mkdirSync3(dirname3(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  const acquired = acquireLock(lockPath);
   try {
     return fn();
   } finally {
-    if (acquired) {
-      try {
-        rmSync(lockPath, { recursive: true, force: true });
-      } catch {
-      }
-    }
+    if (acquired) releaseLock(lockPath);
   }
 }
 function enqueuePending(path, entry) {
@@ -7572,6 +7575,19 @@ function enqueuePending(path, entry) {
     writeFileSync(tmp, JSON.stringify(entries));
     renameSync(tmp, path);
   });
+}
+function joinPointerBlock({ header, lines = [], tail } = {}) {
+  return [header, ...lines.map((l) => l.line), ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
+}
+var DELIVERY_RECIPE_VERSION = 2;
+function pointerVerifyRecipe({ header, entries, tail } = {}) {
+  return {
+    version: DELIVERY_RECIPE_VERSION,
+    mode: "pointer_verify",
+    header: typeof header === "string" ? header : "",
+    entries: (entries ?? []).map((e) => ({ id: e?.id, line: e?.line })),
+    tail: typeof tail === "string" ? tail : ""
+  };
 }
 
 // scripts/hooks/h23-output-axis.mjs
@@ -7620,21 +7636,20 @@ try {
   const ordered = [...hazards, ...decisions];
   const shown = ordered.slice(0, OUTPUT_AXIS_POINTER_CAP);
   const remainder = ordered.length - shown.length;
-  const lines = [
-    "STERLING OUTPUT-AXIS DELIVERY (H23) \u2014 the tool output you just consumed matches governing knowledge. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself."
-  ];
-  for (const x of shown) {
+  const header = "STERLING OUTPUT-AXIS DELIVERY (H23) \u2014 the tool output you just consumed matches governing knowledge. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.";
+  const pointerLines = shown.map((x) => {
     const r = x.record;
     const kind = r.type === "anti_pattern" ? "HAZARD anti_pattern" : "DECISION";
     const authorityMarker = r.authority ? `[${r.authority}] ` : "";
-    lines.push(`  \u2192 ${authorityMarker}${kind} '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}`);
-  }
-  if (remainder > 0) lines.push(`  (+${remainder} more matched)`);
+    return { id: r.id, line: `  \u2192 ${authorityMarker}${kind} '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
+  });
+  const tail = remainder > 0 ? `  (+${remainder} more matched)` : "";
   recordAdvisoryFire(input.cwd, "h23", input.session_id);
   enqueuePending(pendingPath(input.cwd), {
     kind: "output_axis_pointers",
     rel: input.tool_input?.file_path ?? input.tool_input?.command ?? "",
-    payload: lines.join("\n"),
+    payload: joinPointerBlock({ header, lines: pointerLines, tail }),
+    recipe: pointerVerifyRecipe({ header, entries: pointerLines, tail }),
     agent_id: "conductor"
   });
   guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];

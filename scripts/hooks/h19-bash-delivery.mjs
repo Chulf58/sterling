@@ -49,7 +49,9 @@ import {
   writeGuard,
   enqueuePending,
   extractCommandPathCandidates,
-  renderBashPointers,
+  bashPointerBlock,
+  joinPointerBlock,
+  pointerVerifyRecipe,
   BASH_POINTER_PATH_CAP,
 } from './lib/delivery.mjs';
 
@@ -112,10 +114,19 @@ try {
   // is what makes delivery once-per-session, so writing it before the delivery
   // happens turns any failure into permanent silent loss — nothing retries,
   // because the next touch sees the paths already marked.
+  // POINTER-VERIFY recipe (decision db3392db part 2, v2 per fixer F1): the block
+  // is enqueued DECOMPOSED — the fixed two-sentence header plus one {id, line}
+  // per record — so the drain can REBUILD it: a still-live record's line replays
+  // verbatim, while a superseded or missing one is REPLACED by its stub. The
+  // earlier shape sent bare ids and let the drain append disclosures beneath the
+  // whole cached blob, which left the dead record's own line standing above the
+  // footnote, still naming it as governing this path.
+  const block = bashPointerBlock(entries);
   enqueuePending(pendingPath(input.cwd), {
     kind: 'bash_pointers',
     rel: delivered.join(' '),
-    payload: renderBashPointers(entries),
+    payload: joinPointerBlock(block),
+    recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines }),
     agent_id: 'conductor',
   });
   guard.pointer_files.push(...delivered);

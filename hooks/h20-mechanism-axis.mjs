@@ -7489,7 +7489,7 @@ function recordAdvisoryFire(root, hook, sessionId) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync, readdirSync } from "node:fs";
 import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
@@ -7610,6 +7610,14 @@ function renderOverrideLine(ids) {
   const idsText = ids.length > 1 ? `one of ${shown.join(", ")}${rest > 0 ? ` +${rest} more` : ""}` : shown.join(", ");
   return `Cite ${idsText} + the unresolved delta or it stays denied \u2014 a re-ask with no delta is denied again, and every override is logged.`;
 }
+function statusBracket(record) {
+  const status = record?.status ?? "unknown";
+  const scope = record?.scope ?? "unknown";
+  return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
+}
+function statusAnnotation(record) {
+  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+}
 function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
   const lines = [
     "STERLING DENY-ONCE (H20, decision 68332e4b) \u2014 this question was NOT shown to the user; read the settled ruling(s) below, then act on them before resubmitting."
@@ -7630,8 +7638,7 @@ function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
       const clippedText = clip(normalizeWs(text), 160);
       const normalizedMarker = normalizeWs(marker);
       const substance = normalizedMarker ? `${clippedText}${clippedText ? " " : ""}${normalizedMarker}` : clippedText;
-      const bracket = `${d.status ?? "unknown"}\xB7${d.scope ?? "unknown"}${d.superseded_by ? `, superseded_by: ${d.superseded_by}` : ""}`;
-      lines.push(`\u2014 "${label}" \u2192 ${kind} [${d.id}] [${bracket}]: ${substance}`);
+      lines.push(`\u2014 "${label}" \u2192 ${kind} [${d.id}] [${statusBracket(d)}]: ${substance}`);
     }
   }
   const idList = [...new Set(citedIds)];
@@ -7657,19 +7664,21 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
     (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})`,
+      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
   );
-  if (hazards.length > shown.length) {
+  if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
-    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+    blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
 }
@@ -7691,20 +7700,22 @@ function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } =
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
   const shown = decisions.slice(0, cap);
+  const fullTotal = total ?? decisions.length;
+  const dropped = suppressed ?? decisions.length - shown.length;
   const lines = [
-    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
+    `\u25B8 DECISIONS for this path (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
     const authorityMarker = d.authority ? `[${d.authority}] ` : "";
-    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
+    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
-  if (decisions.length > shown.length) {
-    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${decisions.length}`;
-    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  if (dropped > 0) {
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${fullTotal}`;
+    lines.push(`  \u2026 ${dropped} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }

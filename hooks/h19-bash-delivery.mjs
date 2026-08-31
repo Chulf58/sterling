@@ -7213,7 +7213,7 @@ import { existsSync as existsSync4, statSync as statSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync, readdirSync } from "node:fs";
 import { join as join3, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join3(cwd, ".sterling", "transient", "delivery");
@@ -7243,19 +7243,23 @@ function writeGuard(path, guard) {
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
+function statusBracket(record) {
+  const status = record?.status ?? "unknown";
+  const scope = record?.scope ?? "unknown";
+  return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
+}
+function statusAnnotation(record) {
+  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+}
 var LOCK_DEADLINE_MS = 2e3;
 var LOCK_STALE_MS = 5e3;
 var LOCK_POLL_MS = 5;
-function withFileLock(targetPath, fn) {
-  mkdirSync2(dirname3(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
+function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
-  let acquired = false;
   while (Date.now() < deadline) {
     try {
       mkdirSync2(lockPath);
-      acquired = true;
-      break;
+      return true;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
@@ -7269,15 +7273,22 @@ function withFileLock(targetPath, fn) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
+  return false;
+}
+function releaseLock(lockPath) {
+  try {
+    rmSync(lockPath, { recursive: true, force: true });
+  } catch {
+  }
+}
+function withFileLock(targetPath, fn) {
+  mkdirSync2(dirname3(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  const acquired = acquireLock(lockPath);
   try {
     return fn();
   } finally {
-    if (acquired) {
-      try {
-        rmSync(lockPath, { recursive: true, force: true });
-      } catch {
-      }
-    }
+    if (acquired) releaseLock(lockPath);
   }
 }
 function enqueuePending(path, entry) {
@@ -7311,24 +7322,44 @@ function extractCommandPathCandidates(command2) {
   }
   return out;
 }
-function renderBashPointers(entries) {
-  const lines = [
+function bashPointerBlock(entries) {
+  const header = [
     "STERLING KNOWLEDGE POINTERS (H19) \u2014 governed paths named in a Bash command.",
     "This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here."
-  ];
+  ].join("\n");
+  const lines = [];
   for (const e of entries) {
     for (const h of e.hazards) {
       const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : h.title ?? h.slug ?? h.id;
-      lines.push(`  \u2022 ${e.rel} \u2014 \u26A0 HAZARD anti_pattern '${hazardLabel}' \xB7 knowledge_get ${h.id}`);
+      lines.push({
+        id: h.id,
+        line: `  \u2022 ${e.rel} \u2014 \u26A0 HAZARD anti_pattern '${hazardLabel}' \xB7 knowledge_get ${h.id}${statusAnnotation(h)}`
+      });
     }
     for (const o of e.owners) {
       const kind = o.type === "reference_material" ? "reference" : "article";
       const label = o.title && o.slug ? `${o.title} [${o.slug}]` : o.slug ?? o.title ?? o.id;
       const state = o.state ? ` (${o.state})` : "";
-      lines.push(`  \u2022 ${e.rel} \u2014 ${kind} '${label}'${state} \xB7 knowledge_get ${o.id}`);
+      lines.push({
+        id: o.id,
+        line: `  \u2022 ${e.rel} \u2014 ${kind} '${label}'${state} \xB7 knowledge_get ${o.id}${statusAnnotation(o)}`
+      });
     }
   }
-  return lines.join("\n");
+  return { header, lines };
+}
+function joinPointerBlock({ header, lines = [], tail } = {}) {
+  return [header, ...lines.map((l) => l.line), ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
+}
+var DELIVERY_RECIPE_VERSION = 2;
+function pointerVerifyRecipe({ header, entries, tail } = {}) {
+  return {
+    version: DELIVERY_RECIPE_VERSION,
+    mode: "pointer_verify",
+    header: typeof header === "string" ? header : "",
+    entries: (entries ?? []).map((e) => ({ id: e?.id, line: e?.line })),
+    tail: typeof tail === "string" ? tail : ""
+  };
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
@@ -7364,10 +7395,12 @@ try {
     delivered.push(rel);
   }
   if (!entries.length) allow();
+  const block = bashPointerBlock(entries);
   enqueuePending(pendingPath(input.cwd), {
     kind: "bash_pointers",
     rel: delivered.join(" "),
-    payload: renderBashPointers(entries),
+    payload: joinPointerBlock(block),
+    recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines }),
     agent_id: "conductor"
   });
   guard.pointer_files.push(...delivered);

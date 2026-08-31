@@ -62,6 +62,8 @@ import {
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
   hasRecordCentralityHit,
+  pointerVerifyRecipe,
+  joinPointerBlock,
 } from './lib/delivery.mjs';
 
 // Clip and cap, named per the brief (b266d6b7): matching runs over the first
@@ -158,26 +160,36 @@ try {
   const shown = ordered.slice(0, OUTPUT_AXIS_POINTER_CAP);
   const remainder = ordered.length - shown.length;
 
-  const lines = [
+  // PER-RECORD LINES, keyed by id (fixer F1): the drain rebuilds this block from
+  // the recipe, replaying a still-live record's line verbatim and REPLACING a
+  // superseded/missing one with its stub, so the payload is assembled from the
+  // same {header, lines, tail} decomposition the recipe carries. `header` and the
+  // '(+N more matched)' tail interpolate no record field, so they replay verbatim.
+  const header =
     'STERLING OUTPUT-AXIS DELIVERY (H23) — the tool output you just consumed matches governing knowledge. ' +
-      'Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.',
-  ];
-  for (const x of shown) {
+    'Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.';
+  const pointerLines = shown.map((x) => {
     const r = x.record;
     const kind = r.type === 'anti_pattern' ? 'HAZARD anti_pattern' : 'DECISION';
     const authorityMarker = r.authority ? `[${r.authority}] ` : '';
-    lines.push(`  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}`);
-  }
-  if (remainder > 0) lines.push(`  (+${remainder} more matched)`);
+    return { id: r.id, line: `  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
+  });
+  const tail = remainder > 0 ? `  (+${remainder} more matched)` : '';
 
   // SIDE EFFECT FIRST, GUARD SECOND (the H19/H20 rule): writing the guard
   // before the enqueue lands turns any failure into permanent silent loss,
   // since the next touch would see the record already marked seen.
   recordAdvisoryFire(input.cwd, 'h23', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
+  // POINTER-VERIFY recipe (decision db3392db part 2): pointer lines only, no
+  // record body — the drain re-reads the SHOWN ids and REPLACES the line of any
+  // that went superseded or missing between this match and the next prompt.
+  // Only the shown ones: a record capped out of the payload was never pointed
+  // at, so re-resolving it would disclose a record the reader never saw.
   enqueuePending(pendingPath(input.cwd), {
     kind: 'output_axis_pointers',
     rel: input.tool_input?.file_path ?? input.tool_input?.command ?? '',
-    payload: lines.join('\n'),
+    payload: joinPointerBlock({ header, lines: pointerLines, tail }),
+    recipe: pointerVerifyRecipe({ header, entries: pointerLines, tail }),
     agent_id: 'conductor',
   });
   // Only the SHOWN (capped) records are marked seen — a record capped out of

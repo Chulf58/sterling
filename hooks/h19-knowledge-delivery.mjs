@@ -7230,7 +7230,7 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync, readdirSync } from "node:fs";
 import { join as join3, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join3(cwd, ".sterling", "transient", "delivery");
@@ -7273,19 +7273,23 @@ function writeGuard(path, guard) {
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
+function statusBracket(record) {
+  const status = record?.status ?? "unknown";
+  const scope = record?.scope ?? "unknown";
+  return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
+}
+function statusAnnotation(record) {
+  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+}
 var LOCK_DEADLINE_MS = 2e3;
 var LOCK_STALE_MS = 5e3;
 var LOCK_POLL_MS = 5;
-function withFileLock(targetPath, fn) {
-  mkdirSync2(dirname3(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
+function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
-  let acquired = false;
   while (Date.now() < deadline) {
     try {
       mkdirSync2(lockPath);
-      acquired = true;
-      break;
+      return true;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
@@ -7299,15 +7303,22 @@ function withFileLock(targetPath, fn) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
+  return false;
+}
+function releaseLock(lockPath) {
+  try {
+    rmSync(lockPath, { recursive: true, force: true });
+  } catch {
+  }
+}
+function withFileLock(targetPath, fn) {
+  mkdirSync2(dirname3(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  const acquired = acquireLock(lockPath);
   try {
     return fn();
   } finally {
-    if (acquired) {
-      try {
-        rmSync(lockPath, { recursive: true, force: true });
-      } catch {
-      }
-    }
+    if (acquired) releaseLock(lockPath);
   }
 }
 function enqueuePending(path, entry) {
@@ -7332,20 +7343,24 @@ function clip(text, cap) {
 }
 function pointerLine(store2, kind, slug) {
   let head = "(not in store)";
+  let annotation = "";
   try {
     const match = store2.articlesBySlug(slug).find((r) => !r.working_tree);
-    if (match) head = clip(match.what_it_does, 140);
+    if (match) {
+      head = clip(match.what_it_does, 140);
+      annotation = statusAnnotation(match);
+    }
   } catch {
     head = "(lookup failed)";
   }
-  return `  \u2192 ${kind} [[${slug}]]: ${head}`;
+  return `  \u2192 ${kind} [[${slug}]]: ${head}${annotation}`;
 }
 var UNTESTABLE_REASON_CLIP = 140;
 var ARTICLE_BODY_FLOOR = 4096;
 var ARTICLE_DIGEST_EXCERPT = 1200;
 var ARTICLE_SLUG_CLIP = 256;
 function renderArticle(store2, article, charCap) {
-  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})`;
+  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
   if (body.length > ARTICLE_BODY_FLOOR) {
     return [
@@ -7385,39 +7400,43 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
     (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})`,
+      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
       `TRIGGER: ${clip(ap.trigger, charCap)}`,
       `RIGHT WAY: ${clip(ap.right_way, charCap)}`
     ].join("\n")
   );
-  if (hazards.length > shown.length) {
+  if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${hazards.length}`;
-    blocks.push(`\u2026 ${hazards.length - shown.length} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+    blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { remedy } = {}) {
+function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
   const shown = decisions.slice(0, cap);
+  const fullTotal = total ?? decisions.length;
+  const dropped = suppressed ?? decisions.length - shown.length;
   const lines = [
-    `\u25B8 DECISIONS for this path (${decisions.length}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
+    `\u25B8 DECISIONS for this path (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
     const authorityMarker = d.authority ? `[${d.authority}] ` : "";
-    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})`);
+    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
-  if (decisions.length > shown.length) {
-    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${decisions.length}`;
-    lines.push(`  \u2026 ${decisions.length - shown.length} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  if (dropped > 0) {
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${fullTotal}`;
+    lines.push(`  \u2026 ${dropped} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
 }
@@ -7427,22 +7446,57 @@ function suspectLabel(record) {
   if (record.slug) return `article '${record.slug}'`;
   return record.title ?? record.id;
 }
-function renderLineSuspects(suspects, charCap) {
-  if (!suspects?.length) return [];
-  const lines = [
-    "\u26A0 LINE-SUSPECT (H19 advisory) \u2014 cited line position(s) below may have rotted: the citing record predates this file's current version."
-  ];
-  for (const { record, tokens } of suspects) {
-    lines.push(`  \u2192 ${suspectLabel(record)} cites ${clip(tokens.join(", "), charCap)} \u2014 this position may no longer be accurate.`);
-  }
-  lines.push("  Line numbers rot as a file changes \u2014 cite an anchor (function/slug/passage) instead where possible.");
-  return [lines.join("\n")];
+function lineSuspectBlock(suspects, charCap) {
+  return {
+    header: "\u26A0 LINE-SUSPECT (H19 advisory) \u2014 cited line position(s) below may have rotted: the citing record predates this file's current version.",
+    lines: (suspects ?? []).map(({ record, tokens }) => ({
+      id: record.id,
+      line: `  \u2192 ${suspectLabel(record)} cites ${clip(tokens.join(", "), charCap)} \u2014 this position may no longer be accurate.`
+    })),
+    footer: "  Line numbers rot as a file changes \u2014 cite an anchor (function/slug/passage) instead where possible."
+  };
 }
-function renderPayload(rel2, blocks, { unowned = false } = {}) {
+function joinSuspectBlock({ header, lines = [], footer } = {}) {
+  if (!lines.length) return "";
+  return [header, ...lines.map((l) => l.line), footer].filter((s2) => typeof s2 === "string" && s2).join("\n");
+}
+function renderPayload(rel2, blocks, { unowned = false, substantiveCount } = {}) {
+  const substantive = substantiveCount ?? blocks.length;
   return [
-    unowned ? renderFrontier(rel2, { hasOtherKnowledge: blocks.length > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
+    unowned ? renderFrontier(rel2, { hasOtherKnowledge: substantive > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
     ...blocks
   ].join("\n\n");
+}
+var DELIVERY_RECIPE_VERSION = 2;
+function rerenderRecipe({
+  rel: rel2,
+  unowned,
+  charCap,
+  hazardIds,
+  ownerIds,
+  decisionIds,
+  hazardTail,
+  decisionTail,
+  suspects,
+  trailingBlocks
+}) {
+  return {
+    version: DELIVERY_RECIPE_VERSION,
+    mode: "rerender",
+    rel: rel2,
+    unowned: !!unowned,
+    char_cap: charCap,
+    hazard_ids: hazardIds ?? [],
+    owner_ids: ownerIds ?? [],
+    decision_ids: decisionIds ?? [],
+    tails: { hazards: hazardTail ?? 0, decisions: decisionTail ?? 0 },
+    suspects: suspects ? {
+      header: suspects.header ?? "",
+      entries: (suspects.lines ?? []).map((l) => ({ id: l?.id, line: l?.line })),
+      footer: suspects.footer ?? ""
+    } : null,
+    trailing_blocks: trailingBlocks ?? []
+  };
 }
 function renderFrontier(rel2, { hasOtherKnowledge = false } = {}) {
   return `STERLING FRONTIER SIGNAL (H19): territory '${rel2}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
@@ -7485,8 +7539,10 @@ try {
   const frontierFresh = unowned && !guard.frontier_files.includes(rel);
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
-  let lineSuspectBlocks = [];
+  const shownHazards = cappedHazards(freshHazards);
+  const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
+  const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
+  let suspectBlock = null;
   try {
     const mtimeMs = statSync2(join4(input.cwd, rel)).mtimeMs;
     const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -7500,21 +7556,42 @@ try {
       if (!Number.isFinite(updatedAtMs) || updatedAtMs >= mtimeMs) continue;
       suspects.push({ record, tokens });
     }
-    lineSuspectBlocks = renderLineSuspects(suspects, charCap);
+    if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
   } catch {
   }
   const blocks = [
     ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
     ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
     ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
-    ...lineSuspectBlocks
-  ];
+    // joinSuspectBlock returns '' when no line survives; the filter keeps an
+    // empty advisory shell out of the payload exactly as the drain does.
+    joinSuspectBlock(suspectBlock ?? {})
+  ].filter((b) => typeof b === "string" && b);
   const payload = renderPayload(rel, blocks, { unowned });
   if (mode === "enqueue") {
     enqueuePending(pendingPath(input.cwd), {
       kind: unowned ? "frontier" : "delivery",
       rel,
       payload,
+      recipe: rerenderRecipe({
+        rel,
+        unowned,
+        charCap,
+        hazardIds: shownHazards.map((r) => r.id),
+        ownerIds: freshOwners.map((r) => r.id),
+        decisionIds: shownDecisions.map((r) => r.id),
+        hazardTail: freshHazards.length - shownHazards.length,
+        decisionTail: freshDecisions.length - shownDecisions.length,
+        // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
+        // It reads as a note about the FILE's line positions, but every one of its
+        // lines is labelled with the CITING RECORD's own title/slug/id, so
+        // replaying it verbatim at drain would serve cached per-record text for a
+        // record that may have been superseded or deleted meanwhile — the same leak
+        // the pointer channel was rebuilt to close. It therefore rides `suspects`
+        // as {id, line} entries and is re-resolved there; `trailing_blocks` is
+        // reserved for text with no record id in it at all.
+        suspects: suspectBlock
+      }),
       agent_id: input.agent_id ?? "conductor"
     });
   } else {
