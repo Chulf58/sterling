@@ -319,6 +319,29 @@ import { matchesGlob } from '@sterling/schemas';
 import { readStdin, allow, deny, openStore, withRetry, environmentDefectDenial } from './lib/common.mjs';
 import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 
+// S2f (board e15035ce) — MISSING PRE-EVIDENCE vs ENVIRONMENT DEFECT. A
+// PreToolUse-denied Bash call produces NO Post-family event at all (measured
+// CLI 2.1.251, research_finding 6114d0b9), so the three call sites below
+// (attribution record absent, per-call Pre-STATE record absent, (B) baseline
+// absent) are unreachable for a policy deny — they fire only when Post finds
+// no Pre-phase record for a call that DEMONSTRABLY RAN. That cause is
+// internal to this hook's own evidence trail (the record was lost, corrupted
+// in transit, or never written because of a hook-registration gap), not
+// necessarily a defect in the platform environment the shared
+// environmentDefectDenial() classification implies — so these three sites
+// classify separately. Same hard-deny, same exit code, same detail text;
+// only the classification token differs. Built by swapping the shared
+// wrapper's classification prefix rather than duplicating its audience-aware
+// / self-heal machinery.
+function missingPreEvidenceDenial(gateName, detail, opts = {}) {
+  return environmentDefectDenial(gateName, detail, opts)
+    .replace('⚠ ENVIRONMENT DEFECT', '⚠ MISSING PRE-EVIDENCE (abnormal)')
+    .replace(
+      'this denial is about BROKEN STATE, not your conduct.',
+      'this denial is about Pre-phase evidence missing for a call that demonstrably ran — an abnormal internal state (evidence file loss/corruption, a hook-registration gap), not necessarily the platform environment, and not your conduct.'
+    );
+}
+
 // The (B) gitignored baseline set (v3.1: settings*.json added — the gitignored
 // settings.local.json is enforcement surface but git is blind to it).
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
@@ -3907,7 +3930,7 @@ try {
       // Reached when Pre did not run, when a run boundary moved the runId between
       // Pre and Post, or when a Pre written by an OLDER bundle predates this file.
       deny(
-        environmentDefectDenial(
+        missingPreEvidenceDenial(
           'H17',
           `attribution record '${dPath}' absent at Post — cannot tell this command's writes from pre-existing ones; failing closed (P5). ` +
             `If a run started or completed between Pre and Post, the runId in the filename moved; rerun the command.` +
@@ -4045,7 +4068,7 @@ try {
       const sPath = stateFile(cwd, runId, key);
       if (!existsSync(sPath)) {
         deny(
-          environmentDefectDenial(
+          missingPreEvidenceDenial(
             'H17',
             `per-call Pre-STATE record '${sPath}' absent at Post — the pre-existing dirt cannot be compared against its state at Pre; failing closed (P5). ` +
               `Same causes as a missing attribution record, plus one more: the tool_use_id carried at Pre and at Post must be the SAME Bash call's.`,
@@ -4301,7 +4324,7 @@ try {
     }
     if (!existsSync(bPath)) {
       deny(
-        environmentDefectDenial(
+        missingPreEvidenceDenial(
           'H17',
           `Baseline '${bPath}' absent at Post (no Pre snapshot) — cannot verify the enforcement surface; failing closed (P5). ` +
             `Same three causes as a missing attribution record: Pre genuinely did not run, a run started or completed between Pre and ` +

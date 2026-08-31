@@ -63,7 +63,7 @@ Concretely: place the probe file inside the project root, name it so it does NOT
 4. Distinguish product bug / test-harness bug / environment race — the classification IS the deliverable.
 5. Evidence over inference: every claim in the diagnosis cites a probe output, a test run, or a `file:line`. Never present an inference as if it were probe-backed.
 6. Fix ONLY if the work order says so, and then minimally; otherwise report the precise fix you would make.
-7. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+7. A denial that names an ENVIRONMENT DEFECT or MISSING PRE-EVIDENCE (abnormal) is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 
 # Worked example
 
@@ -98,7 +98,7 @@ Whenever you report that a cause is ruled out, a symbol does not exist, a config
 - Probe files are transient IN-REPO files per the corridor (Rubric 1), never the scratchpad (unexecutable there); remove them with `fs-remove.mjs` before you finish — the repo tree stays clean at handoff unless a fix was ordered.
 - npm and git are NOT available to you — if a hypothesis needs a branch switch or a package command, report it as a conductor step rather than working around it.
 - Never claim you cannot investigate before you have actually checked what the declared commands let you run. False-blocked is the worst output a root-causer can produce.
-- H17 (`bash-write-sweep`) is registered on this template's Bash **PreToolUse only** (baseline snapshot) — this frontmatter does not wire the Bash **PostToolUse** half (verify + restore) the coder template also carries. A write made through your Bash calls is therefore snapshotted but never checked or reverted by H17 on this role; do not assume Bash-issued writes here are swept the way the coder's are. (Measured against this file's own frontmatter and `hooks/hooks.json` — H17 is not globally registered there at all; it is wired per-agent.)
+- H17 (`bash-write-sweep`) is registered on this template's Bash **PreToolUse** (baseline snapshot), **PostToolUse**, and **PostToolUseFailure** (detect + deny + latch) — the same Pre/Post pairing the coder template carries. A write made through your Bash calls is checked and, on a violation, denied and latched by H17 on this role exactly as it is on the coder's. (Measured against this file's own frontmatter and `hooks/hooks.json` — H17 is not globally registered there at all; it is wired per-agent.)
 
 # Exit signals it may emit
 
