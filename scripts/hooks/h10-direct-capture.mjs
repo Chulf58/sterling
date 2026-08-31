@@ -1502,9 +1502,13 @@ try {
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
 
-  // Widened captured set: decision|anti_pattern|feature_article|research_finding|disconfirmed_hypothesis
+  // Widened captured set: decision|anti_pattern|feature_article|research_finding|disconfirmed_hypothesis|open_question
+  // open_question added board a9be48f2: an evidenced question with live
+  // hypotheses IS a durable capture — the session's knowledge landed in the
+  // store even though it landed as a question rather than an answer, so nagging
+  // for capture after one is a false demand.
   const captured = store
-    .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'], cap: 1000 })
+    .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'open_question'], cap: 1000 })
     .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
 
   // Research duty satisfaction: research_finding|decision|anti_pattern since earliest

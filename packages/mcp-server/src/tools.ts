@@ -389,7 +389,7 @@ export interface SameSubjectEntry {
   matched_on: string[];
   /** N25: the served/derived status of the matched record. A same_subject
    *  candidate is drawn from axisCandidateMatches -> store.query over the
-   *  five governing types, which never serves a 'superseded' row (AC5,
+   *  six governing types, which never serves a 'superseded' row (AC5,
    *  same-subject-surfacing.test.ts: a just-superseded record must NEVER be
    *  named) — a retired record simply never reaches this entry at all, so
    *  `status` cannot disclose retirement. What it DOES disclose: among the
@@ -3454,11 +3454,12 @@ export class SterlingTools {
    * than discovering a governing record only after a subagent has already gone
    * wrong (H20/H19 relevance slice 4b). Reuses the SAME axis extraction +
    * stage-2 centrality floors H20 already applies at delivery time. Since
-   * board 39c3d762 (widened by e7157d0b) the candidate surface spans all five
-   * governing types — anti_pattern, decision, feature_article (territory =
-   * slug/family/title), research_finding and disconfirmed_hypothesis (subject
-   * = question) — because a missing type made an article-governed question
-   * answer 'nothing governs this', a false negative dressed as a verdict; and
+   * board 39c3d762 (widened by e7157d0b, then by a9be48f2) the candidate
+   * surface spans all six governing types — anti_pattern, decision,
+   * feature_article (territory = slug/family/title), research_finding,
+   * disconfirmed_hypothesis and open_question (subject = question) — because a
+   * missing type made an article-governed question answer 'nothing governs
+   * this', a false negative dressed as a verdict; and
    * the no-match verdict is 'ungoverned' (renamed from 'ready', whose
    * query-envelope reading is the opposite).
    */
@@ -3489,7 +3490,7 @@ export class SterlingTools {
   /**
    * The candidate-matching CORE shared by knowledgePreflight and same-subject
    * surfacing on write (decision 7e3c66c5) — the preflight axis floors
-   * (extractAxisTerms already run by the caller -> store.query the five
+   * (extractAxisTerms already run by the caller -> store.query the six
    * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
    * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
    * Callers differ only in what they do with the (record, hits) pairs and in
@@ -3519,6 +3520,15 @@ export class SterlingTools {
       // about to re-litigate a disproved hypothesis is the exact re-derivation
       // waste preflight exists to stop.
       ...this.store.query({ types: ['disconfirmed_hypothesis'], rank_terms: queryTerms, cap: 40 }),
+      // OPEN QUESTIONS join it too (board a9be48f2, wiring decision
+      // open-question-record-type-authorized's registered type into its
+      // consuming surfaces): the prior-answer surface answers "has this been
+      // settled?" — an open_question answers the adjacent "is this ALREADY
+      // BEING INVESTIGATED?", and a preflight that cannot see one lets a
+      // second lane restart a live investigation. axisNarrowText/axisTitleText
+      // already match its `question` (packages/store/src/axis.ts), so nothing
+      // in the shared matcher changes.
+      ...this.store.query({ types: ['open_question'], rank_terms: queryTerms, cap: 40 }),
     ];
     return candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))
@@ -6436,7 +6446,12 @@ export class SterlingTools {
   private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
     const since = item.created_at;
-    const evidenceTypes = ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'reference_material'];
+    // open_question joins the evidence set (board a9be48f2): a board item can
+    // legitimately close by being CONVERTED into an evidenced open question —
+    // the investigation is now durable and tracked as a record — and without
+    // this type the receipt would show empty artifact evidence for exactly the
+    // close that produced the most durable artifact.
+    const evidenceTypes = ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'open_question', 'reference_material'];
     // FIX M1 (upgrade-polish review, 2026-08-21): the id-citation arm below needs
     // no file identity at all — concept_article_missing / research_owed / plain
     // tasks routinely carry no file_keys, and those are exactly the items most

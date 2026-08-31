@@ -857,7 +857,12 @@ try {
           earliest !== null &&
           store
             .query({
-              types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis'],
+              // open_question joins the set (board a9be48f2) — kept
+              // BYTE-FOR-BYTE the same list H10's duty check uses, since the
+              // comment above binds the two: a dead session that captured an
+              // evidenced open question paid its debt exactly as one that
+              // captured an answer did.
+              types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'open_question'],
               cap: 1000,
             })
             .some((r) => r.created_at >= earliest || r.updated_at >= earliest);

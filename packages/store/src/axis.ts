@@ -104,11 +104,11 @@ export function axisNarrowText(record: AxisRecord | null | undefined): string {
   // Board 4ffb95be: an open_question's subject is its question, the same rule as
   // research_finding and disconfirmed_hypothesis — hypotheses/evidence are
   // discussion, and matching them would be the noise this narrowing exists to
-  // avoid. Added AHEAD of a consuming surface: knowledge_preflight's and H20's
-  // candidate sets do not yet include open_question (that wiring is boarded, not
-  // authorized by decision open-question-record-type-authorized, which scoped
-  // itself to the schema registration), so this arm is dormant until they grow —
-  // "is this already being investigated?" is the check it exists to serve then.
+  // avoid. Written AHEAD of its consuming surfaces (decision
+  // open-question-record-type-authorized scoped itself to the schema
+  // registration); NO LONGER DORMANT since board a9be48f2 wired them —
+  // knowledge_preflight's and H20's candidate sets both query open_question now,
+  // so this arm carries the live "is this already being investigated?" check.
   if (record.type === 'open_question') return `${record.question ?? ''}`;
   return '';
 }
