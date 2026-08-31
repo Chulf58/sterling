@@ -363,8 +363,12 @@ test('H22 claimed-territory RECEIPT SAFETY: a reviewer brief naming its subject 
 
     const ledger = JSON.parse(readFileSync(join(dir, '.sterling', 'review-ledger.json'), 'utf8'));
     assert.equal(ledger.length, 1, 'exactly one receipt was promoted');
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files at territory.files; dual-shape read preserves this test's
+    // substance (the promoted receipt must still NAME the reviewed territory) for either shape.
+    const promotedFiles = ledger[0].territory?.files ?? ledger[0].files;
     assert.ok(
-      ledger[0].files.includes('src/auth.mjs'),
+      promotedFiles.includes('src/auth.mjs'),
       `the promoted receipt must NAME the reviewed territory — an empty files[] is the strongest unverifiable-territory signal at commit-reviewed.mjs:428-436; got: ${JSON.stringify(ledger[0])}`
     );
   } finally {

@@ -78,10 +78,40 @@
 // `truncated_of` but not the newer `truncated` flag (e.g. a fixture authored
 // before F3, or a future producer that has not adopted it yet) — explicit
 // beats inferred whenever both are present.
+//
+// FIX ROUND 2 (2026-08-31, Codex outside-family review thread 01a0586b) —
+// three more findings landed here:
+//
+// HIGH-2/HIGH-3 — agent_id IS SURFACED, and it is the DISPATCH IDENTITY the
+// ledger-append idempotency check (h22-dispatch-register.mjs) now keys on
+// instead of agent_type+at (which two genuinely distinct same-instant
+// same-type dispatches can share — pin DISPATCH-IDENTITY). Reading it through
+// THIS adapter (rather than an inline schema_version branch in h22) is
+// finding HIGH-3: one shape-transparency layer, not a second hand-rolled
+// switch. A v1 entry never carried agent_id, so it normalizes to no
+// `agent_id` key at all and can never false-match a real identity.
+//
+// MED-2 — STRUCTURAL COMPLETENESS. A v2 entry can claim schema_version:2
+// while missing everything a real promotion always sets (entry_id/started_at/
+// identity — see h22-ledger-v2-entry.test.mjs's V2-1). Mapping such an object
+// through the same field homes as a real entry would silently manufacture a
+// spendable-looking receipt out of a malformed one (pin S13). `v2_deficient`
+// marks it so a reader (commit-reviewed.mjs) can withhold and disclose it —
+// the STRUCTURAL check belongs here (this is the one place that already knows
+// what a complete v2 entry looks like); the SPENDING decision still belongs to
+// the reader, same separation of concerns as content_evidence_status (F2).
 export function normalizeLedgerEntry(entry) {
   if (!entry || typeof entry !== 'object' || entry.schema_version !== 2) {
     return entry; // legacy/malformed — presented AS-IS, shape-transparent
   }
+  const v2Deficient =
+    typeof entry.entry_id !== 'string' ||
+    entry.entry_id === '' ||
+    typeof entry.started_at !== 'string' ||
+    entry.started_at === '' ||
+    !entry.identity ||
+    typeof entry.identity !== 'object' ||
+    Array.isArray(entry.identity); // an array passes typeof==='object' but is not the identity object a real promotion writes
   const reviewer = entry.reviewer && typeof entry.reviewer === 'object' ? entry.reviewer : {};
   const identity = entry.identity && typeof entry.identity === 'object' ? entry.identity : {};
   const territory = entry.territory && typeof entry.territory === 'object' ? entry.territory : {};
@@ -108,6 +138,10 @@ export function normalizeLedgerEntry(entry) {
     session_id: identity.session_id,
     branch: identity.branch,
     base_sha: identity.base_sha,
+    // HIGH-2/HIGH-3 — the register's own dispatch identity, undefined for a
+    // v1 entry (which never recorded it) or a legacy v2 entry promoted before
+    // this field existed.
+    agent_id: identity.agent_id,
     reviewed_state: {
       completed_at: typeof entry.finished_at === 'string' ? entry.finished_at : undefined,
       blobs,
@@ -117,5 +151,10 @@ export function normalizeLedgerEntry(entry) {
     // this object, so a reader that only ever sees this key set can rely on
     // its presence to mean "this came through the v2 branch").
     content_evidence_status: typeof contentEvidence?.status === 'string' ? contentEvidence.status : undefined,
+    // MED-2 — v2-ONLY marker: true when this v2-claiming object is missing
+    // entry_id/started_at/identity. A v1 entry never sets this key at all
+    // (undefined, not false), matching content_evidence_status's v2-only
+    // presence convention.
+    v2_deficient: v2Deficient,
   };
 }

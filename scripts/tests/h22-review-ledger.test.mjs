@@ -139,7 +139,7 @@ const registerEntry = (agentId, agentType, files, at = new Date().toISOString())
 //     into the ledger and removes the register entry.
 // ===========================================================================
 
-test('H22 ledger: SubagentStop for a reviewer-* entry PROMOTES it into .sterling/review-ledger.json (exactly agent_type/files/at) and removes the register entry', () => {
+test('H22 ledger: SubagentStop for a reviewer-* entry PROMOTES it into .sterling/review-ledger.json as a v2 entry (schema_version/entry_id/kind/status/started_at/finished_at/reviewer/identity/territory/content_evidence/disposition, per decision 57984926) and removes the register entry', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [registerEntry('rev-1', 'reviewer-correctness', ['src/a.mjs', 'src/b.mjs'], '2026-08-22T00:00:00.000Z')]);
@@ -154,10 +154,19 @@ test('H22 ledger: SubagentStop for a reviewer-* entry PROMOTES it into .sterling
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 1);
     const entry = ledger[0];
-    assert.deepEqual(Object.keys(entry).sort(), ['agent_type', 'at', 'base_sha', 'branch', 'files', 'session_id'], 'decision 0408b295 (review-ledger-receipt-expiry) reverses the three-key exclusion — the promoted entry now ALSO carries session_id/branch/base_sha (six keys total; git-less contexts degrade branch/base_sha to null, never absent keys)');
-    assert.equal(entry.agent_type, 'reviewer-correctness');
-    assert.deepEqual(entry.files, ['src/a.mjs', 'src/b.mjs']);
-    assert.equal(entry.at, '2026-08-22T00:00:00.000Z');
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): promotions now write the v2 entry envelope, not the flat six-key shape decision 0408b295 pinned.
+    // The flat concerns this pin originally guarded (agent_type/at/base_sha/branch/files/session_id) now live at
+    // their v2 homes (reviewer.agent_type, started_at, identity.{base_sha,branch,session_id}, territory.files) —
+    // same INTENT (no unexpected extra top-level junk on a promotion), pinned against the ruled contract.
+    assert.deepEqual(
+      Object.keys(entry).sort(),
+      ['content_evidence', 'disposition', 'entry_id', 'finished_at', 'identity', 'kind', 'reviewer', 'schema_version', 'started_at', 'status', 'territory'],
+      'decision 57984926: every new promotion is a v2 entry — exactly these eleven top-level keys, nothing extra'
+    );
+    assert.equal(entry.reviewer.agent_type, 'reviewer-correctness');
+    assert.deepEqual(entry.territory.files, ['src/a.mjs', 'src/b.mjs']);
+    assert.equal(entry.started_at, '2026-08-22T00:00:00.000Z');
 
     const reg = readRegister(dir);
     assert.deepEqual(reg, [], 'the promoted entry is also removed from the in-flight register, exactly as the pre-existing delete-only path did');
@@ -187,7 +196,9 @@ test('H22 ledger: two reviewer-* SubagentStop events accumulate two ledger entri
     // or, once a partial fix lands, comes back with fewer than 2 entries.
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 2, 'both reviewer stops accumulate — the second promotion never clobbers the first');
-    assert.deepEqual(ledger.map((e) => e.agent_type), ['reviewer-security', 'reviewer-performance'], 'append order matches stop order');
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): agent_type now lives at reviewer.agent_type on a v2-promoted entry.
+    assert.deepEqual(ledger.map((e) => e.reviewer.agent_type), ['reviewer-security', 'reviewer-performance'], 'append order matches stop order');
 
     assert.deepEqual(readRegister(dir), [], 'both entries removed from the register');
   } finally {
@@ -282,8 +293,11 @@ test('H22 ledger: promoting a new reviewer entry APPENDS to a pre-populated ledg
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 2, 'append, not overwrite');
     assert.deepEqual(ledger[0], priorEntry, 'the pre-existing entry is byte-for-byte preserved');
-    assert.equal(ledger[1].agent_type, 'reviewer-security');
-    assert.deepEqual(ledger[1].files, ['src/new.mjs']);
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): ledger[1] is the NEW promotion, so it is v2-shaped (agent_type/files live under
+    // reviewer.agent_type/territory.files) — ledger[0] above is the PRE-EXISTING v1 fixture and stays flat, untouched.
+    assert.equal(ledger[1].reviewer.agent_type, 'reviewer-security');
+    assert.deepEqual(ledger[1].territory.files, ['src/new.mjs']);
   } finally {
     cleanup();
   }
@@ -313,8 +327,10 @@ test('H22 ledger: a malformed (corrupt JSON) pre-existing ledger is tolerated �
     }, 'the ledger left behind after recovery must itself be valid JSON');
     assert.ok(Array.isArray(ledger));
     assert.equal(ledger.length, 1, 'the corrupt prior content is discarded (treated as empty), not salvaged into a longer array');
-    assert.equal(ledger[0].agent_type, 'reviewer-performance');
-    assert.deepEqual(ledger[0].files, ['src/heal.mjs']);
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): the sole surviving entry is the NEW promotion, v2-shaped.
+    assert.equal(ledger[0].reviewer.agent_type, 'reviewer-performance');
+    assert.deepEqual(ledger[0].territory.files, ['src/heal.mjs']);
   } finally {
     cleanup();
   }
@@ -332,7 +348,9 @@ test('H22 ledger: a MISSING ledger file is tolerated identically to an empty one
     assert.ok(ledgerExists(dir), 'a first promotion creates the ledger file from nothing');
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 1);
-    assert.equal(ledger[0].agent_type, 'reviewer-skeptic');
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): the first-ever promotion is v2-shaped.
+    assert.equal(ledger[0].reviewer.agent_type, 'reviewer-skeptic');
   } finally {
     cleanup();
   }

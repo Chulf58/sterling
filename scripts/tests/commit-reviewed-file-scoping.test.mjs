@@ -481,3 +481,88 @@ test('file-scoping S11: receipts whose files[] is absent, empty, or a non-array 
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// S12 — MUTATION-EXPOSED GAP, decision 57984926 (review-ledger-v2-lifecycle-
+// refuse-flip-and-external-review-design), cited 2026-08-31: no frozen pin in
+// this file or its siblings ever fed a v2-SHAPED ledger entry through
+// commit-reviewed's eligibility/file-scoping path — every S1-S11 fixture
+// above is flat v1. Sabotaging the adapter's `territory.files` mapping to
+// `[]` left all 84 existing tests green; only a live probe's soft RECORDS NO
+// FILES warning caught it. This pin closes that gap directly.
+// EXPECTED STATE: GREEN today (the adapter already reads v2 correctly).
+// SABOTAGE: map `territory.files` to `[]` when reading a v2 entry instead of
+// the real declared array — the receipt's usable-files count collapses to
+// zero, RECORDS NO FILES fires on stderr, and the `doesNotMatch` assertion
+// below goes red while every OTHER assertion in this file (which only ever
+// exercises flat v1 entries) stays green — that asymmetry is exactly why
+// this pin exists as its own test rather than folding into an existing one.
+// ---------------------------------------------------------------------------
+test('file-scoping S12: a v2-shaped entry (schema_version:2, territory.files, identity{session_id,branch,base_sha}) is selected by file-intersection and stamped — no RECORDS NO FILES', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneA.mjs');
+    const headSha = git(dir, ['rev-parse', 'HEAD']);
+    writeLedger(dir, [
+      {
+        schema_version: 2,
+        entry_id: 'e2f1a1a0-0000-4000-8000-000000000001',
+        kind: 'roster_receipt',
+        status: 'active',
+        started_at: isoAgo(1_000),
+        finished_at: isoAgo(500),
+        reviewer: { agent_type: 'reviewer-correctness', model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
+        identity: { session_id: 'this-session', branch: 'main', base_sha: headSha },
+        territory: { files: ['src/laneA.mjs'], source: 'review-territory', attribution: 'block' },
+        content_evidence: { status: 'complete', blobs: {}, absent_paths: [], truncated_of: null, failure_reason: null },
+        disposition: null,
+      },
+    ]);
+
+    const r = runCommitReviewedEnv(dir, ['-m', 'v2 entry, file-intersection'], { STERLING_SESSION_ID: 'this-session' });
+    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(readTrailerValues(dir), ['reviewer-correctness'], 'the v2 entry is selected by file-intersection and stamped exactly as a flat entry would be');
+    assert.deepEqual(readLedger(dir), [], 'the v2 entry is consumed');
+    assert.doesNotMatch(r.stderr, /RECORDS NO FILES/, `a correctly-read territory.files must never trip the no-files advisory — stderr=${flat(r.stderr)}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// S13 — MED-2, Codex outside-family review thread 01a0586b + decision 57984926
+// (cited 2026-08-31): a STRUCTURALLY-DEFICIENT v2 entry — carrying
+// schema_version:2 but missing entry_id/started_at/identity (the fields a
+// real promotion always sets, per h22-ledger-v2-entry.test.mjs's V2-1) — must
+// never be upgraded into a spendable receipt just because it claims v2. It
+// must be withheld and disclosed, never silently stamped/consumed as though
+// it were a complete entry.
+// Mirrors scripts/tests/h22-receipt-expiry.test.mjs's B1/B2 "either reading"
+// pattern for the lone-receipt exit-code ambiguity: this pin does NOT assert
+// a fixed exit code (zero-eligible-receipts refusal vs. bare success is an
+// open question that file already discloses, not this pin's to resolve) — it
+// asserts the INVARIANT that holds under either reading.
+// EXPECTED RED until the coder adds the structural completeness check.
+// SABOTAGE: treat `schema_version === 2` alone as sufficient to consider an
+// entry eligible/spendable (skip checking entry_id/started_at/identity
+// presence) — the deficient entry gets stamped and consumed, flipping the
+// `after.length` assertion (0 instead of 1) red.
+// ---------------------------------------------------------------------------
+test('file-scoping S13 (MED-2): a structurally-deficient v2 entry ({schema_version:2, reviewer:{agent_type}} only — no entry_id/started_at/identity) must NOT be stamped or consumed, and is disclosed — holds under either reading of the lone-receipt exit-code ambiguity', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneA.mjs');
+    writeLedger(dir, [{ schema_version: 2, reviewer: { agent_type: 'reviewer-security' } }]);
+
+    const r = runCommitReviewed(dir, ['-m', 'structurally-deficient v2']);
+
+    if (r.code === 0) {
+      assert.deepEqual(readTrailerValues(dir), [], 'if the commit succeeds bare, the deficient entry must never earn a Reviewed-By-Agent trailer');
+    }
+    const after = readLedger(dir);
+    assert.equal(after.length, 1, 'the deficient entry survives — never silently spent as a real v2 receipt, regardless of exit code');
+    assert.match(r.stderr, /reviewer-security/, `the withheld entry is named in the disclosure, not silently dropped — stderr=${flat(r.stderr)}`);
+  } finally {
+    cleanup();
+  }
+});

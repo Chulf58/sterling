@@ -9,7 +9,8 @@
 // truncated_of?} carrying the review-END instant and the git blob sha of each
 // reviewed file as it stood at Stop, and — only past REVIEWED_BLOBS_CAP files
 // — disclosing that the binding covers just the first 64 rather than the
-// whole territory (board 0f448efb; see reviewEndState below) —
+// whole territory (board 0f448efb; see buildContentEvidence below, campaign
+// slice S2b-1's v2 content_evidence{} envelope) —
 // into the durable review ledger
 // at .sterling/review-ledger.json (STORE ROOT, not transient/, so it
 // survives H1's session wipe — decision 12a26ca6-a301-466d-a45c-5e1eeff36694,
@@ -61,12 +62,15 @@
 // with no self-healing mechanism.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { lastDispatchBlocks, extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
 import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates } from './lib/dispatch-advisory.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
+import { readTail } from './lib/transcript.mjs';
+import { normalizeLedgerEntry } from './lib/review-ledger-entry.mjs';
 
 // REGISTER LOCK (decision register-writers-cooperating-lock, 1e0ba0d0, board
 // 673ca3f6) — guards the register's whole-array read-modify-write on BOTH
@@ -133,98 +137,210 @@ function gitReceiptIdentity(cwd) {
   };
 }
 
-// REVIEW-END CONTENT EVIDENCE (board 0f448efb). THE DEFECT THIS CLOSES, in two
-// halves that are really one: (1) a receipt was never checked against THE BYTES
-// IT REVIEWED — commit-reviewed's eligibility was session + branch + FILENAME
-// intersection, never content — and (2) the receipt's only timestamp, `at`, is
-// copied from the register entry, which stamps it at SubagentSTART (see the
-// Start branch below). So `at` marks when the review BEGAN, and a long review of
-// early bytes reads as FRESHER than it is. Both halves have the same root cause:
-// nothing was recorded at the moment the review ENDED.
+// CONTENT EVIDENCE — v2's content_evidence{} (decision 57984926, campaign
+// slice S2b-1). Supersedes the old optional `reviewed_state` shape (board
+// 0f448efb): every v2 promotion carries this key UNCONDITIONALLY (status is
+// always one of 'complete'|'partial'|'unavailable', never omitted), whereas
+// the old shape recorded nothing at all when no reviewed path resolved to a
+// readable file. The scripts/hooks/lib/review-ledger-entry.mjs read adapter
+// maps this back to the legacy `reviewed_state` shape for existing readers
+// (scripts/commit-reviewed.mjs), so this is a WRITE-side-only reshaping.
 //
-// WHAT IS RECORDED: the git blob sha of each reviewed file AS IT STANDS AT STOP,
-// plus the Stop instant. base_sha (HEAD) does not answer this — a reviewer reads
-// the UNCOMMITTED working tree, which moves freely while HEAD stands still, so a
-// receipt can already carry the right base_sha for bytes that changed after it
-// was earned.
+// THE DEFECT THIS CLOSES, in two halves that are really one (unchanged from
+// the prior design): (1) a receipt was never checked against THE BYTES IT
+// REVIEWED — commit-reviewed's eligibility was session + branch + FILENAME
+// intersection, never content — and (2) the receipt's only timestamp, `at`
+// (now `started_at`), is copied from the register entry, stamped at
+// SubagentSTART. `finished_at` (captured unconditionally, see the Stop branch
+// below) is the review-END instant this was always missing.
 //
-// WHY BLOB SHAS AND NOT MTIMES: the reporter's cheap version (compare `at`
-// against the newest staged mtime) is defeated by a `touch` and by any checkout
-// that rewrites mtimes without changing content; a content hash is not.
-// `git hash-object` rather than a hand-rolled sha1 of the raw bytes, because it
-// applies the SAME clean/eol filters `git add` applies — so the value is
-// directly comparable to the INDEX blob sha commit-reviewed reads at spend time,
-// including on Windows checkouts with autocrlf on, where raw-content hashing
-// would mismatch on every single file.
+// WHAT IS RECORDED: the git blob sha of each reviewed file AS IT STANDS AT
+// STOP. base_sha (HEAD) does not answer this — a reviewer reads the
+// UNCOMMITTED working tree, which moves freely while HEAD stands still.
 //
-// POSITIVE EVIDENCE ONLY, and that is why this is ONE optional key rather than
-// two required ones. When no reviewed path resolves to a readable file there is
-// no content evidence — and nothing to anchor a completion time TO — so the key
-// is omitted entirely and every downstream check degrades to exactly today's
-// behavior (unjudgeable → eligible), the same failure direction the whole
-// receipt-expiry design already takes. Omission also matches the
-// copy-if-present, never-fabricated posture `files_source`/`attribution` already
-// use on this receipt: JSON.stringify drops an undefined-valued key, so the
-// promoted entry genuinely lacks it rather than carrying an empty default.
+// WHY BLOB SHAS AND NOT MTIMES: a `touch`, or any checkout that rewrites
+// mtimes without changing content, defeats a timestamp comparison; a content
+// hash does not. `git hash-object` applies the SAME clean/eol filters `git
+// add` applies, so the value is directly comparable to the INDEX blob sha
+// commit-reviewed reads at spend time, including under autocrlf.
 //
-// NEVER THROWS, NEVER GATES: every failure path (no git, a non-zero exit, an
-// output shape that does not line up 1:1 with the inputs) returns undefined. A
-// PARTIAL result is deliberately discarded rather than recorded — a blob map
-// missing entries it should have had would read downstream as "these files were
-// not reviewed" and manufacture a false disclosure out of a tooling failure.
+// A DECLARED FILE ABSENT ON DISK (decision 57984926's absent-path sentinel,
+// pins V2-5a/V2-5b) is recorded in `absent_paths`, never silently dropped —
+// a reviewed DELETION is legitimately reviewable, so its absence is evidence,
+// not noise. `status` is the vacuous/every-present/some-absent/every-absent
+// enum read literally off the three named values: no declared files at all is
+// read as vacuously 'complete' (nothing to contradict completeness — not
+// pinned either way, disclosed here as the chosen degenerate-case reading).
+//
+// NEVER THROWS, NEVER GATES: every git failure path (no git, a non-zero exit,
+// an output shape that does not line up 1:1 with the inputs) records
+// `failure_reason` and leaves `blobs` at whatever was already gathered (`{}`
+// when nothing hashed) rather than fabricating or discarding partial evidence
+// — `status` is still derived purely from PRESENCE ON DISK, independent of
+// whether the hashing step itself succeeded.
 const REVIEWED_BLOBS_CAP = 64; // far above any real review territory; bounds the argv this builds
-function reviewEndState(cwd, files) {
-  try {
-    const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === 'string' && f !== ''))] : [];
-    // TRUNCATION IS A CAP, NOT A FAILURE — recorded, never silent (review
-    // finding, MEDIUM). Slicing to the cap before hashing is deliberate (it
-    // bounds the argv `git hash-object` is spawned with), but for a review
-    // territory past the cap the receipt must not read as fully bound just
-    // because the shape it produces is identical to a complete one.
-    // `truncated`/`truncated_of` name exactly how partial the binding is, so a
-    // reader can tell "bound" from "bound as far as the cap" — this never
-    // refuses anything (the user ruled WARN, not REFUSE, for this whole
-    // mechanism); it only makes the cap's effect visible instead of silent.
-    const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
-    const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
-    // Only regular files can be hashed. Filtering FIRST matters: `git
-    // hash-object` fails as a whole when any one argument is missing, so a
-    // single deleted path would otherwise cost the evidence for every other
-    // file in the same receipt.
-    const present = paths.filter((p) => {
-      try {
-        return statSync(join(cwd, p)).isFile();
-      } catch {
-        return false;
-      }
-    });
-    if (present.length === 0) return undefined;
-    // `--` terminates options, so a path beginning with '-' is a path.
-    const r = spawnSync('git', ['hash-object', '--', ...present], { cwd, encoding: 'utf8', timeout: 10_000 });
-    if (!r || r.error || r.status !== 0) return undefined;
-    const shas = (r.stdout ?? '')
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => /^[0-9a-f]{40}$/i.test(l));
-    // 1:1 or nothing — see the PARTIAL note above. git emits one sha per input
-    // in argument order, so any other count means the output cannot be aligned
-    // with the paths and must not be guessed at.
-    if (shas.length !== present.length) return undefined;
-    const blobs = {};
-    present.forEach((p, i) => {
-      blobs[p] = shas[i];
-    });
-    return {
-      completed_at: new Date().toISOString(),
-      blobs,
-      // Present only when true — same copy-if-present, never-fabricated
-      // posture as the other optional receipt fields (JSON.stringify drops an
-      // undefined-valued key, so an untruncated receipt genuinely lacks it).
-      ...(truncated ? { truncated: true, truncated_of: uniqueFiles.length } : {}),
-    };
-  } catch {
-    return undefined;
+function buildContentEvidence(cwd, files) {
+  const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === 'string' && f !== ''))] : [];
+  if (uniqueFiles.length === 0) {
+    // Vacuous case, not pinned: no declared territory to check at all.
+    return { status: 'complete', blobs: {}, absent_paths: [] };
   }
+  // TRUNCATION IS A CAP, NOT A FAILURE — recorded, never silent (unchanged
+  // from the prior design). Slicing to the cap before hashing bounds the argv
+  // `git hash-object` is spawned with; `truncated_of` names how many files the
+  // receipt DECLARED versus how many this evidence actually bound.
+  const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
+  const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
+  const present = [];
+  const absent = [];
+  for (const p of paths) {
+    try {
+      if (statSync(join(cwd, p)).isFile()) present.push(p);
+      else absent.push(p);
+    } catch {
+      absent.push(p); // ENOENT and every other stat failure read as absent
+    }
+  }
+  let blobs = {};
+  let failureReason;
+  // UNHASHED, NOT JUST ABSENT (decision 57984926 fix round, finding MED-3): a
+  // PRESENT file whose hash could not be produced (permission denied, a
+  // vanish-between-stat-and-hash race, a malformed git output) is A THIRD
+  // OUTCOME, distinct from "present and bound" and from "absent" — pin
+  // V2-HASH-FAIL. Starting this as a copy of `present` and narrowing it to
+  // "still unhashed" after the attempt means `status` below can honestly
+  // reflect what was ACTUALLY recovered, never what was merely attempted.
+  let presentUnhashed = [...present];
+  if (present.length > 0) {
+    try {
+      // `--` terminates options, so a path beginning with '-' is a path.
+      const r = spawnSync('git', ['hash-object', '--', ...present], { cwd, encoding: 'utf8', timeout: 10_000 });
+      if (r && !r.error && r.status === 0) {
+        const shas = (r.stdout ?? '')
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => /^[0-9a-f]{40}$/i.test(l));
+        // 1:1 or nothing: git emits one sha per input in argument order, so any
+        // other count cannot be aligned with the paths and must not be guessed.
+        if (shas.length === present.length) {
+          present.forEach((p, i) => {
+            blobs[p] = shas[i];
+          });
+          presentUnhashed = [];
+        } else {
+          failureReason = 'git hash-object output did not align 1:1 with the reviewed paths';
+        }
+      } else {
+        failureReason = 'git hash-object failed or git is unavailable';
+      }
+    } catch {
+      failureReason = 'git hash-object threw';
+    }
+  }
+  // STATUS REFLECTS HASHES RECOVERED, NOT MERELY FILES DECLARED PRESENT (pin
+  // V2-HASH-FAIL): a present-but-unhashed file counts the same as an absent
+  // one for this verdict — 'complete' claims every declared file is BOTH
+  // present AND bound, never "present, but we never actually got its bytes".
+  // 'unavailable' when NOTHING at all was recovered (every declared path is
+  // either absent or unhashed); 'partial' otherwise.
+  const noEvidenceCount = absent.length + presentUnhashed.length;
+  const status = noEvidenceCount === 0 ? 'complete' : noEvidenceCount === paths.length ? 'unavailable' : 'partial';
+  const result = { status, blobs, absent_paths: absent };
+  // EXPLICIT BOOLEAN, not just truncated_of (decision 57984926 fix round,
+  // finding F3): truncation is DECIDED here, at write time, from `truncated`
+  // (uniqueFiles.length > REVIEWED_BLOBS_CAP) — the ONLY authority for whether
+  // this receipt's binding is partial-by-cap. scripts/hooks/lib/
+  // review-ledger-entry.mjs's read adapter PREFERS this flag over inferring it
+  // from `truncated_of` being a positive integer, because inference is a
+  // SECOND, weaker copy of the same decision (a `truncated_of` written by hand
+  // or by a future producer with a different convention could satisfy the
+  // "positive integer" test without ever having been the write side's actual
+  // truncation verdict). Both fields are still written together — truncated_of
+  // is the COUNT this flag names, never emitted alone.
+  if (truncated) {
+    result.truncated = true;
+    result.truncated_of = uniqueFiles.length;
+  }
+  if (failureReason) result.failure_reason = failureReason;
+  return result;
+}
+
+// MODEL PROVENANCE (decision 57984926) — the reviewer{} envelope's model,
+// model_family, model_source. RECORDING, not a mismatch guard: decision
+// f5802025's rejection of an actual-vs-pinned escalation backstop stands
+// untouched; this only names what ran.
+//
+// OBSERVED (preferred): the DEPARTING SUBAGENT'S OWN transcript, at Stop's
+// stdin.transcript_path — scanned tail-backward (same 1MB tail window H6 uses
+// via lib/transcript.mjs's readTail) for the most recent assistant entry
+// carrying a `message.model` string. Unlike lib/transcript.mjs's own
+// `latestUsage`, this does NOT require a `usage` field on that entry — a
+// model id can be observed on an entry that never reports usage.
+function observedModelFromTranscript(transcriptPath) {
+  if (typeof transcriptPath !== 'string' || transcriptPath === '') return null;
+  const tail = readTail(transcriptPath);
+  if (tail === null) return null;
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // the tail window's first line may be truncated mid-record
+    }
+    if (parsed.type !== 'assistant') continue;
+    const model = parsed.message?.model;
+    if (typeof model === 'string' && model !== '') return model;
+  }
+  return null;
+}
+
+// CONFIGURED (fallback): the reviewer model SNAPSHOT taken at SubagentStart
+// (never a live re-read at Stop — pin V2-3b) from config.models, never
+// installed frontmatter (rendered output can be stale).
+//
+// FIX ROUND finding HIGH-1 (Codex outside-family review, thread 01a0586b;
+// conductor-verified against packages/schemas/src/config.ts:171-175): the
+// REAL, single shared key for every reviewer-* agent_type is
+// `config.models.reviewers` — there is no per-role key (the schema names
+// test_writer/coder/researcher/etc. as SEPARATE roles, but every reviewer-*
+// agent_type folds to this one shared entry). The earlier per-agent-type-then-
+// 'reviewer'-fallback lookup was an invented convention that never matched the
+// real schema and masked the defect: it always silently missed and fell
+// through to model_source:'unknown'. NEVER GUESS A PER-ROLE KEY (pin
+// V2-3b-ANTI: a config carrying only an invented key like
+// `models['reviewer-correctness']` must still yield 'unknown', not a false
+// 'configured' read of a value that was never the real source of truth).
+function configuredReviewerModel(cwd) {
+  try {
+    const model = loadConfig(cwd)?.models?.reviewers?.model;
+    return typeof model === 'string' && model !== '' ? model : null;
+  } catch {
+    return null;
+  }
+}
+
+// FAMILY — ANCHORED patterns only (decision 57984926's explicit anti-pin:
+// no broad `o*` -> openai rule, which would misclassify 'other-model').
+function familyFromModel(model) {
+  if (typeof model !== 'string' || model === '') return 'unknown';
+  if (/^claude-/.test(model)) return 'anthropic';
+  if (/^gpt-/.test(model) || /^codex/.test(model)) return 'openai';
+  return 'unknown';
+}
+
+// Resolves {model, model_source} for a departing reviewer entry: OBSERVED
+// (this Stop's transcript) wins over CONFIGURED (the register entry's
+// Start-time snapshot, see `configured_model` on newEntryBase below); neither
+// available yields null/'unknown' rather than a guess.
+function resolveReviewerModel(departing, transcriptPath) {
+  const observed = observedModelFromTranscript(transcriptPath);
+  if (observed) return { model: observed, model_source: 'observed' };
+  const configured = typeof departing?.configured_model === 'string' && departing.configured_model !== '' ? departing.configured_model : null;
+  if (configured) return { model: configured, model_source: 'configured' };
+  return { model: null, model_source: 'unknown' };
 }
 
 // EMPTY IS NULL AT THE WRITING END TOO (Codex review, MEDIUM). A promoted
@@ -614,6 +730,16 @@ try {
       attribution,
     };
     if (claimed.length) newEntryBase.exclusive_resources = claimed;
+    // MODEL PROVENANCE SNAPSHOT (decision 57984926, pin V2-3b) — taken HERE,
+    // at Start, never re-read lazily at Stop: config.models can change between
+    // the two events (a config edit mid-dispatch), and the entry must carry
+    // what was CONFIGURED when the reviewer was DISPATCHED, not whatever is
+    // live when it happens to finish. Only computed for reviewer-* dispatches
+    // (the only ones ever promoted); null when nothing resolves, consumed by
+    // resolveReviewerModel at Stop as the fallback behind an OBSERVED model.
+    if (typeof input.agent_type === 'string' && input.agent_type.startsWith('reviewer-')) {
+      newEntryBase.configured_model = configuredReviewerModel(input.cwd);
+    }
 
     // REGISTER LOCK, APPEND SIDE (decision register-writers-cooperating-lock,
     // 1e0ba0d0). Everything above (transcript reads, prompt parsing, git-free
@@ -686,6 +812,15 @@ try {
     }
     allow();
   } else {
+    // FINISHED_AT — captured as the FIRST ACT of Stop handling (decision
+    // 57984926: "captured unconditionally at the START of Stop handling"),
+    // strictly BEFORE the register lookup and the killed-reviewer residue
+    // probe below — both can run slow git work (probeDirtyPaths spawns git),
+    // and the earlier placement (top of the reviewer-class branch only) still
+    // let that work shift the recorded review-END instant. Captured once,
+    // unconditionally, regardless of whether this Stop turns out to be
+    // reviewer-class at all; only used later, in the reviewer branch.
+    const finishedAt = new Date().toISOString();
     // Stop: promote a reviewer-class entry into the durable review ledger
     // (decision 12a26ca6-a301-466d-a45c-5e1eeff36694, slug
     // review-receipt-ledger) BEFORE removing it from the register — the
@@ -733,16 +868,19 @@ try {
       // here would be a permanent loss of reviewer evidence rather than a
       // bounded, self-healing one.
       const sterlingDir = join(input.cwd, '.sterling');
+      // finishedAt is captured at the TOP of Stop handling, above (before the
+      // register lookup and residue probe) — reused here unconditionally, not
+      // re-captured, so nothing after Stop entry (git identity, content-
+      // evidence hashing, the residue probe) can shift the review-END instant.
       // Probed OUTSIDE the lock: two git spawns are the slowest thing on this
       // path, and holding the ledger mutex across them would push concurrent
       // reviewer stops toward the unlocked-timeout fallback for no reason.
       const identity = gitReceiptIdentity(input.cwd);
-      // Probed OUTSIDE the lock for the same reason `identity` is: it is a stat
-      // sweep plus one git spawn. It must also be read HERE, at Stop, and not
-      // inside the lock — the whole point of the field is that it names the
-      // bytes as they stood when the review ENDED, and the lock wait is time in
-      // which they could move.
-      const reviewedState = reviewEndState(input.cwd, departing.files);
+      // Also read here rather than inside the lock — it names the bytes as
+      // they stood when the review ENDED, and the lock wait is time in which
+      // they could move.
+      const contentEvidence = buildContentEvidence(input.cwd, departing.files);
+      const resolvedModel = resolveReviewerModel(departing, input.transcript_path);
       withLedgerLock(sterlingDir, () => {
         const ledgerPath = join(sterlingDir, 'review-ledger.json');
         let ledger = [];
@@ -755,29 +893,52 @@ try {
           ledger = []; // malformed ledger degrades to empty (same posture as the
           // register above) and is rewritten valid below — never exit 2 for this
         }
-        // LEDGER IDEMPOTENCY (review-fix round, MEDIUM). The register-lock
+        // LEDGER IDEMPOTENCY (review-fix round, MEDIUM; STRENGTHENED — decision
+        // 57984926 fix round, findings HIGH-2 + HIGH-3). The register-lock
         // timeout path (D3) means a Stop whose register removal was skipped
-        // leaves the entry behind for a LATER Stop-shaped fire to find again
-        // — this closes that double-promotion window. DELIBERATELY NOT a new
-        // `agent_id` field on the receipt: h22-review-ledger.test.mjs and
-        // h22-receipt-expiry.test.mjs both pin the promoted entry's key set
-        // to EXACTLY ['agent_type','at','base_sha','branch','files',
-        // 'session_id'] via Object.keys(entry).sort() — a 7th key (agent_id
-        // is always a defined string, so it always survives the JSON
-        // round-trip unlike the conditionally-undefined files_source/
-        // attribution fields) fails that frozen pin outright. `agent_type` +
-        // `at` are ALREADY two of the six pinned keys, both copied verbatim
-        // from the register entry and therefore stable across repeated
-        // promotion attempts for the SAME dispatch (the same convention the
-        // concurrency pin file's own C2 arm uses to identify a receipt: `key
-        // = (e) => \`${e.agent_type}::${e.at}\``) — a lightweight, no-new-field
-        // idempotency key. Never touches commit-reviewed's OWN consume
-        // identity (agent_type/at/session_id/branch/base_sha/files, per its
-        // sameIdentity()) — this is a read-before-push guard on the SAME
-        // ledger-locked append, not a new field for that matcher to see.
-        if (ledger.some((e) => e && e.agent_type === departing.agent_type && e.at === departing.at)) {
+        // leaves the entry behind for a LATER Stop-shaped fire to find again —
+        // this closes that double-promotion window.
+        //
+        // HIGH-2: keys on the register entry's DISPATCH IDENTITY (agent_id),
+        // never on agent_type+at. Two DISTINCT reviewer dispatches sharing
+        // agent_type AND the same Start-millisecond `at` are NOT duplicates of
+        // each other (pin DISPATCH-IDENTITY control) — a dedupe keyed on
+        // agent_type+at would silently discard the second one's evidence, a
+        // permanent data loss the idempotency check exists to prevent, not
+        // cause. agent_id is the register's own unique key for a dispatch, so
+        // it is stamped into `identity.agent_id` on every new v2 promotion
+        // (below) specifically so a LATER retry of the SAME dispatch can be
+        // recognized by the one field that actually identifies it.
+        //
+        // HIGH-3: routed through the SAME normalizeLedgerEntry adapter every
+        // other reader uses, rather than an inline schema_version branch —
+        // this file no longer hand-rolls its own v1/v2 shape switch for
+        // reading an existing ledger entry. A v1 entry never carried agent_id,
+        // so it normalizes to an entry with no `agent_id` field and can never
+        // false-match a real dispatch identity.
+        // LEGACY FALLBACK (roster review, LOW): a v1 entry, or a pre-fix v2
+        // entry promoted before identity.agent_id existed, never carries a
+        // usable agent_id — falling straight to "not a duplicate" there would
+        // reopen the re-promotion window this check exists to close for those
+        // prior receipts. So: match on agent_id when BOTH sides carry a
+        // string; otherwise fall back to the old agent_type+at key. This never
+        // reintroduces the false-dedupe HIGH-2 fixed — DISPATCH-IDENTITY's two
+        // dispatches each carry their own real, distinct agent_id, so they
+        // always take the agent_id branch and are correctly told apart.
+        const ledgerEntryMatchesDeparting = (e) => {
+          const normalized = normalizeLedgerEntry(e);
+          if (!normalized) return false;
+          if (typeof normalized.agent_id === 'string' && typeof departing.agent_id === 'string') {
+            return normalized.agent_id === departing.agent_id;
+          }
+          return normalized.agent_type === departing.agent_type && normalized.at === departing.at;
+        };
+        if (ledger.some(ledgerEntryMatchesDeparting)) {
+          // Names the actual duplicate IDENTITY (agent_id), not a stock phrase
+          // (strengthened LEDGER-IDEMPOTENCY pin) — proving this reasons about
+          // identity, not merely agent_type+at coincidence.
           process.stderr.write(
-            `H22: a review receipt for agent_type '${departing.agent_type}' at '${departing.at}' is already present in .sterling/review-ledger.json — skipping duplicate promotion\n`
+            `H22: a review receipt for agent_id '${departing.agent_id}' (agent_type '${departing.agent_type}', at '${departing.at}') is already present in .sterling/review-ledger.json — skipping duplicate promotion\n`
           );
         } else {
           // session_id comes from the REGISTER entry, not from stdin: it is the
@@ -789,35 +950,49 @@ try {
           // Both candidates go through normIdentity, so an empty-string session_id
           // on the register entry falls through to stdin's rather than being
           // written as a meaningless '' the reader must then interpret.
+          //
+          // V2 ENVELOPE (decision 57984926, campaign slice S2b-1) — EVERY new
+          // promotion writes exactly these eleven top-level keys (pins V2-1,
+          // h22-review-ledger.test.mjs test (1), h22-receipt-expiry.test.mjs
+          // A1). Pre-existing v1 entries already in `ledger` are NEVER
+          // migrated in place (pin V2-6) — this object is only ever APPENDED
+          // beside them.
           ledger.push({
-            agent_type: departing.agent_type,
-            files: departing.files,
-            // Copied unchanged from the register entry (decision 8f137474):
-            // absent on a pre-migration register entry, same posture as the
-            // other always-attempted-never-required fields on this receipt.
-            files_source: departing.files_source,
-            // Same copy-if-present, never-fabricated posture as files_source
-            // above (review-fix round, pins T6a/T6b): a legacy register entry
-            // written before per-block attribution existed carries no
-            // `attribution` key, and `departing.attribution` is then
-            // `undefined` here — JSON.stringify drops an undefined-valued key
-            // entirely, so the promoted receipt genuinely lacks the key rather
-            // than carrying a fabricated default.
-            attribution: departing.attribution,
-            // THE DISPATCH INSTANT, kept verbatim and deliberately NOT
-            // corrected in place (board 0f448efb): it is half of this hook's own
-            // duplicate-promotion key just above, and half of commit-reviewed's
-            // consume identity, so rewriting its meaning would break both. The
-            // review-END instant lives in reviewed_state.completed_at instead,
-            // which is what the staleness advisory now prefers.
-            at: departing.at,
-            session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
-            branch: identity.branch,
-            base_sha: identity.base_sha,
-            // Optional by construction — undefined when no reviewed path
-            // resolved to a readable file, and then dropped entirely by
-            // JSON.stringify (same posture as files_source/attribution above).
-            reviewed_state: reviewedState,
+            schema_version: 2,
+            entry_id: randomUUID(),
+            kind: 'roster_receipt',
+            status: 'active',
+            started_at: departing.at,
+            finished_at: finishedAt,
+            reviewer: {
+              agent_type: departing.agent_type,
+              model: resolvedModel.model,
+              model_family: familyFromModel(resolvedModel.model),
+              model_source: resolvedModel.model_source,
+            },
+            identity: {
+              session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
+              branch: identity.branch,
+              base_sha: identity.base_sha,
+              // DISPATCH IDENTITY (finding HIGH-2) — the register's own unique
+              // key for this dispatch, stamped so a later duplicate-promotion
+              // attempt for the SAME dispatch can be recognized by identity
+              // rather than by the coincidence of sharing agent_type+at with
+              // an unrelated dispatch. Not part of decision 57984926's original
+              // named identity fields (session_id/branch/base_sha), but no pin
+              // asserts an exact key set on this nested object.
+              agent_id: departing.agent_id,
+            },
+            territory: {
+              files: departing.files,
+              // Nested home of decision 8f137474's already-shipped
+              // files_source/attribution fields — copied unchanged from the
+              // register entry, same copy-if-present posture as before.
+              source: departing.files_source,
+              attribution: departing.attribution,
+            },
+            content_evidence: contentEvidence,
+            disposition: null,
           });
         }
         const ledgerTmpPath = join(sterlingDir, `review-ledger.json.tmp-${process.pid}`);

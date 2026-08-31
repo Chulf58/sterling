@@ -112,6 +112,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSy
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { arg, fail } from './lib/project.mjs';
+// READ ADAPTER (decision 57984926, campaign slice S2b-1): h22-dispatch-
+// register.mjs now promotes every NEW reviewer-* receipt as a v2 entry
+// (nested reviewer/identity/territory/content_evidence); pre-existing v1
+// entries are never migrated in place, so a real ledger mixes both shapes.
+// Every read below maps each raw entry through this ONE adapter so the rest
+// of this file keeps reading the same flat field names it always has
+// (agent_type/files/at/session_id/branch/base_sha/reviewed_state) regardless
+// of which shape produced them — v1 entries pass through byte-identical.
+import { normalizeLedgerEntry } from './hooks/lib/review-ledger-entry.mjs';
 
 const target = process.cwd();
 
@@ -209,6 +218,10 @@ try {
   ledger = []; // malformed ledger degrades to empty — treated identically to
   // a missing/empty ledger, never a crash
 }
+// Normalize ONCE, at read time — every downstream read in this file (validity,
+// eligibility, file-scoping, spend advisories, trailer stamping) sees the flat
+// legacy shape regardless of whether the raw entry was v1 or v2.
+ledger = ledger.map(normalizeLedgerEntry);
 
 const guidance =
   'commit-reviewed: no un-consumed review-ledger entries — dispatch a reviewer before committing, or commit bare and answer at the merge gate';
@@ -223,7 +236,18 @@ if (ledger.length === 0) {
 // LEFT in the ledger un-consumed — never silently dropped.
 const validEntries = [];
 for (const e of ledger) {
-  if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
+  // MED-2 (decision 57984926 fix round, pin S13): a v2-CLAIMING entry missing
+  // entry_id/started_at/identity is structurally deficient — normalizeLedgerEntry
+  // marks it `v2_deficient` rather than mapping it into a spendable-looking
+  // shape. Checked BEFORE the agent_type-format acceptance so a deficient
+  // entry whose agent_type otherwise looks valid is never pushed to
+  // validEntries — the strongest-unverifiable posture, same family as an
+  // invalid agent_type, disclosed by its own distinct message.
+  if (e && e.v2_deficient) {
+    console.error(
+      `commit-reviewed: skipping structurally-deficient v2 ledger entry (agent_type ${JSON.stringify(e.agent_type)} — missing entry_id/started_at/identity, per decision 57984926) — left un-consumed in the ledger, never stamped`
+    );
+  } else if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
     validEntries.push(e);
   } else {
     console.error(
@@ -831,11 +855,30 @@ try {
   // nothing), and a missing one alongside a sibling that has real evidence —
   // a mechanism that recorded blobs for one receipt of this commit and none
   // for another.
+  // FIX ROUND finding F2 (decision 57984926): a v2 entry's `reviewed_state` is
+  // UNCONDITIONALLY present (mapped from v2's always-on content_evidence), so
+  // `hasState` alone no longer distinguishes "an attempt was made and then
+  // emptied/tampered" (v1's actual meaning, since v1 only ever wrote the key
+  // on a successful hash) from "this receipt legitimately never had anything
+  // to hash" (a v2 receipt with no declared territory, or a reviewed deletion
+  // whose every declared path is absent — status:'unavailable'). The adapter
+  // exposes `content_evidence_status` ONLY for a v2-derived entry (undefined
+  // for v1/legacy), so branching on its presence keeps v1 behavior untouched
+  // while giving v2 entries the honest reading: `status === 'unavailable'` or
+  // no usable files were ever declared both RECORD NONE BY DESIGN and stay
+  // silent here; anything else reaching this point (status 'complete'/
+  // 'partial' with declared files, yet no usable blobs) means evidence was
+  // EXPECTED and is genuinely missing — still warned, exactly as before.
   const anyRecordedEvidence = stampEntries.some((e) => recordedBlobs(e).length > 0);
   const noEvidence = stampEntries.filter((e) => {
     if (recordedBlobs(e).length > 0) return false;
     const hasState = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null;
-    return hasState || anyRecordedEvidence;
+    const v2Status = e && typeof e.content_evidence_status === 'string' ? e.content_evidence_status : undefined;
+    if (v2Status !== undefined) {
+      const recordedNoneByDesign = v2Status === 'unavailable' || usableFiles(e).length === 0;
+      return !recordedNoneByDesign;
+    }
+    return hasState || anyRecordedEvidence; // v1/legacy — unchanged
   });
   if (noEvidence.length > 0) {
     warnSpend(
@@ -1171,7 +1214,11 @@ try {
     const unclaimedStamped = [...stampEntries];
     const survivors = freshLedger.filter((e) => {
       if (!e || typeof e !== 'object') return true; // a malformed fresh entry was never stamped — it survives untouched
-      const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
+      // Normalized ONLY for the identity comparison below — the RAW entry `e`
+      // (v1 or v2, byte-for-byte as re-read from disk) is what actually
+      // survives into `survivors`, so a v2 entry's true on-disk shape is
+      // never rewritten by this consume step.
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(normalizeLedgerEntry(e), s));
       if (i === -1) return true;
       unclaimedStamped.splice(i, 1);
       return false; // consumes exactly one stamped occurrence
@@ -1342,9 +1389,16 @@ function runTargetShaMode(targetShaArg) {
   } catch {
     ledger = []; // malformed ledger degrades to empty, same posture as the -m flow
   }
+  // Same one-adapter normalization as the -m flow above.
+  ledger = ledger.map(normalizeLedgerEntry);
   const validEntries = [];
   for (const e of ledger) {
-    if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
+    // MED-2 — same structural-completeness check as the -m flow (see there).
+    if (e && e.v2_deficient) {
+      console.error(
+        `commit-reviewed: skipping structurally-deficient v2 ledger entry (agent_type ${JSON.stringify(e.agent_type)} — missing entry_id/started_at/identity, per decision 57984926) — left un-consumed in the ledger, never stamped`
+      );
+    } else if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
       validEntries.push(e);
     } else {
       console.error(
@@ -1770,7 +1824,9 @@ function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries) {
     const unclaimedStamped = [...stampEntries];
     const survivors = freshLedger.filter((e) => {
       if (!e || typeof e !== 'object') return true;
-      const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
+      // Normalized only for identity matching; the RAW re-read entry is what
+      // survives, so a v2 entry's on-disk shape is never rewritten here.
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(normalizeLedgerEntry(e), s));
       if (i === -1) return true;
       unclaimedStamped.splice(i, 1);
       return false;

@@ -433,9 +433,16 @@ test('(T5) SubagentStop promotion copies files_source into the review-ledger rec
     assert.equal(r.code, 0, r.stderr);
     assert.ok(ledgerExists(dir), 'a review ledger receipt was promoted');
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('packages/mcp-server/src/auth.ts'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/files_source at territory.files/territory.source. Dual-shape
+    // lookup preserves this test's substance (decision 8f137474's structured-territory extraction, unchanged) for
+    // either shape.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('packages/mcp-server/src/auth.ts');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.files_source, 'review-territory', 'files_source travels unchanged from the register entry to the promoted ledger receipt');
+    assert.equal(entry.territory?.source ?? entry.files_source, 'review-territory', 'files_source travels unchanged from the register entry to the promoted ledger receipt');
   } finally {
     cleanup();
   }
@@ -466,9 +473,15 @@ test('(T5b) SubagentStop promotion of a free-prose-fallback reviewer entry copie
     assert.equal(r.code, 0, r.stderr);
     assert.ok(ledgerExists(dir), 'a review ledger receipt was promoted');
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('scripts/decoy-analysis.mjs'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/files_source at territory.files/territory.source. Dual-shape
+    // lookup preserves this test's substance for either shape.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('scripts/decoy-analysis.mjs');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.files_source, 'free-prose-fallback', 'a fallback-sourced register entry must never be promoted as though it were review-territory-sourced');
+    assert.equal(entry.territory?.source ?? entry.files_source, 'free-prose-fallback', 'a fallback-sourced register entry must never be promoted as though it were review-territory-sourced');
   } finally {
     cleanup();
   }
@@ -497,9 +510,16 @@ test('(T6b) CONTROL: a legacy register entry with no `attribution` key promotes 
     const r = runHook(h22Input(dir, { agent_id: 'rev-legacy', hook_event_name: 'SubagentStop' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('src/legacy.mjs'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/attribution at territory.files/territory.attribution. Dual-shape
+    // lookup preserves this CONTROL's substance (no fabricated attribution) for either shape.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('src/legacy.mjs');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.ok(!('attribution' in entry), 'a legacy source entry lacking attribution must never gain a fabricated attribution key on promotion');
+    const attributionHome = entry.territory ?? entry;
+    assert.ok(!('attribution' in attributionHome), 'a legacy source entry lacking attribution must never gain a fabricated attribution key on promotion');
   } finally {
     cleanup();
   }
@@ -528,9 +548,14 @@ test('(T6a) SubagentStop promotion copies the register entry\'s attribution valu
     const r = runHook(h22Input(dir, { agent_id: 'rev-attr', hook_event_name: 'SubagentStop' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('src/attr.mjs'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/attribution at territory.files/territory.attribution.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('src/attr.mjs');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.attribution, 'union', 'the register entry\'s attribution value is copied unchanged into the ledger receipt');
+    assert.equal(entry.territory?.attribution ?? entry.attribution, 'union', 'the register entry\'s attribution value is copied unchanged into the ledger receipt');
   } finally {
     cleanup();
   }
