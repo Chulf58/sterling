@@ -79,6 +79,15 @@ export const configSchema = z.object({
   // not by article baselines. DELETION still flags (a vanished committed
   // deliverable is real drift regardless of how the file is produced).
   generated_projections: z.array(z.string()).default([]),
+  // Undeclared-source disclosure (decision
+  // undeclared-source-disclosure-per-file-coverage-live-h1-scan, board
+  // 44ef6838): POSIX globs excluded from the live per-file source-extension
+  // coverage scan H1 (SessionStart) and init render — an excluded file never
+  // participates (neither covered nor uncovered), same precedence as
+  // classifyCoverage's excludeGlobs parameter in
+  // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
+  // toolchain path_glob).
+  undeclared_source_exclude_globs: z.array(z.string()).default([]),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: z.string().optional(),

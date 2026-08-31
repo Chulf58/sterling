@@ -34,6 +34,8 @@ import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, probeCodexWin, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
 import { appendMissingSanctioned } from './lib/store-remediation.mjs';
+import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
+import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Test-isolation seam (mirrors STERLING_REGISTRY_DB/STERLING_WIN_NODE): the
@@ -1190,6 +1192,28 @@ console.log('\ndead-term check: clean');
 for (const line of warns) console.log(line);
 for (const line of notes) console.log(line);
 for (const instruction of agentInstructions) console.log('\n' + instruction);
+
+// UNDECLARED-SOURCE DISCLOSURE (decision undeclared-source-disclosure-per-
+// file-coverage-live-h1-scan, board 44ef6838): the SAME shared ladder
+// scripts/hooks/h1-session-start.mjs calls — computeUndeclaredSourceDisclosure
+// in scripts/hooks/lib/undeclared-source-scan.mjs (fix-round MED-2/MED-3: one
+// function, one semantics, instead of two independently-drifting copies) —
+// rendered ONCE here so a fresh project sees its coverage gaps immediately,
+// not only at its first session start. Never a refusal (P1 — disclosure
+// only, no gate) and never silent on an abnormal shape (P5) — git absent,
+// spawn failure, timeout, output cap, or an unparseable/malformed effective
+// config (including a malformed per-entry toolchain shape) each print the
+// bounded UNAVAILABLE line instead of vanishing.
+try {
+  const effectiveConfig = recorded ?? expectedConfig;
+  const report = computeUndeclaredSourceDisclosure({ cwd: target, config: effectiveConfig });
+  if (report) console.log('\n' + report);
+} catch (err) {
+  // Last-resort fail-open (P1): computeUndeclaredSourceDisclosure already
+  // catches internally, so this is truly last-resort (e.g. renderUnavailable
+  // itself throwing).
+  console.log('\n' + renderUnavailable(`unexpected error: ${err?.message ?? err}`));
+}
 
 if (restartNeeded) {
   console.log('\n' + RESTART_INSTRUCTION);

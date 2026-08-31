@@ -13,6 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
+import { normalizeLedgerEntry } from './lib/review-ledger-entry.mjs';
+import { renderUnavailable } from './lib/undeclared-source.mjs';
+import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
@@ -289,11 +292,40 @@ function reviewReceiptLines(cwd) {
   }
   return entries
     .filter((e) => e && typeof e === 'object')
+    // ONE ADAPTER, same as commit-reviewed.mjs (decision 57984926, campaign
+    // slice S2b-1 fix round, finding F1): a v2 entry's agent_type/session_id/
+    // branch/files/at live nested (reviewer.agent_type, identity.*,
+    // territory.files, started_at) — without this map every v2 receipt read
+    // every one of those as undefined and rendered as 'unknown reviewer —
+    // age unknown … no recorded session/branch — a pre-expiry receipt', even
+    // though it recorded all of that. Legacy (v1) entries pass through
+    // byte-identical.
+    .map(normalizeLedgerEntry)
     .map((e) => {
-      const parsedAt = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
+      const startMs = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
+      // PREFER THE COMPLETION INSTANT, same bounded logic as commit-reviewed's
+      // staleness advisory (useCompleted): `at` is the DISPATCH instant (v1's
+      // only timestamp, and v2's `started_at`), so a long review reads
+      // artificially fresh against it. reviewed_state.completed_at (the
+      // adapter's view of v2's finished_at) is the honest review-END moment
+      // when present — but only trusted inside [at, now]: an out-of-range
+      // value (a review "ending" before it started, or in the future) is
+      // untrusted and this silently falls back to `at`, exactly like
+      // commit-reviewed's clamp. Fail-open: a missing/unparseable value on
+      // either side degrades toward whichever side still parses, never throws.
+      const completedAtStr = e.reviewed_state && typeof e.reviewed_state.completed_at === 'string' ? e.reviewed_state.completed_at : null;
+      const rawCompletedMs = completedAtStr === null ? NaN : Date.parse(completedAtStr);
+      const nowMs = Date.now();
+      const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs;
+      const completedMs = !Number.isNaN(rawCompletedMs) && rawCompletedMs >= lowerMs && rawCompletedMs <= nowMs ? rawCompletedMs : NaN;
+      const useCompleted = !Number.isNaN(completedMs);
+      const recordedAt = useCompleted ? completedMs : startMs;
       // Same 'X.Xh' convention as commit-reviewed's staleness advisory, so one
-      // receipt reads identically on both surfaces.
-      const age = Number.isNaN(parsedAt) ? 'age unknown (no usable timestamp)' : `${((Date.now() - parsedAt) / 3_600_000).toFixed(1)}h old`;
+      // receipt reads identically on both surfaces. The existing message
+      // shape here never disclosed WHICH moment fed the age (unlike
+      // commit-reviewed's verbose STALE RECEIPT warning, which names it) —
+      // preserved as-is; only the underlying instant preference changes.
+      const age = Number.isNaN(recordedAt) ? 'age unknown (no usable timestamp)' : `${((nowMs - recordedAt) / 3_600_000).toFixed(1)}h old`;
       // EVERY receipt-derived string below goes through safeReceiptField before
       // it reaches the injected block — agent_type, session_id, branch and file
       // paths alike. A field that sanitizes down to empty is treated as absent,
@@ -1320,6 +1352,38 @@ try {
   // catch and each degrades LOUD. Nothing routine reaches here (02a1ed39).
 }
 
+// UNDECLARED-SOURCE DISCLOSURE (decision undeclared-source-disclosure-per-
+// file-coverage-live-h1-scan, board 44ef6838). Per-FILE live coverage scan
+// against config.toolchains[].path_globs, computed FRESH every session start —
+// NO cache (a stale cached scan under-reports silently, the exact silence
+// this feature exists to close). DISCLOSURE ONLY: never denies, never gates,
+// never boards. ABNORMAL SHAPES RENDER, never vanish (P5): git absent, spawn
+// failure, timeout, output cap, or unparseable/malformed config (including a
+// malformed per-entry toolchain shape — fix-round MED-1) each render ONE
+// bounded 'UNDECLARED SOURCE CHECK UNAVAILABLE: <reason>' line. The ENTIRE
+// ladder (config validation, git-spawn glue, classification, rendering) is
+// scripts/hooks/lib/undeclared-source-scan.mjs's computeUndeclaredSourceDisclosure
+// — the SAME function scripts/init-impl.mjs calls (fix-round MED-2/MED-3: one
+// ladder, one semantics, so this comment is no longer an aspiration).
+let undeclaredSourceContext = '';
+try {
+  // `config` was read ABOVE under its own guarded try/catch — null there IS
+  // the malformed/missing-config case, and computeUndeclaredSourceDisclosure
+  // treats it as UNAVAILABLE, never as "zero toolchains" (decision b128f79c).
+  const report = computeUndeclaredSourceDisclosure({ cwd: input.cwd, config });
+  if (report) undeclaredSourceContext = `\n\n${report}`;
+} catch (err) {
+  // Last-resort fail-open (P1): never break SessionStart. Still disclose,
+  // never silence — an uncaught exception here is itself an abnormal shape.
+  // computeUndeclaredSourceDisclosure already catches internally, so this is
+  // truly last-resort (e.g. renderUnavailable itself throwing).
+  try {
+    undeclaredSourceContext = `\n\n${renderUnavailable(`unexpected error: ${err?.message ?? err}`)}`;
+  } catch {
+    // even rendering failed — truly last resort, stay silent rather than throw
+  }
+}
+
 if (process.env.STERLING_NO_BANNER !== '1') {
   const width = Math.max(...BANNER_ROWS.map((r) => r.length));
   const version = pluginVersion();
@@ -1355,7 +1419,7 @@ const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurre
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();
