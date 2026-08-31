@@ -122,6 +122,19 @@
 // the STRUCTURAL check belongs here (this is the one place that already knows
 // what a complete v2 entry looks like); the SPENDING decision still belongs to
 // the reader, same separation of concerns as content_evidence_status (F2).
+/** A plain, non-null, non-array object. THE ONE PREDICATE FOR EVERY LEVEL OF A
+ *  RECEIPT'S EVIDENCE — the `content_evidence` container here, and the `blobs`
+ *  map and v1 `reviewed_state` container in commit-reviewed.mjs, which imports
+ *  it rather than keeping a second copy. The levels are the SAME QUESTION ("is
+ *  there a readable record here, or merely a value?"), and each was a separate
+ *  bypass while each had its own guard: `typeof x === 'object'` admits both
+ *  `null` and an ARRAY, which is precisely the shape a tamper reaches for once
+ *  the obvious ones refuse. One predicate means closing a level cannot leave a
+ *  sibling level open. */
+export function isEvidenceObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 export function normalizeLedgerEntry(entry) {
   if (!entry || typeof entry !== 'object' || entry.schema_version !== 2) {
     return entry; // legacy/malformed — presented AS-IS, shape-transparent
@@ -137,7 +150,11 @@ export function normalizeLedgerEntry(entry) {
   const reviewer = entry.reviewer && typeof entry.reviewer === 'object' ? entry.reviewer : {};
   const identity = entry.identity && typeof entry.identity === 'object' ? entry.identity : {};
   const territory = entry.territory && typeof entry.territory === 'object' ? entry.territory : {};
-  const contentEvidence = entry.content_evidence && typeof entry.content_evidence === 'object' ? entry.content_evidence : null;
+  // isEvidenceObject, not the bare `&& typeof === 'object'` this used to be: an
+  // ARRAY passes that test, so `content_evidence: ["array"]` was admitted as a
+  // real (empty) evidence record whose every field read as absent. Same
+  // array-shaped hole the identity check above already closes.
+  const contentEvidence = isEvidenceObject(entry.content_evidence) ? entry.content_evidence : null;
   // F3: explicit `truncated` boolean wins; `truncated_of` alone (no explicit
   // flag) is the fallback inference, kept for a producer/fixture that has not
   // adopted the explicit flag yet.
@@ -147,10 +164,50 @@ export function normalizeLedgerEntry(entry) {
       : contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0;
   const truncatedOf =
     contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0 ? contentEvidence.truncated_of : null;
-  const blobs =
-    contentEvidence && typeof contentEvidence.blobs === 'object' && contentEvidence.blobs !== null && !Array.isArray(contentEvidence.blobs)
-      ? contentEvidence.blobs
-      : undefined;
+  // BLOBS ARE PASSED THROUGH RAW, SHAPE-TRANSPARENT (board f55ab3e9, decision
+  // 57984926 §2). This guard used to map ANY unusable content_evidence.blobs
+  // value — the string "junk", 42, ["array"], true, null — to `undefined`, which
+  // ERASED THE PRESENT-vs-ABSENT DISTINCTION: commit-reviewed.mjs's evidence
+  // classifier then read "this receipt recorded nothing", the one shape §2
+  // grandfathers ("grandfather only genuinely absent evidence"), when the truth
+  // was "this receipt recorded something unusable", which §2 calls INCONSISTENT
+  // and refuses. Overwriting a receipt's blob map with junk was therefore a
+  // one-keystroke bypass of the entire reviewed-bytes gate, and status:'complete'
+  // made it worse rather than better — the receipt claimed full coverage while
+  // carrying nothing comparable.
+  //
+  // Same posture as `status`, `kind` and `disposition` above: the
+  // shape-transparency layer reports WHAT IS THERE and the READER decides what it
+  // MEANS. commit-reviewed.mjs's receiptEvidenceClass now classifies a
+  // present-but-not-a-map blobs value as 'inconsistent' for BOTH schema versions,
+  // through this one shared field name — which is also what closes the identical
+  // v1 hole (a v1 reviewed_state that IS an object whose `blobs` is not), so the
+  // two versions cannot drift apart on the same question.
+  //
+  // NOTHING DOWNSTREAM CAN ITERATE A NON-MAP BY ACCIDENT: every consumer of
+  // `reviewed_state.blobs` guards its own read (commit-reviewed.mjs's
+  // receiptBlobEvidence and recordedBlobs both test typeof/null/Array before
+  // Object.entries), which is why the raw value is safe to surface.
+  //
+  // ABSENT STAYS ABSENT: a v2 entry with NO content_evidence KEY AT ALL yields
+  // `undefined` — the genuine grandfather §2 protects — as does a
+  // content_evidence object carrying no `blobs` key, which is the shape a
+  // legitimate status:'unavailable' receipt has.
+  //
+  // THE SAME HOLE ONE LEVEL UP, CLOSED BY THE SAME LINE (coordinator scope
+  // addition, this round): when the ENTIRE content_evidence VALUE is present but
+  // is not a proper object ("junk", 42, ["array"], null), `contentEvidence` is
+  // null above and the old `: undefined` fallback read that as "this receipt
+  // recorded nothing" — the identical present-read-as-absent defect the inner
+  // guard just closed, one nesting level up, and reachable without ever touching
+  // the inner guard. Surfacing the raw outer value instead is exact rather than
+  // approximate: what the receipt recorded as its content evidence IS that value,
+  // so the reader's one present-but-not-a-map test (commit-reviewed.mjs's
+  // receiptEvidenceClass, over the shared isEvidenceObject below) answers BOTH
+  // levels with no second branch, no marker key, and no new class. The
+  // distinction that matters survives intact: `entry.content_evidence` is
+  // `undefined` exactly when the key is absent.
+  const blobs = contentEvidence ? contentEvidence.blobs : entry.content_evidence;
   return {
     // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
     // entry it refuses or waives (decision 57984926 §2). undefined for v1.

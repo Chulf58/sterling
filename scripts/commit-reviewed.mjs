@@ -176,7 +176,7 @@ import { arg, fail } from './lib/project.mjs';
 // on a structurally complete v2 entry, and that verdict is defined once, beside
 // the shape it reads, rather than restated in each of this file's two flows and
 // again in H1. See isDischargedEntry / skipForDischargeMarker below.
-import { normalizeLedgerEntry, dischargeMarkerClass, isExternalReviewEntry } from './hooks/lib/review-ledger-entry.mjs';
+import { normalizeLedgerEntry, dischargeMarkerClass, isExternalReviewEntry, isEvidenceObject } from './hooks/lib/review-ledger-entry.mjs';
 
 const target = process.cwd();
 
@@ -2721,6 +2721,31 @@ function receiptAdmitsPartial(e) {
  *                     and unreadable is INCONSISTENT evidence, and the verdict
  *                     refuses on any staged path the receipt covers, disclosing
  *                     the shape it actually found.
+ *                     ONE LEVEL DOWN, SAME CLASS, BOTH SCHEMA VERSIONS (board
+ *                     f55ab3e9, 2026-08-31): a receipt whose evidence CONTAINER
+ *                     is a proper object but whose `blobs` value is PRESENT and
+ *                     is not a map — the string 'junk', 42, ['array'], true,
+ *                     null — is inconsistent for exactly the same reason, and it
+ *                     is checked BEFORE the version branches below because it is
+ *                     the same defect in both. v2 reached it by a different road:
+ *                     the read adapter used to collapse an unusable
+ *                     content_evidence.blobs to `undefined`, so "recorded
+ *                     something unusable" and "recorded nothing" became one
+ *                     observation and the grandfather swallowed the first; the
+ *                     adapter now passes the value through RAW (see
+ *                     scripts/hooks/lib/review-ledger-entry.mjs) so this one
+ *                     check answers for both. v1 had the hole natively — a
+ *                     reviewed_state object carrying `blobs: 'junk'` passed the
+ *                     container guard and then produced an empty map, which read
+ *                     as absent evidence.
+ *                     PRESENT means `!== undefined`: a receipt with no `blobs`
+ *                     key at all recorded nothing, which is the genuine
+ *                     grandfather and must stay one.
+ *                     `null` IS REFUSED (board f55ab3e9 left the reading open):
+ *                     it is PRESENT-and-not-a-map, and the neighbouring v1
+ *                     container case (`reviewed_state: null`) is already
+ *                     adjudicated REFUSE — reading the same value as an explicit
+ *                     absence one level down would split the class on nothing.
  *    'unavailable'  — a v2 receipt whose content_evidence.status says the
  *                     hashing never ran. Grandfathered (commits) but DISCLOSED
  *                     (conductor adjudication 2026-08-31 on the frozen suite's
@@ -2733,20 +2758,34 @@ function receiptAdmitsPartial(e) {
  *    'present'      — anything else. ENFORCED. */
 function receiptEvidenceClass(e) {
   const status = e && typeof e.content_evidence_status === 'string' ? e.content_evidence_status : undefined;
-  if (status === 'unavailable') return 'unavailable';
-  if (status !== undefined) return 'present';
-  // v1/legacy from here down: the adapter never sets content_evidence_status
-  // for a v1 entry, so `status === undefined` IS the v1 branch.
-  const hasKey = !!e && typeof e === 'object' && e.reviewed_state !== undefined;
-  if (!hasKey) return 'absent'; // genuinely absent — the only v1 grandfather
   // An ARRAY is excluded deliberately: `typeof [] === 'object' && [] !== null`
   // is true, so the obvious object-guard admits `reviewed_state: []` as a real
   // (empty) evidence record — the exact shape a tamper reaches for after `null`
   // is refused. A v2-derived entry always arrives as a plain object here, so
   // this narrowing costs nothing on that path.
-  const usableObject = typeof e.reviewed_state === 'object' && e.reviewed_state !== null && !Array.isArray(e.reviewed_state);
-  return usableObject ? 'present' : 'inconsistent';
+  const hasKey = !!e && typeof e === 'object' && e.reviewed_state !== undefined;
+  const rs = hasKey && isEvidenceObject(e.reviewed_state) ? e.reviewed_state : null;
+  // VERSION-INDEPENDENT, AND FIRST: the blob map is PRESENT but is not a map.
+  // Checked ahead of both branches below because it is one defect wearing two
+  // schema costumes (see the class list above), and ahead of 'unavailable'
+  // because a receipt that says the hashing never ran while carrying an unusable
+  // blobs value contradicts itself — the same reasoning the verdict already
+  // applies to an 'unavailable' receipt carrying real shas.
+  if (rs && rs.blobs !== undefined && !isEvidenceObject(rs.blobs)) return 'inconsistent';
+  if (status === 'unavailable') return 'unavailable';
+  if (status !== undefined) return 'present';
+  // v1/legacy from here down: the adapter never sets content_evidence_status
+  // for a v1 entry, so `status === undefined` IS the v1 branch.
+  if (!hasKey) return 'absent'; // genuinely absent — the only v1 grandfather
+  return rs ? 'present' : 'inconsistent';
 }
+
+// isEvidenceObject — the shape the evidence CONTAINER (`reviewed_state`) and the
+// blob MAP inside it must both have before anything they claim can be read — is
+// imported from the read adapter, which applies the identical test to the v2
+// `content_evidence` container one level up. Three levels, one predicate: see its
+// definition in scripts/hooks/lib/review-ledger-entry.mjs for why a per-level
+// copy is what let each level be bypassed separately.
 
 /** The human-readable SHAPE of a present-but-unreadable reviewed_state, for the
  *  'inconsistent' disclosure. Names the shape AND shows the value (bounded),
@@ -2756,6 +2795,29 @@ function evidenceShapeLabel(v) {
   const kind = v === null ? 'null' : Array.isArray(v) ? 'an array' : `a ${typeof v}`;
   const shown = safeLabel(v);
   return `${kind} (${shown.length > 120 ? `${shown.slice(0, 120)}…` : shown})`;
+}
+
+/** WHICH LEVEL of a receipt's evidence is unreadable, for the 'inconsistent'
+ *  disclosure (board f55ab3e9). The class has two members and they need
+ *  different remedies: an unreadable CONTAINER (`reviewed_state` is null/an
+ *  array/a string) means the receipt has no evidence record at all, while an
+ *  unreadable BLOB MAP inside a proper container means the record exists and its
+ *  contents were replaced — EXCEPT for a v2 entry whose whole content_evidence
+ *  container was junk: the adapter's raw pass-through routes that shape into the
+ *  blob-map arm too, so there the "record" never existed at all and the remedy
+ *  is re-promotion, not un-replacing contents (review finding, 2026-08-31). The
+ *  emitted string stays accurate either way (it prints the actual value).
+ *  The blob-map case is reported first because
+ *  receiptEvidenceClass tests it first, so the two always agree about what was
+ *  found. A v2 entry reaches the blob-map arm through the read adapter's raw
+ *  pass-through of content_evidence.blobs, so one wording serves both schema
+ *  versions. */
+function inconsistentEvidenceDetail(e) {
+  const rs = e && isEvidenceObject(e.reviewed_state) ? e.reviewed_state : null;
+  if (rs && rs.blobs !== undefined && !isEvidenceObject(rs.blobs)) {
+    return `the receipt's recorded content evidence is ${evidenceShapeLabel(rs.blobs)}, not a map of recorded blob shas`;
+  }
+  return `the receipt's reviewed_state is ${evidenceShapeLabel(e && e.reviewed_state)}, not a map of recorded blob shas`;
 }
 
 /** THE VERDICT. Never throws in any path it controls — the caller's degraded
@@ -2894,13 +2956,15 @@ function reviewedBytesVerdict(entries, touchedPaths, readBlobs, progress) {
         // written — not for evidence that was written and then broken.
         files.push(`${x} (INCONSISTENT EVIDENCE — the receipt records ${safeLabel(raw)} for this path, which is not a usable blob sha)`);
       } else if (cls === 'inconsistent') {
-        // The reviewed_state KEY is present but unreadable (null/array/string).
-        // Same family as the junk-sha case one level down, disclosed with the
-        // shape actually found so a producer bug is distinguishable from a
-        // tamper (see receiptEvidenceClass).
-        files.push(
-          `${x} (INCONSISTENT EVIDENCE — the receipt's reviewed_state is ${evidenceShapeLabel(e && e.reviewed_state)}, not a map of recorded blob shas, so nothing it claims about this path can be read)`
-        );
+        // The receipt's evidence is present but unreadable — either the
+        // reviewed_state KEY itself (null/array/string) or, one level down, the
+        // `blobs` value inside a proper container (board f55ab3e9). Same family
+        // as the junk-sha case one level further down, and disclosed with the
+        // LEVEL and the SHAPE actually found: "not an object" alone does not
+        // tell a reader whether they are looking at a tamper, a producer bug or
+        // a hand-edited fixture, and naming the wrong level would send them to
+        // the wrong one of the three.
+        files.push(`${x} (INCONSISTENT EVIDENCE — ${inconsistentEvidenceDetail(e)}, so nothing it claims about this path can be read)`);
       } else if (cls === 'unavailable' || receiptAdmitsPartial(e)) {
         // The receipt itself says its binding is incomplete, and the file this
         // commit stages is one of the ones it never bound. Evidence that does
