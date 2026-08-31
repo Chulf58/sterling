@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
-import { normalizeLedgerEntry } from './lib/review-ledger-entry.mjs';
+import { normalizeLedgerEntry, isAuthenticatedDischarge } from './lib/review-ledger-entry.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
@@ -301,6 +301,28 @@ function reviewReceiptLines(cwd) {
     // though it recorded all of that. Legacy (v1) entries pass through
     // byte-identical.
     .map(normalizeLedgerEntry)
+    // DISCHARGED RECEIPTS ARE NOT SURVIVORS (decision 57984926 §3, campaign
+    // slice S2b-3: "H1, spending, amend spending, fallback selection and counts
+    // all ignore discharged entries"). A receipt discharged by
+    // scripts/review-ledger.mjs has already been adjudicated — explicitly ruled
+    // unspendable, with an accountable reason recorded IN the entry, and
+    // deliberately PRESERVED rather than deleted. Reporting it at every
+    // subsequent SessionStart would re-open a settled decision forever and
+    // would tell the conductor to "judge each one and remove it by hand" for a
+    // receipt that has already been judged.
+    //
+    // ONLY AN AUTHENTICATED DISCHARGE STOPS THE REPORT (Codex review MED, S2b-3
+    // fix round). This was `e.status === 'discharged'` — a one-field test, on
+    // the surface whose entire job is to make un-consumed receipts VISIBLE, so
+    // one stray string was enough to hide a receipt from the only mechanism that
+    // reports it. The genuine verb writes the PAIR {status:'discharged',
+    // disposition:{...}} on a complete v2 entry (dischargeMarkerClass in the
+    // shared adapter); anything short of that — a v1 entry with a stray status
+    // (v1 has no lifecycle at all, §3's "missing status = active" read to its
+    // conclusion), a deficient v2, a discharge claim with no disposition — is
+    // STILL REPORTED here, which is the right direction for a disclosure
+    // surface: a malformed marker is exactly what a human needs told.
+    .filter((e) => !isAuthenticatedDischarge(e))
     .map((e) => {
       const startMs = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
       // PREFER THE COMPLETION INSTANT, same bounded logic as commit-reviewed's

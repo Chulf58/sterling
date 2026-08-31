@@ -124,16 +124,30 @@
 //     nothing"); a receipt whose files intersect nothing staged is DEFERRED —
 //     disclosed by name, NOT stamped, NOT consumed, NOT deleted, and left for
 //     the commit that stages its territory, exactly like a foreign receipt.
-//     FALLBACK: if NO eligible receipt matches the staged set there is nothing
-//     to select on, so the rule does not apply and every eligible receipt is
-//     stamped exactly as before — because H22's file attribution is measured
-//     unreliable (board 09e03d76; research finding 289cd172: negated paths are
-//     recorded, positively-asserted ones can be dropped, globs register
-//     nothing), and refusing on it would brick this CLI and train
-//     --waive-reviews. NET INVARIANT: the stamped set is always a SUBSET of the
-//     old behavior's and never empty while any eligible receipt exists, so this
-//     rule can only remove a FALSE attestation — it can never add a trailer,
-//     invent evidence, or turn a commit that succeeds today into a refusal.
+//     FALLBACK, NARROWED (decision 57984926 §3): if NO eligible receipt matches
+//     the staged set, a receipt whose territory came from FREE-PROSE or LEGACY
+//     attribution is still stamped exactly as before — that attribution is
+//     measured unreliable (board 09e03d76; research finding 289cd172: negated
+//     paths are recorded, positively-asserted ones can be dropped, globs
+//     register nothing), and refusing on it would brick this CLI and train
+//     --waive-reviews. A receipt with STRUCTURED territory (territory.source /
+//     files_source 'review-territory' AND a non-empty files[]) does NOT fall
+//     back: its paths are the reviewer's own declared scope, so a non-overlap is
+//     evidence the review never saw this diff. It DEFERS instead, and if that
+//     leaves NOTHING to stamp the commit REFUSES (see the zero-stamp guard).
+//     NET INVARIANT: the stamped set is always a SUBSET of the pre-file-scoping
+//     behavior's, so this rule can only ever remove a FALSE attestation — never
+//     add a trailer and never invent evidence. It CAN now refuse a commit that
+//     an earlier version would have carried on a structured false attestation,
+//     which is the point of the narrowing.
+//   - DISCHARGED RECEIPTS ARE INVISIBLE HERE (decision 57984926 §3): a v2 entry
+//     whose `status` is 'discharged' has been explicitly ruled unspendable by
+//     `node scripts/review-ledger.mjs discharge` while being PRESERVED in the
+//     ledger. It is excluded from validity, eligibility, the file-scoped
+//     partition, every count and every advisory — and, because the consume step
+//     removes only entries it actually STAMPED, it survives the consume write
+//     untouched. A missing `status` (every v1 entry, and any v2 entry promoted
+//     before the field existed) reads as ACTIVE, never as discharged.
 //   - >=1 valid entry but NOTHING STAGED: refuse (exit 1), do NOT consume
 //     the ledger (P5 — never mint an empty commit that silently eats real
 //     review evidence for nothing).
@@ -157,7 +171,12 @@ import { arg, fail } from './lib/project.mjs';
 // of this file keeps reading the same flat field names it always has
 // (agent_type/files/at/session_id/branch/base_sha/reviewed_state) regardless
 // of which shape produced them — v1 entries pass through byte-identical.
-import { normalizeLedgerEntry } from './hooks/lib/review-ledger-entry.mjs';
+// dischargeMarkerClass rides the SAME adapter (S2b-3 fix round): the discharge
+// marker is only honored as the PAIR {status:'discharged', disposition:<object>}
+// on a structurally complete v2 entry, and that verdict is defined once, beside
+// the shape it reads, rather than restated in each of this file's two flows and
+// again in H1. See isDischargedEntry / skipForDischargeMarker below.
+import { normalizeLedgerEntry, dischargeMarkerClass } from './hooks/lib/review-ledger-entry.mjs';
 
 const target = process.cwd();
 
@@ -345,8 +364,30 @@ if (ledger.length === 0) {
 // shape are eligible (VALID_AGENT_TYPE is declared near the top of the file,
 // shared with --target-sha amend mode). A rejected entry is warned about and
 // LEFT in the ledger un-consumed — never silently dropped.
+// DISCHARGED = EXPLICITLY UNSPENDABLE, EXPLICITLY PRESERVED (decision 57984926
+// §3, campaign slice S2b-3). scripts/review-ledger.mjs discharge sets
+// status:'discharged' + a disposition on a receipt that can never legitimately
+// be spent (foreign session, foreign branch, conclusively no-live territory)
+// WITHOUT deleting it — the evidence and the accountable reason both survive.
+// Every spending surface must therefore ignore it: it is never valid, never
+// eligible, never counted, never stamped, and (because the consume step removes
+// only entries it actually stamped) never consumed. Read STRICTLY: only the
+// exact string 'discharged' withholds, so a missing status — every v1 entry, and
+// any v2 entry promoted before the field existed — reads as ACTIVE, which is the
+// compatibility rule §3 states ("missing status = active").
+// isDischargedEntry is a HOISTED function declaration near the bottom of this
+// file, not a const here: --target-sha amend mode runs BEFORE this flow's body
+// and would hit the temporal dead zone of any const declared in it.
 const validEntries = [];
 for (const e of ledger) {
+  // Checked FIRST. An AUTHENTICATED discharge is skipped SILENTLY: it was
+  // already adjudicated and disclosed at discharge time, with its reason
+  // recorded in the ledger, and warning about it on every subsequent commit
+  // would be noise about a decision already made — §3 says these surfaces IGNORE
+  // discharged entries, not re-report them. A v2 entry CLAIMING a discharge
+  // without a usable disposition is skipped too, but LOUDLY (see
+  // skipForDischargeMarker).
+  if (skipForDischargeMarker(e)) continue;
   // MED-2 (decision 57984926 fix round, pin S13): a v2-CLAIMING entry missing
   // entry_id/started_at/identity is structurally deficient — normalizeLedgerEntry
   // marks it `v2_deficient` rather than mapping it into a spendable-looking
@@ -565,26 +606,43 @@ const stagedFiles = new Set(
 //                  deleted; disclosed by name and left for the commit that
 //                  stages its territory. Same posture as a foreign receipt.
 //
-// THE FALLBACK IS THE WHOLE SAFETY ARGUMENT. When NO eligible receipt matches
-// the staged set, no selection is possible, so this rule does not fire at all
-// and every eligible receipt is stamped exactly as before. That is not a
-// loophole, it is the measured reality: research finding
+// THE FALLBACK IS THE SAFETY ARGUMENT FOR *UNRELIABLE* ATTRIBUTION, AND ONLY
+// THERE (NARROWED by decision 57984926 §3, campaign slice S2b-3). When no
+// eligible receipt matches the staged set, a receipt whose territory came from
+// H22's FREE-PROSE extractor still falls back and is stamped exactly as before,
+// because that attribution is measured unreliable: research finding
 // h26-registers-do-not-touch-paths-as-held-territory (289cd172, 2026-08-26)
 // establishes that files[] is written by h22-dispatch-register.mjs with NO
 // negation suppression and NO glob handling, so a receipt can both carry a
 // path its brief forbade and LOSE a path the brief positively asserted
 // ("do not edit tests/x, instead fix src/auth.mjs" drops src/auth.mjs). A
-// zero-match ledger is therefore far more likely to mean the attribution
-// failed than that every reviewer looked at other work — and board 09e03d76
-// measured exactly that, every receipt mis-attributed. Refusing there would
-// brick the CLI and train --waive-reviews, inverting this gate's purpose.
+// zero-match ledger from free-prose extraction is therefore far more likely to
+// mean the attribution failed than that every reviewer looked at other work —
+// and board 09e03d76 measured exactly that. Refusing there would brick the CLI
+// and train --waive-reviews, inverting this gate's purpose.
+//
+// STRUCTURED TERRITORY IS DIFFERENT, AND NO LONGER FALLS BACK. A receipt whose
+// territory.source is 'review-territory' (decision 8f137474 — the reviewer's
+// own declared review scope, nested in v2 as territory.source and surfaced flat
+// by the read adapter as files_source) records paths that were NOT guessed from
+// prose. For such a receipt a non-overlap is EVIDENCE that the review did not
+// look at this diff, not evidence that the extractor failed — so the no-match
+// stamping fallback is REMOVED for it: it DEFERS (disclosed, un-stamped,
+// un-consumed, never deleted) even when nothing else covers the diff. An EMPTY
+// files[] is never structured for this purpose, whatever the source says: it is
+// the UNATTRIBUTED class below, always stamped (there is nothing to have
+// matched).
+//
+// THAT MAKES THE ZERO-STAMP REFUSAL BELOW REAL AND EXPECTED, not an internal
+// scream. If every eligible receipt defers on structured territory, nothing is
+// stamped and the commit REFUSES — see that guard for the message and remedy.
 //
 // INVARIANT THIS PRESERVES (the reason this is safe on the merge-gate
-// surface): the stamped set is always a SUBSET of what today's code stamps,
-// and is never empty while eligibleEntries is non-empty (the fallback
-// guarantees it). So this rule can only ever REMOVE a trailer that would have
-// been a false attestation — it can never add one, never invent evidence, and
-// never turn a commit that succeeds today into a refusal.
+// surface): the stamped set is always a SUBSET of what the pre-file-scoping
+// code stamped. So this rule can only ever REMOVE a trailer that would have
+// been a false attestation — it can never add one and never invent evidence.
+// What it CAN now do, deliberately, is turn a commit that would have been
+// carried by a false attestation into a refusal (decision 57984926 §3).
 //
 // KNOWN, ACCEPTED LIMITATION (review, acknowledged no-action): a receipt whose
 // files[] records a path git will never stage again — a pre-rename spelling, a
@@ -595,42 +653,85 @@ const stagedFiles = new Set(
 // a receipt by hand once judged; do NOT relax the match to make it spendable.
 const usableFiles = (e) => (Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : []);
 const touchesStaged = (e) => usableFiles(e).some((f) => stagedFiles.has(normalizePath(f)));
+// STRUCTURED TERRITORY (decision 57984926 §3). BOTH spellings of the field mean
+// the same thing and are treated identically: v2's nested territory.source (via
+// the read adapter) and the FLAT pre-v2 `files_source` shipped by decision
+// 8f137474 — a receipt whose paths came from the reviewer's declared review
+// scope rather than from prose extraction. NON-EMPTY files[] is part of the
+// definition, not an extra condition: an empty files[] is the UNATTRIBUTED
+// class (always stamped), never a non-match, whatever the source records.
+// isStructuredTerritoryEntry is a HOISTED function declaration near the bottom
+// of this file, shared verbatim with --target-sha amend mode (which runs before
+// this flow's body and so cannot reach a const declared inside it).
+const isStructuredTerritory = (e) => isStructuredTerritoryEntry(e);
 // Attributed = carries territory that CAN be judged. Scoping only applies when
 // at least one attributed receipt actually matches this diff.
 const fileScopingApplies = eligibleEntries.some((e) => usableFiles(e).length > 0 && touchesStaged(e));
 const stampEntries = [];
 const deferredEntries = [];
 for (const e of eligibleEntries) {
-  if (!fileScopingApplies || usableFiles(e).length === 0 || touchesStaged(e)) stampEntries.push(e);
-  else deferredEntries.push(e);
-}
-// STRUCTURALLY UNREACHABLE, DELIBERATELY NOT SILENT (P5). The partition above
-// guarantees a non-empty stamp set: fileScopingApplies is true only when some
-// entry both has usable files AND touches the staged set (so that entry is
-// stamped), and when it is false every eligible entry is stamped — and
-// eligibleEntries was already proven non-empty. If a future edit breaks that
-// reasoning, the failure would otherwise be SILENT AND WORST-CASE: zero trailer
-// lines, a commit that lands anyway, and a trailer verification that compares
-// [] against [] and PASSES — i.e. an unreviewed-looking commit reported as a
-// success, with the ledger consumed. Refuse loudly instead, before committing.
-if (stampEntries.length === 0) {
-  fail(
-    `commit-reviewed: INTERNAL INVARIANT VIOLATED — file-scoped stamping selected ZERO receipts out of ${eligibleEntries.length} eligible one(s), which the ` +
-      `partition is constructed to make impossible. Refusing rather than creating a commit with no Reviewed-By-Agent trailer at all (which would land, ` +
-      `verify vacuously, and consume the ledger). Nothing is stamped and nothing is consumed — report this, and commit with bare 'git commit' plus the ` +
-      `merge gate if you need to proceed now.`
-  );
+  if (usableFiles(e).length === 0 || touchesStaged(e)) {
+    stampEntries.push(e); // UNATTRIBUTED or MATCHED — unchanged in both directions
+  } else if (isStructuredTerritory(e)) {
+    deferredEntries.push(e); // NARROWED (§3): structured territory never falls back
+  } else if (!fileScopingApplies) {
+    stampEntries.push(e); // the SURVIVING fallback — free-prose / legacy attribution only
+  } else {
+    deferredEntries.push(e); // DEFERRED: something else covers this diff
+  }
 }
 // Collected as well as printed, for the same reason foreign disclosures are:
 // what was NOT spent is exactly what a reader of this CLI's report needs.
+// Printed BEFORE the zero-stamp refusal below, so the receipts named in that
+// refusal are already on stderr with their full territory when it fires.
 const deferredDisclosures = deferredEntries.map(
   (e) =>
     `commit-reviewed: DEFERRED RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) reviewed ` +
-    `[${usableFiles(e).join(', ')}], none of which this commit stages, while ${stampEntries.length} other receipt(s) DO cover this diff. Stamping it here ` +
-    `would claim a review of files absent from the diff (a false attestation on the merge gate's audit surface), and consuming it would strand the slice it ` +
-    `really reviewed with no evidence at all (board 51d93c34). It stays in the ledger untouched — commit the files it names and it will be spent there.`
+    `[${usableFiles(e).join(', ')}], none of which this commit stages` +
+    (stampEntries.length > 0
+      ? `, while ${stampEntries.length} other receipt(s) DO cover this diff. `
+      : `, and NO other receipt covers this diff either — its territory is STRUCTURED (territory.source 'review-territory'), so the no-match stamping ` +
+        `fallback does NOT apply to it (decision 57984926 §3); that fallback survives only for free-prose/legacy attribution. `) +
+    `Stamping it here would claim a review of files absent from the diff (a false attestation on the merge gate's audit surface), and consuming it would ` +
+    `strand the slice it really reviewed with no evidence at all (board 51d93c34). It stays in the ledger untouched — commit the files it names and it ` +
+    `will be spent there.`
 );
 for (const line of deferredDisclosures) console.error(line);
+
+// A REAL, EXPECTED REFUSAL (decision 57984926 §3) — it used to be an internal
+// invariant scream, and it is not one any more. Since the no-match stamping
+// fallback was REMOVED for structured territory, "every eligible receipt
+// deferred" is a reachable, meaningful state: every receipt that could be spent
+// declares territory this commit does not stage, so stamping any of them would
+// be a false attestation and the commit must refuse instead.
+//
+// THE PARTITION STILL GUARANTEES WHICH SHAPE REACHES HERE. A receipt deferred
+// by the LAST branch above requires fileScopingApplies, which requires some
+// entry that both has usable files and touches the staged set — and that entry
+// is stamped. So a zero stamp set means every eligible receipt was deferred by
+// the STRUCTURED branch, which is what this message reports. (The fallback
+// wording covers a future partition change rather than a state reachable today.)
+//
+// The old reason for refusing rather than committing silently still holds and
+// is why this is a refusal and not a warning: a commit with zero trailer lines
+// would land, verify VACUOUSLY (comparing [] against []) and consume the
+// ledger — an unreviewed commit reported as a success.
+if (stampEntries.length === 0) {
+  const structuredDeferred = deferredEntries.filter(isStructuredTerritory);
+  const named = (structuredDeferred.length > 0 ? structuredDeferred : deferredEntries)
+    .map((e) => `${e.agent_type} reviewed [${usableFiles(e).join(', ')}]`)
+    .join('; ');
+  fail(
+    `commit-reviewed: NO REVIEW RECEIPT COVERS THIS DIFF — all ${eligibleEntries.length} spendable receipt(s) are DEFERRED because they declare STRUCTURED ` +
+      `territory (territory.source 'review-territory') that this commit does not stage: ${named}. Structured territory is recorded from the reviewer's own ` +
+      `declared review scope, not from the free-prose extractor, so a non-overlap is EVIDENCE that the review never looked at this diff — decision 57984926 ` +
+      `§3 removed the no-match stamping fallback for exactly this shape (it survives only for free-prose/legacy attribution, research finding 289cd172). ` +
+      `Nothing is stamped and NOTHING IS CONSUMED: every receipt named above stays in the ledger, byte-identical, for the commit that stages its territory. ` +
+      `REMEDY: stage the files a receipt names and commit those; or dispatch a reviewer for THIS diff; or commit bare with 'git commit' and answer at the ` +
+      `merge gate. If a receipt can never be spent (its territory is gone), discharge it explicitly with 'node scripts/review-ledger.mjs discharge' — never ` +
+      `by deleting the evidence.`
+  );
+}
 
 // eligibleEntries, not validEntries: a foreign receipt is not being spent on
 // this commit, so warning that its sabotage does not target this diff would be
@@ -742,7 +843,10 @@ try {
       // when some other receipt DID match, a non-overlapping one is DEFERRED
       // rather than stamped, and is disclosed there instead. Reaching this line
       // therefore means NO eligible receipt matched the diff at all, which is
-      // the state where the attribution itself is the prime suspect.
+      // the state where the attribution itself is the prime suspect — and since
+      // decision 57984926 §3 it also means this receipt's territory is
+      // FREE-PROSE or LEGACY, because a structured non-match defers instead of
+      // falling back. That is exactly the population this advisory is about.
       warnSpend(
         `commit-reviewed: RECEIPT FILES DO NOT OVERLAP THIS DIFF — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) names [${entryFiles.join(', ')}], ` +
           `none of which this commit stages, AND no other eligible receipt covers this diff either — so file-scoped stamping (board 51d93c34) has nothing ` +
@@ -1613,8 +1717,43 @@ try {
       // (v1 or v2, byte-for-byte as re-read from disk) is what actually
       // survives into `survivors`, so a v2 entry's true on-disk shape is
       // never rewritten by this consume step.
-      const i = unclaimedStamped.findIndex((s) => sameIdentity(normalizeLedgerEntry(e), s));
+      const normFresh = normalizeLedgerEntry(e);
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(normFresh, s));
       if (i === -1) return true;
+      // DISCHARGED MID-FLIGHT — PRESERVATION WINS (Codex review HIGH, fix round
+      // 2026-08-31). This whole block exists because the ledger can CHANGE while
+      // `git commit` runs its hooks; a discharge landing in that window is
+      // exactly such a change, and it is the one that must not be papered over.
+      // The entry was ACTIVE when this invocation read and stamped it, and it is
+      // DISCHARGED now — i.e. a conductor explicitly ruled it unspendable and
+      // PRESERVED it, and §3's whole promise is that a discharged entry is never
+      // deleted ("deletion is never silent"). Consuming it here would delete
+      // preserved evidence, and the accountable disposition with it, milliseconds
+      // after it was recorded.
+      // THE STAMPED OCCURRENCE IS STILL CLAIMED. Leaving it unclaimed would let
+      // the NEXT matching fresh entry — a genuinely distinct receipt sharing this
+      // identity — be spliced out in its place, turning a preservation into the
+      // silent destruction of a different receipt. So the claim is consumed and
+      // only the SPLICE-OUT is skipped.
+      // NOT the authenticated test: this is the SAFE direction (retain), and an
+      // entry claiming a discharge is exactly the shape that must not be
+      // destroyed while its claim is unjudged. The stamped side is checked too,
+      // so a v1 pass-through entry carrying a stray status:'discharged' — which
+      // skipForDischargeMarker deliberately treats as an ordinary ACTIVE v1
+      // receipt — was 'discharged' at stamp time as well, is not a mid-flight
+      // discharge, and consumes normally rather than leaking back into the ledger
+      // to be spent twice.
+      if (normFresh && normFresh.status === 'discharged' && unclaimedStamped[i].status !== 'discharged') {
+        unclaimedStamped.splice(i, 1);
+        console.error(
+          `commit-reviewed: RECEIPT DISCHARGED MID-COMMIT — ${JSON.stringify(normFresh.agent_type)}'s receipt (entry_id ${JSON.stringify(ledgerEntryId(normFresh))}) ` +
+            `was ACTIVE when this commit stamped it and is DISCHARGED now, so it was discharged while 'git commit' ran. The trailer it earned is already in ` +
+            `the commit, but the entry is PRESERVED in the ledger rather than consumed: a discharged entry is never deleted (decision 57984926 §3), and ` +
+            `deleting one milliseconds after its accountable disposition was recorded would destroy exactly the evidence the discharge verb exists to keep. ` +
+            `It will not be spent again — every spending surface ignores a discharged entry.`
+        );
+        return true;
+      }
       unclaimedStamped.splice(i, 1);
       return false; // consumes exactly one stamped occurrence
     });
@@ -1803,6 +1942,12 @@ function runTargetShaMode(targetShaArg) {
   ledger = ledger.map(normalizeLedgerEntry);
   const validEntries = [];
   for (const e of ledger) {
+    // DISCHARGED — same exclusion as the -m flow, through the same helper and
+    // for the same reason (decision 57984926 §3: "spending, amend spending,
+    // fallback selection and counts all ignore discharged entries"). First, and
+    // silent only for an AUTHENTICATED marker; an unauthenticated one is
+    // withheld and disclosed identically on this flow.
+    if (skipForDischargeMarker(e)) continue;
     // MED-2 — same structural-completeness check as the -m flow (see there).
     if (e && e.v2_deficient) {
       console.error(
@@ -1866,26 +2011,47 @@ function runTargetShaMode(targetShaArg) {
   const fileScopingApplies = baseMatchingEntries.some((e) => usableFiles(e).length > 0 && touchesTarget(e));
   const stampEntries = [];
   const deferredEntries = [];
+  // IDENTICAL PARTITION to the -m flow, including the STRUCTURED-TERRITORY
+  // NARROWING (decision 57984926 §3) — the only difference is that "the diff"
+  // is the target commit's own diff instead of the staged set. An
+  // `if (!targetSha)` carve-out would leave post-hoc amends able to stamp a
+  // structured receipt onto a commit it never reviewed, which is precisely the
+  // false attestation the narrowing removes.
   for (const e of baseMatchingEntries) {
-    if (!fileScopingApplies || usableFiles(e).length === 0 || touchesTarget(e)) stampEntries.push(e);
+    if (usableFiles(e).length === 0 || touchesTarget(e)) stampEntries.push(e);
+    else if (isStructuredTerritoryEntry(e)) deferredEntries.push(e);
+    else if (!fileScopingApplies) stampEntries.push(e);
     else deferredEntries.push(e);
-  }
-  if (stampEntries.length === 0) {
-    // Structurally unreachable (same invariant as the -m flow's partition),
-    // deliberately not silent — see that flow's identical guard for why.
-    fail(
-      `commit-reviewed: INTERNAL INVARIANT VIOLATED — file-scoped stamping (target-sha mode) selected ZERO receipts out of ${baseMatchingEntries.length} ` +
-        `base_sha-matching one(s), which the partition is constructed to make impossible. Refusing rather than amending with no Reviewed-By-Agent trailer ` +
-        `at all. Nothing amended, nothing consumed — report this.`
-    );
   }
   const deferredDisclosures = deferredEntries.map(
     (e) =>
       `commit-reviewed: DEFERRED RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) reviewed ` +
-      `[${usableFiles(e).join(', ')}], none of which the target commit ${resolvedSha} actually changed, while ${stampEntries.length} other receipt(s) ` +
-      `DO cover it. It stays in the ledger untouched — amend the commit that stages its territory and it will be spent there.`
+      `[${usableFiles(e).join(', ')}], none of which the target commit ${resolvedSha} actually changed` +
+      (stampEntries.length > 0
+        ? `, while ${stampEntries.length} other receipt(s) DO cover it. `
+        : `, and NO other receipt covers it either — its territory is STRUCTURED (territory.source 'review-territory'), so the no-match stamping fallback ` +
+          `does NOT apply to it (decision 57984926 §3). `) +
+      `It stays in the ledger untouched — amend the commit that stages its territory and it will be spent there.`
   );
   for (const line of deferredDisclosures) console.error(line);
+  // A REAL, EXPECTED REFUSAL since the structured narrowing (decision 57984926
+  // §3) — see the -m flow's identical guard for the full reasoning. Reachable
+  // exactly when every base_sha-matching receipt declares structured territory
+  // the target commit does not change.
+  if (stampEntries.length === 0) {
+    const structuredDeferred = deferredEntries.filter(isStructuredTerritoryEntry);
+    const named = (structuredDeferred.length > 0 ? structuredDeferred : deferredEntries)
+      .map((e) => `${e.agent_type} reviewed [${usableFiles(e).join(', ')}]`)
+      .join('; ');
+    fail(
+      `commit-reviewed: NO REVIEW RECEIPT COVERS THE TARGET COMMIT — all ${baseMatchingEntries.length} base_sha-matching receipt(s) are DEFERRED because ` +
+        `they declare STRUCTURED territory (territory.source 'review-territory') that ${resolvedSha} does not change: ${named}. Structured territory is the ` +
+        `reviewer's own declared review scope, so a non-overlap is EVIDENCE the review never looked at this commit — decision 57984926 §3 removed the ` +
+        `no-match stamping fallback for exactly this shape. Nothing amended and NOTHING CONSUMED: every receipt named above stays in the ledger, ` +
+        `byte-identical. REMEDY: amend the commit that carries its territory; or dispatch a reviewer for THIS commit; or answer at the merge gate. If a ` +
+        `receipt can never be spent, discharge it explicitly with 'node scripts/review-ledger.mjs discharge' — never by deleting the evidence.`
+    );
+  }
 
   // ---------------------------------------------------------------------
   // G4b: REVIEWED-BYTES ENFORCEMENT, MEASURED AGAINST THE TARGET COMMIT'S
@@ -2823,6 +2989,78 @@ function ledgerEntryId(e) {
   return e && typeof e.entry_id === 'string' && e.entry_id !== '' ? e.entry_id : null;
 }
 
+/** DISCHARGED (decision 57984926 §3) — an entry explicitly ruled unspendable by
+ *  `scripts/review-ledger.mjs discharge` and PRESERVED in place. Both flows
+ *  exclude these before validation, so they are never valid, eligible, counted,
+ *  stamped or consumed. A missing status (every v1 entry) is ACTIVE, per §3's
+ *  compatibility rule, and an unrecognized status is likewise not a discharge.
+ *
+ *  AUTHENTICATED, NOT MERELY CLAIMED (Codex review MED, fix round 2026-08-31).
+ *  This used to be `e.status === 'discharged'` and nothing else — a ONE-FIELD
+ *  test for the one state that makes real reviewer evidence invisible to every
+ *  spending surface, satisfiable by a hand-edited ledger, a truncated write, or
+ *  a v1 entry that never had a lifecycle at all. The genuine verb always writes
+ *  the PAIR {status:'discharged', disposition:{...}} onto a complete v2 entry,
+ *  so the pair is what is honored; the classes and their reasoning live in the
+ *  shared adapter (dischargeMarkerClass). A hoisted `function`, not a const,
+ *  because --target-sha amend mode runs before the -m flow's body and cannot
+ *  reach that flow's consts. */
+function isDischargedEntry(e) {
+  return dischargeMarkerClass(e) === 'authenticated';
+}
+
+/** The exclusion BOTH flows apply, at the top of their validity loop: true means
+ *  "this entry is not spendable on the discharge axis — skip it". Returns false
+ *  for everything else, so a 'v2-deficient' entry still reaches (and is
+ *  disclosed by) the deficiency branch and a v1 pass-through still validates as
+ *  an ordinary active receipt.
+ *
+ *  FAIL TOWARD NOT-SPENDING, BUT NEVER SILENTLY (decision 57984926 §3; fix round
+ *  2026-08-31). A v2 entry claiming 'discharged' with NO usable disposition is
+ *  MALFORMED, and the two readings of it disagree: honor it and a one-field
+ *  forgery buries evidence; ignore it and a genuine discharge whose disposition
+ *  was lost gets spent as though it had never been adjudicated. Neither reading
+ *  is safe enough to take silently, so this takes the conservative half —
+ *  the receipt is NOT spent — and DISCLOSES the anomaly by name, because the
+ *  malformed marker is the thing a human has to fix (re-discharge it properly,
+ *  or repair the entry). The one class that is skipped in SILENCE is the
+ *  authenticated one: it was already adjudicated, with its reason recorded in
+ *  the entry, and re-reporting it at every commit would be noise about a settled
+ *  decision. */
+function skipForDischargeMarker(e) {
+  const cls = dischargeMarkerClass(e);
+  if (cls === 'authenticated') return true;
+  if (cls === 'unauthenticated') {
+    console.error(
+      `commit-reviewed: UNAUTHENTICATED DISCHARGE MARKER — ${JSON.stringify(e && e.agent_type)}'s v2 ledger entry ` +
+        `(entry_id ${JSON.stringify(ledgerEntryId(e))}) carries status:'discharged' but NO usable disposition object, which no real discharge ever ` +
+        `writes (decision 57984926 §3: the verb records disposition{reason, at, head_sha, classifier_version, class, facts} in the same write). It is NOT ` +
+        `stamped and NOT consumed — a malformed lifecycle marker is not evidence that the receipt is spendable — and it is NOT silently skipped either: ` +
+        `either re-discharge it properly with 'node scripts/review-ledger.mjs discharge', or repair the entry so it can be spent. Left un-consumed in the ledger.`
+    );
+    return true;
+  }
+  return false;
+}
+
+/** Repo-path-shaped entries of a receipt's recorded territory — the one
+ *  definition both flows' local `usableFiles` helpers restate. */
+function usableTerritoryFiles(e) {
+  return e && Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : [];
+}
+
+/** STRUCTURED TERRITORY (decision 57984926 §3) — the receipt's paths came from
+ *  the reviewer's own declared review scope (decision 8f137474), not from
+ *  free-prose extraction. BOTH spellings count and are treated identically:
+ *  v2's nested `territory.source` (surfaced flat by the read adapter) and the
+ *  pre-v2 FLAT `files_source`. A NON-EMPTY files[] is part of the definition:
+ *  an empty files[] is the UNATTRIBUTED class (always stamped), never a
+ *  non-match, whatever source it records. Such a receipt does NOT fall back
+ *  when it matches nothing — it defers. */
+function isStructuredTerritoryEntry(e) {
+  return !!e && e.files_source === 'review-territory' && usableTerritoryFiles(e).length > 0;
+}
+
 /** Lock-guarded read-modify-write consume, shared shape with the -m flow's
  *  inline consume block but self-contained (own ledgerFilePath/sterlingDir
  *  args) so --target-sha amend mode never depends on that flow's locals. */
@@ -2871,8 +3109,22 @@ function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries) {
       if (!e || typeof e !== 'object') return true;
       // Normalized only for identity matching; the RAW re-read entry is what
       // survives, so a v2 entry's on-disk shape is never rewritten here.
-      const i = unclaimedStamped.findIndex((s) => sameIdentity(normalizeLedgerEntry(e), s));
+      const normFresh = normalizeLedgerEntry(e);
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(normFresh, s));
       if (i === -1) return true;
+      // DISCHARGED MID-FLIGHT — PRESERVATION WINS, and the stamped occurrence is
+      // still CLAIMED so no other entry is spliced in its place. Identical rule
+      // and identical reasoning to the -m flow's consume block (see there for
+      // the full argument, including why the stamped side is checked too).
+      if (normFresh && normFresh.status === 'discharged' && unclaimedStamped[i].status !== 'discharged') {
+        unclaimedStamped.splice(i, 1);
+        console.error(
+          `commit-reviewed: RECEIPT DISCHARGED MID-AMEND — ${JSON.stringify(normFresh.agent_type)}'s receipt (entry_id ${JSON.stringify(ledgerEntryId(normFresh))}) ` +
+            `was ACTIVE when this amend stamped it and is DISCHARGED now. The entry is PRESERVED in the ledger rather than consumed: a discharged entry is ` +
+            `never deleted (decision 57984926 §3). It will not be spent again — every spending surface ignores a discharged entry.`
+        );
+        return true;
+      }
       unclaimedStamped.splice(i, 1);
       return false;
     });

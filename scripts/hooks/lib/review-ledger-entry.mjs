@@ -55,10 +55,18 @@
 // content_evidence_status/agent_id: a v1 entry returns early and never gains
 // the key, so a v1 waiver identity can never be mistaken for a real entry_id.
 //
-// STATUS:'discharged' entries are explicitly OUT OF SCOPE this slice (decision
-// 57984926 part 3; no discharge verb exists yet, so no v2 entry can carry that
-// status today) — no special-casing here, every v2 entry this slice can ever
-// produce is status:'active'.
+// STATUS IS SURFACED RAW (campaign slice S2b-3, decision 57984926 §3). The
+// discharge verb (scripts/review-ledger.mjs) now exists, so a v2 entry really
+// can carry status:'discharged' — evidence that has been explicitly ruled
+// unspendable while being PRESERVED in place. Every spending surface must be
+// able to see that, so `status` is passed through UNCHANGED rather than
+// defaulted here: the compatibility rule §3 states is "missing status =
+// active", and defaulting inside this adapter would erase the difference
+// between "a real promotion recorded 'active'" and "this shape predates the
+// field". A v1 entry returns early below and never gains the key at all, which
+// is exactly the legacy-is-active reading. The SPENDING decision stays with the
+// reader (commit-reviewed.mjs), same separation of concerns as
+// content_evidence_status (F2) and v2_deficient (MED-2).
 //
 // FIX ROUND (2026-08-31, roster review of this slice) — two findings landed
 // here:
@@ -147,6 +155,20 @@ export function normalizeLedgerEntry(entry) {
     // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
     // entry it refuses or waives (decision 57984926 §2). undefined for v1.
     entry_id: entry.entry_id,
+    // S2b-3 — the v2 LIFECYCLE STATUS, raw and undefaulted (see the STATUS note
+    // in the header). undefined for v1; 'discharged' is the only value that
+    // makes an entry unspendable.
+    status: entry.status,
+    // S2b-3 FIX ROUND — the DISPOSITION, raw and unvalidated. A discharge is
+    // only AUTHENTICATED by the pair {status:'discharged', disposition:<object>}
+    // (see isAuthenticatedDischarge below), and until this was surfaced no
+    // reader could see the second half of that pair: `status` alone is a single
+    // string any hand-written or truncated ledger can carry, which made a
+    // one-field forgery enough to make real reviewer evidence invisible to every
+    // spending surface. Passed through UNCHANGED for the same reason `status` is:
+    // the shape-transparency layer reports what is there, the READER decides what
+    // it means. undefined for v1 (which returns early and has no lifecycle).
+    disposition: entry.disposition,
     agent_type: reviewer.agent_type,
     files: territory.files,
     files_source: territory.source,
@@ -174,4 +196,79 @@ export function normalizeLedgerEntry(entry) {
     // presence convention.
     v2_deficient: v2Deficient,
   };
+}
+
+/** THE DISCHARGE MARKER'S AUTHENTICATION CLASS (decision 57984926 §3; S2b-3 fix
+ *  round, Codex review MED "authenticated discharge marker"). Takes a
+ *  NORMALIZED entry (the output of normalizeLedgerEntry above), because the
+ *  verdict needs all three of `status`, `disposition` and the v2 marker
+ *  `v2_deficient`, and only the normalized view carries the last one.
+ *
+ *  WHY A CLASS AND NOT A BOOLEAN. `status:'discharged'` is a single string, and
+ *  a discharge is the one lifecycle state that makes real reviewer evidence
+ *  INVISIBLE to every spending surface — so a one-field marker is a one-field
+ *  forgery, reachable from a hand-edited ledger, a truncated write, or a fixture
+ *  written before the verb existed. The genuine act (scripts/review-ledger.mjs
+ *  discharge) always writes the PAIR {status:'discharged', disposition:{reason,
+ *  at, head_sha, classifier_version, class, facts}} onto a structurally complete
+ *  v2 entry, so the PAIR is what a reader honors. The classes differ in what the
+ *  reader must DO, which is why they are not collapsed into a boolean:
+ *
+ *    'authenticated'   — v2, non-deficient, status EXACTLY 'discharged', and a
+ *                        non-null non-array disposition object. THE ONLY class
+ *                        excluded SILENTLY (already adjudicated, its reason
+ *                        recorded in the entry) and the only class H1 stops
+ *                        reporting.
+ *    'unauthenticated' — v2, non-deficient, status 'discharged', but no usable
+ *                        disposition. NOT SPENT (fail toward not-spending: a
+ *                        malformed lifecycle marker is not evidence that the
+ *                        receipt IS spendable either) but DISCLOSED, never
+ *                        silently skipped, and still reported by H1.
+ *    'v2-deficient'    — a v2-claiming entry missing entry_id/started_at/
+ *                        identity. Already withheld AND disclosed by the
+ *                        deficiency path (MED-2); its discharge claim adds
+ *                        nothing to that verdict.
+ *    'v1-no-lifecycle' — a LEGACY entry carrying a stray status:'discharged'.
+ *                        v1 has NO lifecycle at all — the discharge verb refuses
+ *                        v1 entries outright — so this string was never written
+ *                        by a discharge and cannot mean one. Treated as an
+ *                        ORDINARY ACTIVE v1 receipt (spendable), which keeps the
+ *                        v1 pass-through promise: a v1 entry's behavior through
+ *                        every reader is unchanged by this slice.
+ *    'none'            — not claiming a discharge at all.
+ */
+export function dischargeMarkerClass(normalized) {
+  const e = normalized;
+  if (!e || typeof e !== 'object' || e.status !== 'discharged') return 'none';
+  // v2_deficient is the v2-ONLY presence marker: undefined means the entry came
+  // out of the legacy early-return, i.e. it has no lifecycle to speak of.
+  if (e.v2_deficient === undefined) return 'v1-no-lifecycle';
+  if (e.v2_deficient === true) return 'v2-deficient';
+  const d = e.disposition;
+  // An ARRAY passes typeof === 'object' but is not the disposition object a real
+  // discharge writes — the same reasoning the identity check above applies.
+  if (d === null || typeof d !== 'object' || Array.isArray(d)) return 'unauthenticated';
+  // CONTENTFUL, NOT MERELY PRESENT (final review, pre-merge). `disposition: {}`
+  // satisfied "a non-null object" and therefore classed as AUTHENTICATED — the
+  // ONE class excluded SILENTLY from spending and from H1's report. So an empty
+  // object, which a hand-edit or a truncated write produces trivially, could hide
+  // real reviewer evidence with no line printed anywhere: the exact failure the
+  // authentication check exists to prevent, reached by a two-character payload.
+  // The two fields checked here are the two the verb ALWAYS writes and the two a
+  // human actually needs — WHY it was discharged and UNDER WHICH recognized
+  // class — so no genuine discharge changes class, while every contentless or
+  // invented-class marker falls to 'unauthenticated', which is already the safe,
+  // NOT-SPENT-and-DISCLOSED path. The class list is §3's closed set, mirroring
+  // scripts/review-ledger.mjs's RECOGNIZED_CLASSES: a disposition naming a class
+  // the verb would have refused was not written by the verb.
+  const reasonOk = typeof d.reason === 'string' && d.reason.trim() !== '';
+  const classOk = d.class === 'foreign-session' || d.class === 'foreign-branch' || d.class === 'no-live-territory';
+  return reasonOk && classOk ? 'authenticated' : 'unauthenticated';
+}
+
+/** The one predicate every spending/reporting surface asks: may this entry be
+ *  treated as EXPLICITLY RULED UNSPENDABLE AND ALREADY ADJUDICATED? True only
+ *  for the 'authenticated' class above. */
+export function isAuthenticatedDischarge(normalized) {
+  return dischargeMarkerClass(normalized) === 'authenticated';
 }
