@@ -236,6 +236,19 @@ export interface BoardQueryResult {
    */
   provenance: string;
   /**
+   * TRUTH AT READ (decision queue-truth-at-read-annotation-design): whether the
+   * reconcile_needed DRIFT RE-CHECK ran over this page — a DIFFERENT check from
+   * `provenance` above, which describes the measured_at_head git walk, so the two
+   * statuses are reported separately rather than one standing in for the other.
+   * 'checked' means every returned reconcile_needed row got a verdict (a row with
+   * no annotation genuinely still reproduces); 'checked:budget_truncated' means
+   * the page's cost allowance ran out and the items past it say so themselves;
+   * 'unavailable:<reason>' — no_reconcile_items | no_repo_root | no_git — states
+   * why nothing was compared, because an absent annotation must never read as a
+   * positive freshness claim (P5).
+   */
+  reconcile_provenance: string;
+  /**
    * PARALLEL-LANE SEED: present ONLY when two or more user-source items in the
    * matched set share a file_keys path — see LaneAdvisory. Absent, never empty.
    */
@@ -445,6 +458,109 @@ const DRIFT_ITEMS_PER_READ = 3;
 // nag about a stub someone scaffolded five minutes ago. A whole file under this
 // is plausibly still a placeholder; several hundred lines is not.
 const PLANNED_CREDIBLE_BYTES = 2000;
+
+// TRUTH AT READ (decision queue-truth-at-read-annotation-design): the PER-CALL
+// budget the reconcile_needed re-check may spend on a board_query/
+// maintenance_query page. THREE AXES, not one N-files cap — that cap was
+// explicitly REJECTED because "fifty files can be gigabytes and missing paths
+// spawn git subprocesses", so a single number cannot bound the cost honestly:
+//  - ATTEMPTS bounds the stat() fan-out (one attempt = one owned path looked at);
+//  - BYTES bounds the sha256 work, which is what a big file actually costs;
+//  - GIT PROBES bounds parkedOnRef, the only arm that shells out per path.
+// Every axis is shared by the WHOLE page and, once any is hit, remaining items
+// get a per-item `unavailable:budget` and the envelope discloses the truncation
+// — never a silent partial evaluation read as "checked" (P5).
+//
+// MAGNITUDES: a page is capped at DEFAULT_BOARD_CAP (50) items and a minted
+// reconcile item names ONE file (DRIFT_ITEMS_PER_READ splits per file), so 120
+// attempts covers an ordinary full page more than twice over; the axis only
+// binds on the pathological shape this budget exists for — one item naming an
+// article's whole (possibly hundreds-strong) files[] set through the overflow
+// summary arm.
+const RECONCILE_RECHECK_FILE_ATTEMPT_CAP = 120;
+const RECONCILE_RECHECK_HASH_BYTE_CAP = 8 * 1024 * 1024;
+const RECONCILE_RECHECK_GIT_PROBE_CAP = 8;
+// How far liveArticleFor will follow a supersede chain before abstaining
+// (review FIX 3, 2026-08-31). Real chains are a handful of hops; the cap is the
+// shape-independent backstop beside the cycle guard, so a torn or pathological
+// chain costs a bounded number of store reads and then discloses, never a
+// verdict built on whatever node the walk happened to stop on.
+const LIVE_ARTICLE_CHAIN_HOP_CAP = 32;
+
+/**
+ * The verdict of the ONE per-owned-file drift classifier
+ * (classifyOwnedFileDrift) that the read-time MINT and the queue's
+ * TRUTH-AT-READ annotation both consume — decision
+ * queue-truth-at-read-annotation-design, predicate half: "never a second copy,
+ * and abstention is never collapsed to false".
+ *
+ * `unavailable` is a FIRST-CLASS verdict, not a hole. contentChanged() collapses
+ * "no baseline" and "cannot read the file" into `false` because its callers
+ * RAISE FLAGS and must abstain rather than fabricate one; that collapse is the
+ * anti-model here, because the annotation site has to say WHY it could not
+ * answer. The mint's abstain-as-no-drift behaviour is preserved by its CALL
+ * SITE reading `unavailable` exactly as it reads `clean` — a caller policy,
+ * never a property of the shared predicate.
+ */
+type DriftVerdict =
+  | { kind: 'reconcile'; missing: boolean }
+  | { kind: 'deletion_candidate' }
+  | { kind: 'parked'; ref: string }
+  | { kind: 'clean' }
+  | { kind: 'unavailable'; reason: string };
+
+/**
+ * classifyOwnedFileDrift's result: the verdict, plus the file's size when it
+ * EXISTS on disk (the mint's state-honesty check counts owned live bytes, and
+ * the stat is already taken — returning it keeps the mint from taking a second).
+ */
+type OwnedFileDrift = { verdict: DriftVerdict; size?: number };
+
+/**
+ * The two questions classifyOwnedFileDrift is asked, which differ in exactly
+ * TWO documented places (see the method body). Both modes run the same seven
+ * checks in the same order.
+ *
+ *  - 'mint' (knowledgeQuery's read-time drift wire): "is the article's account
+ *    of this file still true?" — the historical behaviour, unchanged.
+ *  - 'recheck' (the queue annotation): "does the drift an OPEN item already
+ *    recorded still reproduce?" — a different question about the same bytes.
+ */
+type DriftCheckMode = 'mint' | 'recheck';
+
+interface DriftCheckContext {
+  mode: DriftCheckMode;
+  /** the working tree the article's paths live in (treeRootFor, already resolved) */
+  treeRoot: string;
+  /** the live article's server-computed baselines — the bytes it was written against */
+  baselines: Record<string, string> | undefined;
+  /** the instant those baselines were taken: the article's updated_at */
+  baselinedAt: string;
+  /**
+   * Whether the cheap stat-first mtime prefilter may TERMINATE with `clean`
+   * (no hash). TRUE at the mint (its historical behaviour, decision 57d9a52d);
+   * ALWAYS FALSE at the recheck (review FIX 1, 2026-08-31) — there a
+   * timestamp-only `clean` becomes the affirmative "no longer reproduces"
+   * claim, and an mtime-preserved edit after an unrelated re-baseline would make
+   * that claim false. See the prefilter arm in classifyOwnedFileDrift.
+   */
+  honorMtimePrefilter: boolean;
+}
+
+/**
+ * The per-CALL budget + memo the recheck threads through the classifier.
+ * Absent at the mint, which is a per-record wire with its own DRIFT_ITEMS_PER_READ
+ * bound and must keep spending exactly what it spends today.
+ */
+interface DriftBudget {
+  attempts: number;
+  bytesHashed: number;
+  gitProbes: number;
+  /** any axis was hit at least once — the envelope's truncation disclosure */
+  truncated: boolean;
+  /** (resolved tree, article version, path, prefilter policy) -> verdict */
+  memo: Map<string, DriftVerdict>;
+}
 
 /**
  * Tags resolveRecordId's two genuine MISS throws — too-short-to-resolve and
@@ -792,8 +908,13 @@ export class SterlingTools {
   }
 
   /**
-   * board-provenance-measured-at-head: ONE bounded `git log --name-only` walk
-   * per board_query call (never per item — the decision's whole point).
+   * board-provenance-measured-at-head: bounded `git log` walks per board_query
+   * call — never per item, which is the decision's whole point. ONE walk for the
+   * KEYED lane (`--name-only`, path-touch counts) and, only when the page holds
+   * keyless measured items, ONE more names-free walk for their distance
+   * annotation; the two are deliberately separate so the keyless lane can never
+   * change a keyed verdict or the envelope value (see the FIX 6 note in the body
+   * and provenanceWalk).
    *
    * FIX F1 (review 2026-08-24): the walk is RANGE-BOUNDED by the OLDEST
    * eligible item's measured_at_head, not an unconditional HEAD-relative cap
@@ -828,36 +949,186 @@ export class SterlingTools {
     treeRoot: string | undefined
   ): { status: string; warnings: Map<string, { full: string; short: string }> } {
     const warnings = new Map<string, { full: string; short: string }>();
-    const withFileKeys = (records as unknown as Record<string, unknown>[]).filter((r) => {
+    const all = records as unknown as Record<string, unknown>[];
+    const hasFileKeys = (r: Record<string, unknown>) => {
       const fk = r.file_keys as string[] | undefined;
       return Array.isArray(fk) && fk.length > 0;
-    });
-    const eligible = withFileKeys.filter((r) => {
+    };
+    const hasValidHead = (r: Record<string, unknown>) => {
       const head = r.measured_at_head as string | undefined;
       return typeof head === 'string' && /^[0-9a-f]{40}$/.test(head);
-    });
+    };
+    const withFileKeys = all.filter(hasFileKeys);
+    // KEYLESS ITEMS ARE ANNOTATED TOO (board ab5ef216, decision
+    // queue-truth-at-read-annotation-design §4): a keyless item's evidence still
+    // ages, and excluding it meant the one item that can say NOTHING about paths
+    // also said nothing about its own age — the absence a reader most easily
+    // misreads as freshness (P5).
+    //
+    // BUT STRICTLY ADDITIVELY (review FIX 6, 2026-08-31). The broadening first
+    // shipped by widening THE SHARED eligibility set, which is not additive: a
+    // keyless sha joined the oldest-base selection and the single walk, so an
+    // older keyless base could widen the range past PROVENANCE_WALK_COMMIT_CAP,
+    // flip the shared `walkTruncated` flag, and thereby change a KEYED item's
+    // verdict ('not an ancestor of HEAD' → 'walk cap reached', or a real count →
+    // no count at all) plus the envelope's own provenance value
+    // ('checked' → 'unavailable:walk_cap'). The keyed lane's verdicts and the
+    // envelope value are therefore computed from the ORIGINAL keyed-only
+    // eligibility, over their own walk, exactly as before the broadening; the
+    // keyless distances ride a SEPARATE bounded walk whose truncation is
+    // disclosed per item and never touches the keyed lane or the envelope.
+    const keyed = all.filter((r) => hasFileKeys(r) && hasValidHead(r));
+    const keyless = all.filter((r) => !hasFileKeys(r) && hasValidHead(r));
     if (!treeRoot) return { status: 'unavailable:no_repo_root', warnings };
     const headCheck = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
     if (!headCheck || headCheck.status !== 0) return { status: 'unavailable:no_git', warnings };
     const branchCheck = this.runGit(treeRoot, ['symbolic-ref', '-q', 'HEAD']);
     if (!branchCheck || branchCheck.status !== 0) return { status: 'unavailable:detached_head', warnings };
     // FIX F2: distinguish "nothing here even carries file_keys" from "file_keys
-    // exist but none of them have been stamped yet" — different remedies.
-    if (withFileKeys.length === 0) return { status: 'unavailable:no_file_keys', warnings };
-    if (eligible.length === 0) return { status: 'unavailable:no_measured_items', warnings };
+    // exist but none of them have been stamped yet" — different remedies. Both
+    // reasons report on the same NOTHING-TO-CHECK case: with no annotatable item
+    // at all there is no walk to run, and the reason names which of the two
+    // inputs was missing.
+    if (keyed.length === 0 && keyless.length === 0) {
+      return { status: withFileKeys.length === 0 ? 'unavailable:no_file_keys' : 'unavailable:no_measured_items', warnings };
+    }
+    // The CURRENT tip, for the keyless distance wording below — the reader needs
+    // the sha the distance is measured TO, and it is already in hand.
+    const headShaNow = headCheck.stdout.trim();
+    const headNow8 = /^[0-9a-f]{40}$/.test(headShaNow) ? headShaNow.slice(0, 8) : headShaNow;
 
-    // F1 / OUTSIDE-MODEL FINDING 1 (2026-08-24, repro d5b84e6→3ef9fbc): resolve
-    // the oldest eligible base topologically, never by commit TIMESTAMP — a
-    // child and its parent can share a timestamp, which made the CHILD
-    // "oldest" and excluded the PARENT's range entirely, falsely reporting the
-    // parent's sha as "not in current history". `git merge-base --octopus
-    // <shas>` returns a commit reachable from EVERY given base — an ancestor
-    // of all of them by construction — so `<that>^..HEAD` is guaranteed to
-    // cover every base's range regardless of commit-time skew. Pre-filter to
-    // shas that actually resolve (rev-list --ignore-missing) first: merge-base
-    // refuses outright if handed one that doesn't, and one rebased-away sha
-    // must not poison the whole batch back to the unbounded walk.
-    const uniqueShas = [...new Set(eligible.map((r) => r.measured_at_head as string))];
+    // ---- THE KEYED LANE: byte-identical to the pre-broadening behaviour ----
+    let capHit = false;
+    if (keyed.length) {
+      const keyedWalk = this.provenanceWalk(
+        treeRoot,
+        keyed.map((r) => r.measured_at_head as string),
+        true
+      );
+      if (!keyedWalk) return { status: 'unavailable:no_git', warnings };
+      const { commits, truncated: walkTruncated } = keyedWalk;
+      for (const rec of keyed) {
+        const fileKeys = rec.file_keys as string[];
+        const head = rec.measured_at_head as string;
+        const id = rec.id as string;
+        const idx = commits.findIndex((c) => c.sha === head);
+        if (idx === -1) {
+          // F3: never silently skip — the sha is either older than a truncated
+          // window (cap genuinely hit) or not on HEAD's ancestry at all
+          // (rebased/orphaned); either way the count cannot be trusted, so say
+          // so on the item rather than reporting nothing.
+          if (walkTruncated) capHit = true;
+          const reason = walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+          warnings.set(id, {
+            full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+            // OUTSIDE-MODEL FINDING 3 (headline stays compact): no sha/reason detail.
+            short: ` ⚠not verifiable — re-verify`,
+          });
+          continue;
+        }
+        const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
+        if (count > 0) {
+          warnings.set(id, {
+            full: `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`,
+            // OUTSIDE-MODEL FINDING 3 (2026-08-24): appending the full sentence
+            // after headlineRecord's clip broke headline's compact-line contract
+            // (an 80-char line became 170+ chars, multiline). Headline gets a
+            // short marker instead; digest/full keep the full sentence.
+            short: ` ⚠${count} commits since measured`,
+          });
+        }
+      }
+    }
+
+    // ---- THE KEYLESS LANE: its own walk, its own truncation, ADDITIVE ONLY ----
+    // KEYLESS DISTANCE (board ab5ef216): with no file_keys there is no
+    // path-touch count to compute, so the item gets the one thing a walk CAN say
+    // about it — how far behind HEAD its evidence was measured. AN AGE SIGNAL,
+    // NEVER CALLED STALENESS: commits that touched nothing this item cares about
+    // still move the number, so the annotation asks for re-verification rather
+    // than asserting anything about the item's content. Zero distance says so
+    // plainly instead of dressing "no drift" up as a measurement.
+    //
+    // Names are NOT requested here (no path counting to do), and this walk's own
+    // truncation is disclosed PER ITEM only — it deliberately never feeds
+    // `capHit`, because the envelope's provenance value describes the keyed
+    // path-level check (review FIX 6).
+    if (keyless.length) {
+      const keylessWalk = this.provenanceWalk(
+        treeRoot,
+        keyless.map((r) => r.measured_at_head as string),
+        false
+      );
+      for (const rec of keyless) {
+        const head = rec.measured_at_head as string;
+        const id = rec.id as string;
+        const idx = keylessWalk ? keylessWalk.commits.findIndex((c) => c.sha === head) : -1;
+        if (idx === -1) {
+          // Same P5 posture as the keyed lane's F3 arm: never silently skip. A
+          // failed walk is its own named reason rather than an absent annotation.
+          const reason = !keylessWalk ? 'git walk unavailable' : keylessWalk.truncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+          warnings.set(id, {
+            full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+            short: ` ⚠not verifiable — re-verify`,
+          });
+          continue;
+        }
+        warnings.set(id, {
+          full:
+            idx === 0
+              ? `ℹ measured at current HEAD (${headNow8}) — no file_keys, path-level provenance unavailable; re-verify any absence claim before acting`
+              : // The decision's verbatim wording. Plural 'commits' at every N,
+                // deliberately: the phrase is quoted as-is by the pins and by the
+                // decision, and a singular special case would make the one
+                // reader who greps for it miss exactly the N=1 case.
+                `⚠ measured ${idx} commits before HEAD at ${headNow8} — no file_keys, path-level provenance unavailable; re-verify any absence claim before acting`,
+          // Headline keeps its compact line (OUTSIDE-MODEL FINDING 3) while
+          // still carrying the phrase a reader greps for.
+          short: idx === 0 ? ` ℹmeasured at current HEAD` : ` ⚠measured ${idx} commits before HEAD`,
+        });
+      }
+    }
+    // THE ENVELOPE VALUE IS THE KEYED LANE'S (review FIX 6): with no keyed item
+    // on the page the path-level check had nothing to run, and its reason is
+    // exactly the one it reported before keyless items were annotated at all.
+    if (keyed.length === 0) {
+      return { status: withFileKeys.length === 0 ? 'unavailable:no_file_keys' : 'unavailable:no_measured_items', warnings };
+    }
+    return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
+  }
+
+  /**
+   * ONE bounded `git log` walk over the range that covers every sha in `shas`,
+   * newest-first. Extracted (review FIX 6, 2026-08-31) so the keyed and keyless
+   * lanes can each have their OWN walk: sharing one walk meant a keyless sha's
+   * range could flip the keyed lane's truncation flag and, through it, both a
+   * keyed item's verdict and the envelope's provenance value.
+   *
+   * Every command, flag and ordering below is unchanged from the single-walk
+   * version, so the keyed lane — handed exactly the shas it was handed before —
+   * gets byte-identical results.
+   *
+   * F1 / OUTSIDE-MODEL FINDING 1 (2026-08-24, repro d5b84e6→3ef9fbc): resolve
+   * the oldest base topologically, never by commit TIMESTAMP — a child and its
+   * parent can share a timestamp, which made the CHILD "oldest" and excluded the
+   * PARENT's range entirely, falsely reporting the parent's sha as "not in
+   * current history". `git merge-base --octopus <shas>` returns a commit
+   * reachable from EVERY given base — an ancestor of all of them by construction
+   * — so `<that>^..HEAD` is guaranteed to cover every base's range regardless of
+   * commit-time skew. Pre-filter to shas that actually resolve (rev-list
+   * --ignore-missing) first: merge-base refuses outright if handed one that
+   * doesn't, and one rebased-away sha must not poison the whole batch back to
+   * the unbounded walk.
+   *
+   * Returns undefined when git could not be walked at all (the caller's
+   * 'unavailable:no_git' / per-item disclosure decision, never a throw).
+   */
+  private provenanceWalk(
+    treeRoot: string,
+    shas: string[],
+    withNames: boolean
+  ): { commits: { sha: string; files: string[] }[]; truncated: boolean } | undefined {
+    const uniqueShas = [...new Set(shas)];
     let oldestBase: string | undefined = uniqueShas.length === 1 ? uniqueShas[0] : undefined;
     if (uniqueShas.length > 1) {
       const resolveCheck = this.runGit(treeRoot, ['rev-list', '--no-walk', '--ignore-missing', ...uniqueShas]);
@@ -889,16 +1160,15 @@ export class SterlingTools {
     // default rename detection reports only the NEW path for a renamed file,
     // so an item keyed to the path it was renamed FROM never saw its own
     // change. --no-renames reports both the old and new paths as plain
-    // add/delete entries.
+    // add/delete entries. A names-free walk (the keyless lane, which counts
+    // commits rather than path touches) asks for neither flag and parses the
+    // same way — every line is a sha.
     const requestCap = PROVENANCE_WALK_COMMIT_CAP + 1;
-    const rangedWalk = oldestBase
-      ? this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), `${oldestBase}^..HEAD`])
-      : undefined;
-    const walk =
-      rangedWalk && rangedWalk.status === 0
-        ? rangedWalk
-        : this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), 'HEAD']);
-    if (!walk || walk.status !== 0) return { status: 'unavailable:no_git', warnings };
+    const nameArgs = withNames ? ['--no-renames', '--name-only'] : [];
+    const logArgs = ['log', ...nameArgs, '--format=%H', '-n', String(requestCap)];
+    const rangedWalk = oldestBase ? this.runGit(treeRoot, [...logArgs, `${oldestBase}^..HEAD`]) : undefined;
+    const walk = rangedWalk && rangedWalk.status === 0 ? rangedWalk : this.runGit(treeRoot, [...logArgs, 'HEAD']);
+    if (!walk || walk.status !== 0) return undefined;
     const commits: { sha: string; files: string[] }[] = [];
     for (const raw of walk.stdout.split('\n')) {
       const line = raw.trim();
@@ -909,41 +1179,269 @@ export class SterlingTools {
         commits[commits.length - 1].files.push(line);
       }
     }
-    const walkTruncated = commits.length > PROVENANCE_WALK_COMMIT_CAP;
-    if (walkTruncated) commits.length = PROVENANCE_WALK_COMMIT_CAP; // drop the CAP+1'th lookahead entry
-    let capHit = false;
-    for (const rec of eligible) {
-      const fileKeys = rec.file_keys as string[];
-      const head = rec.measured_at_head as string;
-      const id = rec.id as string;
-      const idx = commits.findIndex((c) => c.sha === head);
-      if (idx === -1) {
-        // F3: never silently skip — the sha is either older than a truncated
-        // window (cap genuinely hit) or not on HEAD's ancestry at all
-        // (rebased/orphaned); either way the count cannot be trusted, so say
-        // so on the item rather than reporting nothing.
-        if (walkTruncated) capHit = true;
-        const reason = walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD';
-        warnings.set(id, {
-          full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
-          // OUTSIDE-MODEL FINDING 3 (headline stays compact): no sha/reason detail.
-          short: ` ⚠not verifiable — re-verify`,
-        });
+    const truncated = commits.length > PROVENANCE_WALK_COMMIT_CAP;
+    if (truncated) commits.length = PROVENANCE_WALK_COMMIT_CAP; // drop the CAP+1'th lookahead entry
+    return { commits, truncated };
+  }
+
+  /**
+   * TRUTH AT READ for the reconcile_needed lane (decision
+   * queue-truth-at-read-annotation-design; boards be0ea20a HIGH + ab5ef216).
+   *
+   * THE MEASURED PROBLEM: the reconcile lane is minted by the READ path
+   * (research_finding f512020b), so READ VOLUME — not drift volume — drives the
+   * queue, and 12 of 14 lane items measured stale-open: the drift they name had
+   * already been reconciled away, and nothing said so. A drainer had to
+   * re-derive each item's premise by hand, which is exactly the cost that makes
+   * a queue get skipped.
+   *
+   * WHAT THIS DOES: for the reconcile_needed rows ON THIS PAGE, re-run the SAME
+   * per-file predicate the mint uses (classifyOwnedFileDrift) against the live
+   * working tree, and annotate the verdict. Composition, per the decision:
+   *   - ANY path still reconciling ⇒ the item reproduces ⇒ NO annotation (a
+   *     reproducing item is the normal case and needs no decoration);
+   *   - EVERY path clean AND fully evaluated ⇒ the stale annotation;
+   *   - ANY required check abstained (or was cut off by the budget) ⇒
+   *     `unavailable`, NEVER stale. An overflow item is never declared stale on
+   *     a partial check — the whole failure mode this closes is an absence being
+   *     read as a positive claim.
+   *
+   * WORKING-TREE WORDING, deliberately: the predicate reads TREE bytes, not the
+   * committed tree, so the annotation says "in the working tree at HEAD <sha8>"
+   * rather than implying anything about the commit. A mapped working tree is
+   * judged against THAT tree's own HEAD.
+   *
+   * NEVER CLOSURE AUTHORITY. Decision 68988832's rejection of auto-closure and
+   * auto-drain STANDS: this is a best-effort READ annotation that makes a human
+   * drain cheap, and it writes nothing (a read is a pure function here — AC2
+   * pins two identical reads producing identical records).
+   *
+   * SCOPE: source:'system' + system_reason:'reconcile_needed' rows only, so a
+   * source:'user' board_query pays ZERO drift-recompute cost. Implemented at the
+   * ONE shared seam (boardQueryResult) that maintenance_query already delegates
+   * to — the rejected alternative, annotating only the drain surface, would have
+   * left board_query's system rows disagreeing with maintenance_query's about
+   * whether the same row is a closeable no-op.
+   */
+  private reconcileTruthAtRead(records: DurableRecord[]): {
+    status: string;
+    annotations: Map<string, { full: string; short: string }>;
+  } {
+    const annotations = new Map<string, { full: string; short: string }>();
+    const lane = (records as unknown as Record<string, unknown>[]).filter(
+      (r) => r.source === 'system' && r.system_reason === 'reconcile_needed'
+    );
+    // An ABSENT annotation is never a freshness claim (P5), so every reason a
+    // check could not run is named — including "there was nothing on this page
+    // to check", which is the reason a silent field would misrepresent as fine.
+    if (lane.length === 0) return { status: 'unavailable:no_reconcile_items', annotations };
+    if (!this.repoRoot) return { status: 'unavailable:no_repo_root', annotations };
+    const budget: DriftBudget = { attempts: 0, bytesHashed: 0, gitProbes: 0, truncated: false, memo: new Map() };
+    // PER-TREE HEAD, resolved once per distinct tree (review FIX 2, 2026-08-31).
+    // Classification reads the RESOLVED tree's bytes, so both the git-availability
+    // gate and the sha the annotation names must come from THAT tree — the
+    // decision says so in as many words ("mapped working trees use THAT tree's
+    // HEAD"). Reading them from the project root instead meant a mapped-tree item
+    // was judged against one tree and stamped with another tree's HEAD, and a
+    // mapped tree that is not a git repo at all passed a gate the project root
+    // happened to satisfy.
+    const headByTree = new Map<string, string | undefined>();
+    const headFor = (root: string): string | undefined => {
+      if (!headByTree.has(root)) headByTree.set(root, this.currentHeadSha(root));
+      return headByTree.get(root);
+    };
+    for (const item of lane) {
+      const id = item.id as string;
+      const abstain = (reason: string) => annotations.set(id, this.reconcileUnavailableAnnotation([reason]));
+      // BUDGET AXIS 1, PAGE-WIDE STOP (review FIX 4, 2026-08-31): once the
+      // attempt counter has parked at the cap, NOTHING further is spent on this
+      // page — no article resolution, no memo-key construction, no memo write, no
+      // per-path verdict allocation. file_keys carries no schema cardinality cap,
+      // so an adversarial or merely enormous item bounds I/O through the
+      // classifier's own axes but would still have paid CPU and allocation per
+      // path here. Every remaining item is disclosed as unavailable:budget, which
+      // is the same verdict it would have received one layer down (AC6: the item
+      // that blew the budget and the small item behind it are BOTH disclosed).
+      if (budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+        budget.truncated = true;
+        abstain('budget');
         continue;
       }
-      const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
-      if (count > 0) {
-        warnings.set(id, {
-          full: `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`,
-          // OUTSIDE-MODEL FINDING 3 (2026-08-24): appending the full sentence
-          // after headlineRecord's clip broke headline's compact-line contract
-          // (an 80-char line became 170+ chars, multiline). Headline gets a
-          // short marker instead; digest/full keep the full sentence.
-          short: ` ⚠${count} commits since measured`,
-        });
+      const link = item.feature_link as string | undefined;
+      if (!link) {
+        abstain('no_feature_link');
+        continue;
       }
+      const article = this.liveArticleFor(link);
+      if (!article) {
+        abstain('article_unresolved');
+        continue;
+      }
+      const tree = this.treeRootFor(article);
+      if (tree.unresolved || !tree.root) {
+        abstain('unmapped_working_tree');
+        continue;
+      }
+      // GIT AVAILABILITY IS PER TREE (review FIX 2). No resolvable HEAD in the
+      // tree actually being read means the annotation could not even NAME the
+      // state it was measured at, which is half of what makes it re-checkable.
+      const head = headFor(tree.root);
+      if (!head) {
+        abstain('no_git');
+        continue;
+      }
+      const paths = (item.file_keys as string[] | undefined) ?? [];
+      if (paths.length === 0) {
+        // A keyless reconcile item names no path to re-check. The keyless
+        // measured_at_head DISTANCE annotation (computeProvenance) still covers
+        // it — a different check, disclosed separately.
+        abstain('no_file_keys');
+        continue;
+      }
+      const baselines = (article as unknown as { file_baselines?: Record<string, string> }).file_baselines;
+      const version = (article as unknown as { version?: number }).version ?? 0;
+      const verdicts: DriftVerdict[] = [];
+      for (const path of paths) {
+        // PAGE-WIDE STOP, again (review FIX 4): the attempt counter parks at the
+        // cap, so once it is exhausted this item stops allocating per-path work
+        // and rides ONE unavailable:budget verdict into the composition below —
+        // the same verdict the classifier would return one layer down, without
+        // the per-path memo key and Map write. file_keys has no schema
+        // cardinality cap, so CPU and allocation have to be bounded here, not
+        // only I/O.
+        if (budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+          budget.truncated = true;
+          verdicts.push({ kind: 'unavailable', reason: 'budget' });
+          break;
+        }
+        // PER-CALL MEMOIZATION by (resolved tree, article version, path):
+        // sibling items under one article — the ordinary shape, since the mint
+        // splits one article's drift into one item per file — re-ask about the
+        // same paths, and a memo hit costs no budget. NO POLICY DISCRIMINATOR IS
+        // NEEDED any more (review FIX 1): the recheck runs exactly ONE policy (it
+        // always hashes), and this memo is per CALL and reachable only from this
+        // method — the mint passes no budget, so its prefilter-honouring verdicts
+        // can neither enter nor read this map.
+        //
+        // INJECTIVE key by construction (Codex re-review 01a0576f): a separator
+        // can never be impossibility-proof here because normalizeRepoPath and
+        // working_trees permit ANY byte in a path, \x1F included — so crafted
+        // (treeRoot, path) tuples could collide a separator-joined key.
+        // JSON.stringify of the tuple is injective for arbitrary strings.
+        const key = JSON.stringify([tree.root, article.id, version, path]);
+        const cached = budget.memo.get(key);
+        if (cached) {
+          verdicts.push(cached);
+          continue;
+        }
+        // THE RECHECK ALWAYS HASHES (review FIX 1, 2026-08-31 — REPLACING the
+        // 'licensed prefilter' this call site first shipped with). The licence was
+        // "the article was re-baselined after this item was minted", and it does
+        // not hold: drift lands, an unrelated article write re-baselines every
+        // owned file, then a second edit whose mtime is preserved (a copy, a
+        // restore, clock skew) sits at or below updated_at and short-circuits to
+        // `clean`. At the MINT `clean` raises nothing; HERE it is the affirmative
+        // claim "the drift no longer reproduces", which is precisely the P5
+        // inversion this feature exists to close. So the prefilter's terminating
+        // power stays where its inference is sound — the mint — and the recheck
+        // pays the hash, bounded by the attempt and byte axes.
+        const { verdict } = this.classifyOwnedFileDrift(
+          path,
+          { mode: 'recheck', treeRoot: tree.root, baselines, baselinedAt: article.updated_at, honorMtimePrefilter: false },
+          budget
+        );
+        budget.memo.set(key, verdict);
+        verdicts.push(verdict);
+      }
+      // ANY path still reconciling wins outright — never a first-path-wins or
+      // all-paths-must-differ rule (a whole-area change reconciles one file at a
+      // time, so a single live difference means the item still has work in it).
+      if (verdicts.some((v) => v.kind === 'reconcile' || v.kind === 'deletion_candidate')) continue;
+      const reasons = [
+        ...new Set(verdicts.filter((v) => v.kind === 'unavailable' || v.kind === 'parked').map((v) => (v.kind === 'unavailable' ? v.reason : 'parked_on_branch'))),
+      ].sort();
+      if (reasons.length) {
+        annotations.set(id, this.reconcileUnavailableAnnotation(reasons));
+        continue;
+      }
+      const sha8 = head.slice(0, 8);
+      annotations.set(id, {
+        full:
+          `⚠ TRUTH AT READ: the drift this item names no longer reproduces in the working tree at HEAD ${sha8} — ` +
+          `every path it names matches the live article's recorded baseline, so this is very likely a closeable no-op. ` +
+          `A BEST-EFFORT READ CHECK, NEVER CLOSURE AUTHORITY: confirm it yourself, then close it by NAMING it in a write's ` +
+          `resolves claim (or maintenance_remove) — nothing here closes anything. CONFIRM WHAT "MATCHES" MEANS HERE: a later ` +
+          `article write RE-BASELINES every file that article owns, so a re-baseline can absorb a drift whose PROSE was never ` +
+          `reconciled — the bytes agreeing with the recorded baseline does not prove the article still describes them.`,
+        short: ` ⚠no longer reproduces in the working tree at HEAD ${sha8}`,
+      });
     }
-    return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
+    // The budget's truncation rides the STATUS, not only a note: a page that
+    // could not finish its own check must not report the same word as one that
+    // did (P5), and the per-item `unavailable:budget` reasons above are the
+    // detail behind it.
+    return { status: budget.truncated ? 'checked:budget_truncated' : 'checked', annotations };
+  }
+
+  /** The one wording for a reconcile item whose drift could not be re-checked — named reasons, never a shrug. */
+  private reconcileUnavailableAnnotation(reasons: string[]): { full: string; short: string } {
+    const joined = reasons.join(', ');
+    return {
+      full:
+        `⚠ TRUTH AT READ: this item's drift could NOT be re-checked (unavailable:${joined}) — treat it as OPEN and re-verify by hand. ` +
+        `An absent verdict is never a freshness claim (P5); in particular 'budget' means this page's re-check ran out of its own ` +
+        `cost allowance, not that the item is clean.`,
+      short: ` ⚠not re-checkable (unavailable:${joined})`,
+    };
+  }
+
+  /**
+   * The LIVE feature_article a queue item's feature_link points at, following the
+   * supersede chain to its head (decision queue-truth-at-read-annotation-design:
+   * "legacy feature_links resolve through the supersede chain to the LIVE
+   * article's baselines").
+   *
+   * WHY THE WALK MATTERS: an item minted against an article that was later
+   * superseded still points at the DEAD id, and a dead predecessor's baselines
+   * are stale or (for a raw legacy insert) absent entirely — comparing against
+   * them would report a drift that reproduces perfectly well against the live
+   * article, or abstain where a real verdict was available.
+   *
+   * Returns undefined when the link resolves to nothing, or to something that is
+   * not a feature_article — an abstention, never a guess. store.get() (not the
+   * id-resolution ladder) deliberately: a feature_link is a full uuid written by
+   * the mint, and a READ path must not throw on a broken pointer.
+   *
+   * IT MUST TERMINATE ON A LIVE ARTICLE OR ABSTAIN (review FIX 3, 2026-08-31).
+   * The first implementation exited the walk on a BROKEN chain — a superseded
+   * record with no superseded_by, a successor missing from the store, a
+   * self-loop, a cycle — and then returned that last node merely because its
+   * type was feature_article. The whole reason for walking is that a DEAD
+   * predecessor's baselines are stale or absent, so handing one back is worse
+   * than abstaining: it produces a full verdict (including the affirmative "no
+   * longer reproduces" claim) from bytes nothing current was ever compared
+   * against. Every abnormal shape now returns undefined, and the caller's
+   * `unavailable:article_unresolved` disclosure is what the reader sees.
+   */
+  private liveArticleFor(link: string): DurableRecord | undefined {
+    let record = this.store.get(link);
+    // Bounded AND cycle-guarded: a torn store degrades to an abstention rather
+    // than spinning a read forever. The hop cap is a second, shape-independent
+    // backstop — the `seen` set already catches a cycle, but a pathological
+    // (or maliciously long) chain must not be walked at read time either.
+    const seen = new Set<string>();
+    let hops = 0;
+    while (record && record.status === 'superseded') {
+      if (hops++ >= LIVE_ARTICLE_CHAIN_HOP_CAP) return undefined;
+      if (!record.superseded_by || seen.has(record.id)) return undefined;
+      seen.add(record.id);
+      const next = this.store.get(record.superseded_by);
+      if (!next || next.id === record.id) return undefined;
+      record = next;
+    }
+    // Both conditions, not just the type: only a LIVE article's baselines
+    // describe the bytes a current read should be compared against.
+    return record && record.type === 'feature_article' && record.status === 'active' ? record : undefined;
   }
 
   /**
@@ -1002,6 +1500,154 @@ export class SterlingTools {
     const current = this.hashFile(rel, root);
     if (current === undefined) return false;
     return current !== baseline;
+  }
+
+  /**
+   * THE ONE per-owned-file drift classifier (decision
+   * queue-truth-at-read-annotation-design, predicate half). The read-time MINT
+   * (knowledgeQuery's feature-article wire) and the queue's TRUTH-AT-READ
+   * annotation (reconcileTruthAtRead) both call THIS — a second implementation
+   * at the annotation site was explicitly rejected: "the mint predicate is seven
+   * coupled checks, not a hash compare; a copy drifts from the mint and the
+   * annotation then lies about what a fresh read would do".
+   *
+   * THE SEVEN CHECKS, in this order (the mint's original order, preserved so its
+   * decisions are byte-identical before and after the extraction):
+   *   1. working-tree resolution — done by the CALLER (treeRootFor), because an
+   *      unmapped tree abstains for the whole record, not per file;
+   *   2. existence (stat) — absence is not deletion, so it routes to (3);
+   *   3. missing-file classification via parkedOnRef: parked / never_tracked
+   *      (deletion_candidate) / confirmed_absent+probe_failed (reconcile);
+   *   4. the stat-first MTIME PREFILTER — the cheap "could this have changed at
+   *      all" gate that keeps a re-baselined file from being hashed;
+   *   5. generated-projection exclusion (regen churn is by design);
+   *   6. baseline availability;
+   *   7. the authoritative content hash against that baseline.
+   *
+   * MODE DIFFERS IN EXACTLY TWO PLACES, both marked `MODE:` below, because the
+   * two callers ask different questions of the same bytes (see DriftCheckMode).
+   * Everything else — including which verdict each git probe status earns — is
+   * shared, which is the whole point of the extraction.
+   *
+   * NEVER THROWS and never writes: every failure is a named `unavailable`.
+   */
+  private classifyOwnedFileDrift(rel: string, ctx: DriftCheckContext, budget?: DriftBudget): OwnedFileDrift {
+    // BUDGET AXIS 1 — attempts. Checked BEFORE the stat so the cap bounds the
+    // syscall fan-out itself, and NOT incremented on the refusal path, so the
+    // counter parks at the cap and every later item reads the same exhausted
+    // budget (AC6: the item that blew the budget and the small item behind it
+    // are BOTH disclosed, not just the first).
+    if (budget && budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+      budget.truncated = true;
+      return { verdict: { kind: 'unavailable', reason: 'budget' } };
+    }
+    if (budget) budget.attempts++;
+    const baseline = ctx.baselines?.[rel];
+    // THE STAT IS WRAPPED (review FIX 5, 2026-08-31): throwIfNoEntry:false only
+    // silences ENOENT. EACCES (an unreadable directory on the path), ELOOP (a
+    // symlink cycle), ENOTDIR and ENAMETOOLONG all still THROW — and an
+    // exception here does not fail one path, it escapes this method's
+    // NEVER-THROWS contract and aborts the whole board/maintenance read for
+    // every item on the page. Any stat failure is a named abstention instead;
+    // the mint reads `unavailable` exactly as it reads `clean`, so its behaviour
+    // is unchanged, and the annotation site discloses the class.
+    let stat: { size: number; mtimeMs: number } | undefined;
+    try {
+      stat = statSync(join(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? undefined;
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      return { verdict: { kind: 'unavailable', reason: `stat_failed_${String(code ?? 'unknown').toLowerCase()}` } };
+    }
+    if (!stat) {
+      // MODE (1/2) — A MISSING FILE WITH NO BASELINE.
+      // The mint asks whether the article's OWNERSHIP claim is still true, so an
+      // absent owned path is a finding regardless of baselines (that is what
+      // mints the deletion_candidate / out-of-band-deletion items, board
+      // e939fd21). The recheck asks whether an ALREADY-RECORDED drift still
+      // reproduces — and with no recorded bytes for the path there is nothing
+      // to reproduce AGAINST, so the honest answer is abstention, not a verdict.
+      // Abstaining first also spares the git probe entirely.
+      if (ctx.mode === 'recheck' && baseline === undefined) {
+        return { verdict: { kind: 'unavailable', reason: 'no_baseline' } };
+      }
+      // BUDGET AXIS 3 — git probes. parkedOnRef shells out per absent path, so
+      // it gets its own axis: a page full of missing files must not turn into
+      // hundreds of subprocesses.
+      if (budget) {
+        if (budget.gitProbes >= RECONCILE_RECHECK_GIT_PROBE_CAP) {
+          budget.truncated = true;
+          return { verdict: { kind: 'unavailable', reason: 'budget' } };
+        }
+        budget.gitProbes++;
+      }
+      // ABSENT FROM THE WORKING TREE IS NOT THE SAME AS DELETED (board
+      // 1d6a721a): ask git before concluding anything. 'never_tracked' (every
+      // reachable ref checked, none EVER held the blob) is the only verdict that
+      // earns deletion_candidate (board e939fd21); 'confirmed_absent' (real git
+      // history, merged into base) and 'probe_failed' (git could not be
+      // consulted at all) both keep the classic reconcile reading — a failed
+      // probe proves nothing and must not be read as the stronger verdict.
+      const probe = this.parkedOnRef(rel, ctx.treeRoot);
+      if (probe.status === 'parked') return { verdict: { kind: 'parked', ref: probe.ref } };
+      if (probe.status === 'never_tracked') return { verdict: { kind: 'deletion_candidate' } };
+      return { verdict: { kind: 'reconcile', missing: true } };
+    }
+    const size = stat.size;
+    // MODE (2/2) — THE MTIME PREFILTER'S TERMINATING POWER.
+    //
+    // At the MINT the prefilter is unconditional and is the cheap half of the
+    // two-step check (decision 57d9a52d): mtime no newer than the article's last
+    // update means the file cannot have moved since its baseline was taken, so
+    // no content read is owed.
+    //
+    // AT THE RECHECK THE PREFILTER IS OFF — ALWAYS (review FIX 1, 2026-08-31;
+    // the caller passes honorMtimePrefilter:false unconditionally, and the flag
+    // survives only because the mint still legitimately sets it). An earlier
+    // version kept the prefilter under a "licence" (the article was re-baselined
+    // after the item was minted), meaning to honour the cost design's
+    // "re-baselined items terminate without hashing". That licence does not hold:
+    // drift lands, an unrelated article write re-baselines EVERY owned file, and
+    // a second edit whose mtime is preserved or skewed to at-or-below updated_at
+    // (an mtime-preserving copy, a restore from backup, a clock skew) then
+    // short-circuits to `clean`. At the mint `clean` merely raises nothing; at
+    // the recheck it is published as the affirmative claim "the drift no longer
+    // reproduces", so a timestamp is nowhere near enough evidence. The content
+    // hash decides there, bounded by the attempt and byte axes.
+    if (ctx.honorMtimePrefilter && !(stat.mtimeMs > Date.parse(ctx.baselinedAt))) {
+      return { verdict: { kind: 'clean' }, size };
+    }
+    // A registered generated projection never CONTENT-flags: every regen changes
+    // it by design and check-projection-fresh guards its currency at the merge
+    // gate (decision e1275166). Its DELETION still flags, in the arm above.
+    if (this.isGeneratedProjection(rel)) return { verdict: { kind: 'clean' }, size };
+    if (baseline === undefined) {
+      // NOT collapsed to `false`/clean here (the contentChanged() anti-model):
+      // the mint's call site reads `unavailable` as no-drift, so its behaviour is
+      // unchanged, while the annotation site can say WHY it abstained.
+      return { verdict: { kind: 'unavailable', reason: 'no_baseline' }, size };
+    }
+    // BUDGET AXIS 2 — bytes hashed. The size is already known, so an oversize
+    // file is refused BEFORE it is read rather than after.
+    //
+    // THE PARKING ASYMMETRY IS DELIBERATE (review FIX 8): the ATTEMPT axis parks
+    // — its counter stops incrementing at the cap, so every later path and item
+    // reads the same exhausted budget and is disclosed (AC6). The BYTE axis does
+    // NOT park: one oversize file is refused and the walk CONTINUES, because
+    // bytesHashed is only advanced by files actually read, so the next (small)
+    // file can still legitimately be checked. A parking byte axis would let a
+    // single large file suppress every remaining verdict on the page as
+    // unavailable:budget — a worse read for no cost saving, since the refusal
+    // happens before the file is opened either way.
+    if (budget) {
+      if (budget.bytesHashed + size > RECONCILE_RECHECK_HASH_BYTE_CAP) {
+        budget.truncated = true;
+        return { verdict: { kind: 'unavailable', reason: 'budget' }, size };
+      }
+      budget.bytesHashed += size;
+    }
+    const current = this.hashFile(rel, ctx.treeRoot);
+    if (current === undefined) return { verdict: { kind: 'unavailable', reason: 'unreadable' }, size };
+    return { verdict: current === baseline ? { kind: 'clean' } : { kind: 'reconcile', missing: false }, size };
   }
 
   /**
@@ -1777,42 +2423,42 @@ export class SterlingTools {
         // Free here: the stat is already being taken for the drift comparison.
         let liveBytes = 0;
         for (const f of a.files ?? []) {
-          const stat = statSync(join(treeRoot, f.path), { throwIfNoEntry: false });
-          if (!stat) {
-            // ABSENT FROM THE WORKING TREE IS NOT THE SAME AS DELETED (board
-            // 1d6a721a). Every check here evaluates the CHECKED-OUT tree, so a
-            // file parked on an unmerged branch read as an out-of-band deletion
-            // — and that item could never be closed, because the trigger is
-            // absence and no write makes a file appear. It re-fired on every
-            // subsequent read (this arm is a pure function of disk state), which
-            // pushed a drain toward exactly the no-op version bumps the closing
-            // rule calls drift. Ask git before concluding anything: `ls` proves
-            // working-tree absence and nothing else.
-            const probe = this.parkedOnRef(f.path, treeRoot);
-            if (probe.status === 'parked') {
-              parkedFiles.push({ path: f.path, ref: probe.ref });
-              continue; // the article is CORRECT — the path returns on merge
-            }
-            // 'never_tracked' (every reachable ref checked, none EVER held the
-            // blob) is the only verdict that earns deletion_candidate (board
-            // e939fd21). 'confirmed_absent' (real git history, but only as a
-            // merged-into-base ancestor) and 'probe_failed' (git could not be
-            // consulted at all) both keep the classic reconcile_needed reading
-            // — a failed probe proves nothing and must not be read as strong a
-            // signal as a genuine, exhaustive "never existed here" verdict.
-            drifts.push({ path: f.path, missing: true, neverTracked: probe.status === 'never_tracked' });
+          // ONE SHARED PREDICATE (decision queue-truth-at-read-annotation-design):
+          // the seven checks this loop used to inline now live in
+          // classifyOwnedFileDrift, which the queue's truth-at-read annotation
+          // calls too. Same order, same verdicts, same git-probe readings — the
+          // extraction is behaviour-preserving here by construction, and mode
+          // 'mint' selects the two policy points that belong to THIS caller.
+          const { verdict, size } = this.classifyOwnedFileDrift(f.path, {
+            mode: 'mint',
+            treeRoot,
+            baselines: a.file_baselines,
+            baselinedAt: record.updated_at,
+            honorMtimePrefilter: true,
+          });
+          // Owned bytes that actually exist, for the state-honesty check below —
+          // free, because the classifier already took the stat.
+          if (size !== undefined) liveBytes += size;
+          if (verdict.kind === 'parked') {
+            // The article is CORRECT — the path returns on merge (board 1d6a721a).
+            parkedFiles.push({ path: f.path, ref: verdict.ref });
             continue;
           }
-          liveBytes += stat.size;
-          // mtime newer than updated_at is the cheap pre-filter; confirm a real
-          // content change against the baseline before flagging, so a git
-          // merge/checkout's mtime reset is not mistaken for an out-of-band edit.
-          // A registered generated projection never content-flags — every regen
-          // changes it by design and the merge gate's check-projection-fresh
-          // guards its currency; its DELETION still lands in the missing arm above.
-          if (stat.mtimeMs > Date.parse(record.updated_at) && !this.isGeneratedProjection(f.path) && this.contentChanged(f.path, a.file_baselines, treeRoot)) {
-            drifts.push({ path: f.path, missing: false });
+          if (verdict.kind === 'deletion_candidate') {
+            drifts.push({ path: f.path, missing: true, neverTracked: true });
+            continue;
           }
+          if (verdict.kind === 'reconcile') {
+            drifts.push({ path: f.path, missing: verdict.missing, neverTracked: false });
+            continue;
+          }
+          // 'clean' AND every 'unavailable:<reason>' raise NOTHING here, exactly
+          // as before the extraction: no baseline, an unreadable file and a
+          // generated projection all made contentChanged() return false. THE
+          // MINT ABSTAINS rather than fabricate a flag it cannot stand behind —
+          // that is this CALL SITE's policy, which is why the shared predicate
+          // reports the abstention instead of collapsing it (the annotation site
+          // has to disclose it).
         }
         if (drifts.length) {
           // NO PRE-CHECK: enqueueSystemTodo is atomic and keyed
@@ -5373,7 +6019,10 @@ export class SterlingTools {
     const groups = new Map<string, { paths: string[]; items: DurableRecord[] }>();
     for (const [path, items] of byPath) {
       if (items.length < 2) continue; // AC1: two or more, or it is not a collision
-      const key = items.map((i) => (i as unknown as { id: string }).id).join(' ');
+      // Separator is a SOURCE-LEVEL escape (anti-pattern d7e03137): \x1F cannot
+      // occur in a uuid, so the impossibility property holds without a raw
+      // control byte flipping this file to binary for grep/tooling.
+      const key = items.map((i) => (i as unknown as { id: string }).id).join('\x1F');
       const group = groups.get(key);
       if (group) group.paths.push(path);
       else groups.set(key, { paths: [path], items });
@@ -5469,6 +6118,20 @@ export class SterlingTools {
     // this keeps the annotation visible through whichever projection the
     // caller asked for without adding a wire field no projection declares).
     const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    // TRUTH AT READ (decision queue-truth-at-read-annotation-design): the ONE
+    // integration point for the reconcile_needed drift re-check. Gated INSIDE to
+    // this page's source:'system'/reconcile_needed rows, so a source:'user'
+    // query pays nothing; maintenance_query delegates to this same method, so
+    // both public views of one row agree about whether it is a closeable no-op.
+    // AFTER pagination, deliberately: the check is page-scoped, never
+    // matched-set-scoped, because its cost is per item actually served.
+    const { status: reconcile_provenance, annotations: reconcileNotes } = this.reconcileTruthAtRead(records);
+    if (reconcile_provenance === 'checked:budget_truncated') {
+      notes.push(
+        `the reconcile_needed drift re-check hit its per-call BUDGET on this page and was TRUNCATED — the items it could not finish ` +
+          `say 'unavailable:budget' themselves and must be treated as OPEN; narrow the page (cap/offset, or system_reason) to re-check them`
+      );
+    }
     // PARALLEL-LANE SEED: derived from `matching` (the FULL matched set), NOT
     // from `records` — see laneAdvisory. Advisory only: it is computed after
     // `records` is already fixed and never touches it.
@@ -5480,14 +6143,22 @@ export class SterlingTools {
           : projection === 'digest'
             ? digestRecord(r as unknown as Record<string, unknown>)
             : { ...(r as unknown as Record<string, unknown>) };
-      const warning = warnings.get((r as unknown as { id: string }).id);
-      if (!warning) return base;
+      const id = (r as unknown as { id: string }).id;
+      const warning = warnings.get(id);
+      // COMPOSED AFTER THE PROJECTION CLIP, like the provenance warning beside
+      // it and for the same reason: a verdict clipped away by digest/headline
+      // would make those surfaces the ones that lie about the item.
+      const note = reconcileNotes.get(id);
+      if (!warning && !note) return base;
       const text = typeof base.text === 'string' ? base.text : '';
-      // OUTSIDE-MODEL FINDING 3: headline's line stays compact (a short marker,
-      // appended directly, no separator) — the full sentence only lands on
-      // digest/full, which already tolerate multi-line text.
-      if (projection === 'headline') return { ...base, text: `${text}${warning.short}` };
-      return { ...base, text: text ? `${text}\n\n${warning.full}` : warning.full };
+      // OUTSIDE-MODEL FINDING 3: headline's line stays compact (short markers,
+      // appended directly, no separator) — the full sentences only land on
+      // digest/full, which already tolerate multi-line text. Both annotations
+      // can apply to one row (an aged keyed item whose drift is also gone), so
+      // they compose rather than one displacing the other.
+      if (projection === 'headline') return { ...base, text: `${text}${warning ? warning.short : ''}${note ? note.short : ''}` };
+      const parts = [text, warning?.full, note?.full].filter((p): p is string => typeof p === 'string' && p.length > 0);
+      return { ...base, text: parts.join('\n\n') };
     };
     return {
       matched_filter: matching.length,
@@ -5496,6 +6167,7 @@ export class SterlingTools {
       capped,
       offset,
       provenance,
+      reconcile_provenance,
       // AC3: the key is ABSENT when nothing collides, never an empty block.
       ...(lane_advisory ? { lane_advisory } : {}),
       ...(notes.length ? { note: notes.join('; ') } : {}),
