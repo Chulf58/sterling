@@ -71,6 +71,7 @@ import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates } from './l
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
 import { readTail } from './lib/transcript.mjs';
 import { normalizeLedgerEntry } from './lib/review-ledger-entry.mjs';
+import { observedToolPaths } from './lib/observed-territory.mjs';
 
 // REGISTER LOCK (decision register-writers-cooperating-lock, 1e0ba0d0, board
 // 673ca3f6) — guards the register's whole-array read-modify-write on BOTH
@@ -270,15 +271,30 @@ function buildContentEvidence(cwd, files) {
 // f5802025's rejection of an actual-vs-pinned escalation backstop stands
 // untouched; this only names what ran.
 //
-// OBSERVED (preferred): the DEPARTING SUBAGENT'S OWN transcript, at Stop's
-// stdin.transcript_path — scanned tail-backward (same 1MB tail window H6 uses
-// via lib/transcript.mjs's readTail) for the most recent assistant entry
-// carrying a `message.model` string. Unlike lib/transcript.mjs's own
-// `latestUsage`, this does NOT require a `usage` field on that entry — a
-// model id can be observed on an entry that never reports usage.
+// OBSERVED (preferred): the DEPARTING SUBAGENT'S OWN transcript — at Stop,
+// this is stdin.agent_transcript_path (preferred by resolveReviewerModel's
+// caller below whenever it is a usable path); stdin.transcript_path is the
+// PARENT (conductor) transcript and is used here only as the pre-existing
+// LEGACY FALLBACK when agent_transcript_path is absent (adjudicated: dormant
+// on a live CLI, kept only so the shipped h22-ledger-v2-entry pins — which
+// supply just transcript_path — stay green). Scanned tail-backward (same 1MB
+// tail window H6 uses via lib/transcript.mjs's readTail) for the most recent
+// assistant entry carrying a `message.model` string. Unlike
+// lib/transcript.mjs's own `latestUsage`, this does NOT require a `usage`
+// field on that entry — a model id can be observed on an entry that never
+// reports usage.
 function observedModelFromTranscript(transcriptPath) {
   if (typeof transcriptPath !== 'string' || transcriptPath === '') return null;
-  const tail = readTail(transcriptPath);
+  let tail;
+  try {
+    tail = readTail(transcriptPath);
+  } catch {
+    // readTail's existsSync guard does not stop an EISDIR/EACCES throw from
+    // openSync/readSync (a directory-valued or unreadable transcript path) —
+    // degrade to null so the model ladder falls to configured/unknown rather
+    // than losing the whole ledger promotion to an uncaught throw.
+    return null;
+  }
   if (tail === null) return null;
   const lines = tail.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -335,8 +351,21 @@ function familyFromModel(model) {
 // (this Stop's transcript) wins over CONFIGURED (the register entry's
 // Start-time snapshot, see `configured_model` on newEntryBase below); neither
 // available yields null/'unknown' rather than a guess.
-function resolveReviewerModel(departing, transcriptPath) {
-  const observed = observedModelFromTranscript(transcriptPath);
+//
+// CONSOLIDATION FIX (review, same premise-correction round as the
+// observed-territory field fix below): at SubagentStop, stdin.transcript_path
+// is the PARENT (conductor) transcript, not the departing subagent's own —
+// observedModelFromTranscript was reading the CONDUCTOR's model as though it
+// were the reviewer's. `agentTranscriptPath` (stdin.agent_transcript_path,
+// the real per-subagent transcript) is now preferred whenever it is a usable
+// (non-empty string) path; the pre-existing transcript_path behavior is kept
+// as the fallback ONLY when agent_transcript_path is absent — every
+// h22-ledger-v2-entry pin supplies just transcript_path and stays green
+// unchanged. Unlike the territory fix, this fallback is deliberate and
+// pre-existing: no other model-ladder semantics change here.
+function resolveReviewerModel(departing, transcriptPath, agentTranscriptPath) {
+  const preferredTranscriptPath = typeof agentTranscriptPath === 'string' && agentTranscriptPath !== '' ? agentTranscriptPath : transcriptPath;
+  const observed = observedModelFromTranscript(preferredTranscriptPath);
   if (observed) return { model: observed, model_source: 'observed' };
   const configured = typeof departing?.configured_model === 'string' && departing.configured_model !== '' ? departing.configured_model : null;
   if (configured) return { model: configured, model_source: 'configured' };
@@ -650,6 +679,20 @@ try {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
     const { candidates, files_source: filesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
     for (const w of territoryWarnings) process.stderr.write(w + '\n');
+    // OBSERVED-EVIDENCE UPGRADE, PART (1) (decision review-territory-observed-evidence,
+    // 9500cce1) — warn-only, never a gate (h19-dispatch-staging posture: this
+    // hook never denies a spawn). filesSource is 'review-territory' ONLY when
+    // at least one attributed block carried a well-formed REVIEW-TERRITORY
+    // declaration (resolveTerritory above) — anything else (no marker at all,
+    // or a malformed marker that fell back to free-prose) is "no valid
+    // declaration" and gets this loud absence warning for a reviewer-class
+    // dispatch. Exact 'reviewer-' prefix (not a bare 'reviewer' substring) —
+    // matches every other reviewer-class check in this file.
+    if (typeof input.agent_type === 'string' && input.agent_type.startsWith('reviewer-') && filesSource !== 'review-territory') {
+      process.stderr.write(
+        `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s) — territory falls back to free-prose extraction, which measurably over-captures context-mentioned files (board f60ff6d8). Every code-touching reviewer dispatch should carry an explicit REVIEW-TERRITORY: [...] line in its prompt.\n`
+      );
+    }
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
     const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
     // THE EXTRACTOR'S PERMISSIVENESS COSTS MORE HERE THAN IN H19. There a false
@@ -880,7 +923,42 @@ try {
       // they stood when the review ENDED, and the lock wait is time in which
       // they could move.
       const contentEvidence = buildContentEvidence(input.cwd, departing.files);
-      const resolvedModel = resolveReviewerModel(departing, input.transcript_path);
+      const resolvedModel = resolveReviewerModel(departing, input.transcript_path, input.agent_transcript_path);
+      // OBSERVED-EVIDENCE UPGRADE, PART (2) (decision review-territory-observed-evidence,
+      // 9500cce1) — CORROBORATION ONLY, computed from the DEPARTING SUBAGENT'S
+      // OWN transcript. CORRECTED (review CRITICAL, verified against
+      // research_finding 20b44518's byte-exact stdin probe): at SubagentStop,
+      // stdin.transcript_path is the PARENT (conductor) transcript, NOT the
+      // departing subagent's own — the subagent's transcript arrives at
+      // stdin.agent_transcript_path instead. Reading transcript_path here
+      // would record the CONDUCTOR's tool paths as reviewer evidence under a
+      // false 'subagent-transcript' label. NEVER fall back to
+      // input.transcript_path when agent_transcript_path is
+      // absent/non-string/unreadable — parent content is false corroboration
+      // by definition, so that degrades to null exactly like any other
+      // unobservable transcript. Never gates, never touches declared
+      // files/files_source above — null means "could not observe" and the
+      // caller (below) leaves observed_files/observed_source ABSENT entirely,
+      // never an empty placeholder that would look like "observed and found
+      // nothing".
+      const observed = observedToolPaths(input.agent_transcript_path, input.cwd);
+      // SILENT-ABSENCE DISCLOSURE (roster LOW, P5) — warn-only, exit
+      // unchanged: a reviewer-class promotion with no usable
+      // agent_transcript_path (the field absent, or present but
+      // unobservable) is otherwise INDISTINGUISHABLE from ordinary
+      // "observed and found nothing" once it silently omits
+      // observed_files/observed_source. Naming it here makes a platform
+      // that stops delivering the field (or a broken transcript) visible on
+      // stderr instead of quietly degrading the evidence this decision adds.
+      if (observed === null) {
+        const shape =
+          typeof input.agent_transcript_path === 'string' && input.agent_transcript_path !== ''
+            ? `present but unobservable ('${input.agent_transcript_path}')`
+            : 'absent from stdin';
+        process.stderr.write(
+          `H22: no observed evidence for reviewer '${departing.agent_id}' (agent_type '${departing.agent_type}') — agent transcript unobservable (agent_transcript_path is ${shape}); this receipt promotes without observed_files/observed_source.\n`
+        );
+      }
       withLedgerLock(sterlingDir, () => {
         const ledgerPath = join(sterlingDir, 'review-ledger.json');
         let ledger = [];
@@ -991,6 +1069,27 @@ try {
               source: departing.files_source,
               attribution: departing.attribution,
             },
+            // OBSERVED-EVIDENCE UPGRADE, PART (2) (decision
+            // review-territory-observed-evidence, 9500cce1) — TOP-LEVEL
+            // fields (not nested under `territory`, unlike the declared
+            // files/source above): the decision names "the ledger entry
+            // additionally carries observed_files", corroboration
+            // deliberately siblings-not-nests the declared territory it
+            // corroborates. Spread-conditional so a null `observed` (the
+            // transcript could not be observed at all) omits BOTH keys
+            // entirely, never writing an empty placeholder that would read
+            // as "observed and found nothing". `observed_truncated:true`
+            // (review MEDIUM) is a THIRD top-level sibling, present only when
+            // the lib's own `truncated` flag says the 1MB tail window did not
+            // cover the whole departing transcript — absent (never `false`)
+            // otherwise, same absent-unless-true convention as observed_files.
+            ...(observed
+              ? {
+                  observed_files: [...new Set([...observed.reads, ...observed.writes])],
+                  observed_source: 'subagent-transcript',
+                  ...(observed.truncated ? { observed_truncated: true } : {}),
+                }
+              : {}),
             content_evidence: contentEvidence,
             disposition: null,
           });

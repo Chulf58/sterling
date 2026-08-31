@@ -6,8 +6,9 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2, renameSync as renameSync2, rmdirSync, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2, renameSync as renameSync2, rmdirSync, rmSync as rmSync2, statSync as statSync4 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -4102,7 +4103,7 @@ function toRepoRelative(absolutePath, repoRoot) {
 }
 
 // packages/schemas/dist/envelope.js
-var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
+var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
   target_id: external_exports.string().uuid()
@@ -4345,6 +4346,44 @@ var disconfirmedHypothesisSchema = base.extend({
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var openQuestionSchema = base.extend({
+  type: external_exports.literal("open_question"),
+  // Stable handle, minted from the question — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
+  // The question IS the identity, exactly as on research_finding and
+  // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+  // same way and why the digest leads with it).
+  question: external_exports.string().min(1),
+  // The LIVE candidates. Plural and ordered by the author; a question with no
+  // hypothesis yet is legitimate, so this defaults to [] rather than being
+  // required — what makes the record worth keeping is the EVIDENCE.
+  hypotheses: external_exports.array(external_exports.string().min(1)).default([]),
+  // What is already known: the measurements, the derived geometry, the probe
+  // output. Required — an unevidenced question is a board todo, not durable
+  // knowledge, and that boundary is the whole point of the type.
+  evidence: external_exports.string().min(1),
+  resolution_status: external_exports.enum(["open", "closed"]).default("open"),
+  // The TERMINAL home: closure means the question was answered, and an
+  // answered question is a research_finding. Its own field, never an id
+  // embedded in a status string (Codex refinement, thread 01a05710), so it is
+  // queryable and cannot rot inside prose.
+  closed_into: external_exports.string().min(1).optional(),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  if (rec.resolution_status === "closed" && !rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)"
+    });
+  }
+  if (rec.resolution_status !== "closed" && rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "closed_into is set but resolution_status is 'open' \u2014 close the question or drop the terminus"
+    });
+  }
+});
 var attestationSchema = base.extend({
   type: external_exports.literal("attestation"),
   // Optional explicit handle. NEVER auto-minted (no title/question headline
@@ -4760,6 +4799,15 @@ var configSchema = external_exports.object({
   // not by article baselines. DELETION still flags (a vanished committed
   // deliverable is real drift regardless of how the file is produced).
   generated_projections: external_exports.array(external_exports.string()).default([]),
+  // Undeclared-source disclosure (decision
+  // undeclared-source-disclosure-per-file-coverage-live-h1-scan, board
+  // 44ef6838): POSIX globs excluded from the live per-file source-extension
+  // coverage scan H1 (SessionStart) and init render — an excluded file never
+  // participates (neither covered nor uncovered), same precedence as
+  // classifyCoverage's excludeGlobs parameter in
+  // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
+  // toolchain path_glob).
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: external_exports.string().optional(),
@@ -5447,6 +5495,155 @@ async function acquireLock(lockDir, opts = {}) {
   }
 }
 
+// scripts/hooks/lib/review-ledger-entry.mjs
+function isEvidenceObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function normalizeLedgerEntry(entry) {
+  if (!entry || typeof entry !== "object" || entry.schema_version !== 2) {
+    return entry;
+  }
+  const v2Deficient = typeof entry.entry_id !== "string" || entry.entry_id === "" || typeof entry.started_at !== "string" || entry.started_at === "" || !entry.identity || typeof entry.identity !== "object" || Array.isArray(entry.identity);
+  const reviewer = entry.reviewer && typeof entry.reviewer === "object" ? entry.reviewer : {};
+  const identity = entry.identity && typeof entry.identity === "object" ? entry.identity : {};
+  const territory = entry.territory && typeof entry.territory === "object" ? entry.territory : {};
+  const contentEvidence = isEvidenceObject(entry.content_evidence) ? entry.content_evidence : null;
+  const truncatedFlag = contentEvidence && typeof contentEvidence.truncated === "boolean" ? contentEvidence.truncated : contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0;
+  const truncatedOf = contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0 ? contentEvidence.truncated_of : null;
+  const blobs = contentEvidence ? contentEvidence.blobs : entry.content_evidence;
+  return {
+    // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
+    // entry it refuses or waives (decision 57984926 §2). undefined for v1.
+    entry_id: entry.entry_id,
+    // S2b-4 — THE KIND GATE (decision 57984926 §4). A v2 ledger is now
+    // MULTI-KIND: 'roster_receipt' entries are spendable review receipts, and
+    // 'external_review' entries are the conductor's attestation that an
+    // outside-model consult happened (minted only by scripts/review-ledger.mjs
+    // record-external). §4 requires external entries to be "never spendable,
+    // never stamped, never counted by roster eligibility (kind gate +
+    // agent-type regex, belt and braces)", so the KIND must be visible through
+    // the one adapter every reader uses — otherwise each surface would need its
+    // own `entry.kind` branch, which is the second hand-rolled switch this
+    // adapter exists to prevent (finding HIGH-3). Passed through RAW and
+    // undefaulted, same posture as `status`: an external entry carries no
+    // reviewer object, no identity and no started_at, so WITHOUT this key it
+    // normalizes to the shape of a structurally-deficient roster receipt and
+    // gets reported as a malformed REVIEW receipt rather than as what it is.
+    // undefined for v1 (early return above) and for a v2 entry promoted before
+    // the field existed — both of which are roster receipts by construction.
+    kind: entry.kind,
+    // S2b-3 — the v2 LIFECYCLE STATUS, raw and undefaulted (see the STATUS note
+    // in the header). undefined for v1; 'discharged' is the only value that
+    // makes an entry unspendable.
+    status: entry.status,
+    // S2b-3 FIX ROUND — the DISPOSITION, raw and unvalidated. A discharge is
+    // only AUTHENTICATED by the pair {status:'discharged', disposition:<object>}
+    // (see isAuthenticatedDischarge below), and until this was surfaced no
+    // reader could see the second half of that pair: `status` alone is a single
+    // string any hand-written or truncated ledger can carry, which made a
+    // one-field forgery enough to make real reviewer evidence invisible to every
+    // spending surface. Passed through UNCHANGED for the same reason `status` is:
+    // the shape-transparency layer reports what is there, the READER decides what
+    // it means. undefined for v1 (which returns early and has no lifecycle).
+    disposition: entry.disposition,
+    agent_type: reviewer.agent_type,
+    files: territory.files,
+    files_source: territory.source,
+    attribution: territory.attribution,
+    at: entry.started_at,
+    session_id: identity.session_id,
+    branch: identity.branch,
+    base_sha: identity.base_sha,
+    // HIGH-2/HIGH-3 — the register's own dispatch identity, undefined for a
+    // v1 entry (which never recorded it) or a legacy v2 entry promoted before
+    // this field existed.
+    agent_id: identity.agent_id,
+    reviewed_state: {
+      completed_at: typeof entry.finished_at === "string" ? entry.finished_at : void 0,
+      blobs,
+      ...truncatedFlag ? { truncated: true, truncated_of: truncatedOf } : {}
+    },
+    // F2 — v2-ONLY marker (a v1 entry returns early above and never reaches
+    // this object, so a reader that only ever sees this key set can rely on
+    // its presence to mean "this came through the v2 branch").
+    content_evidence_status: typeof contentEvidence?.status === "string" ? contentEvidence.status : void 0,
+    // MED-2 — v2-ONLY marker: true when this v2-claiming object is missing
+    // entry_id/started_at/identity. A v1 entry never sets this key at all
+    // (undefined, not false), matching content_evidence_status's v2-only
+    // presence convention.
+    v2_deficient: v2Deficient
+  };
+}
+
+// scripts/hooks/lib/observed-territory.mjs
+import { existsSync as existsSync4, statSync as statSync3 } from "node:fs";
+var WRITE_TOOLS_FILE_PATH = /* @__PURE__ */ new Set(["Edit", "Write"]);
+var TAIL_BYTES2 = 1024 * 1024;
+function hasFileExtension(p) {
+  const idx = p.lastIndexOf("/");
+  const base2 = idx === -1 ? p : p.slice(idx + 1);
+  return base2.includes(".");
+}
+function observedToolPaths(transcriptPath, cwd) {
+  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
+  if (!existsSync4(transcriptPath)) return null;
+  let tail;
+  try {
+    tail = readTail(transcriptPath);
+  } catch {
+    return null;
+  }
+  if (tail === null || tail === "") return null;
+  let truncated = false;
+  try {
+    truncated = statSync3(transcriptPath).size > TAIL_BYTES2;
+  } catch {
+  }
+  const reads = /* @__PURE__ */ new Set();
+  const writes = /* @__PURE__ */ new Set();
+  const add = (set, rawPath) => {
+    if (typeof rawPath !== "string" || rawPath === "") return;
+    const rel = repoRel(rawPath, cwd);
+    if (!rel) return;
+    const lower = rel.toLowerCase();
+    if (lower === ".git" || lower.startsWith(".git/") || lower === ".sterling" || lower.startsWith(".sterling/")) return;
+    set.add(rel);
+  };
+  for (const line of tail.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (entry?.type !== "assistant") continue;
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || block.type !== "tool_use") continue;
+      const name = block.name;
+      const input2 = block.input;
+      if (WRITE_TOOLS_FILE_PATH.has(name)) {
+        add(writes, input2?.file_path);
+      } else if (name === "NotebookEdit") {
+        add(writes, input2?.notebook_path);
+      } else if (name === "Read") {
+        add(reads, input2?.file_path);
+      } else if (name === "Grep") {
+        const p = input2?.path;
+        if (typeof p === "string" && p !== "" && hasFileExtension(p)) add(reads, p);
+      } else if (name === "Glob") {
+        add(reads, input2?.path);
+      }
+    }
+  }
+  const result = { reads: [...reads], writes: [...writes] };
+  if (truncated) result.truncated = true;
+  return result;
+}
+
 // scripts/hooks/h22-dispatch-register.mjs
 var REGISTER_RETRY_MS = 1e3;
 var REGISTER_STALE_MS = 1e4;
@@ -5477,38 +5674,102 @@ function gitReceiptIdentity(cwd) {
   };
 }
 var REVIEWED_BLOBS_CAP = 64;
-function reviewEndState(cwd, files) {
-  try {
-    const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : [];
-    const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
-    const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
-    const present = paths.filter((p) => {
-      try {
-        return statSync3(join3(cwd, p)).isFile();
-      } catch {
-        return false;
-      }
-    });
-    if (present.length === 0) return void 0;
-    const r = spawnSync2("git", ["hash-object", "--", ...present], { cwd, encoding: "utf8", timeout: 1e4 });
-    if (!r || r.error || r.status !== 0) return void 0;
-    const shas = (r.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/i.test(l));
-    if (shas.length !== present.length) return void 0;
-    const blobs = {};
-    present.forEach((p, i) => {
-      blobs[p] = shas[i];
-    });
-    return {
-      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
-      blobs,
-      // Present only when true — same copy-if-present, never-fabricated
-      // posture as the other optional receipt fields (JSON.stringify drops an
-      // undefined-valued key, so an untruncated receipt genuinely lacks it).
-      ...truncated ? { truncated: true, truncated_of: uniqueFiles.length } : {}
-    };
-  } catch {
-    return void 0;
+function buildContentEvidence(cwd, files) {
+  const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : [];
+  if (uniqueFiles.length === 0) {
+    return { status: "complete", blobs: {}, absent_paths: [] };
   }
+  const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
+  const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
+  const present = [];
+  const absent = [];
+  for (const p of paths) {
+    try {
+      if (statSync4(join3(cwd, p)).isFile()) present.push(p);
+      else absent.push(p);
+    } catch {
+      absent.push(p);
+    }
+  }
+  let blobs = {};
+  let failureReason;
+  let presentUnhashed = [...present];
+  if (present.length > 0) {
+    try {
+      const r = spawnSync2("git", ["hash-object", "--", ...present], { cwd, encoding: "utf8", timeout: 1e4 });
+      if (r && !r.error && r.status === 0) {
+        const shas = (r.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/i.test(l));
+        if (shas.length === present.length) {
+          present.forEach((p, i) => {
+            blobs[p] = shas[i];
+          });
+          presentUnhashed = [];
+        } else {
+          failureReason = "git hash-object output did not align 1:1 with the reviewed paths";
+        }
+      } else {
+        failureReason = "git hash-object failed or git is unavailable";
+      }
+    } catch {
+      failureReason = "git hash-object threw";
+    }
+  }
+  const noEvidenceCount = absent.length + presentUnhashed.length;
+  const status = noEvidenceCount === 0 ? "complete" : noEvidenceCount === paths.length ? "unavailable" : "partial";
+  const result = { status, blobs, absent_paths: absent };
+  if (truncated) {
+    result.truncated = true;
+    result.truncated_of = uniqueFiles.length;
+  }
+  if (failureReason) result.failure_reason = failureReason;
+  return result;
+}
+function observedModelFromTranscript(transcriptPath) {
+  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
+  let tail;
+  try {
+    tail = readTail(transcriptPath);
+  } catch {
+    return null;
+  }
+  if (tail === null) return null;
+  const lines = tail.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (parsed.type !== "assistant") continue;
+    const model = parsed.message?.model;
+    if (typeof model === "string" && model !== "") return model;
+  }
+  return null;
+}
+function configuredReviewerModel(cwd) {
+  try {
+    const model = loadConfig(cwd)?.models?.reviewers?.model;
+    return typeof model === "string" && model !== "" ? model : null;
+  } catch {
+    return null;
+  }
+}
+function familyFromModel(model) {
+  if (typeof model !== "string" || model === "") return "unknown";
+  if (/^claude-/.test(model)) return "anthropic";
+  if (/^gpt-/.test(model) || /^codex/.test(model)) return "openai";
+  return "unknown";
+}
+function resolveReviewerModel(departing, transcriptPath, agentTranscriptPath) {
+  const preferredTranscriptPath = typeof agentTranscriptPath === "string" && agentTranscriptPath !== "" ? agentTranscriptPath : transcriptPath;
+  const observed = observedModelFromTranscript(preferredTranscriptPath);
+  if (observed) return { model: observed, model_source: "observed" };
+  const configured = typeof departing?.configured_model === "string" && departing.configured_model !== "" ? departing.configured_model : null;
+  if (configured) return { model: configured, model_source: "configured" };
+  return { model: null, model_source: "unknown" };
 }
 function normIdentity(v) {
   if (typeof v === "string") return v.trim() === "" ? null : v.trim();
@@ -5590,7 +5851,7 @@ function withLedgerLock(sterlingDir, run) {
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync3(lockPath).mtimeMs > 1e4) {
+        if (Date.now() - statSync4(lockPath).mtimeMs > 1e4) {
           rmSync2(lockPath, { recursive: true, force: true });
           continue;
         }
@@ -5614,7 +5875,7 @@ var input = readStdin();
 try {
   let readEntriesRaw = function() {
     try {
-      if (existsSync4(registerPath)) {
+      if (existsSync5(registerPath)) {
         const raw = JSON.parse(readFileSync3(registerPath, "utf8"));
         if (Array.isArray(raw)) return raw;
       }
@@ -5622,7 +5883,7 @@ try {
     }
     return [];
   };
-  if (!existsSync4(join3(input.cwd, ".sterling", "config.json"))) allow();
+  if (!existsSync5(join3(input.cwd, ".sterling", "config.json"))) allow();
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;
   if (event !== "SubagentStart" && event !== "SubagentStop") {
@@ -5637,6 +5898,12 @@ try {
     const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
     const { candidates, files_source: filesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
     for (const w of territoryWarnings) process.stderr.write(w + "\n");
+    if (typeof input.agent_type === "string" && input.agent_type.startsWith("reviewer-") && filesSource !== "review-territory") {
+      process.stderr.write(
+        `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s) \u2014 territory falls back to free-prose extraction, which measurably over-captures context-mentioned files (board f60ff6d8). Every code-touching reviewer dispatch should carry an explicit REVIEW-TERRITORY: [...] line in its prompt.
+`
+      );
+    }
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
     const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
     const toRegisterPaths = (cands) => [...new Set(cands.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
@@ -5669,6 +5936,9 @@ try {
       attribution
     };
     if (claimed.length) newEntryBase.exclusive_resources = claimed;
+    if (typeof input.agent_type === "string" && input.agent_type.startsWith("reviewer-")) {
+      newEntryBase.configured_model = configuredReviewerModel(input.cwd);
+    }
     const registerLock = await acquireRegisterLock(input.cwd);
     if (!registerLock) {
       process.stderr.write(
@@ -5702,6 +5972,7 @@ try {
     }
     allow();
   } else {
+    const finishedAt = (/* @__PURE__ */ new Date()).toISOString();
     const departing = pruneForeign(readEntriesRaw()).find((e) => e.agent_id === input.agent_id);
     if (departing && !departing.residue_reported_at) {
       const lastMsg = input.last_assistant_message;
@@ -5716,53 +5987,96 @@ try {
     if (departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-")) {
       const sterlingDir = join3(input.cwd, ".sterling");
       const identity = gitReceiptIdentity(input.cwd);
-      const reviewedState = reviewEndState(input.cwd, departing.files);
+      const contentEvidence = buildContentEvidence(input.cwd, departing.files);
+      const resolvedModel = resolveReviewerModel(departing, input.transcript_path, input.agent_transcript_path);
+      const observed = observedToolPaths(input.agent_transcript_path, input.cwd);
+      if (observed === null) {
+        const shape = typeof input.agent_transcript_path === "string" && input.agent_transcript_path !== "" ? `present but unobservable ('${input.agent_transcript_path}')` : "absent from stdin";
+        process.stderr.write(
+          `H22: no observed evidence for reviewer '${departing.agent_id}' (agent_type '${departing.agent_type}') \u2014 agent transcript unobservable (agent_transcript_path is ${shape}); this receipt promotes without observed_files/observed_source.
+`
+        );
+      }
       withLedgerLock(sterlingDir, () => {
         const ledgerPath = join3(sterlingDir, "review-ledger.json");
         let ledger = [];
         try {
-          if (existsSync4(ledgerPath)) {
+          if (existsSync5(ledgerPath)) {
             const raw = JSON.parse(readFileSync3(ledgerPath, "utf8"));
             if (Array.isArray(raw)) ledger = raw;
           }
         } catch {
           ledger = [];
         }
-        if (ledger.some((e) => e && e.agent_type === departing.agent_type && e.at === departing.at)) {
+        const ledgerEntryMatchesDeparting = (e) => {
+          const normalized = normalizeLedgerEntry(e);
+          if (!normalized) return false;
+          if (typeof normalized.agent_id === "string" && typeof departing.agent_id === "string") {
+            return normalized.agent_id === departing.agent_id;
+          }
+          return normalized.agent_type === departing.agent_type && normalized.at === departing.at;
+        };
+        if (ledger.some(ledgerEntryMatchesDeparting)) {
           process.stderr.write(
-            `H22: a review receipt for agent_type '${departing.agent_type}' at '${departing.at}' is already present in .sterling/review-ledger.json \u2014 skipping duplicate promotion
+            `H22: a review receipt for agent_id '${departing.agent_id}' (agent_type '${departing.agent_type}', at '${departing.at}') is already present in .sterling/review-ledger.json \u2014 skipping duplicate promotion
 `
           );
         } else {
           ledger.push({
-            agent_type: departing.agent_type,
-            files: departing.files,
-            // Copied unchanged from the register entry (decision 8f137474):
-            // absent on a pre-migration register entry, same posture as the
-            // other always-attempted-never-required fields on this receipt.
-            files_source: departing.files_source,
-            // Same copy-if-present, never-fabricated posture as files_source
-            // above (review-fix round, pins T6a/T6b): a legacy register entry
-            // written before per-block attribution existed carries no
-            // `attribution` key, and `departing.attribution` is then
-            // `undefined` here — JSON.stringify drops an undefined-valued key
-            // entirely, so the promoted receipt genuinely lacks the key rather
-            // than carrying a fabricated default.
-            attribution: departing.attribution,
-            // THE DISPATCH INSTANT, kept verbatim and deliberately NOT
-            // corrected in place (board 0f448efb): it is half of this hook's own
-            // duplicate-promotion key just above, and half of commit-reviewed's
-            // consume identity, so rewriting its meaning would break both. The
-            // review-END instant lives in reviewed_state.completed_at instead,
-            // which is what the staleness advisory now prefers.
-            at: departing.at,
-            session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
-            branch: identity.branch,
-            base_sha: identity.base_sha,
-            // Optional by construction — undefined when no reviewed path
-            // resolved to a readable file, and then dropped entirely by
-            // JSON.stringify (same posture as files_source/attribution above).
-            reviewed_state: reviewedState
+            schema_version: 2,
+            entry_id: randomUUID2(),
+            kind: "roster_receipt",
+            status: "active",
+            started_at: departing.at,
+            finished_at: finishedAt,
+            reviewer: {
+              agent_type: departing.agent_type,
+              model: resolvedModel.model,
+              model_family: familyFromModel(resolvedModel.model),
+              model_source: resolvedModel.model_source
+            },
+            identity: {
+              session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
+              branch: identity.branch,
+              base_sha: identity.base_sha,
+              // DISPATCH IDENTITY (finding HIGH-2) — the register's own unique
+              // key for this dispatch, stamped so a later duplicate-promotion
+              // attempt for the SAME dispatch can be recognized by identity
+              // rather than by the coincidence of sharing agent_type+at with
+              // an unrelated dispatch. Not part of decision 57984926's original
+              // named identity fields (session_id/branch/base_sha), but no pin
+              // asserts an exact key set on this nested object.
+              agent_id: departing.agent_id
+            },
+            territory: {
+              files: departing.files,
+              // Nested home of decision 8f137474's already-shipped
+              // files_source/attribution fields — copied unchanged from the
+              // register entry, same copy-if-present posture as before.
+              source: departing.files_source,
+              attribution: departing.attribution
+            },
+            // OBSERVED-EVIDENCE UPGRADE, PART (2) (decision
+            // review-territory-observed-evidence, 9500cce1) — TOP-LEVEL
+            // fields (not nested under `territory`, unlike the declared
+            // files/source above): the decision names "the ledger entry
+            // additionally carries observed_files", corroboration
+            // deliberately siblings-not-nests the declared territory it
+            // corroborates. Spread-conditional so a null `observed` (the
+            // transcript could not be observed at all) omits BOTH keys
+            // entirely, never writing an empty placeholder that would read
+            // as "observed and found nothing". `observed_truncated:true`
+            // (review MEDIUM) is a THIRD top-level sibling, present only when
+            // the lib's own `truncated` flag says the 1MB tail window did not
+            // cover the whole departing transcript — absent (never `false`)
+            // otherwise, same absent-unless-true convention as observed_files.
+            ...observed ? {
+              observed_files: [.../* @__PURE__ */ new Set([...observed.reads, ...observed.writes])],
+              observed_source: "subagent-transcript",
+              ...observed.truncated ? { observed_truncated: true } : {}
+            } : {},
+            content_evidence: contentEvidence,
+            disposition: null
           });
         }
         const ledgerTmpPath = join3(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
