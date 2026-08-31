@@ -176,7 +176,7 @@ import { arg, fail } from './lib/project.mjs';
 // on a structurally complete v2 entry, and that verdict is defined once, beside
 // the shape it reads, rather than restated in each of this file's two flows and
 // again in H1. See isDischargedEntry / skipForDischargeMarker below.
-import { normalizeLedgerEntry, dischargeMarkerClass } from './hooks/lib/review-ledger-entry.mjs';
+import { normalizeLedgerEntry, dischargeMarkerClass, isExternalReviewEntry } from './hooks/lib/review-ledger-entry.mjs';
 
 const target = process.cwd();
 
@@ -388,6 +388,30 @@ for (const e of ledger) {
   // without a usable disposition is skipped too, but LOUDLY (see
   // skipForDischargeMarker).
   if (skipForDischargeMarker(e)) continue;
+  // EXTERNAL REVIEW EVIDENCE IS NEVER SPENDABLE (decision 57984926 §4, campaign
+  // slice S2b-4). A kind:'external_review' entry is the conductor's attestation
+  // that an outside-model consult completed — "evidence of a completed consult,
+  // NOT PROOF" — minted only by `scripts/review-ledger.mjs record-external`. It
+  // is never valid, never eligible, never counted by roster eligibility, never
+  // stamped, never in reviewed_by, and (because the consume step removes only
+  // entries it actually STAMPED) never consumed: the same structural posture a
+  // discharged entry has.
+  //
+  // THE KIND GATE IS THE FIRST OF TWO INDEPENDENT GUARDS §4 asks for ("kind gate
+  // + agent-type regex, belt and braces"). The agent-type regex below is the
+  // second and would already exclude this entry — an external entry carries NO
+  // agent_type at all — but it would do so through the MALFORMED-ENTRY message,
+  // which tells the conductor a well-formed attestation is broken. So the kind
+  // gate is checked FIRST, before the deficiency check (an external entry has no
+  // identity/started_at and would otherwise read as a structurally-deficient
+  // ROSTER receipt), and it is NOT AN ERROR: one quiet line, because nothing is
+  // wrong — this entry was never meant to be spent.
+  if (isExternalReviewEntry(e)) {
+    console.error(
+      `commit-reviewed: external_review ledger entry left un-consumed (not a review receipt — conductor-attested consult evidence, never spendable, decision 57984926 §4)`
+    );
+    continue;
+  }
   // MED-2 (decision 57984926 fix round, pin S13): a v2-CLAIMING entry missing
   // entry_id/started_at/identity is structurally deficient — normalizeLedgerEntry
   // marks it `v2_deficient` rather than mapping it into a spendable-looking
@@ -1948,6 +1972,16 @@ function runTargetShaMode(targetShaArg) {
     // silent only for an AUTHENTICATED marker; an unauthenticated one is
     // withheld and disclosed identically on this flow.
     if (skipForDischargeMarker(e)) continue;
+    // EXTERNAL REVIEW — same exclusion as the -m flow, through the same shared
+    // predicate and for the same reason (decision 57984926 §4: external entries
+    // are "never spendable, never stamped, never counted by roster
+    // eligibility"). Checked first, and quiet: nothing is wrong with the entry.
+    if (isExternalReviewEntry(e)) {
+      console.error(
+        `commit-reviewed: external_review ledger entry left un-consumed (not a review receipt — conductor-attested consult evidence, never spendable, decision 57984926 §4)`
+      );
+      continue;
+    }
     // MED-2 — same structural-completeness check as the -m flow (see there).
     if (e && e.v2_deficient) {
       console.error(

@@ -53,7 +53,7 @@
 // genuinely dead holder is still recoverable by all three.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 // ONE compatibility adapter for both ledger shapes (decision 57984926, slice
 // S2b-1). A v1 entry passes through byte-identical; a v2 entry's nested
@@ -81,6 +81,28 @@ const CLASSIFIER_VERSION = 1;
 const RECOGNIZED_CLASSES = ['foreign-session', 'foreign-branch', 'no-live-territory'];
 
 const REASON_MAX = 500; // same bound as commit-reviewed's --waive-bytes reason (decision 57984926 §2)
+
+// THE NOTE BOUND for `record-external` (§4: "--note sanitized and bounded").
+// Wider than REASON_MAX because a consult note summarizes a whole review round
+// rather than justifying one flag, but still bounded: the ledger is a small
+// hand-readable evidence file that H1, commit-reviewed and the merge gate all
+// read and QUOTE, and one unbounded conductor paste makes it unreadable for
+// every consumer at once. REFUSED over the bound, never truncated — half a
+// recorded attestation is an attestation nobody made.
+const NOTE_MAX = 4096;
+
+// THE LOCK'S STATE, declared HERE rather than beside withLedgerLock below. The
+// lock section (search LOCK_STALE_MS / heldLock further down) documents what
+// these are for and why the window is what it is; they live above the verb
+// dispatch only because `record-external` (§4) takes the lock from a dispatch
+// placed above that section, and a `const`/`let` read from above its own
+// declaration is a ReferenceError rather than a refusal.
+const LOCK_STALE_MS = 10_000; // SHARED CONVENTION with commit-reviewed.mjs / h22 — do not diverge
+/** The lock this process currently holds, or null. Module-level because gitRun
+ *  (which refreshes the mtime) is called from the classifier, several frames
+ *  below withLedgerLock, and threading a handle through every verifier would put
+ *  the liveness guarantee at the mercy of whoever adds the next git call. */
+let heldLock = null;
 
 function fail(message) {
   console.error(message);
@@ -116,26 +138,42 @@ function flag(name) {
 function flagGiven(name) {
   return argv.includes(name);
 }
+/** EVERY value given for a REPEATABLE flag, in argv order (record-external's
+ *  --file). A flag occurrence with no following value contributes `undefined`,
+ *  which the caller rejects rather than silently dropping — a `--file` with
+ *  nothing after it is a malformed invocation, not a shorter territory. */
+function flagAll(name) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === name) out.push(argv[i + 1]);
+  }
+  return out;
+}
 
-const USAGE =
+const USAGE_DISCHARGE =
   "usage: node scripts/review-ledger.mjs discharge --entry-id <uuid> --digest <sha256-hex-of-the-exact-current-ledger-bytes> " +
   `--class <${RECOGNIZED_CLASSES.join('|')}> --reason "<single-line reason>"`;
+const USAGE_RECORD_EXTERNAL =
+  'usage: node scripts/review-ledger.mjs record-external --file <repo-relative path> [--file <path> …] --provider <id> [--model <id>] ' +
+  '--thread-id <id> --round <n> [--note "<single-line note>"]';
+const USAGE = `${USAGE_DISCHARGE}\n${USAGE_RECORD_EXTERNAL}`;
 
 // ===========================================================================
-// VERB. 'discharge' is the only one. An unknown verb REFUSES rather than
-// falling through to a default, and the message says so explicitly for the
-// resurrection family — a conductor reaching for `restore` must learn that the
-// absence is deliberate, not a missing feature.
+// VERBS. Exactly two: 'discharge' (§3) and 'record-external' (§4). An unknown
+// verb REFUSES rather than falling through to a default, and the message says
+// so explicitly for the resurrection family — a conductor reaching for
+// `restore` must learn that the absence is deliberate, not a missing feature.
 // ===========================================================================
+const KNOWN_VERBS = ['discharge', 'record-external'];
 const verb = argv[0];
 if (verb === undefined || verb.startsWith('-')) {
   fail(`review-ledger: missing subcommand. ${USAGE}`);
 }
-if (verb !== 'discharge') {
+if (!KNOWN_VERBS.includes(verb)) {
   fail(
-    `review-ledger: unknown subcommand '${verb}' — the only verb is 'discharge'. There is NO undischarge/restore/reactivate/resurrect verb, and its ` +
-      `absence is deliberate (decision 57984926 §3): a discharged receipt can never be returned to active, because a state that round-trips is worthless ` +
-      `as a record. Correct a mistaken discharge by RE-DISPATCHING A REVIEWER for the work it covered. ${USAGE}`
+    `review-ledger: unknown subcommand '${verb}' — the verbs are ${KNOWN_VERBS.map((v) => `'${v}'`).join(' and ')}. There is NO undischarge/restore/` +
+      `reactivate/resurrect verb, and its absence is deliberate (decision 57984926 §3): a discharged receipt can never be returned to active, because a ` +
+      `state that round-trips is worthless as a record. Correct a mistaken discharge by RE-DISPATCHING A REVIEWER for the work it covered. ${USAGE}`
   );
 }
 
@@ -146,19 +184,31 @@ if (!existsSync(join(target, '.sterling'))) {
 }
 
 // ===========================================================================
+// RECORD-EXTERNAL (§4) — dispatched HERE, ahead of the discharge-only argument
+// validation below, and it NEVER RETURNS: recordExternal() ends in process.exit
+// on every path (0 recorded, 0 duplicate no-op, 1 refused). The two verbs share
+// nothing but the ledger, the lock and the tmp+rename write, so running one
+// verb's required-argument checks over the other's invocation would refuse a
+// well-formed command for a flag it does not take.
+// ===========================================================================
+if (verb === 'record-external') {
+  recordExternal();
+}
+
+// ===========================================================================
 // ARGUMENT VALIDATION — every defect is its own refusal with its own wording,
 // so a caller can never be told the wrong thing about which argument was
 // wrong. Nothing is read, locked or written until all four are well-formed.
 // ===========================================================================
 const entryIdRaw = flag('--entry-id');
 if (!flagGiven('--entry-id') || typeof entryIdRaw !== 'string' || entryIdRaw.trim() === '') {
-  fail(`review-ledger discharge: --entry-id <uuid> is required — it is the SELECTOR, and a discharge with no entry selected has no target. ${USAGE}`);
+  fail(`review-ledger discharge: --entry-id <uuid> is required — it is the SELECTOR, and a discharge with no entry selected has no target. ${USAGE_DISCHARGE}`);
 }
 const entryId = entryIdRaw.trim();
 
 const classRaw = flag('--class');
 if (!flagGiven('--class') || typeof classRaw !== 'string' || classRaw.trim() === '') {
-  fail(`review-ledger discharge: --class is required and must be one of ${RECOGNIZED_CLASSES.join(', ')}. ${USAGE}`);
+  fail(`review-ledger discharge: --class is required and must be one of ${RECOGNIZED_CLASSES.join(', ')}. ${USAGE_DISCHARGE}`);
 }
 const dischargeClass = classRaw.trim();
 if (!RECOGNIZED_CLASSES.includes(dischargeClass)) {
@@ -177,7 +227,7 @@ const reasonRaw = flag('--reason');
 if (!flagGiven('--reason') || reasonRaw === undefined) {
   fail(
     `review-ledger discharge: --reason "<text>" is required — the reason IS the accountability this verb exists for (decision 57984926 §3 chose explicit ` +
-      `discharge over silent auto-discharge precisely so a human decision is on the record). Nothing written. ${USAGE}`
+      `discharge over silent auto-discharge precisely so a human decision is on the record). Nothing written. ${USAGE_DISCHARGE}`
   );
 }
 if (/[\r\n]/.test(reasonRaw)) {
@@ -204,7 +254,7 @@ const digestRaw = flag('--digest');
 if (!flagGiven('--digest') || typeof digestRaw !== 'string' || digestRaw.trim() === '') {
   fail(
     `review-ledger discharge: --digest <sha256-hex> is required — it is the CONCURRENCY TOKEN (decision 57984926 §3): the SHA-256 of the exact ledger bytes ` +
-      `you read before deciding. Without it this verb would overwrite a receipt promoted since. Nothing written. ${USAGE}`
+      `you read before deciding. Without it this verb would overwrite a receipt promoted since. Nothing written. ${USAGE_DISCHARGE}`
   );
 }
 const expectedDigest = digestRaw.trim().toLowerCase();
@@ -292,7 +342,13 @@ function safeLabel(v) {
   }
 }
 
-const normalizePath = (p) => String(p).replace(/\\/g, '/').replace(/^\.\//, '');
+// A FUNCTION DECLARATION, not a const arrow: `record-external` (§4) runs from a
+// dispatch placed above this line, and a const would be in its temporal dead
+// zone there — a ReferenceError instead of a refusal, on the one surface whose
+// whole contract is "every defect is a refusal, never a crash".
+function normalizePath(p) {
+  return String(p).replace(/\\/g, '/').replace(/^\.\//, '');
+}
 
 // ===========================================================================
 // CLASS VERIFICATION.
@@ -613,13 +669,9 @@ function verifyNoLiveTerritory(norm) {
 // (a missing lock directory included: rmSync force already tolerates ENOENT,
 // and the try/catch covers the rest).
 // ===========================================================================
-const LOCK_STALE_MS = 10_000; // SHARED CONVENTION with commit-reviewed.mjs / h22 — do not diverge
-
-/** The lock this process currently holds, or null. Module-level because gitRun
- *  (which refreshes the mtime) is called from the classifier, several frames
- *  below withLedgerLock, and threading a handle through every verifier would put
- *  the liveness guarantee at the mercy of whoever adds the next git call. */
-let heldLock = null;
+// LOCK_STALE_MS and heldLock are declared ABOVE the verb dispatch (see the note
+// there) — `record-external` takes this same lock from a dispatch that runs
+// before this point in the file.
 
 /** Keep a HELD lock looking alive. Called before every git invocation; a failure
  *  is silent BY DESIGN — if the directory is gone or unwritable the lock has
@@ -689,7 +741,7 @@ function withLedgerLock(sterlingDir, run) {
   }
   if (!acquired) {
     fail(
-      'review-ledger discharge: the review-ledger lock is held by another process and did not clear — REFUSING rather than writing unlocked, because a ' +
+      `review-ledger ${verb}: the review-ledger lock is held by another process and did not clear — REFUSING rather than writing unlocked, because a ` +
         'digest verified outside the lock is exactly the race the digest exists to prevent. Nothing written; re-run.'
     );
   }
@@ -705,7 +757,7 @@ function withLedgerLock(sterlingDir, run) {
       /* best effort — the stale window is the backstop */
     }
     fail(
-      `review-ledger discharge: acquired the ledger lock but could not write its owner token (${e && e.message ? e.message : e}) — REFUSING rather than ` +
+      `review-ledger ${verb}: acquired the ledger lock but could not write its owner token (${e && e.message ? e.message : e}) — REFUSING rather than ` +
         `running a critical section this process cannot prove it owns, because the release would then be unable to tell its own lock from a usurper's. ` +
         `Nothing written; re-run.`
     );
@@ -904,3 +956,304 @@ try {
 }
 
 console.log(JSON.stringify(report));
+
+// ===========================================================================
+// RECORD-EXTERNAL (decision 57984926 §4 "EXTERNAL REVIEW"; campaign slice
+// S2b-4).
+//
+//   node scripts/review-ledger.mjs record-external \
+//     --file <repo-relative path> [--file <path> …] \
+//     --provider <id> [--model <id>] --thread-id <id> --round <n> \
+//     [--note "<single-line note>"]
+//
+// WHAT THIS RECORDS, AND WHAT IT IS NOT. §4 verbatim: this is "conductor-
+// attested evidence of a completed consult, NOT PROOF". The conductor typed the
+// command; nothing here verifies that the consult happened, which provider
+// answered, or what it said. That is precisely why the entry is minted ONLY by
+// an explicit command — §4 rejected minting external entries by inferring review
+// purpose from Codex prompts or H29 observations, because H29 cannot tell design
+// sparring from review and keyword inference FALSE-MINTS review evidence.
+// Under-recording through an explicit verb is the safer failure.
+//
+// NEVER SPENDABLE, BY TWO INDEPENDENT GUARDS (§4: "kind gate + agent-type
+// regex, belt and braces"). The entry declares kind:'external_review', which
+// every reading surface gates on through the shared adapter; and it carries NO
+// agent_type ANYWHERE, so it also fails commit-reviewed's VALID_AGENT_TYPE
+// roster check. Neither guard stands in for the other: dropping the kind gate
+// must not make this spendable, and neither must a future entry shape that
+// happens to acquire a reviewer-looking field. If external provenance ever
+// reaches a commit it does so under a DISTINCT `External-Review:` trailer, never
+// `Reviewed-By-Agent:` — the merge gate's receipt read is keyed to the latter.
+//
+// NO --digest, DELIBERATELY (adjudicated). The discharge verb takes a
+// concurrency token because it REWRITES AN EXISTING ENTRY IN PLACE, and a stale
+// read there means flipping the state of an entry other than the one the
+// conductor judged. An APPEND is not a state flip: it changes no existing entry,
+// so a receipt promoted between the conductor's read and this command is not a
+// hazard — it simply survives beside the new entry. The lock (not a token) is
+// what makes the append safe against a concurrent H22 promotion.
+//
+// IDEMPOTENT ON (thread_id, round). One consult thread holds SEVERAL review
+// rounds (§4: "round/consult id for idempotency — one thread can hold several
+// review rounds"), so the round is what distinguishes them and the PAIR is the
+// key. The command is hand-typed, so re-running it is the natural conductor
+// mistake, and a ledger that doubles its own evidence on a re-run cannot be
+// COUNTED — the count is exactly what a reader of external review evidence
+// wants. A repeat writes NOTHING, preserves the first attestation verbatim, and
+// DISCLOSES the duplicate (P5: never a silent success).
+// ===========================================================================
+
+/** MODEL IS RECORDED OR ABSENT — NEVER INVENTED (§4's "--model-or-null").
+ *  A consult whose model the conductor cannot observe records null. Defaulting
+ *  to the provider's flagship, to the configured reviewer model, or to the
+ *  string 'unknown' would turn conductor-attested evidence into a FALSE
+ *  PROVENANCE CLAIM, which is the one thing §4 says this entry is not. */
+function recordExternal() {
+  let outcome;
+  try {
+    outcome = recordExternalUnderLock(buildExternalEntryFromArgv());
+  } catch (e) {
+    if (e && e.refusal) fail(e.message);
+    throw e;
+  }
+  if (outcome.duplicate) {
+    // EXIT 0, NOTHING WRITTEN, LOUDLY DISCLOSED. A repeat is not an error — the
+    // consult it names really is recorded — but a silent success would leave the
+    // conductor believing a second attestation exists.
+    console.error(
+      `review-ledger record-external: DUPLICATE — an external_review entry for thread_id ${JSON.stringify(outcome.thread_id)} round ${outcome.round} is ` +
+        `ALREADY RECORDED (entry_id ${JSON.stringify(outcome.existing_entry_id)}). NOTHING WAS WRITTEN and the first attestation is preserved exactly as it ` +
+        `was: (thread_id, round) identifies ONE consult, and recording it twice would double evidence that readers COUNT. If this is genuinely a different ` +
+        `consult round, re-run with the round it actually was.`
+    );
+    console.log(JSON.stringify({ recorded: false, duplicate: true, entry_id: outcome.existing_entry_id, thread_id: outcome.thread_id, round: outcome.round }));
+    process.exit(0);
+  }
+  console.log(JSON.stringify({ recorded: true, ...outcome.report }));
+  process.exit(0);
+}
+
+/** ARGUMENT VALIDATION + ENTRY CONSTRUCTION. Every defect is its own refusal
+ *  NAMING THE GAP, and nothing is read, locked or written until the whole
+ *  invocation is well-formed — a missing required argument is REFUSED, never
+ *  defaulted. Each default this refuses to take is separately corrosive: an
+ *  inferred provider is a fabricated provenance claim; a generated thread-id
+ *  destroys the (thread, round) idempotency key; a files default silently
+ *  attributes territory nobody attested to, which is the exact mis-attribution
+ *  research finding 289cd172 measured on the roster side. */
+function buildExternalEntryFromArgv() {
+  // --- TERRITORY: repeatable --file, at least one ---
+  const fileArgs = flagAll('--file');
+  if (fileArgs.length === 0) {
+    fail(
+      `review-ledger record-external: at least one --file <repo-relative path> is required — the files are the TERRITORY the consult covered, and an ` +
+        `attestation naming no territory says nothing about any diff. It is refused, never defaulted to the staged paths: territory nobody attested to is ` +
+        `mis-attributed evidence. Nothing written. ${USAGE_RECORD_EXTERNAL}`
+    );
+  }
+  const files = [];
+  for (const raw of fileArgs) {
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      fail(
+        `review-ledger record-external: a --file argument has no value (${safeLabel(raw)}) — a flag with nothing after it is a malformed invocation, not a ` +
+          `shorter territory. Nothing written. ${USAGE_RECORD_EXTERNAL}`
+      );
+    }
+    if (/[\r\n]/.test(raw)) {
+      fail(
+        `review-ledger record-external: a --file path contains a newline (${safeLabel(raw)}) — refused, never flattened. Ledger values are read back into ` +
+          `refusal messages and advisories, where an embedded second line reads as the mechanism's own output. Nothing written.`
+      );
+    }
+    const p = normalizePath(raw.trim());
+    if (!files.includes(p)) files.push(p); // repeated identical paths are one path, in argv order
+  }
+
+  // --- PROVIDER: required (who was consulted) ---
+  const provider = requiredSingleLineFlag('--provider', 'the PROVIDER identifies WHO was consulted, and an attestation with no provider names no outside party at all');
+  // --- THREAD-ID: required (which conversation) ---
+  const threadId = requiredSingleLineFlag(
+    '--thread-id',
+    'the THREAD ID is half the idempotency key — generating one here would make every re-run of the same command look like a new consult'
+  );
+
+  // --- ROUND: required (which round within the thread) ---
+  // §4 does not spell out that --round is mandatory, but idempotency KEYS on it:
+  // with no round a repeat could only be judged per-thread, and §4 is explicit
+  // that "one thread can hold several review rounds". So it is required, and an
+  // unparseable value refuses rather than defaulting to 1.
+  const roundRaw = flag('--round');
+  if (!flagGiven('--round') || typeof roundRaw !== 'string' || roundRaw.trim() === '') {
+    fail(
+      `review-ledger record-external: --round <n> is required — one consult THREAD holds several review ROUNDS (decision 57984926 §4), so the round is what ` +
+        `tells them apart and (thread_id, round) is the idempotency key. Nothing written. ${USAGE_RECORD_EXTERNAL}`
+    );
+  }
+  const round = Number(roundRaw.trim());
+  if (!Number.isInteger(round) || round < 0) {
+    fail(
+      `review-ledger record-external: --round ${safeLabel(roundRaw)} is not a non-negative integer — the round is a counter within the thread and is compared ` +
+        `for equality when detecting a duplicate, so a value that is not a plain integer would make two spellings of the same round read as two consults. ` +
+        `Nothing written.`
+    );
+  }
+
+  // --- MODEL: OPTIONAL. Absent means null (see the header). ---
+  let model = null;
+  if (flagGiven('--model')) {
+    const modelRaw = flag('--model');
+    if (typeof modelRaw !== 'string' || modelRaw.trim() === '') {
+      fail(
+        `review-ledger record-external: --model was given with no usable value (${safeLabel(modelRaw)}) — OMIT the flag entirely to record an unknown model ` +
+          `as null. An empty model string is neither a model nor an honest absence. Nothing written.`
+      );
+    }
+    if (/[\r\n]/.test(modelRaw)) {
+      fail(`review-ledger record-external: --model must be a SINGLE LINE (${safeLabel(modelRaw)}) — refused, never flattened. Nothing written.`);
+    }
+    model = modelRaw.trim();
+  }
+
+  // --- NOTE: OPTIONAL, single-line, bounded, sanitized like --reason. ---
+  let note = null;
+  if (flagGiven('--note')) {
+    const noteRaw = flag('--note');
+    if (typeof noteRaw !== 'string') {
+      fail(
+        `review-ledger record-external: --note was given with no value — a flag with nothing after it is a malformed invocation. Omit --note entirely to ` +
+          `record no note. Nothing written. ${USAGE_RECORD_EXTERNAL}`
+      );
+    }
+    if (/[\r\n]/.test(noteRaw)) {
+      // THE REFUSAL DOES NOT ECHO THE NOTE. The note is exactly the
+      // newline-bearing text this check exists to keep OUT of a message stream
+      // (anti-pattern ee89c3fd): quoting it here would print the forged second
+      // line as this mechanism's own output while explaining why it was refused.
+      fail(
+        `review-ledger record-external: --note must be a SINGLE LINE — the note given contains a newline (${noteRaw.length} characters, not echoed here). ` +
+          `REFUSED, never silently flattened: the ledger is read back into refusal messages and advisories, and an embedded second line reads there as the ` +
+          `mechanism's own output. Re-run with a one-line note. Nothing written.`
+      );
+    }
+    if (noteRaw.length > NOTE_MAX) {
+      fail(
+        `review-ledger record-external: --note is ${noteRaw.length} characters, over the ${NOTE_MAX}-character bound. REFUSED, not truncated — half a ` +
+          `recorded attestation is an attestation nobody made — and the oversize note is deliberately NOT echoed back here. Nothing written.`
+      );
+    }
+    // EMPTY IS ABSENCE, RECORDED AS null. Never a half-built entry: the rest of
+    // the entry is constructed exactly as it would be with a note.
+    note = noteRaw.trim() === '' ? null : noteRaw.trim();
+  }
+
+  // §1's v2 envelope, in the EXTERNAL shape (§4). NO reviewer object and no
+  // agent_type ANYWHERE — an agent_type is what roster eligibility matches on,
+  // so carrying one is precisely how this entry would become spendable.
+  return {
+    entry: {
+      schema_version: 2,
+      entry_id: randomUUID(),
+      kind: 'external_review',
+      status: 'active',
+      recorded_at: new Date().toISOString(),
+      provider,
+      model,
+      thread_id: threadId,
+      round,
+      note,
+      files,
+      disposition: null,
+    },
+    thread_id: threadId,
+    round,
+  };
+}
+
+/** A required flag that must be present, non-empty and single-line. `why` is
+ *  appended so each refusal explains what the missing argument was FOR rather
+ *  than printing a generic usage error. */
+function requiredSingleLineFlag(name, why) {
+  const raw = flag(name);
+  if (!flagGiven(name) || typeof raw !== 'string' || raw.trim() === '') {
+    fail(`review-ledger record-external: ${name} is required — ${why}. It is refused, never inferred or defaulted. Nothing written. ${USAGE_RECORD_EXTERNAL}`);
+  }
+  if (/[\r\n]/.test(raw)) {
+    fail(`review-ledger record-external: ${name} must be a SINGLE LINE (${safeLabel(raw)}) — refused, never flattened. Nothing written.`);
+  }
+  return raw.trim();
+}
+
+/** The APPEND, run under the ledger lock: re-read the ledger, check the
+ *  (thread_id, round) idempotency key against what is ACTUALLY on disk now, and
+ *  append atomically. Read-check-write is one critical section for the same
+ *  reason the discharge is: a duplicate check performed outside the lock could
+ *  be raced by a concurrent record-external and both would append. */
+function recordExternalUnderLock({ entry, thread_id: threadId, round }) {
+  const sterlingDirLocal = join(target, '.sterling');
+  const ledgerPathLocal = join(sterlingDirLocal, 'review-ledger.json');
+  return withLedgerLock(sterlingDirLocal, () => {
+    let entries = [];
+    if (existsSync(ledgerPathLocal)) {
+      let bytes;
+      try {
+        bytes = readFileSync(ledgerPathLocal, 'utf8');
+      } catch (e) {
+        refuse(`review-ledger record-external: could not read ${ledgerPathLocal} (${e && e.message ? e.message : e}). Nothing written.`);
+      }
+      try {
+        entries = JSON.parse(bytes);
+      } catch (e) {
+        // NEVER degrade a malformed evidence file to empty and write over it —
+        // that would DESTROY every receipt in it. commit-reviewed can degrade to
+        // empty because it only READS; this appends.
+        refuse(
+          `review-ledger record-external: ${ledgerPathLocal} is not valid JSON (${e && e.message ? e.message : e}) — refusing to append to an evidence file ` +
+            `this command cannot parse, because writing a fresh array over it would destroy every receipt it holds. Nothing written.`
+        );
+      }
+      if (!Array.isArray(entries)) {
+        refuse(`review-ledger record-external: ${ledgerPathLocal} does not hold a JSON array (got ${typeof entries}) — refusing to append. Nothing written.`);
+      }
+    }
+
+    // IDEMPOTENCY KEY: (kind, thread_id, round). thread_id by strict string
+    // equality; round compared BOTH strictly and by string form, so a ledger
+    // holding `"round": "2"` (a hand-edit, or a future producer) still reads as
+    // the same consult as `--round 2` rather than minting a second entry.
+    const existing = entries.find(
+      (e) =>
+        e &&
+        typeof e === 'object' &&
+        e.kind === 'external_review' &&
+        e.thread_id === threadId &&
+        (e.round === round || String(e.round) === String(round))
+    );
+    if (existing) {
+      return { duplicate: true, existing_entry_id: typeof existing.entry_id === 'string' ? existing.entry_id : null, thread_id: threadId, round };
+    }
+
+    // APPEND — every pre-existing entry is written back exactly as re-read, so
+    // recording a consult never rewrites, reorders or drops review evidence.
+    const next = [...entries, entry];
+    const tmpPath = join(sterlingDirLocal, `review-ledger.json.tmp-${process.pid}`);
+    writeFileSync(tmpPath, JSON.stringify(next));
+    renameSync(tmpPath, ledgerPathLocal);
+
+    return {
+      duplicate: false,
+      report: {
+        entry_id: entry.entry_id,
+        kind: entry.kind,
+        provider: entry.provider,
+        model: entry.model,
+        thread_id: entry.thread_id,
+        round: entry.round,
+        files: entry.files,
+        note: entry.note,
+        recorded_at: entry.recorded_at,
+        spendable: false,
+        ledger: ledgerPathLocal,
+      },
+    };
+  });
+}

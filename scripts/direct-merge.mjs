@@ -497,7 +497,35 @@ const commitsRaw = spawnSync('git', ['log', '--format=%H', `${into}..${branch}`]
 if (commitsRaw.status !== 0) fail(`direct-merge: git log ${into}..${branch} failed: ${(commitsRaw.stderr || '').trim()}`);
 const branchCommits = commitsRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
 const pathGlobs = (config.toolchains ?? []).flatMap((t) => t.path_globs ?? []);
+// ROSTER-PATTERN TRAILER VALIDATION (decision 57984926 §5, campaign slice
+// S2b-4). The gate used to accept ANY non-empty Reviewed-By-Agent value, so
+// `Reviewed-By-Agent: yes` — a receipt naming nobody — satisfied the ONLY
+// mechanism standing between an unreviewed diff and main. A value now counts
+// only if it NAMES A ROSTER REVIEWER.
+//
+// THE MATCH IS ON THE LEADING IDENTITY TOKEN, NOT THE WHOLE VALUE, and that is
+// the adjudicated shape rather than an accident: commit-reviewed stamps a bare
+// `reviewer-<class>`, while hand-written and post-hoc receipts carry a decorated
+// value like `reviewer-correctness (opus) — findings adjudicated`. Anchoring the
+// pattern with `$` would reject every decorated receipt in the repo's own
+// history — an over-anchored gate refusing real reviews is a worse failure than
+// the loose one it replaces, because it trains --waive-reviews. So: the value
+// must BEGIN with a roster identity token, and that token must END at a
+// whitespace boundary or at the end of the value (`reviewer bob` and
+// `reviewer-` therefore fail, `reviewer-security` and `reviewer-security (opus)`
+// pass).
+//
+// AT LEAST ONE MATCHING VALUE SATISFIES THE GATE (§5's words). A commit may
+// legitimately carry a roster receipt AND a hand-written note under the same
+// key; requiring EVERY value to match would block the very commits this gate
+// exists to require. Unmatched values are DISCLOSED, never fatal and never
+// silently ignored — a junk receipt nobody meant as one otherwise keeps living
+// in commit messages unremarked.
+const ROSTER_TRAILER_VALUE = /^reviewer-[A-Za-z0-9_-]+(\s|$)/;
 const unreviewed = [];
+// Commits that PASS on a valid value while also carrying value(s) that do not
+// match — reported after the loop, never fatal.
+const decoratedButUnmatched = [];
 for (const sha of branchCommits) {
   // Multi-parent (merge) commits emit NOTHING from a plain `diff-tree --name-only`
   // (r-review F1) — the default diff-tree suppresses merge diffs entirely, so a
@@ -523,13 +551,51 @@ for (const sha of branchCommits) {
     { cwd: target, encoding: 'utf8', timeout: 30_000 }
   );
   // A trailer with an EMPTY value is treated as ABSENT, deliberately (r-review F2,
-  // adjudicated by the conductor): a receipt naming nobody is not a receipt. `.trim()`
-  // on an empty/whitespace-only value falls through to the unreviewed list below.
-  if ((trailerRaw.stdout ?? '').trim()) continue; // receipt present
-  const short = spawnSync('git', ['rev-parse', '--short', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
-  const subject = spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
-  unreviewed.push({ sha, short, subject });
+  // adjudicated by the conductor): a receipt naming nobody is not a receipt. An
+  // empty/whitespace-only value is dropped here and falls through to the
+  // unreviewed list below, exactly as before — the roster-pattern check is a
+  // NARROWING of what counts, never a widening.
+  // The read stays KEYED to `Reviewed-By-Agent` (§4: external provenance uses a
+  // DISTINCT `External-Review:` trailer, "never Reviewed-By-Agent"), so an
+  // External-Review line is invisible here and can never satisfy this gate.
+  const trailerValues = (trailerRaw.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '');
+  const matched = trailerValues.filter((v) => ROSTER_TRAILER_VALUE.test(v));
+  const unmatched = trailerValues.filter((v) => !ROSTER_TRAILER_VALUE.test(v));
+  const short = () => spawnSync('git', ['rev-parse', '--short', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
+  const subject = () => spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
+  if (matched.length > 0) {
+    if (unmatched.length > 0) decoratedButUnmatched.push({ short: short(), subject: subject(), unmatched });
+    continue; // receipt present
+  }
+  // NO matching value: the commit is treated EXACTLY as trailer-less — same
+  // list, same refusal, same remedies — with the rejected value(s) carried so the
+  // refusal can NAME what it rejected. A gate that refuses a trailered commit
+  // without showing WHICH value failed sends the conductor to `git log` to guess.
+  unreviewed.push({ sha, short: short(), subject: subject(), unmatched });
 }
+if (decoratedButUnmatched.length > 0) {
+  console.error(
+    `direct-merge: ${decoratedButUnmatched.length} code-touching commit(s) carry a valid roster receipt ALONGSIDE Reviewed-By-Agent value(s) that do not ` +
+      `match the roster reviewer pattern (^reviewer-<class>) — the gate passed on the valid value; the unmatched value(s) are DISCLOSED, never counted:\n` +
+      decoratedButUnmatched.map((c) => `  - ${c.short}  ${c.subject}  — ignored value(s): ${c.unmatched.map((v) => JSON.stringify(v)).join(', ')}`).join('\n')
+  );
+}
+// ONE RENDERER FOR BOTH OUTCOMES (review LOW-2). The refusal and the waiver
+// describe the SAME commits and must describe them the same way: a value that is
+// present-but-not-a-roster-reviewer is exactly what the operator needs shown, and
+// needing it MORE on the waiver path, not less — a waiver is the branch that lets
+// the commit through, so "what did the gate reject here" is the one question its
+// output has to answer. Rendered once rather than twice because the two copies had
+// already drifted (the waiver branch dropped `unmatched` while the comment above
+// promised it was carried so the output could NAME what it rejected).
+const renderUnreviewed = (c) =>
+  `  - ${c.short}  ${c.subject}` +
+  (c.unmatched && c.unmatched.length
+    ? `\n      REJECTED value(s) — present but not a roster reviewer (^reviewer-<class>): ${c.unmatched.map((v) => JSON.stringify(v)).join(', ')}`
+    : '');
 if (unreviewed.length > 0) {
   const waivePresent = process.argv.includes('--waive-reviews');
   const waiveReason = arg('--waive-reviews');
@@ -542,12 +608,13 @@ if (unreviewed.length > 0) {
     }
     console.error(
       `direct-merge: --waive-reviews WAIVED the review-receipt gate for ${unreviewed.length} code-touching commit(s) — reason: ${waiveReason}\n` +
-        unreviewed.map((c) => `  - ${c.short}  ${c.subject}`).join('\n')
+        unreviewed.map(renderUnreviewed).join('\n')
     );
   } else {
     fail(
-      `direct-merge: ${unreviewed.length} code-touching commit(s) on this branch are missing a 'Reviewed-By-Agent' review-receipt trailer — reconcile before merging:\n` +
-        unreviewed.map((c) => `  - ${c.short}  ${c.subject}`).join('\n') +
+      `direct-merge: ${unreviewed.length} code-touching commit(s) on this branch are missing a 'Reviewed-By-Agent' review-receipt trailer naming a roster ` +
+        `reviewer — reconcile before merging:\n` +
+        unreviewed.map(renderUnreviewed).join('\n') +
         `\nRemedy: amend the commit(s) to record a 'Reviewed-By-Agent: <reviewer>' trailer, then rerun.\n` +
         `Or, to proceed anyway: rerun with --waive-reviews "<reason>" (never silent — the waiver is echoed at merge time).`
     );

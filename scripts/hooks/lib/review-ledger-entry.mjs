@@ -155,6 +155,23 @@ export function normalizeLedgerEntry(entry) {
     // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
     // entry it refuses or waives (decision 57984926 §2). undefined for v1.
     entry_id: entry.entry_id,
+    // S2b-4 — THE KIND GATE (decision 57984926 §4). A v2 ledger is now
+    // MULTI-KIND: 'roster_receipt' entries are spendable review receipts, and
+    // 'external_review' entries are the conductor's attestation that an
+    // outside-model consult happened (minted only by scripts/review-ledger.mjs
+    // record-external). §4 requires external entries to be "never spendable,
+    // never stamped, never counted by roster eligibility (kind gate +
+    // agent-type regex, belt and braces)", so the KIND must be visible through
+    // the one adapter every reader uses — otherwise each surface would need its
+    // own `entry.kind` branch, which is the second hand-rolled switch this
+    // adapter exists to prevent (finding HIGH-3). Passed through RAW and
+    // undefaulted, same posture as `status`: an external entry carries no
+    // reviewer object, no identity and no started_at, so WITHOUT this key it
+    // normalizes to the shape of a structurally-deficient roster receipt and
+    // gets reported as a malformed REVIEW receipt rather than as what it is.
+    // undefined for v1 (early return above) and for a v2 entry promoted before
+    // the field existed — both of which are roster receipts by construction.
+    kind: entry.kind,
     // S2b-3 — the v2 LIFECYCLE STATUS, raw and undefaulted (see the STATUS note
     // in the header). undefined for v1; 'discharged' is the only value that
     // makes an entry unspendable.
@@ -271,4 +288,27 @@ export function dischargeMarkerClass(normalized) {
  *  for the 'authenticated' class above. */
 export function isAuthenticatedDischarge(normalized) {
   return dischargeMarkerClass(normalized) === 'authenticated';
+}
+
+/** EXTERNAL REVIEW EVIDENCE, NEVER A SPENDABLE RECEIPT (decision 57984926 §4,
+ *  campaign slice S2b-4). Takes a NORMALIZED entry, like the discharge
+ *  predicates above, so every surface asks the question the same way.
+ *
+ *  An external entry is the conductor's attestation that an outside-model
+ *  consult COMPLETED — "evidence of a completed consult, not proof" (§4). It is
+ *  therefore excluded from validity, eligibility, roster counts, trailer
+ *  stamping and reviewed_by everywhere, and — because the consume step removes
+ *  only entries it actually STAMPED — it survives a consume write untouched,
+ *  the same structural posture a discharged entry has.
+ *
+ *  STRICT STRING EQUALITY, and the ONE kind that is excluded. A missing/unknown
+ *  kind reads as a roster receipt (the compatibility rule: every entry that
+ *  predates the field is one), so this predicate can only ever ADD an exclusion
+ *  for an entry that explicitly declares itself external — it can never
+ *  silently withhold a real review receipt. The agent-type regex on the reading
+ *  side is the second, independent guard §4 asks for ("belt and braces"): an
+ *  external entry carries NO agent_type at all, so it fails that check too, and
+ *  neither guard stands in for the other. */
+export function isExternalReviewEntry(normalized) {
+  return !!normalized && typeof normalized === 'object' && normalized.kind === 'external_review';
 }

@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
-import { normalizeLedgerEntry, isAuthenticatedDischarge } from './lib/review-ledger-entry.mjs';
+import { normalizeLedgerEntry, isAuthenticatedDischarge, isExternalReviewEntry } from './lib/review-ledger-entry.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
@@ -323,6 +323,19 @@ function reviewReceiptLines(cwd) {
     // STILL REPORTED here, which is the right direction for a disclosure
     // surface: a malformed marker is exactly what a human needs told.
     .filter((e) => !isAuthenticatedDischarge(e))
+    // EXTERNAL REVIEW ENTRIES ARE NOT SURVIVING RECEIPTS (decision 57984926 §4,
+    // campaign slice S2b-4). This report exists to surface UN-CONSUMED REVIEW
+    // RECEIPTS — evidence a reviewer earned that was never stamped into a commit
+    // — and it tells the conductor to "judge each one and remove it by hand, or
+    // re-dispatch a reviewer". A kind:'external_review' entry is neither: it was
+    // never spendable, so it can never be un-consumed, and neither remedy
+    // applies to it. EXCLUDED rather than labelled distinctly, matching its
+    // never-spendable nature — listing it here would inflate the un-consumed
+    // count with entries that are working exactly as designed, and (carrying no
+    // agent_type, session, branch or started_at) it would render as
+    // "unknown reviewer — age unknown … a pre-expiry receipt", which is three
+    // wrong claims about a well-formed record.
+    .filter((e) => !isExternalReviewEntry(e))
     .map((e) => {
       const startMs = typeof e.at === 'string' ? Date.parse(e.at) : NaN;
       // PREFER THE COMPLETION INSTANT, same bounded logic as commit-reviewed's
