@@ -52,7 +52,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SterlingStore } from '@sterling/store';
+import { createSterlingServer } from '../server.js';
 import { SterlingTools } from '../tools.js';
 
 const NOW = '2026-08-30T12:00:00.000Z';
@@ -1110,5 +1113,538 @@ test('B11 (DECISION 4, CONTROL): removing the LAST `current_ac` / `live_test_ref
     } finally {
       cleanup();
     }
+  }
+});
+
+// ===========================================================================
+// SCALAR-DISCRIMINATOR RULE (user-approved hardening, NOT YET BUILT) — SD1-SD5
+// ===========================================================================
+// SPEC (given, not derived from the code under test): the selector key in
+// `field[key=value]` must be a SCALAR discriminator (string/number/boolean)
+// across the WHOLE named array — not merely at the matched element. If ANY
+// element of the named array OWNS the key with a defined non-scalar value (an
+// object or an array), the call is REFUSED loudly, regardless of whether that
+// element or any other would have matched the selector's value — because
+// non-scalar values compare lossily as strings ("[object Object]", a
+// comma-joined array), which must never be allowed to address a destroy.
+// Elements that do not own the key at all (or own it as `undefined`) remain
+// simple non-matches, exactly as today; the existing zero/multi-match
+// refusals (AC7/AC8) are unchanged.
+//
+// THE ONE PLACE THIS FILE FIXES THE UNDECIDED WORDING: the SPEC dictates WHAT
+// the refusal must teach (the key, the count of non-scalar-carrying elements,
+// and that addressing is scalar-only, naming string/number/boolean) but not
+// its exact prose. assertScalarDiscriminatorMessage() below is that decision,
+// as a forgiving multi-assertion (same convention as FULL_UUID_REQUIRED and
+// the DECISION 1-4 regexes above) — an implementer who prefers different
+// wording changes the message so it still says "scalar", still names
+// string/number/boolean, still names the key, still names the count.
+//
+// Every SD test asserts the record is UNCHANGED (body deep-equal, version
+// unchanged) — a refusal that writes nothing is the feature, not the happy
+// path.
+// ---------------------------------------------------------------------------
+function assertScalarDiscriminatorMessage(message: string, key: string, count: number): void {
+  assert.match(message, /scalar/i, `refusal must characterize the rule as scalar-based — got: "${message}"`);
+  assert.match(message, /string/i, `refusal must name string as an accepted scalar type — got: "${message}"`);
+  assert.match(message, /number/i, `refusal must name number as an accepted scalar type — got: "${message}"`);
+  assert.match(message, /boolean/i, `refusal must name boolean as an accepted scalar type — got: "${message}"`);
+  assert.match(
+    message,
+    new RegExp(`\\b${key}\\b`),
+    `refusal must name the offending key ("${key}") — got: "${message}"`
+  );
+  assert.match(
+    message,
+    new RegExp(`\\b${count}\\b`),
+    `refusal must name the count of non-scalar-carrying elements (${count}) — got: "${message}"`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SD4 (CONTROL, PLACED FIRST). Without this, SD1/SD2/SD3 are all satisfied by
+// an implementation that simply refuses every removal, or refuses whenever
+// the selector key is anything other than a hardcoded name. This uses the
+// EXACT SAME field/key as SD3 below (current_ac / ac_id) — a clean minimal
+// pair differing only in whether one sibling element is non-scalar — so a
+// green SD4 alongside a red-today SD3 can only be explained by the value's
+// TYPE, never by the key's NAME.
+// Sabotage: make knowledgeArrayRemove refuse unconditionally (or refuse
+// whenever any optional/typed field is present) — SD1/SD2/SD3 would stay
+// (correctly) refused, and only SD4 goes red, which is exactly the
+// wrong-reason pass this control exists to catch.
+// ---------------------------------------------------------------------------
+test('SD4 (CONTROL, first): an array where every element carries a purely SCALAR value under the selector key still removes exactly the matched element — the scalar-discriminator guard is additive, not a blanket refusal (same field/key as SD3: current_ac/ac_id)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { ac_id: 'AC1', text: 'first criterion', verifiable_at: 'final' },
+      { ac_id: 'AC2', text: 'second criterion', verifiable_at: 'final' },
+      { ac_id: 'AC3', text: 'third criterion', verifiable_at: 'final' },
+    ];
+    const article = mkArticleRaw(tools, 'sd4-all-scalar-control', { current_ac: original });
+    const id = article.id as string;
+    const before = getRecord(tools, id);
+
+    assert.ok(
+      (before.current_ac as Loose[]).every((e) => typeof e.ac_id === 'string'),
+      'PRECONDITION: every element carries ac_id as a plain string — no non-scalar owner anywhere in this array'
+    );
+
+    let result: ArrayRemoveResult | undefined;
+    assert.doesNotThrow(() => {
+      result = remover(tools).knowledgeArrayRemove(id, 'current_ac[ac_id=AC2]', before.version as number);
+    }, 'an all-scalar array must still permit removal — the new guard must not become a blanket refusal');
+
+    assert.deepEqual(
+      ((result!.record as unknown as { current_ac: Loose[] }).current_ac).map((e) => e.ac_id),
+      ['AC1', 'AC3'],
+      'exactly the matched element was removed, siblings byte-preserved and in order'
+    );
+    const after = getRecord(tools, id);
+    assert.deepEqual(after.current_ac, [original[0], original[2]], 'persisted, byte-identical siblings');
+    assert.equal(after.version, (before.version as number) + 1, 'the successful path mints a version');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SD1 — the direct case: one element OWNS the selector key with an OBJECT
+// value. `current_ac[].untestable_because` is a genuinely schema-typed object
+// field ({reason, blocking_record_id}), so no store-proxy patching is needed
+// — the object survives the ordinary, schema-validated create surface as-is.
+// Sabotage: keep today's `String(el[key]) === value` comparison with no
+// non-scalar ownership pre-check — this test goes red (the call succeeds and
+// deletes AC1).
+// ---------------------------------------------------------------------------
+test('SD1: a selector key that is an OBJECT on at least one element is REFUSED, naming the key and the count — regardless of whether the naive stringified value would have matched (RED today: "[object Object]" string-compares as a clean single match and deletes it)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      {
+        ac_id: 'AC1',
+        text: 'first criterion',
+        verifiable_at: 'final',
+        untestable_because: { reason: 'blocked upstream', blocking_record_id: '00000000-0000-0000-0000-000000000000' },
+      },
+      { ac_id: 'AC2', text: 'second criterion', verifiable_at: 'final' },
+    ];
+    const article = mkArticleRaw(tools, 'sd1-object-valued-key', { current_ac: original });
+    const id = article.id as string;
+    const before = getRecord(tools, id);
+    const beforeAc = before.current_ac as Loose[];
+
+    assert.deepEqual(
+      beforeAc[0].untestable_because,
+      original[0].untestable_because,
+      'PRECONDITION: the object survives creation untouched — this is a genuinely schema-typed field, no patching needed'
+    );
+    assert.ok(
+      !hasKey(beforeAc[1], 'untestable_because'),
+      'PRECONDITION: the sibling does not own the key at all — it must remain a simple non-match, never counted'
+    );
+
+    assert.throws(
+      () => remover(tools).knowledgeArrayRemove(id, 'current_ac[untestable_because=[object Object]]', before.version as number),
+      (err: Error) => {
+        assertScalarDiscriminatorMessage(err.message, 'untestable_because', 1);
+        return true;
+      },
+      'an object-valued key must refuse the destroy outright, even though naive stringification makes AC1 look like a clean single match'
+    );
+
+    const after = getRecord(tools, id);
+    assert.deepEqual(after.current_ac, before.current_ac, 'record UNCHANGED — the refusal writes nothing');
+    assert.equal(after.version, before.version, 'no version minted by the refused call');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SD2 — the same refusal shape for an ARRAY-valued key. `test_paths` is
+// REQUIRED on every `live_test_refs` element, so BOTH elements here own it as
+// an array — a count of 2, distinct from SD1's count of 1.
+// Sabotage: same as SD1 — this test goes red (the call succeeds and deletes
+// the first entry via comma-joined string comparison).
+// ---------------------------------------------------------------------------
+test('SD2: a selector key that is an ARRAY on multiple elements is REFUSED the same way as an object-valued key, naming the count across BOTH owners (RED today: comma-joined string-compares as a clean single match and deletes it)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { ac_id: 'AC1', test_paths: ['src/tests/one.test.ts', 'src/tests/two.test.ts'] },
+      { ac_id: 'AC2', test_paths: ['src/tests/three.test.ts'] },
+    ];
+    const article = mkArticleRaw(tools, 'sd2-array-valued-key', { live_test_refs: original });
+    const id = article.id as string;
+    const before = getRecord(tools, id);
+    const beforeRefs = before.live_test_refs as Loose[];
+
+    assert.ok(Array.isArray(beforeRefs[0].test_paths), 'PRECONDITION: test_paths is genuinely an array field, no patching needed');
+    assert.ok(Array.isArray(beforeRefs[1].test_paths), 'PRECONDITION: the sibling ALSO owns it as an array — both elements are non-scalar owners');
+
+    assert.throws(
+      () =>
+        remover(tools).knowledgeArrayRemove(
+          id,
+          'live_test_refs[test_paths=src/tests/one.test.ts,src/tests/two.test.ts]',
+          before.version as number
+        ),
+      (err: Error) => {
+        assertScalarDiscriminatorMessage(err.message, 'test_paths', 2);
+        return true;
+      },
+      'an array-valued key must refuse the destroy outright, even though naive stringification makes AC1 look like a clean single match'
+    );
+
+    const after = getRecord(tools, id);
+    assert.deepEqual(after.live_test_refs, before.live_test_refs, 'record UNCHANGED — the refusal writes nothing');
+    assert.equal(after.version, before.version, 'no version minted by the refused call');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SD3 — the subtle case: the selector EXACTLY string-matches a SCALAR
+// element's unique value, but a DIFFERENT element in the SAME array owns the
+// SAME key with a non-scalar value. The key is unsound for the array as a
+// whole, so the refusal must fire even though the matched element itself is
+// perfectly scalar.
+//
+// REACHING THE STATE: `current_ac[].ac_id` is always `string` by schema, so
+// "one element's ac_id is an object" is not reachable through the ordinary,
+// schema-validated create surface — exactly the situation A1's
+// versionlessHarness above solves for `version`. elementPatchHarness()
+// generalizes that same technique (a Proxy around the declared store
+// constructor parameter, reshaping only the target slug's record on the way
+// out, binding every call back to the real store, touching no other slug and
+// no class instance) to patch ONE named field of ONE element, identified by a
+// second, untouched key.
+//
+// The PRECONDITION assertions are load-bearing exactly as in A1: a failure
+// there means "fix the harness", a failure on the throws() means "the rule is
+// not enforced".
+//
+// Sabotage: keep today's `String(el[key]) === value` comparison scoped to
+// only the MATCHED element (i.e., check only the element the value equals,
+// never scan the array's OTHER elements for non-scalar ownership) — this test
+// goes red while SD1/SD2/SD4 stay green, which is exactly the
+// under-inclusive bug this test exists to catch.
+// ---------------------------------------------------------------------------
+function elementPatchHarness(slug: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-knowledge-array-remove-ep-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  let patch: { field: string; anchorKey: string; anchorValue: string; patchKey: string; patchValue: unknown } | null = null;
+
+  const apply = (value: unknown, depth = 0): unknown => {
+    if (depth > 8 || value === null || value === undefined || !patch) return value;
+    if (typeof value === 'string') {
+      if (value.includes(`"slug":"${slug}"`) && value.includes(`"${patch.field}"`)) {
+        try {
+          return JSON.stringify(apply(JSON.parse(value), depth + 1));
+        } catch {
+          return value;
+        }
+      }
+      return value;
+    }
+    if (Array.isArray(value)) return value.map((v) => apply(v, depth + 1));
+    if (typeof value !== 'object') return value;
+    if (Object.getPrototypeOf(value) !== Object.prototype) return value;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = apply(v, depth + 1);
+    const field = patch.field;
+    if (out.slug === slug && Array.isArray(out[field])) {
+      out[field] = (out[field] as Loose[]).map((el) =>
+        el && typeof el === 'object' && (el as Loose)[patch!.anchorKey] === patch!.anchorValue
+          ? { ...el, [patch!.patchKey]: patch!.patchValue }
+          : el
+      );
+    }
+    return out;
+  };
+
+  const proxied = new Proxy(store, {
+    get(target, prop) {
+      const value = (target as unknown as Record<string | symbol, unknown>)[prop as string];
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => apply((value as (...a: unknown[]) => unknown).apply(target, args));
+    },
+  });
+
+  const tools = new SterlingTools({ store: proxied, now: () => NOW });
+  return {
+    tools,
+    setPatch: (p: { field: string; anchorKey: string; anchorValue: string; patchKey: string; patchValue: unknown }) => {
+      patch = p;
+    },
+    clearPatch: () => {
+      patch = null;
+    },
+    cleanup: () => {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test('SD3: a selector that EXACTLY string-matches a SCALAR element is still REFUSED when a DIFFERENT element in the same array owns the SAME key with a non-scalar value — the discriminator is unsound for the array as a whole, not merely for the matched element (RED today: current behavior removes the scalar match)', () => {
+  const SLUG = 'sd3-mixed-soundness';
+  const h = elementPatchHarness(SLUG);
+  try {
+    const article = h.tools.knowledgeCreate('feature_article', {
+      slug: SLUG,
+      title: SLUG,
+      what_it_does: 'does things',
+      intended_behavior: 'intends things',
+      files: [
+        { path: 'src/a.ts', role: 'the seam' },
+        { path: 'src/b.ts', role: 'sibling' },
+      ],
+      current_ac: [
+        { ac_id: 'AC1', text: 'first criterion', verifiable_at: 'final' },
+        { ac_id: 'AC2', text: 'second criterion', verifiable_at: 'final' },
+        { ac_id: 'AC3-TO-CORRUPT', text: 'third criterion, patched post-create', verifiable_at: 'final' },
+      ],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    }).record as unknown as Loose;
+    const id = article.id as string;
+    const trueBefore = getRecord(h.tools, id);
+
+    h.setPatch({
+      field: 'current_ac',
+      anchorKey: 'text',
+      anchorValue: 'third criterion, patched post-create',
+      patchKey: 'ac_id',
+      patchValue: { corrupted: true },
+    });
+
+    const seen = getRecord(h.tools, id);
+    const seenAc = seen.current_ac as Loose[];
+    assert.equal(seenAc.length, 3, 'PRECONDITION (harness): all three elements survive the patch');
+    assert.deepEqual(
+      seenAc[2].ac_id,
+      { corrupted: true },
+      'PRECONDITION (harness, not the pin): the third element must be SEEN carrying a non-scalar ac_id. A failure HERE means the patch proxy did not reach the value the tools layer reads — fix the harness; it does not mean the rule is unenforced.'
+    );
+    assert.equal(seenAc[0].ac_id, 'AC1', 'PRECONDITION: the sibling ac_id is untouched by the patch');
+    assert.equal(seenAc[1].ac_id, 'AC2', 'PRECONDITION: the selector will exactly string-match this element by itself');
+
+    assert.throws(
+      () => remover(h.tools).knowledgeArrayRemove(id, 'current_ac[ac_id=AC2]', trueBefore.version as number),
+      (err: Error) => {
+        assertScalarDiscriminatorMessage(err.message, 'ac_id', 1);
+        return true;
+      },
+      'AC2 alone is a clean scalar match, but AC3 owns the SAME key as a non-scalar — the array-wide soundness check must still refuse'
+    );
+
+    h.clearPatch();
+    const trueAfter = getRecord(h.tools, id);
+    assert.deepEqual(
+      trueAfter.current_ac,
+      trueBefore.current_ac,
+      'record UNCHANGED (compared against the TRUE stored data, not the patched read-time view) — the refusal writes nothing'
+    );
+    assert.equal(trueAfter.version, trueBefore.version, 'no version minted by the refused call');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SD5 — the MCP-SURFACE required-token pin. Through the REGISTERED server
+// schema/handler (a client → server round trip, not a direct method cast on
+// SterlingTools), an omitted expected_version must be rejected by the zod
+// layer BEFORE the handler/method runs at all — the same wire-only
+// discrimination server.test.ts's own "unknown parameter" pins rely on (a
+// stripped/skipped parameter at the SDK's own parse step is invisible to any
+// unit test that calls the method directly).
+//
+// This is a REGRESSION pin, not a red-today pin: server.ts already declares
+// expected_version as `.int().positive()` per the existing DECISION 1/A1/A2
+// commentary above, so an omitted token is expected to be refused ALREADY.
+// Report its color rather than assuming — it exists so that someone loosening
+// that declaration to optional sees THIS go red.
+// Sabotage: change `expected_version: z.number().int().positive()` to
+// `.optional()` in server.ts's knowledge_array_remove schema — this test goes
+// red (the call is no longer refused at the wire).
+// ---------------------------------------------------------------------------
+async function mcpHarness() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-knowledge-array-remove-mcp-'));
+  const { server, store } = createSterlingServer(join(dir, 'sterling.db'));
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const cleanup = async () => {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { client, cleanup };
+}
+
+function mcpPayload(result: unknown): Loose {
+  const content = (result as { content: { type: string; text: string }[] }).content;
+  return JSON.parse(content[0].text);
+}
+
+test('SD5: through the REGISTERED MCP surface, an OMITTED expected_version on knowledge_array_remove is REJECTED by the zod schema before the handler runs (regression pin — may be GREEN today; report its color)', async () => {
+  const { client, cleanup } = await mcpHarness();
+  try {
+    const created = mcpPayload(
+      await client.callTool({
+        name: 'knowledge_create',
+        arguments: {
+          type: 'feature_article',
+          fields: {
+            type: 'feature_article',
+            slug: 'sd5-mcp-required-token',
+            title: 'sd5-mcp-required-token',
+            what_it_does: 'does things',
+            intended_behavior: 'intends things',
+            files: [
+              { path: 'src/a.ts', role: 'the seam' },
+              { path: 'src/b.ts', role: 'sibling' },
+            ],
+            current_ac: [],
+            dependencies: { relies_on: [], relied_by: [] },
+            state: 'active',
+            history: [{ date: NOW, event: 'seed' }],
+            live_test_refs: [],
+          },
+          projection: 'full',
+        },
+      })
+    ) as unknown as { record: { id: string } };
+    const id = created.record.id;
+
+    const omitted = await client.callTool({
+      name: 'knowledge_array_remove',
+      arguments: { id, selector: 'files[path=src/b.ts]' }, // expected_version deliberately OMITTED
+    });
+    assert.equal(
+      omitted.isError,
+      true,
+      'an omitted expected_version must be rejected in-band — a destroying call with no stated token must never reach the handler'
+    );
+    const text = (omitted.content as { text: string }[])[0].text;
+    assert.match(text, /expected_version/, `the refusal must name the missing parameter — got: "${text}"`);
+    assert.match(
+      text,
+      /required|invalid_type/i,
+      `the refusal is a zod validation error (required/invalid_type), not a tool-logic error — got: "${text}"`
+    );
+
+    const reread = mcpPayload(await client.callTool({ name: 'knowledge_get', arguments: { id } }));
+    assert.deepEqual(
+      reread.files,
+      [
+        { path: 'src/a.ts', role: 'the seam' },
+        { path: 'src/b.ts', role: 'sibling' },
+      ],
+      'the record is UNCHANGED — the omitted-token call never landed'
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SD6 — the NULL-valued discriminator case. `typeof null === 'object'`, so a
+// naive "is it an object" ownership check already catches it — but the
+// tempting SHORTCUT is a predicate that reads `typeof rec[key] === 'object'
+// && rec[key] !== null`, on the reasoning that "null isn't REALLY an object".
+// That shortcut is wrong here: `String(null)` is the literal string `'null'`,
+// which COLLIDES with a genuine string element whose value happens to be the
+// literal text "null" — exactly the same lossy-stringification hazard SD1/SD2
+// exist to close for objects/arrays. So the spec's disposition is: an OWNED
+// null value is NON-scalar, full stop, and it is INCLUDED in the named count
+// exactly like an object or array owner.
+//
+// REACHING THE STATE: `current_ac[].ac_id` is `string` by schema, so a null
+// value there is not reachable through the ordinary, schema-validated create
+// surface — the same reason SD3 needed elementPatchHarness() rather than a
+// plain create. This reuses that exact harness, patching ONE element's ac_id
+// to `null` post-create (anchored on an untouched sibling key), with the same
+// load-bearing PRECONDITION assert SD3 uses: a failure there means "fix the
+// harness", a failure on the throws() means "the rule is not enforced".
+//
+// Sabotage (named in the dispatch brief): change the ownership predicate from
+// `typeof rec[key] === 'object'` to `rec[key] !== null && typeof rec[key] ===
+// 'object'` — this test goes red (the null-owning element's string collision
+// makes the call look like a clean single match and it is destroyed).
+// ---------------------------------------------------------------------------
+test('SD6: a selector key that is NULL on one element is REFUSED the same way as an object/array-valued key, the null owner INCLUDED in the named count — null is non-scalar (typeof null === "object"; String(null) === "null" collides with the literal string value) (RED under a `!== null` carve-out: the null owner would then string-compare as a clean match and be destroyed)', () => {
+  const SLUG = 'sd6-null-valued-key';
+  const h = elementPatchHarness(SLUG);
+  try {
+    const article = h.tools.knowledgeCreate('feature_article', {
+      slug: SLUG,
+      title: SLUG,
+      what_it_does: 'does things',
+      intended_behavior: 'intends things',
+      files: [
+        { path: 'src/a.ts', role: 'the seam' },
+        { path: 'src/b.ts', role: 'sibling' },
+      ],
+      current_ac: [
+        { ac_id: 'AC1', text: 'first criterion', verifiable_at: 'final' },
+        { ac_id: 'AC2', text: 'second criterion', verifiable_at: 'final' },
+        { ac_id: 'AC3-TO-NULL', text: 'third criterion, patched post-create', verifiable_at: 'final' },
+      ],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'seed' }],
+      live_test_refs: [],
+    }).record as unknown as Loose;
+    const id = article.id as string;
+    const trueBefore = getRecord(h.tools, id);
+
+    h.setPatch({
+      field: 'current_ac',
+      anchorKey: 'text',
+      anchorValue: 'third criterion, patched post-create',
+      patchKey: 'ac_id',
+      patchValue: null,
+    });
+
+    const seen = getRecord(h.tools, id);
+    const seenAc = seen.current_ac as Loose[];
+    assert.equal(seenAc.length, 3, 'PRECONDITION (harness): all three elements survive the patch');
+    assert.ok(
+      hasKey(seenAc[2], 'ac_id') && seenAc[2].ac_id === null,
+      'PRECONDITION (harness, not the pin): the third element must be SEEN OWNING ac_id with value null (not merely absent). A failure HERE means the patch proxy did not reach the value the tools layer reads — fix the harness; it does not mean the rule is unenforced.'
+    );
+    assert.equal(seenAc[0].ac_id, 'AC1', 'PRECONDITION: the sibling ac_id is untouched by the patch');
+    assert.equal(seenAc[1].ac_id, 'AC2', 'PRECONDITION: the selector will exactly string-match this element by itself');
+
+    assert.throws(
+      () => remover(h.tools).knowledgeArrayRemove(id, 'current_ac[ac_id=AC2]', trueBefore.version as number),
+      (err: Error) => {
+        assertScalarDiscriminatorMessage(err.message, 'ac_id', 1);
+        return true;
+      },
+      'AC2 alone is a clean scalar match, but AC3 owns the SAME key as null — a non-scalar owner regardless of the `!== null` shortcut — so the array-wide soundness check must still refuse'
+    );
+
+    h.clearPatch();
+    const trueAfter = getRecord(h.tools, id);
+    assert.deepEqual(
+      trueAfter.current_ac,
+      trueBefore.current_ac,
+      'record UNCHANGED (compared against the TRUE stored data, not the patched read-time view) — the refusal writes nothing'
+    );
+    assert.equal(trueAfter.version, trueBefore.version, 'no version minted by the refused call');
+  } finally {
+    h.cleanup();
   }
 });

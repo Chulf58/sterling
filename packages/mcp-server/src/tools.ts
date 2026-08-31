@@ -2332,6 +2332,31 @@ export class SterlingTools {
           `addresses array elements. Nothing was written.`
       );
     }
+    // SCALAR-DISCRIMINATOR RULE, checked across the WHOLE array before any
+    // matching is trusted: `String(el[key]) === value` compares a non-scalar
+    // value LOSSILY (an object stringifies to "[object Object]", an array to
+    // a comma-joined list), so a key that any element owns as an object or
+    // array is unsound to address elements by — even for an element that
+    // itself holds the key as a clean scalar, because the destroy is keyed on
+    // the selector's KEY, not on any one element's value. Scanned over every
+    // element that OWNS the key with a defined value (absent/undefined stays
+    // a plain non-match, covered by the zero-match refusal below), so the
+    // refusal fires regardless of whether the naive string comparison would
+    // have produced a match.
+    const nonScalarOwners = arr.filter((el) => {
+      if (!el || typeof el !== 'object') return false;
+      const rec = el as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
+      return typeof rec[key] === 'object';
+    });
+    if (nonScalarOwners.length > 0) {
+      throw new Error(
+        `knowledge_array_remove: selector key '${key}' is not a scalar discriminator on ${old.type}.${base} — ${nonScalarOwners.length} ` +
+          `element(s) own '${key}' with a non-scalar (object, array, or null) value. knowledge_array_remove addresses elements by scalar discriminators ` +
+          `only (string, number, or boolean): a non-scalar value compares lossily via String() and can turn an unrelated element into a false ` +
+          `match or hide a true one. Nothing was written.`
+      );
+    }
     // OWNERSHIP FIRST, then value. `String(el[key]) === value` alone reads an
     // ABSENT key as the string 'undefined', so `[anykey=undefined]` matched
     // every element LACKING that key — on a destroying call that turns "this
