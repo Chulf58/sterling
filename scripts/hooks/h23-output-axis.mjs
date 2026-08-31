@@ -14,6 +14,18 @@
 // because the conductor was reading ungoverned log/txt artifacts, not
 // governed source (retro 2026-08-18).
 //
+// RETUNED 2026-08-31 (USER RULING h23-kept-raised-threshold-one-pointer-payload,
+// knowledge_get 284fc4b0-d8a5-4b5b-aebc-e2d1cfaeec5e; board 1f26e2a5): this hook
+// is KEPT — dropping it was rejected because one of its measured saves is
+// structurally output-only, a class neither H19 nor H20 can reach — but its two
+// cost knobs are turned down, because it is the largest single advisory consumer
+// on this repo (57 of 103 all-time fires) at a ~6% follow rate. The PAYLOAD half
+// is built: see OUTPUT_AXIS_POINTER_CAP (one pointer + the suppressed tail). The
+// THRESHOLD half is NOT — the min_score machinery the ruling names cannot carry
+// it portably; the measurements that establish that, and what they imply, sit
+// beside that constant below. A FOLD into H19/H20 stays the ruling's own
+// fallback if noise persists.
+//
 // POINTER, NOT SUBSTANCE, ENQUEUE-ONLY — same reasoning as H19's Bash-pointer
 // channel: a content match is weaker evidence of relevance than an explicit
 // file_keys join, and this hook fires on every Read/Bash whose output happens
@@ -67,10 +79,45 @@ import {
 } from './lib/delivery.mjs';
 
 // Clip and cap, named per the brief (b266d6b7): matching runs over the first
-// 16,000 chars of the stringified tool_response only, and at most 3 pointer
-// lines render per block regardless of how many records matched.
+// 16,000 chars of the stringified tool_response only, and at most
+// OUTPUT_AXIS_POINTER_CAP pointer lines render per block regardless of how many
+// records matched.
 export const OUTPUT_AXIS_CLIP = 16_000;
-export const OUTPUT_AXIS_POINTER_CAP = 3;
+/** ONE pointer line + the suppressed-count tail (was 3 + tail), per USER RULING
+ *  h23-kept-raised-threshold-one-pointer-payload (284fc4b0, 2026-08-31). H23 is
+ *  KEPT — the drop-premise broke on the pre-check, because one of its real saves
+ *  is structurally output-only (no path event for H19, no dispatch/ask event for
+ *  H20 at that moment) — but it is measured as the largest single advisory
+ *  consumer on this repo (57 of 103 all-time fires) at a ~6% follow rate, so the
+ *  volume comes down where it is cheapest. The remainder is still DISCLOSED, never
+ *  silently dropped: capping to one line must not turn "3 more matched" into
+ *  "that is all there is" (the same cap-and-disclose rule renderHazards keeps). */
+export const OUTPUT_AXIS_POINTER_CAP = 1;
+
+// THE OTHER HALF OF RULING 284fc4b0 — THE RAISED MATCH THRESHOLD — IS NOT BUILT
+// HERE, and deliberately so: the mechanism the ruling names cannot express it.
+// Measured 2026-08-31, before implementing, and reported rather than shipped:
+//
+//   (1) min_score thresholds `-bm25(records_fts)`, which is IDF-WEIGHTED and so
+//       corpus-relative in MAGNITUDE, not just in ordering. A floor tuned on this
+//       repo's store (records passing the three axis floors: 49 -> 18 for
+//       CLAUDE.md at a floor of 12, with pure-noise prose silenced by 6) reduces
+//       to "never fires" on a young or homogeneous store: probed at corpus sizes
+//       1, 4 and 20 where every record matched, EVERY record scored below 0.05,
+//       so ANY positive floor silenced all of them. Shipping a constant would
+//       have implemented DROP — the option this very ruling rejected on the
+//       evidence — on every consumer project, silently.
+//   (2) The two portable floors already exported for H20's deny path do not
+//       substitute. STRICT_MIN_HITS (>=3 distinct hits) barely cuts (49->44,
+//       29->24, and the noise samples not at all); hasFullNarrowCentralityCoverage
+//       over-cuts (4 of 5 real samples to zero).
+//   (3) The reframing both measurements force: H23's noise is NOT weak matches.
+//       On a repo whose own text IS the store's subject matter, the records it
+//       surfaces score high on every axis measure available — this is intrinsic
+//       high recall, not a mis-set threshold.
+//
+// Left to the conductor + an outside-family consult, per the ruling's own
+// fallback clause (FOLD into H19/H20 if noise persists).
 
 /** Title-only clip: this channel renders NO guidance/rationale/statement
  *  prose inline, ever — a pointer line names the record, it never restates

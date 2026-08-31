@@ -624,7 +624,12 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   server.registerTool(
     'knowledge_link',
     {
-      description: 'Add a typed link between records: cites | informed_by | fulfills | supersedes.',
+      description:
+        'Add a typed link between records: cites | informed_by | fulfills | supersedes | falsified_by. ' +
+        "`supersedes` is never writable here — it is a lifecycle transition, so use knowledge_supersede / knowledge_retire. " +
+        '`falsified_by` goes FROM the record whose central claim was disproven TO the durable record carrying the falsifying evidence; ' +
+        'the falsified record stays LIVE and readable (that is the point — a reader still meets it, now with the contradiction attached). ' +
+        'Use it when there is no successor claim to write yet; when there IS one, supersede instead.',
       inputSchema: strict({ from: z.string(), rel: z.string(), to: z.string() }),
     },
     ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to))

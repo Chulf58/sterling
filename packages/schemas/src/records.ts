@@ -254,6 +254,76 @@ export const disconfirmedHypothesisSchema = base
   })
   .superRefine(refineSupersession);
 
+// open_question — an EVIDENCED question with live hypotheses and NO answer
+// (decision open-question-record-type-authorized, 0857d3bb; board 4ffb95be, from
+// the 2026-08-29 dome-farmer docs). research_finding's contract is question +
+// ANSWER, so a lane holding "three measurements, a derived geometry, two live
+// hypotheses, and no answer" had nowhere durable to put the most perishable
+// output of an engineering session; two independent consumer lanes parked it on
+// board todos instead — correct capture, wrong surface, since the board is
+// near-term WORK and this is durable KNOWLEDGE. Relaxing research_finding was
+// rejected: its two-clocks/staleness contract assumes an answer exists to go
+// stale, so an optional answer would weaken every existing consumer.
+//
+// WHY THE LIFECYCLE FIELD IS NAMED resolution_status AND NOT `status`
+// (user-ruled 2026-08-31, correcting the decision's literal field name): `status`
+// is already the ENVELOPE's server-owned lifecycle axis. It is refused by name on
+// every write (WRITE_REFUSED_FIELDS) and deleted from the persisted body by the
+// store (storableBody), which derives the served value from lifecycle/freshness.
+// A type-local `status` would therefore be both unsettable by a caller and
+// silently destroyed on write — the misleading-success shape the refusal guard
+// exists to eliminate. research_finding is not a counter-example: its extra
+// 'flagged_stale' value is still the ENVELOPE axis, derived at read. The two
+// axes are genuinely different questions — whether the RECORD still serves
+// (envelope) versus whether the QUESTION is still open (this field) — so they
+// get different names rather than one overloaded one.
+export const openQuestionSchema = base
+  .extend({
+    type: z.literal('open_question'),
+    // Stable handle, minted from the question — see decisionSchema.slug.
+    slug: z.string().min(1).optional(),
+    // The question IS the identity, exactly as on research_finding and
+    // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+    // same way and why the digest leads with it).
+    question: z.string().min(1),
+    // The LIVE candidates. Plural and ordered by the author; a question with no
+    // hypothesis yet is legitimate, so this defaults to [] rather than being
+    // required — what makes the record worth keeping is the EVIDENCE.
+    hypotheses: z.array(z.string().min(1)).default([]),
+    // What is already known: the measurements, the derived geometry, the probe
+    // output. Required — an unevidenced question is a board todo, not durable
+    // knowledge, and that boundary is the whole point of the type.
+    evidence: z.string().min(1),
+    resolution_status: z.enum(['open', 'closed']).default('open'),
+    // The TERMINAL home: closure means the question was answered, and an
+    // answered question is a research_finding. Its own field, never an id
+    // embedded in a status string (Codex refinement, thread 01a05710), so it is
+    // queryable and cannot rot inside prose.
+    closed_into: z.string().min(1).optional(),
+    file_keys: z.array(repoPath).optional(),
+  })
+  .superRefine((rec, ctx) => {
+    refineSupersession(rec, ctx);
+    // The one invariant the type carries beyond its shape: a closed question
+    // must NAME where its answer went. Without this, closing is indistinguishable
+    // from abandoning, and the answered-question type stops being the terminus.
+    if (rec.resolution_status === 'closed' && !rec.closed_into) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)",
+      });
+    }
+    // The mirror, so 'open' cannot carry a phantom terminus: an open question
+    // pointing at a finding is a record that contradicts itself, and a reader
+    // would have no way to tell which half is true.
+    if (rec.resolution_status !== 'closed' && rec.closed_into) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "closed_into is set but resolution_status is 'open' — close the question or drop the terminus",
+      });
+    }
+  });
+
 // Attestation — a HUMAN inspected an artifact and ruled on it (board 259a455f,
 // user-approved 2026-08-21). The durable per-item progress surface consuming
 // projects were hand-building as markdown ledgers (2,268 lines for 392 parts,
@@ -647,6 +717,20 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     // The rejected answer is the reusable half — it stops the question being
     // re-asked and re-answered the same wrong way.
     digest: { question: 'clip', rejected_answer: 'clip' },
+  },
+  open_question: {
+    schema: openQuestionSchema,
+    // MUTABLE, unlike decision/attestation: an open question is a LIVE working
+    // record — hypotheses get added and struck, evidence accumulates, and it
+    // eventually flips to closed. Supersession would mint a new record per
+    // measurement, which is exactly the churn the type exists to absorb.
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.question), (r.hypotheses as string[] | undefined)?.join('\n') ?? '', s(r.evidence)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The question is the identity (research_finding's rule); resolution_status
+    // rides along because whether a question is still OPEN decides whether it is
+    // worth reading at all — the same role research_finding's clocks play.
+    digest: { slug: 'plain', question: 'clip', resolution_status: 'plain' },
   },
   attestation: {
     schema: attestationSchema,

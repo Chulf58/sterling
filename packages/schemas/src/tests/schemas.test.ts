@@ -399,6 +399,57 @@ test('attestation: human-inspection ruling round-trips; verdict enum closed; imm
   assert.deepEqual(RECORD_TYPES.attestation.fileKeys({}), [], 'fileless attestation never throws');
 });
 
+test('open_question: an OPEN question needs no closed_into; a CLOSED one without closed_into is refused; the resolution_status enum is closed (decision open-question-record-type-authorized)', () => {
+  // WHY THIS EXISTS. The type's whole reason to exist is holding a question
+  // with evidence and NO answer, and its one refinement is that closure must
+  // name where the answer went — `closed_into`, a SEPARATE field, never an id
+  // smuggled into a status string. The caller-set lifecycle field is
+  // `resolution_status` (open|closed) precisely so it cannot collide with the
+  // server-owned envelope `status` (user ruling, 2026-08-31).
+  const base = {
+    ...envelope('open_question'),
+    question: 'does the dome geometry derive from the three measured spans?',
+    hypotheses: ['the spans are chord lengths', 'the spans are arc lengths'],
+    evidence: 'three measurements + a derived geometry, 2026-08-29 dome-farmer lane',
+  };
+
+  // CONTROL ARM, FIRST: an OPEN question with no answer, no closed_into, is
+  // ACCEPTED. Without this, the refusal below is satisfied just as well by a
+  // schema that refuses every open_question — the verdict would have two
+  // possible causes and could not tell them apart.
+  const open = validateRecord({ ...base, resolution_status: 'open' }) as unknown as {
+    resolution_status: string;
+    closed_into?: string | null;
+  };
+  assert.equal(open.resolution_status, 'open');
+  assert.ok(!open.closed_into, 'an open question carries no closure target — that is the state this type exists to hold');
+
+  // THE REFINEMENT: closed without closed_into is refused.
+  assert.throws(
+    () => validateRecord({ ...base, id: randomUUID(), resolution_status: 'closed' }),
+    /closed_into/,
+    'closing an open_question must name the research_finding it closed into — the refusal names the missing field'
+  );
+
+  // SECOND CONTROL: closed WITH closed_into is accepted, so the refusal above
+  // is caused by the missing field and not by 'closed' being unwritable.
+  const closed = validateRecord({
+    ...base,
+    id: randomUUID(),
+    resolution_status: 'closed',
+    closed_into: randomUUID(),
+  }) as unknown as { resolution_status: string; closed_into: string };
+  assert.equal(closed.resolution_status, 'closed');
+  assert.equal(typeof closed.closed_into, 'string');
+
+  // The lifecycle enum is CLOSED — free text is not a third state.
+  assert.throws(
+    () => validateRecord({ ...base, id: randomUUID(), resolution_status: 'parked' }),
+    /invalid/i,
+    'resolution_status is open|closed only'
+  );
+});
+
 test('registry: full record set registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
   assert.deepEqual(Object.keys(RECORD_TYPES).sort(), [
     'anti_pattern',
@@ -407,6 +458,7 @@ test('registry: full record set registered 1:1, unregistered type rejected loudl
     'decision',
     'disconfirmed_hypothesis',
     'feature_article',
+    'open_question', // evidenced question, live hypotheses, no answer (decision open-question-record-type-authorized, user-ruled 2026-08-31)
     'reference_material',
     'research_finding',
     'todo',

@@ -551,6 +551,18 @@ function validBodyFor(type: string): Loose | undefined {
         evidence: 'this test file',
         file_keys: ['src/fixture.ts'],
       };
+    case 'open_question':
+      // Minimal per decision open-question-record-type-authorized: the caller-set
+      // lifecycle field is `resolution_status` (open|closed) — deliberately NOT
+      // the server-owned envelope `status`, which SERVER_OWNED_FIELDS excludes —
+      // and 'open' is used so the conditionally-required `closed_into` is not
+      // needed for a baseline body.
+      return {
+        question: `is this fixture valid? (${uniq('sweep-open-question')})`,
+        hypotheses: ['it is', 'it is not'],
+        evidence: 'this test file',
+        resolution_status: 'open',
+      };
     case 'attestation':
       return {
         artifact_key: uniq('sweep-artifact'),

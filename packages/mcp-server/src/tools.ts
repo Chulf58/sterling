@@ -2177,6 +2177,15 @@ export class SterlingTools {
     // but an explicit slug colliding with a live record would brick slug
     // addressing of that record for every reader (the 1e639f32 incident shape).
     //
+    // `open_question` joins BOTH halves (board 4ffb95be): it declares a `slug`
+    // and mintHeadlineOf already falls through to `question`, so it auto-mints
+    // exactly the way research_finding does — the two types are the same shape,
+    // a question that IS the identity. Omitting it here would have been silent
+    // in both directions: no handle minted, AND no collision refusal, so an
+    // explicit open_question slug could take a live ruling's handle and brick
+    // slug addressing of that record for every reader — the 1e639f32 incident
+    // shape this branch exists to prevent.
+    //
     // `todo` JOINS THE SAME ONE NAMESPACE (S1, decision
     // human-readable-ids-for-board-items) — deliberately through THIS branch
     // rather than a private check on board_add, because board_add funnels here
@@ -2186,7 +2195,14 @@ export class SterlingTools {
     // `todo` a namespace of its own, which is exactly the read-time ambiguity
     // de1a7329 rejected. Its headline comes from mintHeadlineOf (a board item
     // has no title field; see todoHeadline).
-    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding' || type === 'attestation' || type === 'todo') {
+    if (
+      type === 'decision' ||
+      type === 'anti_pattern' ||
+      type === 'research_finding' ||
+      type === 'open_question' ||
+      type === 'attestation' ||
+      type === 'todo'
+    ) {
       const explicit = (parsed as { slug?: string }).slug;
       if (explicit) {
         if (this.store.recordsBySlug(explicit).length) {
@@ -7033,6 +7049,19 @@ export class SterlingTools {
    * a no-op success — a silent success here would let a PIPELINE agent's exit
    * vanish if a run ended mid-phase — but it now terminates the attempt instead
    * of starting a diagnosis.
+   *
+   * SOFTENED 2026-08-31 (board 1259802b, adopted Codex+conductor joint): the
+   * REFUSAL SEMANTICS ARE UNCHANGED — still an error, still nothing recorded,
+   * still the loud refusal decision 391fae4f deliberately kept over a silent
+   * no-op. What changed is the TEXT. The measured residual was agents burning a
+   * tool call AND THEN A PARAGRAPH on this in conductor-direct mode (~12
+   * refusals in one consuming session), which is the shape of a message that
+   * reads like a fault report: four sentences, a parenthetical tool inventory,
+   * and a "do not retry" that invites an explanation of why you did. So the
+   * message now opens by naming the outcome as EXPECTED, states the one action
+   * (put the handoff in your final text and proceed), and says explicitly that
+   * one line is enough — the cheapest fix tried first, before the bigger
+   * mode-aware tool-availability surface the board still holds as option (b).
    */
   private requireWireRun(tool: string, runId?: string): RunRecord {
     // Keyed on "is any run active", NOT on "did the caller omit run_id"
@@ -7045,10 +7074,9 @@ export class SterlingTools {
     // untouched.
     if (!this.store.getRun()) {
       throw new Error(
-        `${tool}: no run is active, so there is no handoff wire to write to — nothing was recorded. ` +
-          `This is CONDUCTOR-DIRECT mode, not a fault to diagnose: ${tool} and its siblings (agent_exit, handoff_write, handoff_read) ` +
-          `work only inside a pipeline run. Your final message IS your deliverable — report your findings in prose and stop. ` +
-          `Do not retry with another signal, and never invent a run_id.`
+        `${tool}: no run is active — EXPECTED in CONDUCTOR-DIRECT mode, not a fault to diagnose. Nothing was recorded. ` +
+          `Put the handoff in your final text and proceed: your final message IS your deliverable. ` +
+          `One line about this is enough — do not narrate it, do not retry with another signal, and never invent a run_id.`
       );
     }
     return this.runState(runId);

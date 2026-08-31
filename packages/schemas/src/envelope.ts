@@ -2,7 +2,30 @@ import { z } from 'zod';
 
 // Common record envelope (spec §3.2): on every durable record.
 
-export const LINK_RELS = ['cites', 'informed_by', 'fulfills', 'supersedes'] as const;
+// The link-rel registry (invariant 3): the one place a rel is registered, and
+// the set linkSchema validates against — store.addLink parses `rel` through
+// linkSchema.shape.rel, so a member added here is accepted everywhere and a
+// non-member is refused everywhere.
+//
+// `falsified_by` (board 038feb3e, adopted Codex+conductor joint 2026-08-31):
+// marks a record whose CENTRAL CLAIM has been disproven, pointing FROM the
+// falsified record TO a durable record carrying the falsifying evidence. It
+// exists because supersession cannot express this case: knowledge_supersede
+// requires a SURVIVOR to point at, and "this measurement did not reproduce"
+// often has no replacement claim to write yet — which is exactly what leaves a
+// false record standing unmarked. So the two are complements, not rivals:
+// SUPERSESSION still REPLACES a ruling, `falsified_by` marks disproof WITHOUT
+// pretending a successor exists. The rejected alternative was extending
+// `evidence_basis` with a 'falsified' value — that field answers HOW a claim
+// was established, a different axis from WHETHER it still holds, and a record
+// can be measured AND falsified.
+//
+// It is a PLAIN SEMANTIC EDGE, like cites/informed_by/fulfills: it carries no
+// lifecycle change (the falsified record stays live and readable — the point is
+// that a reader still meets it, now with the contradiction attached), so it
+// needs none of the machinery 'supersedes' does, and addLink's raw-edge refusal
+// deliberately does not extend to it.
+export const LINK_RELS = ['cites', 'informed_by', 'fulfills', 'supersedes', 'falsified_by'] as const;
 
 export const linkSchema = z.object({
   rel: z.enum(LINK_RELS),
