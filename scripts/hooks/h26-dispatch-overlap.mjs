@@ -43,6 +43,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
 import { liveDispatches } from '../lib/dispatch-register.mjs';
 import { hasUnsuppressedMatch, escapeRe, isReadOnlyDispatchType } from './lib/dispatch-advisory.mjs';
@@ -192,6 +193,7 @@ try {
 }
 
 function emit(additionalContext) {
+  recordAdvisoryFire(input.cwd, 'h26', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext },

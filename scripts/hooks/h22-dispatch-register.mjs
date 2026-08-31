@@ -657,11 +657,12 @@ try {
         // (hookSpecificOutput.additionalContext — same shape h19-dispatch-staging.mjs
         // uses), not a raw stdout write: a raw write is not guaranteed to reach the
         // spawned agent at all. Each hook on this event path writes its OWN
-        // hookSpecificOutput object and the platform composes them — h28-return-contract.mjs
-        // is a second, independent SubagentStart writer (measured 2026-08-26,
-        // research_finding 2b67ba97) — so the shape here is built so this hook's own
-        // addition joins into one payload, never a second competing write within
-        // THIS hook.
+        // hookSpecificOutput object and the platform composes them — h19-dispatch-staging.mjs
+        // is the other independent SubagentStart writer on this path (measured
+        // 2026-08-26, research_finding 2b67ba97; it now also carries the return
+        // contract folded in from h28-return-contract.mjs, decision 04982f45) —
+        // so the shape here is built so this hook's own addition joins into one
+        // payload, never a second competing write within THIS hook.
         if (notices.length) {
           process.stdout.write(
             JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: notices.join('\n') } })

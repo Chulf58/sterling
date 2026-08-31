@@ -280,6 +280,11 @@ function settingsPath(dir) {
   return join(dir, '.claude', 'settings.local.json');
 }
 
+// bcd2cc09: the durable incident marker a (B) detect-and-deny writes.
+function latchPath(dir) {
+  return join(dir, '.sterling', 'enforcement-taint.json');
+}
+
 const X_BYTES = '{"hooks":"enabled","note":"X — the legitimate pre-image lane A snapshots"}\n';
 const Y_BYTES = '{"hooks":"DISABLED","note":"Y — TAMPERED by lane A inside its own window"}\n';
 
@@ -292,18 +297,18 @@ const Y_BYTES = '{"hooks":"DISABLED","note":"Y — TAMPERED by lane A inside its
 // snapshots Y, then the Posts run in REVERSE order.
 //   * Post B must ALLOW: nothing changed inside B's window, and the tamper
 //     predates B's Pre — it is not B's to answer for.
-//   * Post A must DENY and RESTORE X: its own window changed X -> Y.
+//   * Post A must DENY: its own window changed X -> Y.
 // With a run-keyed baseline, Pre B overwrites the single shared file with Y and
 // Post A then compares Y against Y — a real tamper, ALLOWED, with the tampered
 // bytes adopted as the legitimate pre-image.
 //
-// THE RESTORE ASSERTION IS THE ONE THAT CANNOT BE SATISFIED FOR THE WRONG
-// REASON, and it is why this pin does not merely assert "Post A denied": a deny
-// caused by a CONSUMED or MISSING shared baseline (Post B unlinking the file
-// lane A still needed) is fail-closed noise, not the property. Only a comparison
-// against lane A's OWN baseline can restore the file to X. The two
-// `doesNotMatch` assertions name that failure mode explicitly so a red is
-// diagnosable, mirroring PIN-KEY's idiom on the (A) side.
+// A DENY MUST NOT BE SATISFIABLE FOR THE WRONG REASON, and it is why this pin
+// does not merely assert "Post A denied": a deny caused by a CONSUMED or MISSING
+// shared baseline (Post B unlinking the file lane A still needed) is fail-closed
+// noise, not the property. The two `doesNotMatch` assertions name that failure
+// mode explicitly so a red is diagnosable, mirroring PIN-KEY's idiom on the (A)
+// side; together with the path-naming match and the latch, they are what the
+// deleted restore-to-X assertion used to carry alone.
 //
 // EXPECTED FAILURE SHAPE (RED TODAY, both halves plausible and both worth
 // naming, in the order they would fire):
@@ -313,8 +318,8 @@ const Y_BYTES = '{"hooks":"DISABLED","note":"Y — TAMPERED by lane A inside its
 //   (b) with that precondition removed, `assert.equal(postA.code, 2, ...)` fires
 //       with actual 0 (the adopted-tamper allow), or — if Post B consumed the
 //       shared file — postA denies with an "absent at Post"/"failing closed"
-//       message, which the `doesNotMatch` assertions catch instead, and
-//       `assert.equal(readFileSync(settings), X_BYTES)` fires holding Y.
+//       message, which the `doesNotMatch` assertions catch instead, and the
+//       latch assertion fires because no comparison verdict was ever reached.
 //
 // SABOTAGE (once green): drop the call-key component from the (B) baseline
 // filename, i.e. key it by project tag + runId again. Both halves must go red.
@@ -358,6 +363,8 @@ test(
       assert.equal(postB.code, 0, `lane B changed nothing inside ITS window and must not be denied — actual ${postB.code}, stderr: ${oneLine(postB.stderr)}`);
       assert.equal(readFileSync(settings, 'utf8'), Y_BYTES, "and lane B's Post restores nothing — Y is B's own legitimate pre-image");
 
+      assert.equal(existsSync(latchPath(dir)), false, "PRECONDITION: no latch stands yet — lane B allowed, so any latch after Post A came from Post A's OWN detection");
+
       const postA = h17(dir, 'PostToolUse', A);
       assert.notEqual(postA.code, 1, 'a security gate never fails with a non-blocking exit 1');
       assert.equal(
@@ -372,11 +379,32 @@ test(
         "nor because lane B's Post consumed a SHARED baseline out from under lane A — if THIS assertion is what fires, the diagnosis is a shared per-run baseline's lifecycle under overlapping windows, not the comparison"
       );
       assert.match(postA.stderr, /settings\.local\.json/, 'and it names the (B) path lane A\'s window changed');
+      // *** RE-CUT 2026-08-30. THE TIMELINE, kept honest: the (B) restore this
+      // block asserted died in the EARLIER detect-and-deny slice (532a4383
+      // Ruling D / fac9a69b — "(B) changes are DETECTED and DENIED and LEFT ON
+      // DISK"), not in dc616f69's (A) excision. This pin was simply never
+      // adjudicated at that time and has been RED at HEAD since; the (A) slice
+      // only made that visible. ***
+      //
+      // WHAT NOW CARRIES "CANNOT BE FAKED BY A FAIL-CLOSED DENY", since the
+      // restore-to-X assertion is gone: the THREE message-shape assertions
+      // above, which are not decoration but the whole verdict. `code === 2`
+      // alone is satisfiable by a missing/consumed shared baseline; the two
+      // doesNotMatch arms exclude exactly that environment-defect class, and the
+      // path-naming match requires the denial to be ABOUT this path. A run-keyed
+      // baseline fails them together: it either allows (adopted tamper) or
+      // denies with the "absent at Post"/"failing closed" wording.
       assert.equal(
         readFileSync(settings, 'utf8'),
-        X_BYTES,
-        'THE PROPERTY THAT CANNOT BE FAKED BY A FAIL-CLOSED DENY: the (B) stage restored lane A\'s OWN pre-image X — a deny caused by a missing/consumed shared baseline restores nothing, and an adopted-tamper baseline leaves Y in place'
+        Y_BYTES,
+        'and the (B) bytes are LEFT ON DISK exactly as lane A\'s command wrote them — detect-and-deny never restores (532a4383 Ruling D)'
       );
+      assert.notEqual(readFileSync(settings, 'utf8'), X_BYTES, "specifically NOT put back to lane A's pre-image");
+      // Sabotage: drop the latch write from the (B) denial branch (leaving the
+      // denial intact) -> this assertion goes red while every other one here
+      // stays green. It also proves Post A reached a real COMPARISON verdict
+      // rather than an environment-defect exit.
+      assert.equal(existsSync(latchPath(dir)), true, 'and the incident is LATCHED — the durable half of detect-and-deny (bcd2cc09)');
     } finally {
       cleanup();
     }

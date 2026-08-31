@@ -301,12 +301,31 @@ const SKIP = { skip: GIT_SKIP || BACKSLASH_SKIP };
 // window; the real-subdirectory sibling is never touched by this test.
 //
 // A correct (non-colliding) implementation: Post denies (hooks/ changed
-// inside the window) and restores `hooks/a\b.mjs` to ITS OWN pre-image,
-// leaving `hooks/a/b.mjs` completely untouched throughout — matching the
-// established (A) behaviour of reverting new-this-window dirt (decision
-// h17-pre-state-snapshot-closes-false-denial-not-the-restore-hole /
-// f76d7c5c: "pre-existing dirt is denied loudly but never reverted" implies
-// dirt attributable to THIS window IS reverted).
+// inside the window) and leaves `hooks/a\b.mjs` exactly as the command wrote
+// it, leaving `hooks/a/b.mjs` completely untouched throughout.
+//
+// RE-CUT 2026-08-30 per dc616f69 (the (A) arm stops restoring). This block
+// USED to assert `hooks/a\b.mjs` is "restored to ITS OWN pre-image, never the
+// sibling's bytes via a colliding key". `restoreTracked` is deleted, so the
+// self-restore assertion is inverted to leave-as-written.
+//
+// *** AND THE HONEST CONSEQUENCE, WHICH MUST NOT BE PAPERED OVER: after the
+// excision NO ASSERTION IN THIS BLOCK GOES RED UNDER A KEY COLLISION ALONE. ***
+// The header below already recorded that the collision is
+// INTERFACE-UNFALSIFIABLE on the (A) surface (both HEAD and the fixed hook DENY
+// via different internal paths, identical observable). The restore was the LAST
+// place a collision could still have shown itself on disk — "restored to the
+// SIBLING's bytes" was a real, observable failure mode — and deleting the
+// restore deletes that observability with it. What remains (sibling untouched,
+// tampered path untouched) is now true BY DELETION for every path in the repo,
+// so it is a regression tripwire against a restore arm returning, NOT evidence
+// about key identity. A denial-CONTENT oracle (does the message name
+// `hooks/a\b.mjs` or the normalized `hooks/a/b.mjs`?) is the only candidate
+// left, and it is NOT authored here: it asserts against wording this slice is
+// still settling, and a red from it could not be told apart from ordinary
+// path-printing behaviour that predates this ruling. THE REAL TEETH REMAIN
+// PIN-B BELOW (the (B) collectBaseline readdir throw — red-on-HEAD,
+// green-on-fixed, mutation-verified), which this ruling does not touch.
 //
 // HONEST STATUS — THIS TEST IS A DENY-BEHAVIOUR REGRESSION GUARD, NOT A
 // FIX-ISOLATING PIN. It was authored blind expecting RED-on-HEAD, but a
@@ -371,12 +390,12 @@ test(
       assert.equal(
         readFileSync(subPath, 'utf8'),
         SUBB_BYTES,
-        "PIN (sibling untouched): hooks/a/b.mjs was never touched by this test and must remain byte-identical to SUBB_BYTES — a backslash-to-slash key collision is exactly what would let a restore or attribution pass disturb this unrelated sibling"
+        "PIN (sibling untouched): hooks/a/b.mjs was never touched by this test and must remain byte-identical to SUBB_BYTES — now defended BY DELETION of the restore chain (dc616f69 R11) rather than by key identity, so read this as a tripwire against a restore arm returning, never as evidence that the keys stayed distinct"
       );
       assert.equal(
         readFileSync(abPath, 'utf8'),
-        AB_BYTES,
-        "PIN (self-restore, not sibling's bytes): hooks/a\\b.mjs must be restored to ITS OWN pre-image (AB_BYTES) — a colliding key could instead leave it tampered, or restore it to the SIBLING's bytes (SUBB_BYTES) via a shared identity, either of which is the silent-tamper hole this pin exists to catch"
+        AB_TAMPERED,
+        "PIN (left as written, dc616f69 R11 — inverted from 'restored to ITS OWN pre-image'): hooks/a\\b.mjs keeps exactly the bytes the command wrote. The old assertion's discriminating power — a colliding key restoring the SIBLING's bytes here — died with the restore, which is why the honest header above declines to claim this block still catches a collision"
       );
     } finally {
       cleanup();

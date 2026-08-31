@@ -5370,6 +5370,22 @@ ${record.title ?? ""}`;
     return `${record.question ?? ""}`;
   return "";
 }
+function axisTitleText(record) {
+  if (!record || typeof record !== "object")
+    return "";
+  if (record.type === "anti_pattern")
+    return `${record.title ?? ""}`;
+  if (record.type === "decision")
+    return `${record.title ?? ""}`;
+  if (record.type === "feature_article")
+    return `${record.slug ?? ""} ${record.concept_family ?? ""}
+${record.title ?? ""}`;
+  if (record.type === "research_finding")
+    return `${record.question ?? ""}`;
+  if (record.type === "disconfirmed_hypothesis")
+    return `${record.question ?? ""}`;
+  return "";
+}
 function axisHits(record, terms) {
   const hay = axisNarrowText(record).toLowerCase();
   if (!hay)
@@ -5436,9 +5452,15 @@ function hasDiscriminatingHit(hits) {
 }
 var AXIS_RECORD_TOP_K = 6;
 var AXIS_MIN_RECORD_TERMS = 2;
-function recordCentralityHits(record, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
+function narrowCentralTerms(record, topK) {
+  return extractAxisTerms(axisNarrowText(record), topK);
+}
+function unionCentralTerms(record, topK) {
+  return [
+    .../* @__PURE__ */ new Set([...narrowCentralTerms(record, topK), ...extractAxisTerms(axisTitleText(record), topK)])
+  ];
+}
+function coveredCentralTerms(central, outgoingText) {
   const words = [
     ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
   ];
@@ -5446,11 +5468,15 @@ function recordCentralityHits(record, outgoingText, opts = {}) {
     return [];
   return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
 }
+function recordCentralityHits(record, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  return coveredCentralTerms(unionCentralTerms(record, topK), outgoingText);
+}
 function hasRecordCentralityHit(record, outgoingText, opts = {}) {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
   const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
-  const covered = recordCentralityHits(record, outgoingText, { topK });
+  const central = unionCentralTerms(record, topK);
+  const covered = coveredCentralTerms(central, outgoingText);
   return covered.length >= Math.min(minTerms, central.length);
 }
 
@@ -5614,6 +5640,32 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
+function appendPathSegment(path, segment) {
+  if (typeof segment === "number")
+    return `${path}[${segment}]`;
+  return path ? `${path}.${segment}` : segment;
+}
+function allKeyPathsUnder(value, path, depth, out) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (value === null || typeof value !== "object")
+    return out;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const here = appendPathSegment(path, i);
+      out.push(here);
+      allKeyPathsUnder(value[i], here, depth + 1, out);
+    }
+    return out;
+  }
+  for (const key of Object.keys(value)) {
+    const here = appendPathSegment(path, key);
+    out.push(here);
+    allKeyPathsUnder(value[key], here, depth + 1, out);
+  }
+  return out;
+}
 function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
   if (depth > MAX_BODY_COMPARE_DEPTH) {
     throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
@@ -5622,20 +5674,22 @@ function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
     return out;
   if (Array.isArray(before)) {
     if (!Array.isArray(after))
-      return out;
+      return allKeyPathsUnder(before, path, depth, out);
     for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i);
       if (i >= after.length)
-        out.push(`${path}[${i}]`);
+        out.push(here);
       else
-        droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+        droppedKeyPaths(before[i], after[i], here, depth + 1, out);
     }
     return out;
   }
-  if (after === null || typeof after !== "object" || Array.isArray(after))
-    return out;
+  if (after === null || typeof after !== "object" || Array.isArray(after)) {
+    return allKeyPathsUnder(before, path, depth, out);
+  }
   const parsed = after;
   for (const key of Object.keys(before)) {
-    const here = path ? `${path}.${key}` : key;
+    const here = appendPathSegment(path, key);
     if (!Object.prototype.hasOwnProperty.call(parsed, key))
       out.push(here);
     else
@@ -5649,6 +5703,22 @@ function assertNoFieldLoss(op, before, after) {
     return;
   const type = typeof before.type === "string" ? before.type : "unknown";
   throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+}
+function unrecognizedKeyPaths(error) {
+  const issues = error?.issues;
+  if (!Array.isArray(issues))
+    return [];
+  const out = [];
+  for (const raw of issues) {
+    const issue = raw;
+    if (issue.code !== "unrecognized_keys" || !Array.isArray(issue.keys))
+      continue;
+    const segments = Array.isArray(issue.path) ? issue.path : [];
+    const base2 = segments.reduce((acc, segment) => appendPathSegment(acc, typeof segment === "number" ? segment : String(segment)), "");
+    for (const key of issue.keys)
+      out.push(appendPathSegment(base2, String(key)));
+  }
+  return out;
 }
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
@@ -6021,7 +6091,16 @@ var SterlingStore = class _SterlingStore {
     if (prepared.lifecycle === "retired" && !prepared.input.superseded_by) {
       throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
     }
-    const record = validateRecord(prepared.input);
+    let record;
+    try {
+      record = validateRecord(prepared.input);
+    } catch (err) {
+      const refused = unrecognizedKeyPaths(err);
+      if (refused.length === 0)
+        throw err;
+      const type = typeof prepared.input.type === "string" ? prepared.input.type : "unknown";
+      throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
+    }
     assertNoFieldLoss("create", prepared.input, record);
     this.tx(() => {
       this.insertRecord(record);
@@ -7596,10 +7675,27 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
 
 // scripts/hooks/h19-dispatch-staging.mjs
 var SUBJECT_MAX_DECISIONS = 5;
+var EXEMPT_AGENT_TYPES = /* @__PURE__ */ new Set(["statusline-setup"]);
+var RETURN_CONTRACT = "STERLING DEFAULT RETURN CONTRACT \u2014 Explicit output requirements in your agent definition or dispatch brief take precedence. Otherwise, return the conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw logs, or step-by-step narration. Report only the outcome, decisive evidence, relevant files/tests, and unresolved risks.";
 var input = readStdin();
+var emitted = false;
+function combinedContext(payload) {
+  const out = [];
+  if (payload) out.push(payload);
+  if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
+  return out.join("\n\n");
+}
+function finish(payload) {
+  const out = combinedContext(payload);
+  if (out) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
+    emitted = true;
+  }
+  allow();
+}
 try {
   const store = openStore(input.cwd);
-  if (!store) allow();
+  if (!store) finish("");
   const prompts = lastDispatchPrompts(input.transcript_path);
   const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
   const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
@@ -7628,14 +7724,14 @@ try {
     }
   }
   subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
-  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) allow();
+  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) finish("");
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
   const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
   const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) allow();
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) finish("");
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
   const parts = [];
   if (freshOwners.length || freshHazards.length || freshDecisions.length) {
@@ -7671,10 +7767,27 @@ try {
     ...cappedHazards(subjectHazards),
     ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS)
   ];
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: payload } }));
+  const out = combinedContext(payload);
+  if (out) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
+    emitted = true;
+  }
   guard.records.push(...fresh.map((r) => r.id));
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
-  warnNonBlocking(`H19: dispatch staging failed: ${e && e.message || e}`);
+  try {
+    process.stderr.write(`H19: dispatch staging failed: ${e && e.message || e}
+`);
+  } catch {
+  }
+  if (!emitted) {
+    const out = combinedContext("");
+    if (out) {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
+      emitted = true;
+    }
+  }
+  if (emitted) allow();
+  warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
 }

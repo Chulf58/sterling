@@ -228,19 +228,8 @@ function h17(dir, event, over = {}) {
 
 const A1 = { agent_id: 'a1' };
 
-function stampPath(dir) {
-  return join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-}
-
-function writeStamp(dir, entries) {
-  const p = stampPath(dir);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(entries));
-}
-
-function sha256Of(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
+// DELETED S4: stampPath/writeStamp/sha256Of are unused now that PIN H1 is the
+// sole survivor (it never consults a stamp).
 
 // =========================================================================
 // PIN H1 — LOUD RESTORE UNDER A BROKEN STORE: an unstamped in-window tracked
@@ -259,7 +248,11 @@ function sha256Of(path) {
 // error" phrase) — the regex simply does not match today's stderr string.
 // =========================================================================
 
-test('PIN H1 (loud restore under a broken store): deny stderr carries BOTH the environment-defect wording and the restored path in the same message', { skip: GIT_SKIP }, () => {
+// RE-CUT per dc616f69: the restore is deleted, so the "restored path" half of
+// this pin becomes "the path named in the SAME message, bytes left on disk".
+// The load-bearing property is unchanged and untouched by the ruling: a broken
+// store must not make the finding invisible.
+test('PIN H1 (loud detection under a broken store): deny stderr carries BOTH the environment-defect wording and the offending path in the same message', { skip: GIT_SKIP }, () => {
   const { dir, cleanup, closeStore, dbPath } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
@@ -267,7 +260,8 @@ test('PIN H1 (loud restore under a broken store): deny stderr carries BOTH the e
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'Pre snapshot succeeds');
     // unstamped in-window tracked enforcement-file change — no stamp at all
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
+    const tampered = JSON.stringify({ hooks: {}, TAMPERED: true });
+    writeFileSync(hooksJson, tampered);
 
     // break the store so resolveRun throws (same technique as the sibling
     // suite's PIN5 / enforcement.test.mjs AC9d): close the fixture's handle,
@@ -279,199 +273,26 @@ test('PIN H1 (loud restore under a broken store): deny stderr carries BOTH the e
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a broken store must never produce a non-blocking exit 1');
-    assert.equal(r.code, 2, `restore must still deny under a broken store — ${r.stderr}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'the tracked file is still restored to HEAD despite the store throw');
+    assert.equal(r.code, 2, `detection must still deny under a broken store — ${r.stderr}`);
+    // dc616f69 R11: inverted from "restored to HEAD" — the bytes stay exactly
+    // as the command wrote them, and the deny must say so out loud anyway.
+    assert.equal(readFileSync(hooksJson, 'utf8'), tampered, 'the tracked file is LEFT ON DISK as written despite the store throw — no restore, ever');
+    assert.notEqual(readFileSync(hooksJson, 'utf8'), origJson, 'and specifically NOT put back to the committed image');
     assert.match(
       r.stderr,
       /Enforcement verification failed \(store\/resolveRun threw \(/,
       'the deny carries the pinned environment-defect wording verbatim'
     );
-    assert.match(r.stderr, /hooks\.json/, 'the SAME deny message names the restored path');
+    assert.match(r.stderr, /hooks\.json/, 'the SAME deny message names the offending path');
   } finally {
     cleanup();
   }
 });
 
-// =========================================================================
-// PIN H2 — MINT SURVIVES A SUBSEQUENT BASELINE DENY: a (A) tracked restore
-// that succeeds must still mint its restore_performed item even when the
-// (B) gitignored-baseline stage in the SAME Post call independently denies
-// (a new gitignored agents/ file). The two deny reasons collapse into one
-// exit code, but the (A) mint must not be skipped because (B) also fired.
-//
-// EXPECTED FAILURE SHAPE (RED): no restore_performed mint mechanism exists
-// yet at all (FIX-B, per the sibling suite's PIN3/PIN4) — `items.length`
-// will be 0, not the asserted 1. Once a naive mint exists but is gated on
-// "only if nothing else denied", this pin would still fail at 0 until the
-// mint is wired to fire on every actual (A) restore regardless of (B).
-// =========================================================================
-
-test('PIN H2 (mint survives a subsequent baseline deny): the restore_performed item for the (A)-restored path exists even though (B) independently denies', { skip: GIT_SKIP }, () => {
-  const { dir, store, cleanup } = makeGitProject();
-  try {
-    const hooksJson = join(dir, 'hooks', 'hooks.json');
-    const origJson = readFileSync(hooksJson, 'utf8');
-    const evilAgent = join(dir, '.claude', 'agents', 'evil.md');
-
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-
-    // (A) a tracked enforcement path tampered, unstamped — must restore
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
-    // (B) a NEW gitignored baseline-set file — an independent (B)-stage deny
-    // (mirrors enforcement.test.mjs's AC8 "new gitignored agent file" shape)
-    writeFileSync(evilAgent, '# smuggled agent (hooks stripped)\n');
-
-    const r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 2, `both (A) restore and (B) baseline deny must still produce a single deny — ${r.stderr}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'the (A) tracked path is restored to HEAD');
-    // Re-cut 2026-08-27 per user ruling: (B) additions are DETECTED + DENIED
-    // and LEFT ON DISK, never deleted — deleting is irreversible and H17
-    // cannot tell a malicious plant from a legitimate file the conductor
-    // just created. This line previously asserted deletion and, being FIRST,
-    // aborted the test before the mint assertion below ever ran — a live
-    // instance of anti-pattern f1d66bef (an early assertion masking every
-    // later one). The mint assertion at the bottom of this test was UNREACHED
-    // until this re-cut.
-    // Verdict carrier: SURVIVAL + BYTE-IDENTITY, never the exit code above —
-    // measured on this exact file, an exit-code-only assertion stayed GREEN
-    // with the survive-on-disk guard removed, because the old code deleted
-    // the file FIRST and still denied (exit 2) afterward: same exit code,
-    // opposite disk outcome.
-    assert.ok(existsSync(evilAgent), '(B) new gitignored agent file survives on disk (no delete)');
-    // Sabotage: reintroduce removeFileAt/removeUnder (or any code path that
-    // deletes evilAgent before or after denying) → this assertion goes red.
-    assert.equal(
-      readFileSync(evilAgent, 'utf8'),
-      '# smuggled agent (hooks stripped)\n',
-      '(B) surviving file is byte-identical to what was planted, not merely present'
-    );
-    // Sabotage: truncate, re-encode, or partially rewrite evilAgent instead of
-    // leaving it untouched (e.g. write an empty placeholder in its place) →
-    // this assertion goes red even though the existsSync check above would
-    // still pass.
-
-    const items = store
-      .query({ types: ['todo'], cap: 100 })
-      .filter((t) => t.source === 'system' && t.system_reason === 'restore_performed' && (t.file_keys || []).includes('hooks/hooks.json'));
-    assert.equal(items.length, 1, 'the restore_performed mint for the (A)-restored path must exist even though (B) also denied in the same Post call');
-  } finally {
-    cleanup();
-  }
-});
-
-// PIN H3 — SKIPPED per the test-writer brief: "unreadable here without hook
-// knowledge — SKIP, do not write it." Not authored; see the file header.
-
-// =========================================================================
-// PIN H4 — ATTESTED DELETION HONORED: a `{path, deleted:true}` stamp for a
-// tracked enforcement file DELETED DURING THE WINDOW (after Pre, before
-// Post — not pre-existing dirt at Pre time, which enforcement.test.mjs's
-// existing "deleted:true" test already covers) is honored: the file is NOT
-// resurrected by a restore, and no deny names it.
-//
-// EXPECTED FAILURE SHAPE (RED): the only known deleted:true exemption today
-// is for a path already dirty-then-deleted BEFORE Pre snapshots it (the
-// enforcement.test.mjs "H17 stamp fix: a stamp entry with deleted:true"
-// case) — an in-window deletion during the command is a fresh scenario this
-// pin targets. Most likely today: H17 restores (recreates) the deleted file
-// via git checkout HEAD and denies, so `r.code` will be 2 (not the asserted
-// 0) and `existsSync(bundle)` will be `true` (resurrected) rather than the
-// asserted `false`.
-// =========================================================================
-
-test('PIN H4 (attested deletion honored): a deleted:true stamp for an in-window-deleted tracked file is honored — not resurrected, no deny', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'Pre snapshot succeeds while the file still exists');
-
-    // delete the tracked enforcement file DURING the window (after Pre)
-    rmSync(bundle, { force: true });
-    // fresh stamp attesting exactly that deletion — fabricated per the
-    // existing suite's {path, deleted:true} shape (no sha256 needed/known
-    // for a deleted file)
-    writeStamp(dir, [{ path: 'hooks/h3-contract-gate.mjs', deleted: true, at: NOW }]);
-
-    const r = h17(dir, 'PostToolUse', A1);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `an attested in-window deletion must be honored, not restored+denied — ${r.stderr}`);
-    assert.equal(existsSync(bundle), false, 'the deleted file is NOT resurrected by a restore');
-    assert.doesNotMatch(r.stderr, /h3-contract-gate/, 'no deny names the attested-deleted path');
-  } finally {
-    cleanup();
-  }
-});
-
-// =========================================================================
-// PIN H5a — STAMPED UNTRACKED DIRECTORY PRESERVED: an in-window untracked
-// directory under the enforcement surface, with EVERY child file
-// stamp-attested (sha256 over the raw bytes), survives a Post sweep whole —
-// no rmSync, no deny naming it.
-//
-// EXPECTED FAILURE SHAPE (RED): today's untracked-directory sweep (AC3(c)
-// shape: git collapses to `?? hooks/newdir/`, removed recursively) has no
-// stamp-check integration at all for untracked directories — every child
-// being individually attested does not exempt anything today. Most likely:
-// `r.code` will be 2 (not 0) and `existsSync(childPath)` will be `false`
-// (removed) rather than the asserted `true`.
-// =========================================================================
-
-test('PIN H5a (stamped untracked directory preserved): every child of an in-window untracked directory stamp-attested — the directory survives, no deny', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const newDir = join(dir, 'hooks', 'newdir');
-    const childPath = join(newDir, 'a.mjs');
-
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-
-    mkdirSync(newDir, { recursive: true });
-    writeFileSync(childPath, '// conductor-created, fully attested\n');
-    writeStamp(dir, [{ path: 'hooks/newdir/a.mjs', sha256: sha256Of(childPath) }]);
-
-    const r = h17(dir, 'PostToolUse', A1);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 0, `a fully-attested untracked directory must be honored, not swept — ${r.stderr}`);
-    assert.equal(existsSync(childPath), true, 'the attested child file survives (directory not rmSync-ed)');
-    assert.doesNotMatch(r.stderr, /newdir/, 'no deny names the attested directory');
-  } finally {
-    cleanup();
-  }
-});
-
-// =========================================================================
-// PIN H5b — UNSTAMPED CHILD STILL SWEEPS THE DIRECTORY: the same untracked
-// enforcement-surface directory shape, but with one child left unstamped —
-// swept recursively and denied, exactly as an entirely-unattested untracked
-// directory is today (AC3(c) shape). Regression guard for H5a's fix landing
-// beside it.
-//
-// EXPECTED FAILURE SHAPE: likely already GREEN today (no stamp-exemption
-// mechanism exists yet for untracked directories, so this is today's
-// unconditional-sweep behavior — the same AC3(c) shape enforcement.test.mjs
-// already pins). Kept here as a same-file tripwire so H5a's fix cannot
-// accidentally widen the exemption to cover a partially-attested directory.
-// =========================================================================
-
-test('PIN H5b (regression guard alongside H5a): an unstamped child in an otherwise-attested untracked directory still sweeps + denies the whole directory', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const newDir = join(dir, 'hooks', 'newdir');
-    const attested = join(newDir, 'a.mjs');
-    const unattested = join(newDir, 'b.mjs');
-
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-
-    mkdirSync(newDir, { recursive: true });
-    writeFileSync(attested, '// attested\n');
-    writeFileSync(unattested, '// NOT attested\n');
-    // stamp covers ONLY a.mjs — b.mjs has no matching entry
-    writeStamp(dir, [{ path: 'hooks/newdir/a.mjs', sha256: sha256Of(attested) }]);
-
-    const r = h17(dir, 'PostToolUse', A1);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `an unstamped child alongside an attested one must still deny the directory — ${r.stderr}`);
-    assert.equal(existsSync(newDir), false, 'the directory is removed recursively when any child lacks a matching stamp');
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4 (decision 78dc9bd6/fe861066): PIN H2, PIN H3 (already unauthored),
+// PIN H4 and PIN H5a/H5b all pinned FIX-A/FIX-B stamp-honor behaviour —
+// scripts/enforcement-stamp.mjs and every stamp-exemption route are deleted
+// outright, so there is nothing left for any of these pins to exempt. PIN H1
+// above is the sole survivor: it is comparator-independent (a broken-store
+// detection-is-still-loud pin, not a stamp-honor pin) and stays exactly as
+// written.

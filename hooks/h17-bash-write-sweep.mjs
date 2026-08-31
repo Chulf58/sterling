@@ -10,14 +10,11 @@ import {
   writeFileSync,
   existsSync as existsSync3,
   rmSync,
-  rmdirSync,
-  mkdirSync as mkdirSync2,
   readdirSync,
   opendirSync,
   openSync,
   readSync,
   writeSync,
-  ftruncateSync,
   closeSync,
   fstatSync,
   lstatSync,
@@ -28,7 +25,7 @@ import {
 } from "node:fs";
 import { join as join3, resolve as resolve2, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -5408,6 +5405,32 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
+function appendPathSegment(path, segment) {
+  if (typeof segment === "number")
+    return `${path}[${segment}]`;
+  return path ? `${path}.${segment}` : segment;
+}
+function allKeyPathsUnder(value, path, depth, out) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (value === null || typeof value !== "object")
+    return out;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const here = appendPathSegment(path, i);
+      out.push(here);
+      allKeyPathsUnder(value[i], here, depth + 1, out);
+    }
+    return out;
+  }
+  for (const key of Object.keys(value)) {
+    const here = appendPathSegment(path, key);
+    out.push(here);
+    allKeyPathsUnder(value[key], here, depth + 1, out);
+  }
+  return out;
+}
 function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
   if (depth > MAX_BODY_COMPARE_DEPTH) {
     throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
@@ -5416,20 +5439,22 @@ function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
     return out;
   if (Array.isArray(before)) {
     if (!Array.isArray(after))
-      return out;
+      return allKeyPathsUnder(before, path, depth, out);
     for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i);
       if (i >= after.length)
-        out.push(`${path}[${i}]`);
+        out.push(here);
       else
-        droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+        droppedKeyPaths(before[i], after[i], here, depth + 1, out);
     }
     return out;
   }
-  if (after === null || typeof after !== "object" || Array.isArray(after))
-    return out;
+  if (after === null || typeof after !== "object" || Array.isArray(after)) {
+    return allKeyPathsUnder(before, path, depth, out);
+  }
   const parsed = after;
   for (const key of Object.keys(before)) {
-    const here = path ? `${path}.${key}` : key;
+    const here = appendPathSegment(path, key);
     if (!Object.prototype.hasOwnProperty.call(parsed, key))
       out.push(here);
     else
@@ -5443,6 +5468,22 @@ function assertNoFieldLoss(op, before, after) {
     return;
   const type = typeof before.type === "string" ? before.type : "unknown";
   throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+}
+function unrecognizedKeyPaths(error) {
+  const issues = error?.issues;
+  if (!Array.isArray(issues))
+    return [];
+  const out = [];
+  for (const raw of issues) {
+    const issue = raw;
+    if (issue.code !== "unrecognized_keys" || !Array.isArray(issue.keys))
+      continue;
+    const segments = Array.isArray(issue.path) ? issue.path : [];
+    const base2 = segments.reduce((acc, segment) => appendPathSegment(acc, typeof segment === "number" ? segment : String(segment)), "");
+    for (const key of issue.keys)
+      out.push(appendPathSegment(base2, String(key)));
+  }
+  return out;
 }
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
@@ -5815,7 +5856,16 @@ var SterlingStore = class _SterlingStore {
     if (prepared.lifecycle === "retired" && !prepared.input.superseded_by) {
       throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
     }
-    const record = validateRecord(prepared.input);
+    let record;
+    try {
+      record = validateRecord(prepared.input);
+    } catch (err) {
+      const refused = unrecognizedKeyPaths(err);
+      if (refused.length === 0)
+        throw err;
+      const type = typeof prepared.input.type === "string" ? prepared.input.type : "unknown";
+      throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
+    }
     assertNoFieldLoss("create", prepared.input, record);
     this.tx(() => {
       this.insertRecord(record);
@@ -7248,6 +7298,18 @@ function scopeCheck({ brief, debugScope, rel, amendments = [] }) {
 // scripts/hooks/h17-bash-write-sweep.mjs
 var BASELINE_GLOBS = [".claude/agents/**", ".sterling/config.json", ".claude/settings*.json"];
 var NO_RUN = "no-run";
+function baselineListPaths() {
+  return {
+    rel: ".sterling/enforcement-baseline.json",
+    // Bounded like every other record this hook reads back (board 55fcccac
+    // clause 4). The list is ONE {path, sha256} entry per (B) member — a few
+    // hundred bytes each — so 8 MiB is far past any legitimate shape. An
+    // over-budget file is MALFORMED (deny + latch), never a reason to allocate:
+    // a guard that allocates and then measures has already paid the cost it
+    // exists to refuse.
+    maxBytes: 8 * 1024 * 1024
+  };
+}
 var PROCFS_FD_DIR = process.env.STERLING_H17_PROCFS_FD_DIR || "/proc/self/fd";
 var IS_WIN32 = process.platform === "win32";
 var UNATTESTABLE_SYMLINK = "symlink-target";
@@ -7364,7 +7426,6 @@ function withPinnedDir(dirPath, fn) {
   }
 }
 function withPinnedParent(cwd2, rel, what, opts, fn) {
-  const createParents = !!(opts && opts.createParents);
   const segments = rel.replace(/\/+$/, "").split("/");
   for (const s2 of segments) assertResolvableComponent(s2, rel, what);
   const leaf = segments[segments.length - 1];
@@ -7373,16 +7434,8 @@ function withPinnedParent(cwd2, rel, what, opts, fn) {
     const name = segments[i];
     const nextRel = soFar ? `${soFar}/${name}` : name;
     const anchored = `${dirHandle}/${name}`;
-    let kind = lstatKind(anchored);
-    if (kind === "absent") {
-      if (!createParents) return fn(null, leaf);
-      try {
-        mkdirSync2(anchored);
-      } catch (e) {
-        if (!e || e.code !== "EEXIST") throw e;
-      }
-      kind = lstatKind(anchored);
-    }
+    const kind = lstatKind(anchored);
+    if (kind === "absent") return fn(null, leaf);
     if (kind !== "dir") {
       throw new Error(
         `${what} path component '${nextRel}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) \u2014 refusing to read/walk/write through it; a symlink or other non-regular ancestor is denied on sight, never followed`
@@ -7429,102 +7482,11 @@ function classifyLeafAt(parentHandle, leaf) {
 function dirHandleOf(h) {
   return IS_WIN32 ? h.anchored : `${PROCFS_FD_DIR}/${h.fd}`;
 }
-function lstatKindUnder(cwd2, rel, what = "path classification") {
-  return withPinnedParent(cwd2, rel, what, {}, (parentHandle, leaf) => parentHandle === null ? "absent" : lstatKind(`${parentHandle}/${leaf}`));
-}
-function writeRegularAt(parentHandle, leaf, buf, rel) {
-  const anchored = `${parentHandle}/${leaf}`;
-  if (IS_WIN32) {
-    const kind = lstatKind(anchored);
-    if (kind !== "file" && kind !== "absent") {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) \u2014 a symlink or other non-regular entry is never written through by a restore`
-      );
-    }
-  }
-  let fd = null;
-  let creating = false;
-  try {
-    fd = openSync(anchored, FS.O_WRONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
-  } catch (e) {
-    const code = e && e.code;
-    if (code === "ENOENT") {
-      creating = true;
-      fd = openSync(anchored, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 438);
-    } else if (code === "ELOOP") {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: symlink) \u2014 a symlink or other non-regular entry is never written through by a restore`
-      );
-    } else {
-      throw e;
-    }
-  }
-  let primary;
-  try {
-    if (!creating) {
-      const st = fstatSync(fd);
-      if (!st.isFile()) {
-        throw new Error(
-          `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (fstat type on the OPEN descriptor) \u2014 a symlink, directory or other non-regular entry is never written through by a restore, and nothing has been truncated`
-        );
-      }
-      ftruncateSync(fd, 0);
-    }
-    let written = 0;
-    while (written < buf.length) written += writeSync(fd, buf, written, buf.length - written, null);
-  } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    closePinned(fd, primary);
-  }
-}
-function removeTreeAt(parentHandle, leaf, rel, depth = 0, leftOnDisk = []) {
-  WALK_BUDGET.chargeDepth(depth, rel);
-  if (isEnforcementSurface(rel)) {
-    leftOnDisk.push(rel);
-    return leftOnDisk;
-  }
-  const anchored = `${parentHandle}/${leaf}`;
-  const kind = lstatKind(anchored);
-  if (kind === "absent") return leftOnDisk;
-  if (kind !== "dir") {
-    rmSync(anchored, { force: true });
-    return leftOnDisk;
-  }
-  const keptBefore = leftOnDisk.length;
-  withPinnedDir(anchored, (dirHandle) => {
-    const names = [];
-    const dir = opendirSync(dirHandle);
-    let primary;
-    try {
-      for (; ; ) {
-        const de = dir.readSync();
-        if (de === null) break;
-        WALK_BUDGET.chargeNode(rel);
-        names.push(de.name);
-      }
-    } catch (e) {
-      primary = e;
-      throw e;
-    } finally {
-      try {
-        dir.closeSync();
-      } catch (closeErr) {
-        if (!primary) throw closeErr;
-      }
-    }
-    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1, leftOnDisk);
-  });
-  if (leftOnDisk.length === keptBefore) rmdirSync(anchored);
-  return leftOnDisk;
-}
 var HASH_CHUNK_BYTES = 64 * 1024;
 var HASH_STABILITY_ATTEMPTS = 3;
 var MAX_WALK_NODES = 1e4;
 var MAX_WALK_DEPTH = 64;
 var MAX_RECORD_BYTES = 16 * 1024 * 1024;
-var MAX_STAMP_BYTES = 8 * 1024 * 1024;
 var WalkBudgetError = class extends Error {
   constructor(message, budget) {
     super(message);
@@ -7674,7 +7636,7 @@ function dirtyFile(cwd2, runId, key) {
   return join3(tmpdir(), key ? `sterling-enforce-${tag}-${runId}-call-${key}.dirty.json` : `sterling-enforce-${tag}-${runId}.dirty.json`);
 }
 function dirtyTrackedRels(cwd2) {
-  const status = spawnSync("git", ["-C", cwd2, "status", "--porcelain", "-z"], { encoding: "utf8" });
+  const status = spawnSync("git", ["-C", cwd2, "--no-optional-locks", "-c", "core.fsmonitor=", "status", "--porcelain", "-z"], { encoding: "utf8" });
   if (status.error || status.status !== 0) {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
   }
@@ -7920,37 +7882,6 @@ function stateShapeError(cwd2, v, where) {
   }
   return null;
 }
-function stampCouldAttest(recorded, current) {
-  if (!isStateObject(recorded) || !isStateObject(current)) return false;
-  if (recorded.unattestable || current.unattestable) return false;
-  if (recorded.file_unattested || current.file_unattested) return false;
-  if (recorded.index !== current.index) return false;
-  if (!current.exists) return recorded.exists === true;
-  if (!recorded.exists) return false;
-  if (recorded.type !== current.type) return false;
-  if (recorded.mode !== current.mode) return false;
-  if (current.type === "file") {
-    if (recorded.file_unattested || current.file_unattested) return false;
-    return true;
-  }
-  if (current.type === "symlink") return false;
-  if (current.type === "dir") {
-    if (recorded.walk_budget_exceeded || current.walk_budget_exceeded) return false;
-    if (!isStateObject(recorded.children) || !isStateObject(current.children)) return false;
-    const ak = ownKeys(recorded.children);
-    const bk = ownKeys(current.children);
-    if (ak.length !== bk.length) return false;
-    for (const k of ak) {
-      if (!Object.prototype.hasOwnProperty.call(current.children, k)) return false;
-      const a = recorded.children[k];
-      const b = current.children[k];
-      if (sameState(a, b)) continue;
-      if (!stampCouldAttest(a, b)) return false;
-    }
-    return true;
-  }
-  return false;
-}
 function validateStateKey(cwd2, key) {
   if (typeof key !== "string" || key.length === 0) return null;
   if (key.includes("\0")) return null;
@@ -8003,70 +7934,252 @@ function lstatKind(abs) {
     return e && e.code === "ENOENT" ? "absent" : "error";
   }
 }
-function isDirectoryAt(cwd2, rel) {
-  return lstatKindUnder(cwd2, rel, `(A) directory classification of '${rel}'`) === "dir";
+function taintLatchPaths() {
+  return {
+    sterlingDir: ".sterling",
+    dbLeaf: "sterling.db",
+    leaf: "enforcement-taint.json",
+    rel: ".sterling/enforcement-taint.json",
+    // The diagnostic body is bounded like every other record this hook reads
+    // (board 55fcccac clause 4). It is never allowed to change a verdict, so the
+    // bound can be small: an oversize or torn read simply yields no explanation.
+    maxDiagnosticBytes: 64 * 1024
+  };
 }
-function readStamp(cwd2) {
-  return withPinnedParent(
-    cwd2,
-    ".sterling/transient/enforcement-stamp.json",
-    "enforcement stamp",
-    {},
-    (parentHandle, leaf) => parentHandle === null ? { present: false, entries: null } : readStampAt(parentHandle, leaf)
-  );
-}
-function readStampAt(parentHandle, leaf) {
-  const stampPath = `${parentHandle}/${leaf}`;
-  const h = classifyLeafAt(parentHandle, leaf);
-  let primary;
+function readTaintLatch(cwd2) {
+  const P = taintLatchPaths();
   try {
-    if (h.kind !== "file") return { present: h.kind !== "absent", entries: null };
-    return readStampFromFd(h, stampPath);
+    return withClassifiedDir(cwd2, P.sterlingDir, (kind, dirHandle) => {
+      if (kind === "absent") {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason: `'${P.sterlingDir}/' is absent, so the enforcement taint latch at '${P.rel}' cannot be read at all. This hook runs only from a spawned agent's frontmatter INSIDE a Sterling project, so an absent '${P.sterlingDir}/' here is broken state \u2014 and it is a NAMED, UNSOLVED LIMIT that it cannot be mechanically distinguished from a directory that was never a Sterling project (project discovery defines non-Sterling as "no ancestor holding ${P.sterlingDir}/${P.dbLeaf}"). Failing closed rather than guessing`
+        };
+      }
+      if (kind !== "dir") {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason: `'${P.sterlingDir}' is not a directory (kind: ${kind}) \u2014 the enforcement taint latch at '${P.rel}' cannot be classified through it. A symlink or other non-regular entry standing in for '${P.sterlingDir}' is denied on sight, never followed`
+        };
+      }
+      const dbKind = lstatKind(`${dirHandle}/${P.dbLeaf}`);
+      if (dbKind !== "file") {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason: `'${P.sterlingDir}/' exists but '${P.sterlingDir}/${P.dbLeaf}' is ${dbKind} \u2014 BROKEN STATE. The enforcement taint latch is read before this hook trusts the store precisely so a damaged store cannot silence it, and a half-present '${P.sterlingDir}/' is exactly the state in which the enforcement surface is least verifiable. Failing closed`
+        };
+      }
+      const h = classifyLeafAt(dirHandle, P.leaf);
+      let primary;
+      try {
+        if (h.kind === "absent") return { tainted: false, environmentDefect: false, reason: null };
+        if (h.kind !== "file") {
+          return {
+            tainted: true,
+            environmentDefect: true,
+            reason: `'${P.rel}' exists but is ${h.kind}, not a regular file \u2014 an abnormal shape at the latch path is TAINTED, exactly as a normal one is. H17 took no action on it: it was neither read through, replaced, nor removed`
+          };
+        }
+        const diagnostic = taintLatchDiagnostic(h, P);
+        return {
+          tainted: true,
+          environmentDefect: false,
+          reason: `'${P.rel}' is present${diagnostic ? ` (diagnostic body: ${diagnostic})` : " (its body carries no readable diagnostic, which changes nothing)"}`
+        };
+      } catch (e) {
+        primary = e;
+        throw e;
+      } finally {
+        closePinned(h.fd, primary);
+      }
+    });
   } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    closePinned(h.fd, primary);
+    return {
+      tainted: true,
+      environmentDefect: true,
+      reason: `the enforcement taint latch at '${P.rel}' could not be classified (${e && e.message || e}) \u2014 an unclassifiable latch path is TAINTED, never "unlatched"`
+    };
   }
 }
-function readStampFromFd(h, stampPath) {
-  const stamp = JSON.parse(readClassifiedBytes(h, MAX_STAMP_BYTES, "enforcement stamp", stampPath).toString("utf8"));
-  return { present: true, entries: Array.isArray(stamp) ? stamp : null };
+function taintLatchDiagnostic(h, P) {
+  try {
+    const bytes = readClassifiedBytes(h, P.maxDiagnosticBytes, "enforcement taint latch", h.anchored);
+    if (bytes.length === 0) return null;
+    const parsed = JSON.parse(bytes.toString("utf8"));
+    const text = JSON.stringify(parsed);
+    return typeof text === "string" ? text.slice(0, 400) : null;
+  } catch {
+    return null;
+  }
+}
+function setTaintLatch(cwd2, incidents) {
+  const P = taintLatchPaths();
+  try {
+    const payload = Buffer.from(
+      JSON.stringify(
+        {
+          // A NOTE, NOT A CONTROL. Nothing in this object is ever read back as
+          // authority — `readTaintLatch` decides on PRESENCE and parses this
+          // only to quote it.
+          note: "DIAGNOSTIC ONLY. Presence of this file is the verdict; no field in it can reduce enforcement, and H17 never clears it.",
+          at: (/* @__PURE__ */ new Date()).toISOString(),
+          incident: incidents
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    return withPinnedParent(cwd2, P.rel, "enforcement taint latch", {}, (parentHandle, leaf) => {
+      if (parentHandle === null) {
+        return { set: false, error: `'${P.sterlingDir}' is absent, so there is no pinned directory to create '${P.rel}' in` };
+      }
+      let fd = null;
+      try {
+        fd = openSync(`${parentHandle}/${leaf}`, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 384);
+      } catch (e) {
+        const code = e && e.code;
+        if (code === "EEXIST" || code === "ELOOP") return { set: true, error: null };
+        return { set: false, error: `${code || "error"} \u2014 ${e && e.message || e}` };
+      }
+      try {
+        writeSync(fd, payload);
+      } catch {
+      } finally {
+        try {
+          closeSync(fd);
+        } catch {
+        }
+      }
+      return { set: true, error: null };
+    });
+  } catch (e) {
+    return { set: false, error: `${e && e.message || e}` };
+  }
+}
+function denyIfTainted(cwd2, agentId) {
+  const P = taintLatchPaths();
+  const verdict = readTaintLatch(cwd2);
+  if (!verdict.tainted) return;
+  if (verdict.environmentDefect) {
+    deny(
+      environmentDefectDenial(
+        "H17",
+        `ENFORCEMENT TAINT LATCH \u2014 FAIL-CLOSED READ: ${verdict.reason}. The latch is decided by SHAPE before contents, and every abnormal shape is TAINTED (decision b-surface-adoption-point-closes-with-an-incident-bound-taint-latch-not-a-persisted-manifest, RULING 11). Nothing at '${P.rel}' was written, replaced or removed by this hook.`,
+        { agentId }
+      )
+    );
+  }
+  deny(
+    `H17: THE ENFORCEMENT SURFACE IS TAINTED \u2014 this tool call is DENIED BEFORE EXECUTION, and so is every spawned-agent BASH call that H17 gates (it is registered on Bash in agent frontmatter, not globally in hooks/hooks.json, so it does not gate an agent's Edit, Write or Task calls), until the taint is cleared by a conductor. ${verdict.reason}. One of the following was OBSERVED and left unresolved: the protected (B) enforcement surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) was changed inside an audited command's window; the persistent (B) baseline list (\`.sterling/enforcement-baseline.json\`) contradicted that surface or was malformed; or a write landed in tracked enforcement territory (an (A) audit incident, v6.0) \u2014 and in every case the bytes were deliberately LEFT ON DISK. Without this latch the very next PreToolUse would re-collect those tampered bytes as its own legitimate baseline and allow them forever \u2014 one denial would buy a permanent edit to the agent GRANT DEFINITIONS. PRESENCE OF THE LATCH IS THE VERDICT: no field inside it can reduce enforcement, and H17 never clears it. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE \u2014 exit \`blocked\`, citing this message VERBATIM. A CONDUCTOR clears it with a deliberate reconciliation that re-verifies the current enforcement surface, and only then removes '${P.rel}'. Re-running the command will not help; routing around it is never sanctioned.`
+  );
+}
+function readBaselineList(cwd2) {
+  const P = baselineListPaths();
+  try {
+    return withPinnedParent(cwd2, P.rel, "(B) baseline list", {}, (parentHandle, leaf) => {
+      if (parentHandle === null) return { kind: "absent", reason: null, byPath: null };
+      const h = classifyLeafAt(parentHandle, leaf);
+      let primary;
+      try {
+        if (h.kind === "absent") return { kind: "absent", reason: null, byPath: null };
+        if (h.kind !== "file") {
+          return {
+            kind: "malformed",
+            reason: `'${P.rel}' exists but is ${h.kind}, not a regular file \u2014 an abnormal SHAPE at the baseline-list path is MALFORMED, never "absent". H17 took no action on it: it was neither read through, replaced, nor taken off disk`,
+            byPath: null
+          };
+        }
+        let bytes;
+        try {
+          bytes = readClassifiedBytes(h, P.maxBytes, "(B) baseline list", h.anchored);
+        } catch (e) {
+          return { kind: "malformed", reason: `'${P.rel}' could not be read within its ${P.maxBytes}-byte budget (${e && e.message || e})`, byPath: null };
+        }
+        return parseBaselineList(bytes, P);
+      } catch (e) {
+        primary = e;
+        throw e;
+      } finally {
+        closePinned(h.fd, primary);
+      }
+    });
+  } catch (e) {
+    return {
+      kind: "malformed",
+      reason: `'${P.rel}' could not be classified (${e && e.message || e}) \u2014 an unclassifiable baseline-list path is MALFORMED, never "absent"`,
+      byPath: null
+    };
+  }
+}
+function parseBaselineList(bytes, P) {
+  const malformed = (reason) => ({ kind: "malformed", reason, byPath: null });
+  let parsed;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch (e) {
+    return malformed(`'${P.rel}' is not parseable JSON (${e && e.message || e})`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return malformed(`'${P.rel}' is not a JSON object`);
+  if (parsed.version !== 1) {
+    return malformed(`'${P.rel}' declares version ${JSON.stringify(parsed.version)}; this H17 reads version 1 only, and an unknown version is refused rather than guessed at`);
+  }
+  const entries = parsed.entries;
+  if (!Array.isArray(entries)) return malformed(`'${P.rel}' has no 'entries' ARRAY (an array, not an object, so a duplicated path is detectable rather than silently collapsed)`);
+  const byPath = /* @__PURE__ */ new Map();
+  let previous = null;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return malformed(`'${P.rel}' carries an entry (#${i}) that is not a {path, sha256} object (${JSON.stringify(entry)})`);
+    if (typeof entry.path !== "string") return malformed(`'${P.rel}' carries an entry (#${i}) whose 'path' is not a string (${JSON.stringify(entry.path)})`);
+    const unknown = Object.keys(entry).filter((k) => k !== "path" && k !== "sha256").sort();
+    if (unknown.length > 0) {
+      return malformed(
+        `'${P.rel}' entry #${i} (${JSON.stringify(entry.path)}) carries unknown entry key${unknown.length === 1 ? "" : "s"} (${unknown.join(", ")}) \u2014 the entry shape is EXACTLY {path, sha256} (fe861066 D1), so an entry carrying more than that was written against a meaning neither this hook nor the clearer implements (\`deleted: true\` is the likely one, and no deletion attestation exists any more). Refused WHOLE rather than partly honoured`
+      );
+    }
+    if (validateBaselineKey(entry.path) !== entry.path) {
+      return malformed(
+        `'${P.rel}' entry #${i} names ${JSON.stringify(entry.path)}, which is not a repo-relative POSIX path in exactly canonical form inside the fixed (B) surface definition (${BASELINE_GLOBS.join(", ")}) \u2014 absolute, traversing, off-glob, or merely NON-NORMALIZED. A path that would have to be rewritten to become valid is refused rather than rewritten: normalizing it here would let two distinct on-disk paths collapse onto one list slot`
+      );
+    }
+    const rel = entry.path;
+    if (previous !== null && !(previous < rel)) {
+      return malformed(
+        previous === rel ? `'${P.rel}' names '${rel}' more than once \u2014 a duplicated claim has no single meaning, so the list is refused whole` : `'${P.rel}' is not sorted ascending by path ('${previous}' precedes '${rel}') \u2014 an unsorted list is refused, because sortedness is what makes the duplicate check sound`
+      );
+    }
+    if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) {
+      return malformed(`'${P.rel}' carries a sha256 for '${rel}' that is not lowercase 64-hex (${JSON.stringify(entry.sha256)})`);
+    }
+    byPath.set(rel, entry.sha256);
+    previous = rel;
+  }
+  return { kind: "valid", reason: null, byPath };
+}
+function compareBaselineList(cwd2, list, note) {
+  const current = collectBaseline(cwd2);
+  const has = (rel) => Object.prototype.hasOwnProperty.call(current, rel);
+  for (const [rel, sha256] of list.byPath) {
+    if (!has(rel)) {
+      note(`the baseline list attests '${rel}', but that path is MISSING from the live (B) surface`);
+      continue;
+    }
+    const currentHash = createHash("sha256").update(Buffer.from(current[rel], "base64")).digest("hex");
+    if (currentHash !== sha256) note(`the baseline list attests '${rel}' as ${sha256}, but its CURRENT bytes hash to ${currentHash}`);
+  }
+  for (const rel of Object.keys(current)) {
+    if (!list.byPath.has(rel)) {
+      note(`'${rel}' exists on the live (B) surface but has NO entry in the baseline list \u2014 the list is not an exact description of the surface it claims to describe`);
+    }
+  }
 }
 function readClassifiedBytes(h, maxBytes, what, label) {
   if (h.fd !== null) return readBoundedFromFd(h.fd, maxBytes, what, label);
   return readBoundedBuffer(h.anchored, maxBytes, what);
-}
-function sha256OfRegularFile(cwd2, rel, what = `stamp attestation of '${rel}'`) {
-  return withPinnedParent(cwd2, rel, what, {}, (parentHandle, leaf) => {
-    if (parentHandle === null) return null;
-    const h = classifyLeafAt(parentHandle, leaf);
-    let primary;
-    try {
-      if (h.kind !== "file") return null;
-      return hashClassifiedLeaf(h, rel);
-    } catch (e) {
-      primary = e;
-      throw e;
-    } finally {
-      closePinned(h.fd, primary);
-    }
-  });
-}
-function classifyPathComponents(cwd2, rel, what = "(B) baseline") {
-  return withPinnedParent(cwd2, rel, what, {}, (parentHandle, leaf) => parentHandle === null ? "absent" : lstatKind(`${parentHandle}/${leaf}`));
-}
-function assertRealAncestors(cwd2, rel, what) {
-  const segments = rel.replace(/\/+$/, "").split("/");
-  const ancestorRel = segments.slice(0, -1).join("/");
-  if (!ancestorRel) return "dir";
-  const kind = classifyPathComponents(cwd2, ancestorRel, what);
-  if (kind !== "dir" && kind !== "absent") {
-    throw new Error(
-      `${what}: refusing to act on '${rel}' \u2014 its ancestor '${ancestorRel}' is not a directory (lstat kind: ${kind}); a symlink or other non-regular ancestor is never created through, written through, deleted through or restored through`
-    );
-  }
-  return kind;
 }
 function collectBaseline(cwd2) {
   const map = {};
@@ -8187,11 +8300,6 @@ function validateBaselineKey(key) {
   if (!BASELINE_GLOBS.some((g) => matchesGlob(fwd, g))) return null;
   return fwd;
 }
-function writeUnder(cwd2, rel, content) {
-  withPinnedParent(cwd2, rel, `(B) baseline restore of '${rel}'`, { createParents: true }, (parentHandle, leaf) => {
-    writeRegularAt(parentHandle, leaf, Buffer.from(content, "base64"), rel);
-  });
-}
 function parsePorcelainZ(out) {
   const tokens = out.split("\0");
   const entries = [];
@@ -8204,145 +8312,6 @@ function parsePorcelainZ(out) {
     entries.push({ xy, paths });
   }
   return entries;
-}
-function verifyStampAttestation(cwd2, preExistingRels) {
-  try {
-    const { present, entries } = readStamp(cwd2);
-    if (!present) return { attested: false, stampPresent: false, failedPath: null };
-    if (!entries) return { attested: false, stampPresent: true, failedPath: null };
-    const byPath = /* @__PURE__ */ new Map();
-    for (const entry of entries) {
-      if (entry && typeof entry.path === "string") byPath.set(entry.path, entry);
-    }
-    for (const rel of preExistingRels) {
-      const entry = byPath.get(rel);
-      if (!entry) return { attested: false, stampPresent: true, failedPath: rel };
-      if (entry.deleted === true) {
-        if (lstatKindUnder(cwd2, rel, `stamp attestation of '${rel}'`) !== "absent") return { attested: false, stampPresent: true, failedPath: rel };
-        continue;
-      }
-      if (typeof entry.sha256 !== "string") return { attested: false, stampPresent: true, failedPath: rel };
-      const current = sha256OfRegularFile(cwd2, rel);
-      if (current === null) return { attested: false, stampPresent: true, failedPath: rel };
-      if (current !== entry.sha256) return { attested: false, stampPresent: true, failedPath: rel };
-    }
-    return { attested: true, stampPresent: true, failedPath: null };
-  } catch {
-    return { attested: false, stampPresent: true, failedPath: null };
-  }
-}
-function stampAttestsCurrentBytes(cwd2, rel) {
-  try {
-    const { entries } = readStamp(cwd2);
-    if (!entries) return false;
-    const entry = entries.find((e) => e && e.path === rel);
-    if (!entry) return false;
-    const kind = lstatKindUnder(cwd2, rel, `stamp attestation of '${rel}'`);
-    if (kind === "absent") return entry.deleted === true;
-    if (kind !== "file") return false;
-    if (typeof entry.sha256 !== "string") return false;
-    const current = sha256OfRegularFile(cwd2, rel);
-    return current !== null && current === entry.sha256;
-  } catch {
-    return false;
-  }
-}
-function stampAttestsDirectory(cwd2, relDir) {
-  try {
-    const files = [];
-    const walk = (dirHandle, rel, depth) => {
-      WALK_BUDGET.chargeDepth(depth, rel);
-      const dir = opendirSync(dirHandle);
-      let primary;
-      try {
-        for (; ; ) {
-          const de = dir.readSync();
-          if (de === null) break;
-          WALK_BUDGET.chargeNode(rel);
-          const childRel = `${rel}/${de.name}`;
-          if (de.isDirectory()) withPinnedDir(`${dirHandle}/${de.name}`, (childHandle) => walk(childHandle, childRel, depth + 1));
-          else if (de.isFile()) files.push(childRel);
-          else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
-        }
-      } catch (e) {
-        primary = e;
-        throw e;
-      } finally {
-        try {
-          dir.closeSync();
-        } catch (closeErr) {
-          if (!primary) throw closeErr;
-        }
-      }
-    };
-    withClassifiedDir(cwd2, relDir, (kind, dirHandle) => {
-      if (kind !== "dir") throw new Error(`'${relDir}' is not a directory (kind: ${kind}) \u2014 it attests nothing`);
-      walk(dirHandle, relDir, 0);
-    });
-    if (!files.length) return false;
-    return files.every((f) => stampAttestsCurrentBytes(cwd2, f));
-  } catch {
-    return false;
-  }
-}
-function mintRestorePerformed(cwd2, paths, agentId) {
-  let mstore = null;
-  try {
-    mstore = openStore(cwd2);
-    if (!mstore) {
-      process.stderr.write(`H17: restore_performed maintenance item(s) NOT written (store unavailable); restore/deny proceed regardless.
-`);
-      return;
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    for (const rel of paths) {
-      try {
-        mstore.enqueueSystemTodo({
-          id: randomUUID2(),
-          type: "todo",
-          created_at: now,
-          updated_at: now,
-          author: "system",
-          status: "active",
-          superseded_by: null,
-          links: [],
-          scope: "project",
-          stack_tags: [],
-          text: `H17 restored '${rel}' to HEAD, reverting a Bash write by agent '${agentId}' at ${now} (no matching conductor stamp).`,
-          source: "system",
-          system_reason: "restore_performed",
-          file_keys: [rel]
-        });
-      } catch (e) {
-        process.stderr.write(`H17: restore_performed maintenance item failed to write for '${rel}': ${e && e.message || e}
-`);
-      }
-    }
-  } catch (e) {
-    process.stderr.write(`H17: restore_performed maintenance queue unavailable (${e && e.message || e}); restore/deny proceed regardless.
-`);
-  } finally {
-    try {
-      mstore?.close();
-    } catch {
-    }
-  }
-}
-function restoreTracked(cwd2, relRaw) {
-  const rel = relRaw.replace(/\/+$/, "");
-  const inHead = spawnSync("git", ["-C", cwd2, "cat-file", "-e", "HEAD:" + rel], { encoding: "utf8" }).status === 0;
-  if (inHead) {
-    assertRealAncestors(cwd2, rel, `(A) tracked restore of '${rel}'`);
-    const r = spawnSync("git", ["-C", cwd2, "checkout", "HEAD", "--", rel], { encoding: "utf8" });
-    if (r.error || r.status !== 0) throw new Error(`checkout HEAD -- ${rel} failed: ${r.stderr || r.error}`);
-    return { restored: true, leftOnDisk: [] };
-  }
-  if (isEnforcementSurface(rel)) return { restored: false, leftOnDisk: [rel] };
-  const leftOnDisk = withPinnedParent(cwd2, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
-    if (parentHandle === null) return [];
-    return removeTreeAt(parentHandle, leaf, rel);
-  });
-  return { restored: leftOnDisk.length === 0, leftOnDisk };
 }
 var input;
 try {
@@ -8370,6 +8339,7 @@ if (secureIoReason) {
 var event = input.hook_event_name;
 if (event === "PreToolUse") {
   try {
+    denyIfTainted(cwd, input.agent_id);
     const store = openStore(cwd);
     let runId = NO_RUN;
     try {
@@ -8408,7 +8378,48 @@ if (event === "PreToolUse") {
   }
 }
 try {
+  denyIfTainted(cwd, input.agent_id);
   const callId = callKey(input.tool_use_id);
+  let latchOutcome = null;
+  const latchOnDetection = (why) => {
+    let outcome;
+    try {
+      outcome = setTaintLatch(cwd, [why]);
+    } catch (e) {
+      outcome = { set: false, error: `${e && e.message || e}` };
+    }
+    if (latchOutcome === null) latchOutcome = outcome;
+    if (!outcome.set) {
+      try {
+        process.stderr.write(
+          `H17: THE CROSS-CALL ENFORCEMENT TAINT LATCH COULD NOT BE PERSISTED (${taintLatchPaths().rel}: ${outcome.error}) at the moment the incident was observed (${why}). Whatever denial this call ends with is therefore a ONE-CALL denial only: without the latch on disk, the next PreToolUse re-collects the bytes this command left behind as its own legitimate baseline and allows them from then on. THE (B) SURFACE MUST BE TREATED AS TAINTED BY HAND until a conductor has inspected it and re-attested it.
+`
+        );
+      } catch {
+      }
+    }
+  };
+  const listDenied = [];
+  const noteListDenied = (finding) => {
+    listDenied.push(finding);
+    latchOnDetection(`(B) baseline-list contradiction: ${finding}`);
+  };
+  {
+    const listVerdict = readBaselineList(cwd);
+    if (listVerdict.kind === "malformed") {
+      noteListDenied(`the persistent (B) baseline list is MALFORMED \u2014 ${listVerdict.reason}`);
+    } else if (listVerdict.kind === "valid") {
+      compareBaselineList(cwd, listVerdict, noteListDenied);
+    } else {
+      try {
+        process.stderr.write(
+          `H17: NO PERSISTENT (B) BASELINE LIST \u2014 '${baselineListPaths().rel}' is ABSENT, so cross-call (B) coverage is DISABLED for this call: H17 can compare the gitignored enforcement surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) only against THIS call's own Pre image, and cannot see a change made BETWEEN Bash calls or between sessions. This is the documented bootstrap weakness (decision b-baseline-hash-list-concrete-design, D4), not a defect, and it is disclosed rather than denied so a fresh project is not bricked from init until a conductor run. Stated flatly: H17 cannot tell "never enrolled" from "the evidence was taken off disk", and taking the file off disk is easier than forging it. A CONDUCTOR mints the list with the clearer (scripts/enforcement-reconcile.mjs --adopt), agents quiesced. No verdict was changed by this notice.
+`
+        );
+      } catch {
+      }
+    }
+  }
   let storeErr = null;
   let store = null;
   try {
@@ -8451,10 +8462,26 @@ try {
   const violations = [];
   const preExisting = [];
   const changedPreDirty = [];
-  const restoredPaths = [];
   const unauthorizedAdditions = [];
   const noteUnauthorizedAddition = (rel) => {
-    if (!unauthorizedAdditions.includes(rel)) unauthorizedAdditions.push(rel);
+    if (unauthorizedAdditions.includes(rel)) return;
+    unauthorizedAdditions.push(rel);
+    latchOnDetection(`unauthorized (B) addition: ${rel}`);
+  };
+  const baselineDenied = [];
+  const noteBaselineDenied = (rel) => {
+    baselineDenied.push(rel);
+    latchOnDetection(`in-window (B) change: ${rel}`);
+  };
+  const noteTrackedViolation = (rel) => {
+    if (violations.includes(rel)) return;
+    violations.push(rel);
+    latchOnDetection(`in-window (A) enforcement write: ${rel}`);
+  };
+  const noteChangedPreDirty = (rel) => {
+    if (changedPreDirty.includes(rel)) return;
+    changedPreDirty.push(rel);
+    latchOnDetection(`in-window state change on pre-dirty path: ${rel}`);
   };
   let preDirty = /* @__PURE__ */ new Set();
   let preState = null;
@@ -8465,7 +8492,7 @@ try {
   if (!storeErr) {
     const dPath = dirtyFile(cwd, runId, callId);
     if (!callId) {
-      attributionShared = "this hook call carries no usable `tool_use_id` (absent, empty/whitespace, or not a string), so the (A) ATTRIBUTION record in play is the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent Bash lane in this run instead of one keyed to this call \u2014 while it is shared, a second lane's Pre can OVERWRITE it after this lane's Pre ran, and a path that was genuinely dirty at this lane's Pre but MISSING from the overwritten record is then treated as clean-at-Pre and HEAD-restored (DELETED) as this command's write, destroying pre-existing conductor work (that is exactly why the per-call key exists, board 489554d4, and why this fallback is reported rather than assumed harmless)";
+      attributionShared = "this hook call carries no usable `tool_use_id` (absent, empty/whitespace, or not a string), so the (A) ATTRIBUTION record in play is the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent Bash lane in this run instead of one keyed to this call \u2014 while it is shared, a second lane's Pre can OVERWRITE it after this lane's Pre ran, and a path that was genuinely dirty at this lane's Pre but MISSING from the overwritten record is then treated as clean-at-Pre and DENIED + LATCHED as this command's write \u2014 a false attribution, though no longer a destructive one since v6.0 (that is exactly why the per-call key exists, board 489554d4, and why this fallback is reported rather than assumed harmless)";
     }
     const sharedNote = attributionShared ? ` DEGRADED MODE \u2014 the record consulted here is the legacy SHARED per-run attribution file, not one keyed to this call: ${attributionShared}. Its absence or corruption is itself a degraded-mode observation, not necessarily a Pre that never ran.` : "";
     if (!existsSync3(dPath)) {
@@ -8496,7 +8523,7 @@ try {
     if (attributionShared) {
       try {
         process.stderr.write(
-          `H17: DEGRADED (A) ATTRIBUTION \u2014 this Bash call carries no usable \`tool_use_id\`, so the attribution record it compared against was the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent lane in this run, not one keyed to this call. A concurrent lane's Pre could have OVERWRITTEN it after this lane's Pre ran \u2014 in which case a genuinely pre-dirty path MISSING from it is treated as this command's write and HEAD-restored (deleted). The verdict stands; what is unverifiable is that the pre-dirty set it trusted belonged to this call. (board 489554d4)
+          `H17: DEGRADED (A) ATTRIBUTION \u2014 this Bash call carries no usable \`tool_use_id\`, so the attribution record it compared against was the legacy PER-RUN, RUN-KEYED file SHARED by every concurrent lane in this run, not one keyed to this call. A concurrent lane's Pre could have OVERWRITTEN it after this lane's Pre ran \u2014 in which case a genuinely pre-dirty path MISSING from it is treated as this command's write and denied + latched (nothing restores since v6.0). The verdict stands; what is unverifiable is that the pre-dirty set it trusted belonged to this call. (board 489554d4)
 `
         );
       } catch {
@@ -8578,24 +8605,24 @@ try {
       }
     }
   }
-  const status = spawnSync("git", ["-C", cwd, "status", "--porcelain", "-z"], { encoding: "utf8" });
+  const status = spawnSync("git", ["-C", cwd, "--no-optional-locks", "-c", "core.fsmonitor=", "status", "--porcelain", "-z"], { encoding: "utf8" });
   if (status.error || status.status !== 0) {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
   }
   const postEntries = parsePorcelainZ(status.stdout);
-  const sweep = /* @__PURE__ */ new Map();
+  const sweep = /* @__PURE__ */ new Set();
   for (const entry of postEntries) {
     for (const p of entry.paths) {
       const rel = p.replace(/\/+$/, "");
-      if (rel && !sweep.has(rel)) sweep.set(rel, p);
+      if (rel) sweep.add(rel);
     }
   }
   for (const rel of preDirty) {
-    if (typeof rel === "string" && rel && !sweep.has(rel)) sweep.set(rel, rel);
+    if (typeof rel === "string" && rel) sweep.add(rel);
   }
   let postIndex = /* @__PURE__ */ new Map();
-  if (preState) postIndex = indexEntriesFor(cwd, [...sweep.keys()]);
-  for (const [rel, p] of sweep) {
+  if (preState) postIndex = indexEntriesFor(cwd, [...sweep]);
+  for (const rel of sweep) {
     const isViolation = isEnforcementSurface(rel) || matchesGlob(rel, "hooks/**") || brief && !!scopeCheck({ brief, rel, amendments: (run.scope_amendments ?? []).map((a) => a.path) }).deny;
     if (isViolation) {
       const coveringPre = coveringPreDirtyPath(preDirty, rel);
@@ -8616,23 +8643,16 @@ try {
         }
         const nowState = pathState(cwd, rel, postIndex, WALK_BUDGET, 0);
         if (sameState(wasState, nowState)) continue;
-        if (stampCouldAttest(wasState, nowState)) {
-          if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
-        }
-        changedPreDirty.push(rel);
+        noteChangedPreDirty(rel);
         continue;
       }
-      if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
-      const outcome = restoreTracked(cwd, p);
-      if (!outcome.restored) {
-        for (const kept of outcome.leftOnDisk) noteUnauthorizedAddition(kept);
+      if (isEnforcementSurface(rel)) {
+        noteUnauthorizedAddition(rel);
         continue;
       }
-      violations.push(rel);
-      restoredPaths.push(rel);
+      noteTrackedViolation(rel);
     }
   }
-  if (restoredPaths.length) mintRestorePerformed(cwd, restoredPaths, input.agent_id);
   if (!storeErr) {
     const bPath = baselineFile(cwd, runId, callId);
     if (!callId) {
@@ -8677,16 +8697,11 @@ try {
         `H17: the (B) content baseline for this call records ZERO enforcement files while ${Object.keys(current).length} exist now (${Object.keys(current).slice(0, 8).join(", ")}${Object.keys(current).length > 8 ? ", \u2026" : ""}). An initialized project always has a non-empty (B) set, so an empty baseline does not describe this project: it is UNVERIFIABLE, not evidence that the enforcement surface was empty at Pre. NOTHING WAS REMOVED \u2014 the removal arm is not entered on an unverifiable baseline, because trusting one would delete every enforcement file as an "unauthorized addition". These records live in os.tmpdir() and are writable by the audited command, so a crafted baseline is conduct, not environment; failing closed (P5). Exit contract-violated, never route around.`
       );
     }
-    for (const [rel, content] of Object.entries(valid)) {
-      if (!(rel in current)) {
-        writeUnder(cwd, rel, content);
-        violations.push(rel);
-        baselineViolations.push(rel);
-      } else if (current[rel] !== content) {
-        writeUnder(cwd, rel, content);
-        violations.push(rel);
-        baselineViolations.push(rel);
-      }
+    for (const rel of Object.keys(valid)) {
+      const changed = !(rel in current) || current[rel] !== valid[rel];
+      if (!changed) continue;
+      noteBaselineDenied(rel);
+      baselineViolations.push(rel);
     }
     for (const rel of Object.keys(current)) {
       if (!(rel in valid)) {
@@ -8704,44 +8719,67 @@ try {
       }
     }
   }
+  let latchNote = null;
+  if (latchOutcome !== null) {
+    latchNote = latchOutcome.set ? (
+      // SCOPE STATED EXACTLY, NOT OVERSTATED (fd9d24af, security review): this
+      // used to say "every spawned-agent tool call is now denied BEFORE
+      // EXECUTION", which is false today. H17 is registered in AGENT
+      // FRONTMATTER on Bash only and is absent from hooks/hooks.json, so while
+      // the latch stands it denies the agent's BASH calls and nothing else —
+      // an agent's Edit, Write and Task calls are not gated by it. The global
+      // PreToolUse '*' registration that would make the broader claim true is
+      // a later slice and has not landed. Claiming coverage the code does not
+      // have is anti-pattern 586bccdc at the user-facing surface: it stops the
+      // next reader from looking.
+      `H17: THE ENFORCEMENT TAINT LATCH IS SET (${taintLatchPaths().rel}). Repeated denial is established: every spawned-agent BASH call that H17 gates is now denied BEFORE EXECUTION until a CONDUCTOR clears it deliberately, because the bytes this sweep denied are still on disk and the next PreToolUse would otherwise adopt them as its own legitimate baseline. SCOPE, STATED EXACTLY SO IT IS NOT MISREAD AS MORE: H17 is registered on Bash in agent frontmatter and is NOT in hooks/hooks.json, so this latch gates spawned-agent Bash \u2014 it does not gate an agent's Edit, Write or Task calls. Presence of that file is the whole verdict \u2014 no field inside it can reduce enforcement, and H17 never clears it. Clearing is a separate conductor action that re-verifies the current enforcement surface deliberately.`
+    ) : environmentDefectDenial(
+      "H17",
+      `THE CROSS-CALL ENFORCEMENT TAINT LATCH COULD NOT BE PERSISTED (${taintLatchPaths().rel}: ${latchOutcome.error}). The denial above stands and is UNCHANGED \u2014 but it is now a ONE-CALL denial only: without the latch on disk, the next PreToolUse re-collects the bytes this command left behind as its own legitimate baseline and allows them from then on. THE (B) SURFACE MUST BE TREATED AS TAINTED BY HAND until a conductor has inspected every path named above and re-attested the surface.`,
+      { agentId: input.agent_id }
+    );
+  }
   if (storeErr) {
-    const restoredNote = restoredPaths.length ? ` NOTE: ${restoredPaths.length} enforcement path(s) were HEAD-restored during this sweep despite the broken store: ${restoredPaths.join(", ")} \u2014 verify none were conductor work-in-flight.` : "";
+    const latchTail = latchNote ? `
+${latchNote}` : "";
     deny(
       environmentDefectDenial(
         "H17",
-        `Enforcement verification failed (${storeErr && storeErr.message || storeErr}) \u2014 failing closed (P5).${restoredNote}`,
+        `Enforcement verification failed (${storeErr && storeErr.message || storeErr}) \u2014 failing closed (P5).${latchTail}`,
         {
           agentId: input.agent_id
         }
       )
     );
   }
-  let stampFailedPath = null;
-  if (preExisting.length) {
-    const verdict = verifyStampAttestation(cwd, preExisting);
-    if (verdict.attested) {
-      preExisting.length = 0;
-    } else if (verdict.stampPresent) {
-      stampFailedPath = verdict.failedPath;
-    }
-  }
-  if (violations.length || unauthorizedAdditions.length || preExisting.length || changedPreDirty.length) {
+  if (violations.length || unauthorizedAdditions.length || baselineDenied.length || listDenied.length || preExisting.length || changedPreDirty.length) {
     const parts = [];
     if (changedPreDirty.length) {
       parts.push(
         `H17: PRE-EXISTING dirty path(s) whose state CHANGED inside this command's window, and which are therefore NOT verifiable as untouched: ${changedPreDirty.join(
           ", "
-        )}. The state recorded at PreToolUse (existence, file type, mode, symlink target, index entry, bytes) differs from the state now, and no fresh conductor stamp attests the current state. These paths are deliberately NOT reverted \u2014 restoring a pre-image could clobber a concurrent lane's legitimate write \u2014 so the bytes stand as they are; exit contract-violated, never route around.`
+        )}. The state recorded at PreToolUse (existence, file type, mode, symlink target, index entry, bytes) differs from the state now. The change was OBSERVED inside this command's window \u2014 which does not prove this command authored it, and that is exactly why nothing is reverted: restoring a pre-image could clobber a concurrent lane's legitimate write. The bytes stand as they are, the incident is LATCHED, and a conductor must inspect and clear it; exit contract-violated, never route around.`
       );
     }
     if (violations.length) {
       parts.push(
-        `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(", ")} \u2014 exit contract-violated, never route around. This is the post-Bash restore-and-deny design (decisions 2422e76a, f404dfb4): the bytes were deliberately rolled back to their pre-call state before the denial, not lost work or an automatic reset. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
+        `H17: write(s) OBSERVED INSIDE THIS COMMAND'S WINDOW outside its contract \u2014 DENIED, LATCHED, and LEFT ON DISK exactly as observed: ${violations.join(", ")} \u2014 exit contract-violated, never route around. NOTHING WAS REVERTED: H17 detects and denies, it does not restore (decision dc616f69 \u2014 in a shared worktree no hook can prove which PROCESS authored a write, and "observed in this window" is not proof this command wrote it; a rollback on that evidence could destroy a conductor's concurrent legitimate work). The bytes stand for a HUMAN to inspect; the taint latch keeps denying agent Bash until a conductor clears it, so the surviving write buys nothing but a red gate. A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check \u2014 only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
       );
     }
+    const dualReported = unauthorizedAdditions.filter((rel) => baselineDenied.includes(rel));
     if (unauthorizedAdditions.length) {
       parts.push(
-        `H17: UNAUTHORIZED ADDITION(S) DETECTED in the protected (B) enforcement surface, and LEFT IN PLACE ON DISK: ${unauthorizedAdditions.join(", ")} \u2014 exit contract-violated, never route around. These path(s) hold no entry in this call's Pre-image baseline and appeared inside this command's window. The command is DENIED; the file(s) still sit on disk, BYTE-IDENTICAL to what was written there. H17 DETECTED the addition, it did not delete it: deleting is IRREVERSIBLE, and this sweep cannot tell a malicious plant from a legitimate file the conductor just created \u2014 a detector that deletes destroys real work on one false positive. A HUMAN must inspect each path above and take it off disk if it is a plant; H17 keeps denying agent Bash while it stands, so an addition left in place buys nothing but a red gate. Nothing of yours was undone.`
+        `H17: UNAUTHORIZED ADDITION(S) DETECTED in the protected (B) enforcement surface, and LEFT IN PLACE ON DISK: ${unauthorizedAdditions.join(", ")} \u2014 exit contract-violated, never route around. Each path surfaced inside this command's window as newly git-visible (B)-surface material: a genuinely new file with no entry in this call's Pre-image baseline, or a pre-existing gitignored file force-added to the index (this sweep cannot tell the two apart; where the file existed at Pre, the (B) baseline comparison carries the byte-level verdict). The command is DENIED; the file(s) still sit on disk, BYTE-IDENTICAL to what was written there. H17 DETECTED the finding, it did not delete or rewrite anything: deleting is IRREVERSIBLE, and this sweep cannot tell a malicious plant from a legitimate file the conductor just created \u2014 a detector that deletes destroys real work on one false positive. A HUMAN must inspect each path above \u2014 take a plant off disk, or put a tampered pre-existing file back deliberately; H17 keeps denying agent Bash while it stands, so a finding left in place buys nothing but a red gate. Nothing of yours was undone.` + (dualReported.length ? ` NAMED TWICE, DISCLOSED SO IT IS NOT READ AS TWO SEPARATE FINDINGS: ${dualReported.join(", ")} also appear(s) in the (B) in-window paragraph below. That is ONE path met by TWO independent detectors \u2014 the (A) git-visible sweep and the (B) byte comparison \u2014 not two incidents. The disposition is identical either way (denied, latched, left on disk), and both are reported because each is an independent trigger: the (A) route is the only one that survives a broken store.` : "")
+      );
+    }
+    if (baselineDenied.length) {
+      parts.push(
+        `H17: PROTECTED (B) ENFORCEMENT PATH(S) CHANGED IN THIS COMMAND'S WINDOW \u2014 DENIED, AND LEFT IN PLACE EXACTLY AS THE COMMAND LEFT THEM: ${baselineDenied.join(", ")} \u2014 exit contract-violated, never route around. These path(s) are gitignored enforcement surface (.claude/agents/**, .claude/settings*.json, .sterling/config.json) and their state differs from this call's Pre-image baseline. An in-window (B) change is denied UNCONDITIONALLY: there is no attestation, exemption or stamp that excuses one, because on a same-UID machine any such token is forgeable by the very command being audited. H17 DETECTED the change and took NO WRITE ACTION on it: nothing was put back, recreated, truncated or rewritten, and whatever is on disk now is what your command put there. Putting bytes back was REMOVED deliberately \u2014 the (B) pre-image lives only in a temp record the audited command can itself write, so writing from it made this gate a writer of attacker-influenceable bytes, and its truncate-in-place write could be aimed THROUGH a hardlink at a file outside the repository. Conductor edits to this surface belong BETWEEN Bash calls with agents quiesced, never inside one. A HUMAN must inspect each path above.`
+      );
+    }
+    if (listDenied.length) {
+      parts.push(
+        `H17: THE PERSISTENT (B) BASELINE LIST (${baselineListPaths().rel}) CONTRADICTS THE LIVE (B) SURFACE \u2014 DENIED, AND NOTHING WAS WRITTEN OR TAKEN OFF DISK: ${listDenied.join("; ")}. \u2014 exit contract-violated, never route around. The list is compared against the WHOLE current (B) set on EVERY gated call, not only when this window changed something (decision b-baseline-hash-list-concrete-design, D3): a listed path missing or hash-different denies, a live (B) path absent from the list denies, a malformed list denies, and an exact match simply produces no finding \u2014 it never allows anything and never suppresses another finding in this same result. THIS IS THE CROSS-CALL ARM, and it is why the contradiction may have nothing to do with your command: unlike every other check here it is NOT bounded to one Bash window, NOT suspended by a broken store, and NOT reset at SessionStart, so it can be reporting a (B) edit made between calls or between sessions. THE INCIDENT IS LATCHED, deliberately: a denial with no cross-call consequence would let the contradiction be resolved by taking the list off disk, after which the next call sees no list, skips this check, and adopts whatever is on the surface as legitimate. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE \u2014 exit \`blocked\`, citing this message. A CONDUCTOR inspects the surface and re-mints the list deliberately through the clearer (scripts/enforcement-reconcile.mjs), with agents quiesced; the agent must not write, repair or delete the list.`
       );
     }
     if (baselineShared && baselineViolations.length) {
@@ -8754,9 +8792,9 @@ try {
         `H17: DEGRADED (B) VERIFICATION \u2014 the (B)-set path(s) above (${baselineViolations.join(", ")}) were compared against a SHARED PER-RUN baseline, not one keyed to this Bash call: ${baselineShared}. The verdict stands; what is degraded is the confidence that the pre-image compared against was this call's own.`
       );
     }
-    if (attributionShared && restoredPaths.length) {
+    if (attributionShared && violations.length) {
       parts.push(
-        `H17: DEGRADED (A) ATTRIBUTION \u2014 the tracked path(s) HEAD-restored above (${restoredPaths.join(", ")}) were attributed to this command against a SHARED PER-RUN attribution record, not one keyed to this Bash call: ${attributionShared}. The verdict stands; what is degraded is the confidence that a restored path was this command's own write rather than pre-existing dirt missing from an overwritten shared record.`
+        `H17: DEGRADED (A) ATTRIBUTION \u2014 the tracked path(s) denied above (${violations.join(", ")}) were attributed to this command against a SHARED PER-RUN attribution record, not one keyed to this Bash call: ${attributionShared}. The verdict stands; what is degraded is the confidence that a denied path was this command's own write rather than pre-existing dirt missing from an overwritten shared record.`
       );
     }
     if (preExisting.length) {
@@ -8775,11 +8813,16 @@ try {
           // landed, this blanket denial fires ONLY when there is no record to
           // compare against — so it must say which input it lacked, or the
           // degrade is silent and indistinguishable from the old behaviour.
-          (degradedReason ? ` This blanket denial is a DEGRADED FALLBACK: ${degradedReason}.` : "") + (stampFailedPath ? ` A conductor-attested stamp exists but does not attest '${stampFailedPath}' \u2014 no exemption.` : ""),
+          // S4 (78dc9bd6): the trailing stamp-attestation clause is gone with
+          // the apparatus. There is no exemption route left for this arm at
+          // all, so naming one that "did not attest" would point a human at a
+          // mechanism that no longer exists.
+          (degradedReason ? ` This blanket denial is a DEGRADED FALLBACK: ${degradedReason}.` : ""),
           { agentId: input.agent_id }
         )
       );
     }
+    if (latchNote) parts.push(latchNote);
     deny(parts.join("\n"));
   }
   allow();

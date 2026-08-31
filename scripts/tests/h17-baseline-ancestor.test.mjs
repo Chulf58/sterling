@@ -453,6 +453,16 @@ test(
 // hypothetical future-refactor safeguard, per the same "an unreachable pin is
 // worse than a missing one" principle h17-baseline-symlink.test.mjs's own
 // "NOT PINNED: REVERSE SWAP" note applies to a different transition.
+//
+// UPDATE 2026-08-30 (dc616f69 / 78dc9bd6), and it CHANGES THE ANALYSIS ABOVE
+// without changing a single assertion below: the (A) `restoreTracked` this
+// comment credits with unlinking the swapped `.claude` symlink IS DELETED, and
+// (B) restoration was already gone. So the symlink is no longer removed by
+// anything — it is DETECTED, DENIED and LEFT ON DISK, which is what this block
+// actually asserts (exit 2 plus an untouched outside directory). The pin stays
+// GREEN and stays honest, but read it now as: "no restore path exists to write
+// through a linked ancestor, and the denial still fires." It is a safety net
+// against a restore arm returning, not a live guard pin.
 // =========================================================================
 
 test(

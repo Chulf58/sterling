@@ -104,6 +104,38 @@ export function axisNarrowText(record: AxisRecord | null | undefined): string {
   return '';
 }
 
+/** LIMITATION, STATED UP FRONT: this returns text BYTE-IDENTICAL to
+ *  axisNarrowText for feature_article, research_finding and
+ *  disconfirmed_hypothesis — those three narrow texts are already subject-only,
+ *  so the title-union below is a strict NO-OP for 3 of the 5 delivered types.
+ *  The union changes retrieval for `decision` and `anti_pattern` ONLY, which are
+ *  the two types whose narrow text appends a long body (statement / trigger) to
+ *  the title. Do not read a measurement taken on a decision as evidence about an
+ *  article.
+ *
+ *  The record's own SUBJECT LINE — the narrow text's title-ish half, per type,
+ *  mirroring axisNarrowText's shape above. Exists ONLY for centrality (below):
+ *  axisNarrowText concatenates a record's title and its body into ONE flat
+ *  frequency pool, so a 178-char title cannot out-count a 4106-char statement
+ *  and a ruling becomes unretrievable BY ITS OWN SUBJECT the more thoroughly it
+ *  is evidenced — measured 2026-08-30 on decision e9387b85, whose title says
+ *  'attestation' twice while the term ranks 12th in its own top-K
+ *  (research_finding 5f3e0a42). For every type this is a SUBSET of
+ *  axisNarrowText (identical for feature_article / research_finding /
+ *  disconfirmed_hypothesis, whose narrow text is already subject-only), which
+ *  is what keeps the union below from ever growing a terse record's central
+ *  set — see hasRecordCentralityHit. Unknown types return '' exactly as
+ *  axisNarrowText does, preserving its vacuous-pass behaviour. */
+export function axisTitleText(record: AxisRecord | null | undefined): string {
+  if (!record || typeof record !== 'object') return '';
+  if (record.type === 'anti_pattern') return `${record.title ?? ''}`;
+  if (record.type === 'decision') return `${record.title ?? ''}`;
+  if (record.type === 'feature_article') return `${record.slug ?? ''} ${record.concept_family ?? ''}\n${record.title ?? ''}`;
+  if (record.type === 'research_finding') return `${record.question ?? ''}`;
+  if (record.type === 'disconfirmed_hypothesis') return `${record.question ?? ''}`;
+  return '';
+}
+
 /** How many DISTINCT terms appear in the record's narrow fields. Substring
  *  match on a word-ish boundary so 'latch' hits 'latches' and 'one-way-latch'
  *  but not an unrelated token that merely contains the letters. */
@@ -157,9 +189,32 @@ export interface CentralityOpts {
  *  matching here would let the earlier floor COUNT an inflected pair and this
  *  floor SILENCE it, failing closed on a technicality. So a central term is
  *  covered when it and a prompt word prefix each other, either direction. */
-export function recordCentralityHits(record: AxisRecord, outgoingText: unknown, opts: CentralityOpts = {}): string[] {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
+/** The PRE-UNION central set: the top-K terms of the record's narrow text, and
+ *  nothing else. At most topK entries, always. This is the set the H20 strict
+ *  DENY rung evaluates (hasFullNarrowCentralityCoverage below) — it must never
+ *  silently acquire the title arm, because a LARGER central set makes full
+ *  coverage a WEAKER per-term demand and that rung blocks a user's question. */
+function narrowCentralTerms(record: AxisRecord, topK: number): string[] {
+  return extractAxisTerms(axisNarrowText(record), topK);
+}
+
+/** The RETRIEVAL central set: the narrow top-K UNIONED with the top-K terms of
+ *  the record's own subject line (axisTitleText) — decision 00b23915, so a long
+ *  statement can no longer crowd out the principle in its own title. Up to 2*topK
+ *  entries. Narrow-first, so the existing frequency order is preserved and only
+ *  genuinely new subject terms are appended. Used by the two RECALL-side
+ *  functions below (preflight, the H19/H20 loose audit) and by nothing else —
+ *  the union's purpose is retrieval and ranking, never deny eligibility.
+ *  NO-OP for feature_article / research_finding / disconfirmed_hypothesis; see
+ *  the limitation on axisTitleText. */
+function unionCentralTerms(record: AxisRecord, topK: number): string[] {
+  return [
+    ...new Set([...narrowCentralTerms(record, topK), ...extractAxisTerms(axisTitleText(record), topK)]),
+  ];
+}
+
+/** Which of `central` the outgoing text covers, by symmetric prefix match. */
+function coveredCentralTerms(central: string[], outgoingText: unknown): string[] {
   const words = [
     ...new Set(
       String(outgoingText ?? '')
@@ -172,11 +227,16 @@ export function recordCentralityHits(record: AxisRecord, outgoingText: unknown, 
   return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
 }
 
+export function recordCentralityHits(record: AxisRecord, outgoingText: unknown, opts: CentralityOpts = {}): string[] {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  return coveredCentralTerms(unionCentralTerms(record, topK), outgoingText);
+}
+
 export function hasRecordCentralityHit(record: AxisRecord, outgoingText: unknown, opts: CentralityOpts = {}): boolean {
   const topK = opts.topK ?? AXIS_RECORD_TOP_K;
   const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
-  const central = extractAxisTerms(axisNarrowText(record), topK);
-  const covered = recordCentralityHits(record, outgoingText, { topK });
+  const central = unionCentralTerms(record, topK);
+  const covered = coveredCentralTerms(central, outgoingText);
   // A terse record scales the requirement down to what it can offer (one
   // extractable own term needs only that one present). Zero extractable terms
   // passes vacuously — NOT provably unreachable (a narrow text of pure
@@ -186,5 +246,47 @@ export function hasRecordCentralityHit(record: AxisRecord, outgoingText: unknown
   // Known limit (review finding 1, accepted): a record with <= topK extractable
   // own terms makes EVERY term central, so the floor only bites on verbose
   // records — frequency cannot discriminate where there is no repetition.
+  // THE TITLE UNION CANNOT RAISE THIS BAR at the ordinary minTerms=2 floor:
+  // axisTitleText's terms are drawn from text that is a SUBSET of
+  // axisNarrowText for every type, so (a) a terse record — <= topK extractable
+  // narrow terms — already has every one of them central, hence the union adds
+  // nothing and central.length is unchanged; (b) a verbose record already has
+  // central.length === topK >= minTerms, so Math.min() is already pinned at
+  // minTerms and growth cannot move it. The requirement therefore never rises
+  // from 1 to 2 for a terse record.
+  //
+  // THE UNION *DOES* WEAKEN THE PER-TERM DEMAND WHENEVER central.length EXCEEDS
+  // minTerms — Math.min() then caps the requirement at minTerms while the set it
+  // is drawn from has grown to as many as 2*topK, i.e. "any minTerms of a bigger
+  // set". That is acceptable HERE, where this floor only decides whether to
+  // SHOW a record. It is NOT acceptable at H20's AskUserQuestion deny rung,
+  // which EXITS 2 and blocks a question from ever reaching the user: there,
+  // firing more readily is fail-CLOSED toward the user, not fail-open, and a
+  // weaker demand means MORE false denials. That rung therefore does not call
+  // this function at all — it calls hasFullNarrowCentralityCoverage below,
+  // which has no minTerms knob and no title arm.
+
   return covered.length >= Math.min(minTerms, central.length);
+}
+
+/** FULL coverage of the record's PRE-UNION narrow top-K — every one of its own
+ *  dominant narrow terms present in the outgoing text, not merely most of them.
+ *  The H20 AskUserQuestion DENY rung's centrality floor (scripts/hooks/
+ *  h20-mechanism-axis.mjs), and deliberately a SEPARATE function rather than an
+ *  option on hasRecordCentralityHit:
+ *   - it takes NO minTerms, so the requirement cannot be tuned down by a caller;
+ *   - it takes NO union flag, so a future caller cannot reach the union here by
+ *     accident — a default that silently unioned is exactly how the deny rung
+ *     was weakened once already (both reviewers, 2026-08-30).
+ *  Because narrowCentralTerms yields at most topK entries, `>= central.length`
+ *  is literally full coverage — no Math.min() trick, and identical to the
+ *  behaviour that shipped before the title union existed. Zero extractable
+ *  terms still passes vacuously (0 >= 0), unchanged. */
+export function hasFullNarrowCentralityCoverage(
+  record: AxisRecord,
+  outgoingText: unknown,
+  opts: { topK?: number } = {}
+): boolean {
+  const central = narrowCentralTerms(record, opts.topK ?? AXIS_RECORD_TOP_K);
+  return coveredCentralTerms(central, outgoingText).length >= central.length;
 }

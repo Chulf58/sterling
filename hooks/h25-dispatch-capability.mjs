@@ -5128,6 +5128,31 @@ function loadConfig(cwd) {
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 
+// scripts/hooks/lib/advisory-counter.mjs
+import { appendFileSync, existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+function recordAdvisoryFire(root, hook, sessionId) {
+  try {
+    if (!root || !hook) return;
+    if (!existsSync2(join2(root, ".sterling"))) return;
+    const dir = join2(root, ".sterling", "transient");
+    mkdirSync(dir, { recursive: true });
+    let session = typeof sessionId === "string" && sessionId ? sessionId : null;
+    if (!session) {
+      try {
+        const parsed = JSON.parse(readFileSync2(join2(dir, "session.json"), "utf8"));
+        session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
+      } catch {
+      }
+    }
+    appendFileSync(
+      join2(dir, "advisory-fires.ndjson"),
+      JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
+    );
+  } catch {
+  }
+}
+
 // scripts/hooks/lib/transcript.mjs
 var TAIL_BYTES = 1024 * 1024;
 
@@ -5250,8 +5275,8 @@ function isReviewerClass(type) {
 }
 
 // scripts/hooks/h25-dispatch-capability.mjs
-import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
 var BUILTIN_AGENT_TYPES = /* @__PURE__ */ new Set([
   "general-purpose",
   "claude",
@@ -5278,6 +5303,9 @@ var MCP_SHORT_NAMES = [
   "knowledge_update",
   "knowledge_append",
   "knowledge_edit",
+  "knowledge_split",
+  "knowledge_extract",
+  "knowledge_array_remove",
   "knowledge_link",
   "knowledge_retire",
   "knowledge_supersede",
@@ -5377,6 +5405,7 @@ try {
   allow();
 }
 function emit(additionalContext) {
+  recordAdvisoryFire(input.cwd, "h25", input.session_id);
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
@@ -5394,8 +5423,8 @@ try {
   const subagentType = input.tool_input?.subagent_type;
   if (!subagentType) allow();
   const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
-  const agentPath = join2(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
-  if (!existsSync2(agentPath)) {
+  const agentPath = join3(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
+  if (!existsSync3(agentPath)) {
     if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
     finish(
       `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
@@ -5403,7 +5432,7 @@ try {
   }
   let content;
   try {
-    content = readFileSync2(agentPath, "utf8");
+    content = readFileSync3(agentPath, "utf8");
   } catch (e) {
     warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
   }

@@ -272,3 +272,210 @@ test('AC-g3: knowledge_query envelope — a normal, uncapped, non-empty result a
     cleanup();
   }
 });
+
+// --- H23 regression pins: a ruling's transferable principle is unretrievable by its
+// own subject when the record's body is dominated by the incident that justified it
+// (knowledge_get 5f3e0a42, reproducing decision e9387b85 / research_finding 79942bda's
+// SHAPE — never their real ids/content, which would rot and would bind this test to
+// production data). Every fixture below is synthetic, seeded fresh per test. This file
+// was authored spec-only, blind to any fix: no scoring/centrality internals were read.
+
+const PRINCIPLE_TITLE =
+  'Visual render artifact commits require human attestation — attestation is the check no automated test can replace';
+const PRINCIPLE_STATEMENT =
+  'Any commit that touches visual or render artifacts requires a human attestation at the authority boundary, ' +
+  'because no automated test can verify visual correctness.';
+const PRINCIPLE_QUESTION =
+  'Should Sterling require a human attestation before a commit touching visual or render artifacts that no automated test can verify?';
+
+// Deliberately shares NO word with PRINCIPLE_* above — exists only to dilute, exactly
+// as e9387b85's ~2000 words of H17 revert mechanics diluted its own title's 'attestation'.
+const INCIDENT_SENTENCE =
+  'The h17 bash write sweep hardened the hook bundle against a hardlink-safe stamp producer path, adding an ' +
+  'allowlist admission gate before the esbuild bundle staged into mkdtemp, then the revert cleared the ' +
+  'enforcement latch and tripwire consumer taint clearer. ';
+// 20 repeats ~= 5300+ characters of pure incident vocabulary — "several thousand
+// characters" dominated by unrelated words, per the measured defect's shape.
+const INCIDENT_BODY = INCIDENT_SENTENCE.repeat(20);
+
+// CORRECTED (this session, see AC1 below): the matcher's narrow text for a
+// `decision` record is `title + statement` only — `rationale` is excluded
+// entirely (field mapping confirmed via decision 00b23915, which cites
+// axis.ts:97; cited rather than read — H4 forbids reading axis.ts itself
+// from this role, field mapping only). The ORIGINAL shape of this fixture
+// put INCIDENT_BODY in `rationale`, a field the matcher never looks at, so
+// the record's narrow text was just title + PRINCIPLE_STATEMENT (~300
+// chars) in BOTH the pre-fix and post-fix code paths — nothing was ever
+// diluted, the measured defect was never reproduced, and AC1 passed
+// vacuously on baseline. The dilution must live in `statement` itself,
+// which is what actually happened to the real record (00b23915: "narrow_text
+// = 4285 chars (title 178 + statement 4106)").
+function seedDilutedPrincipleDecision(tools: SterlingTools) {
+  return tools.knowledgeCreate('decision', {
+    title: PRINCIPLE_TITLE,
+    statement: `${PRINCIPLE_STATEMENT} ${INCIDENT_BODY}`,
+    alternatives_rejected: [],
+    rationale:
+      'See the H17 bash write sweep incident record for full mechanical detail; kept out of the narrow-text ' +
+      'fields deliberately, so this fixture does not also (accidentally) depend on rationale ever being scored.',
+  }).record;
+}
+
+function seedFocusedPrincipleDecision(tools: SterlingTools) {
+  return tools.knowledgeCreate('decision', {
+    title: PRINCIPLE_TITLE,
+    statement: PRINCIPLE_STATEMENT,
+    alternatives_rejected: [],
+    rationale:
+      'A human attestation is the only mechanism that can verify visual correctness; automated tests cannot ' +
+      'render-check pixels, so the authority boundary requires this attestation on every visual commit.',
+  }).record;
+}
+
+test(
+  'AC1 (core pin): a decision whose TITLE states the principle in plain subject vocabulary, but whose ' +
+    'STATEMENT is dominated by thousands of characters of unrelated incident vocabulary, is still returned ' +
+    'for a plain-language question about the principle',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const record = seedDilutedPrincipleDecision(tools);
+      const result = preflight(tools, PRINCIPLE_QUESTION);
+      assert.equal(
+        result.answerability,
+        'verify_targets',
+        'the store DOES govern this subject via the diluted record — a false "ungoverned" here reproduces the measured defect (knowledge_get 5f3e0a42)'
+      );
+      assert.equal(result.matches.length, 1, 'exactly the one diluted decision seeded in this store should surface');
+      assert.equal(result.matches[0]?.id, record.id);
+      assert.equal(result.matches[0]?.type, 'decision');
+      assert.equal(result.matches[0]?.title, PRINCIPLE_TITLE);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+// Genuine control (post-repair): seedFocusedPrincipleDecision's `statement` is the short
+// PRINCIPLE_STATEMENT alone — no INCIDENT_BODY anywhere in title+statement — while
+// seedDilutedPrincipleDecision's `statement` is now PRINCIPLE_STATEMENT+INCIDENT_BODY. The two
+// fixtures diverge exactly in the field the matcher reads (statement length), which is what a
+// dilution control requires. Before the repair they were identical in narrow text (both diluted
+// only rationale, which the matcher never reads) — AC1 and AC2 were the same test.
+test(
+  'AC2 (dilution control, must already pass): the SAME title/principle with a SHORT, undiluted statement is ' +
+    'returned by the IDENTICAL question — isolates body-dilution, not vocabulary, as the cause of AC1',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const record = seedFocusedPrincipleDecision(tools);
+      const result = preflight(tools, PRINCIPLE_QUESTION);
+      assert.equal(
+        result.answerability,
+        'verify_targets',
+        'an undiluted record sharing the identical title/principle must already be governed today'
+      );
+      assert.equal(result.matches.length, 1);
+      assert.equal(result.matches[0]?.id, record.id);
+      assert.equal(result.matches[0]?.title, PRINCIPLE_TITLE);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+// NOTE on scope (checked this session, not fixed): a research_finding's narrow text is `question`
+// ONLY — slug and answer are both excluded (confirmed via decision 00b23915, which cites axis.ts:99;
+// field mapping cited, axis.ts itself not read by this role per H4). The same decision states the
+// title-union arm's "title-ish" text for research_finding is ALSO just `question`. So narrowText ===
+// titleishText for this type, always — the union is a mathematical no-op and NO fixture, however the
+// vocabulary is arranged, can make a research_finding diverge between pre-fix and post-fix behavior.
+// This test cannot be repaired into a title-union pin; it is left as what it actually is below — a
+// sound, narrower claim that research_finding participates in preflight's queried candidate set at
+// all — and is expected to PASS identically before and after the title-union change.
+test(
+  'AC3: a research_finding whose slug/question states the principle plainly is returned by preflight — pins ' +
+    'that research_finding is genuinely in the queried candidate set',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const record = tools.knowledgeCreate('research_finding', {
+        slug: 'human-attestation-required-at-authority-boundary-automation-cannot-verify',
+        question: PRINCIPLE_QUESTION,
+        answer:
+          'A human attestation is the only mechanism that can verify visual correctness at the authority ' +
+          'boundary; automated tests cannot check rendered pixels.',
+        source_date: '2026-08-10',
+        capture_date: '2026-08-10',
+      }).record;
+      const result = preflight(tools, PRINCIPLE_QUESTION);
+      assert.equal(result.matches.length, 1, 'the seeded research_finding is the only record in this store');
+      assert.equal(result.matches[0]?.id, record.id);
+      assert.equal(result.matches[0]?.type, 'research_finding');
+      assert.equal(result.answerability, 'verify_targets');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+const REVIEW_TITLE =
+  'Merge gate requires an independent review trailer — a review trailer is the only proof self-verification cannot fake';
+const REVIEW_QUESTION =
+  'Does Sterling require an independent review trailer before a commit merges, since self-verification does not count as independent proof?';
+
+// NOTE on scope (checked this session, not fixed): REVIEW_TITLE/statement/rationale all state the
+// principle directly in title+statement with no dilution attempted (narrow text stays well under
+// ~300 chars) — this exercises the fields the matcher reads (title+statement for a decision) but
+// does not exercise the title-union defect at all, since there is nothing here for a long body to
+// crowd out. Expected to PASS identically before and after the title-union change; it pins the
+// answerability-string contract (never a bare "not ungoverned"), not the dilution fix.
+test('AC4 (answerability pin): a governed question answers the EXACT string "verify_targets", never "ungoverned"', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.knowledgeCreate('decision', {
+      title: REVIEW_TITLE,
+      statement:
+        'Every code-touching commit must carry an independent review trailer before it merges, because ' +
+        'self-verification never counts as independent proof.',
+      alternatives_rejected: [],
+      rationale:
+        'A review trailer is the only mechanical evidence that an independent reviewer checked the diff; ' +
+        'without it, self-verification could silently stand in for review.',
+    });
+    const result = preflight(tools, REVIEW_QUESTION);
+    assert.notEqual(
+      result.answerability,
+      'ungoverned',
+      'a false "ungoverned" reads as a positive assurance that nothing governs the subject'
+    );
+    assert.equal(result.answerability, 'verify_targets');
+  } finally {
+    cleanup();
+  }
+});
+
+// Unaffected by the AC1 repair: this test's premise is that the query shares NO vocabulary with
+// either seeded decision, diluted or not, so which field the incident vocabulary lives in is
+// irrelevant here — the daylight-saving/log-timestamp query overlaps with neither record's content
+// words regardless. Expected to PASS identically before and after.
+test(
+  'AC5 (negative control, must already pass): a subject the store genuinely does not govern still answers ' +
+    '"ungoverned" with no matches, even with unrelated records present in the store — the arm a blanket ' +
+    'threshold drop must break',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      seedDilutedPrincipleDecision(tools);
+      seedFocusedPrincipleDecision(tools);
+      const result = preflight(
+        tools,
+        'How should the terminal interface handle daylight saving clock shifts when formatting log timestamps for the maintenance queue view?'
+      );
+      assert.equal(result.answerability, 'ungoverned');
+      assert.deepEqual(result.matches, []);
+    } finally {
+      cleanup();
+    }
+  }
+);

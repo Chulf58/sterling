@@ -437,13 +437,16 @@ test('H13: appends normalized read-evidence to the correct ledger (run vs conduc
     // boundary; evidence now expires with the file, not the prompt.
     const before = JSON.parse(readFileSync(conductorLedger, 'utf8'));
     assert.ok(before.every((e) => e.sha256), 'h13-reads-ledger stamps a content hash on every entry');
-    r = runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    // pruneUnhashed(ledgerPath) absorbed from h13-clear-conductor.mjs (deleted) into
+    // h19-delivery-drain.mjs — same UserPromptSubmit event, decision 04982f45
+    // (s7-small-hook-absorption-measured-two-fold-two-keep). Behavior byte-preserved.
+    r = runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     assert.equal(r.code, 0);
     assert.equal(existsSync(conductorLedger), true, 'hashed entries survive the prompt clear');
     // seed a hashless legacy entry beside it — the prompt clear prunes exactly that one
     const mixed = [...JSON.parse(readFileSync(conductorLedger, 'utf8')), { agent_id: 'conductor', path: 'src/legacy-read.ts', at: NOW }];
     writeFileSync(conductorLedger, JSON.stringify(mixed));
-    r = runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    r = runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     assert.equal(r.code, 0);
     const after = JSON.parse(readFileSync(conductorLedger, 'utf8'));
     assert.ok(after.every((e) => e.sha256), 'hashless legacy entries are pruned at the prompt boundary');
@@ -453,6 +456,58 @@ test('H13: appends normalized read-evidence to the correct ledger (run vs conduc
   }
 });
 
+// AGENT-LEDGER UNTOUCHED (outside-family review finding): pruneUnhashed's
+// absorbed call targets the CONDUCTOR ledger path specifically (decision
+// 04982f45 — h13-clear-conductor.mjs was conductor-only by name). This pins
+// that an AGENT/run ledger — a DIFFERENT file, addressed by (runId, agentId)
+// — is never reached by the same prompt-boundary prune, even when it also
+// holds a hashless legacy entry: proof the targeting is a fixed conductor
+// path, not an accidental sweep of every ledger under .sterling/runs/**.
+test("H19 delivery-drain: pruneUnhashed targets ONLY the conductor ledger — an AGENT/run ledger's hashless entry survives untouched", () => {
+  const { dir, cleanup } = makeProject({ withRun: true });
+  try {
+    const conductorLedger = join(dir, '.sterling', 'transient', 'conductor-reads.json');
+    mkdirSync(dirname(conductorLedger), { recursive: true });
+    writeFileSync(
+      conductorLedger,
+      JSON.stringify([
+        { agent_id: 'conductor', path: 'src/legacy-read.ts', at: NOW },
+        { agent_id: 'conductor', path: 'src/feature.ts', at: NOW, sha256: 'deadbeef' },
+      ])
+    );
+    // an AGENT/run ledger with its OWN hashless entry, seeded via the same
+    // helper h13-reads-ledger's tests use for the run-scoped path.
+    const agentLedger = seedLedger(dir, 'r-1', 'a1', ['src/agent-legacy-read.ts']);
+    const agentBefore = readFileSync(agentLedger, 'utf8');
+
+    const r = runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    assert.equal(r.code, 0, oneLine(r.stderr));
+
+    const conductorAfter = JSON.parse(readFileSync(conductorLedger, 'utf8'));
+    assert.ok(!conductorAfter.some((e) => e.path === 'src/legacy-read.ts'), 'the hashless CONDUCTOR entry is pruned');
+    assert.ok(conductorAfter.some((e) => e.path === 'src/feature.ts'), 'the hashed CONDUCTOR entry survives');
+
+    assert.equal(
+      readFileSync(agentLedger, 'utf8'),
+      agentBefore,
+      "the AGENT/run ledger is byte-identical — untouched by the conductor-scoped prune"
+    );
+    const agentAfter = JSON.parse(readFileSync(agentLedger, 'utf8'));
+    assert.ok(
+      agentAfter.some((e) => e.path === 'src/agent-legacy-read.ts'),
+      "the agent ledger's own hashless entry survives — this hook never targets it"
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: resolving the prune path from the hook input's own agent/run
+// identity (an "undefined,undefined" targeting bug — e.g. falling through to
+// whatever ledgerPath(run_id, agent_id) happens to produce instead of a
+// FIXED conductor-only path), or globbing every ledger under
+// .sterling/runs/**/reads/*.json, flips the agent-ledger-survives assertions
+// above red.
+
 test('H3 [direct mode]: evidence expires with the FILE — a hashed read survives prompts and dies on content change (board 776d2b65)', () => {
   const { dir, cleanup } = makeProject({ withRun: false });
   try {
@@ -460,8 +515,9 @@ test('H3 [direct mode]: evidence expires with the FILE — a hashed read survive
     // real read through the hook so the entry carries the live content hash
     let r = runHook('h13-reads-ledger.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: target } }), dir);
     assert.equal(r.code, 0, oneLine(r.stderr));
-    // prompt boundary: hashed evidence survives …
-    runHook('h13-clear-conductor.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
+    // prompt boundary: hashed evidence survives … (pruneUnhashed absorbed into
+    // h19-delivery-drain.mjs, decision 04982f45 — same event, byte-preserved)
+    runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     r = runHook('h3-contract-gate.mjs', hookInput(dir, { tool_name: 'Edit', tool_input: { file_path: target } }), dir);
     assert.equal(r.code, 0, `byte-current file read before an earlier prompt must stay editable: ${oneLine(r.stderr)}`);
     // … until the FILE changes, which is the actual staleness
@@ -495,8 +551,9 @@ test('H3 [run mode]: scope + read-evidence enforcement, creation exemption, out_
     // NAME THE LEDGER AND ITS WINDOW. ledgerPath resolves three different files, so
     // one sentence used to cover "never read it", "read it in an earlier prompt
     // turn" and "a different agent read it" — and the conductor case reads as a
-    // falsehood, because h13-clear-conductor wipes that ledger on every user
-    // prompt. An agent's denial must say the ledger is the AGENT's own.
+    // falsehood, because h19-delivery-drain (absorbed pruneUnhashed, decision
+    // 04982f45) wipes that ledger on every user prompt. An agent's denial must
+    // say the ledger is the AGENT's own.
     assert.match(r.stderr, /Checked .*reads/, 'the ledger actually consulted is named');
     assert.match(r.stderr, /0 entries/, 'with how much evidence it held');
     assert.match(r.stderr, /this AGENT's own ledger/);
@@ -1052,7 +1109,7 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
       'h7-file-touch.mjs': 'PostToolUse',
       'h9-stop-backstop.mjs': 'Stop',
       'h10-direct-capture.mjs': 'Stop',
-      'h13-clear-conductor.mjs': 'UserPromptSubmit',
+      'h19-delivery-drain.mjs': 'UserPromptSubmit',
       'h13-reads-ledger.mjs': 'PostToolUse',
     };
     for (const [file, event] of Object.entries(events)) {
@@ -1113,6 +1170,10 @@ const GIT_SKIP = (() => {
   const r = spawnSync('git', ['--version'], { encoding: 'utf8' });
   return !r.error && r.status === 0 ? false : 'git not available on this host';
 })();
+
+// DELETED S4: the SLICE1 hardlink-clobber pair (the only consumers of this
+// probe) is deleted along with scripts/enforcement-stamp.mjs — see the note at
+// the old SLICE1 site. The probe itself has no remaining caller in this file.
 
 // run git in `dir` (setup helper — never silently swallows a setup failure: P5)
 function git(dir, args, { must = false } = {}) {
@@ -1269,10 +1330,19 @@ function h17(dir, event, over = {}) {
 const A1 = { agent_id: 'a1' };
 
 // ---------------------------------------------------------------------------
-// AC1 — tracked bundled hooks (hooks.json + a bundled hook): tamper → deny + git-checkout-HEAD restore
+// AC1 — tracked bundled hooks (hooks.json + a bundled hook): tamper → DETECT,
+// DENY, LEAVE ON DISK. INVERTED per dc616f69 (the (A) arm stops restoring):
+// automatic rollback is unavailable while the conductor and agents share a
+// worktree, and no narrowing of the restore is safe, so the observed bytes stay
+// exactly where the command put them. Multi-path denial (both files named in
+// ONE message) is unchanged and is what this AC still uniquely covers.
+// EXPECTED FAILURE SHAPE: if any restore returns, the two byte-identity
+// assertions fire with the committed images on disk.
+// SABOTAGE: re-add a `git checkout HEAD --` over the violation set → both byte
+// assertions go RED while the exit code and both name assertions stay green.
 // ---------------------------------------------------------------------------
 
-test('H17 AC1: tampering tracked hooks/hooks.json + a bundled hooks/*.mjs → exit 2 + HEAD restore', { skip: GIT_SKIP }, () => {
+test('H17 AC1: tampering tracked hooks/hooks.json + a bundled hooks/*.mjs → exit 2, both named, bytes LEFT ON DISK', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const hooksJson = join(dir, 'hooks', 'hooks.json');
@@ -1281,76 +1351,114 @@ test('H17 AC1: tampering tracked hooks/hooks.json + a bundled hooks/*.mjs → ex
     const origHook = readFileSync(bundled, 'utf8');
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'Pre snapshot succeeds');
-    writeFileSync(hooksJson, JSON.stringify({ hooks: {}, TAMPERED: true }));
-    writeFileSync(bundled, '// TAMPERED — enforcement neutered\nprocess.exit(0);\n');
+    const tamperedJson = JSON.stringify({ hooks: {}, TAMPERED: true });
+    const tamperedHook = '// TAMPERED — enforcement neutered\nprocess.exit(0);\n';
+    writeFileSync(hooksJson, tamperedJson);
+    writeFileSync(bundled, tamperedHook);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(r.code, 2, `hooks/** tamper must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(hooksJson, 'utf8'), origJson, 'hooks.json restored via git checkout HEAD');
-    assert.equal(readFileSync(bundled, 'utf8'), origHook, 'bundled hook restored via git checkout HEAD');
+    assert.equal(readFileSync(hooksJson, 'utf8'), tamperedJson, 'dc616f69: hooks.json is LEFT ON DISK exactly as observed — never checked out from HEAD');
+    assert.equal(readFileSync(bundled, 'utf8'), tamperedHook, 'dc616f69: the bundled hook likewise');
+    assert.notEqual(readFileSync(hooksJson, 'utf8'), origJson, 'and specifically NOT put back to the committed image');
+    assert.notEqual(readFileSync(bundled, 'utf8'), origHook, 'nor is the bundled hook');
     assert.match(r.stderr, /hooks\.json/, 'the denial names hooks.json');
     assert.match(r.stderr, /h3-contract-gate/, 'the denial names the bundled hook');
+    assert.match(r.stderr, /left on disk/i, 'and STATES the disposition rather than claiming a rollback');
   } finally {
     cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// AC2 — out-of-contract tracked FROZEN test tampered → deny + restore (caught via scopeCheck)
+// AC2 — out-of-contract tracked FROZEN test tampered → deny, left on disk
+// (caught via scopeCheck). INVERTED per dc616f69: detection is the AC, the
+// restore was the mechanism, and the mechanism is deleted. NOTE the consequence
+// this AC now carries and must not hide: a weakened frozen test SURVIVES the
+// denial on disk — the tripwire stops the next call, it does not undo the edit
+// (dc616f69 R14, the bounded claim).
+// SABOTAGE: re-add the checkout on scope violations → the byte assertion RED.
 // ---------------------------------------------------------------------------
 
-test('H17 AC2: out-of-contract tracked frozen test tampered → exit 2 + checkout restore', { skip: GIT_SKIP }, () => {
+test('H17 AC2: out-of-contract tracked frozen test tampered → exit 2, edit LEFT ON DISK', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const frozen = join(dir, 'tests', 'frozen.test.mjs');
     const orig = readFileSync(frozen, 'utf8');
+    const weakened = orig + "\ntest('injected', () => {}); // weakened via node --test writer\n";
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(frozen, orig + "\ntest('injected', () => {}); // weakened via node --test writer\n");
+    writeFileSync(frozen, weakened);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1);
     assert.equal(r.code, 2, `out-of-blast-radius test edit must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(frozen, 'utf8'), orig, 'frozen test restored to HEAD');
+    assert.equal(readFileSync(frozen, 'utf8'), weakened, 'dc616f69: the frozen test is LEFT as the command wrote it — H17 is a tripwire, not a rollback');
+    assert.notEqual(readFileSync(frozen, 'utf8'), orig, 'and specifically NOT restored to HEAD');
   } finally {
     cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// AC3 — out-of-contract source: modified→checkout; untracked FILE→deleted; untracked DIR→removed recursively
+// AC3 — out-of-contract source, all three SHAPES still DETECTED and DENIED;
+// none is mutated. INVERTED per dc616f69: (a) was checkout-restored, (b) and (c)
+// were deleted/removed recursively — `restoreTracked` and `removeTreeAt` are
+// gone, so all three are now left exactly as observed. The AC still earns its
+// place because the three shapes reach detection by three different porcelain
+// routes (M / ?? file / ?? dir-collapse), which is what it always tested.
+//
+// FIXTURE HAZARD (dc616f69, and the reason for the clearLatch calls): each arm
+// runs its own Pre/Post pair on ONE fixture, and each violating Post now leaves
+// a taint latch. Without the clears, arm (b)'s Pre would be denied by arm (a)'s
+// incident and the arm would prove nothing about its own subject.
+// SABOTAGE: re-add removal of not-in-HEAD (A) paths → (b) and (c) go RED;
+// re-add the checkout → (a) goes RED.
 // ---------------------------------------------------------------------------
 
-test('H17 AC3: out-of-contract source — modified→checkout, untracked file→delete, untracked dir(?? dir/)→rm -r', { skip: GIT_SKIP }, () => {
+test('H17 AC3: out-of-contract source — modified, untracked file, untracked dir(?? dir/) — all DENIED and all LEFT ON DISK', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    // (a) tracked out-of-contract source MODIFIED → restore via checkout
+    // (a) tracked out-of-contract source MODIFIED → denied, left as written
     const other = join(dir, 'src', 'other.ts');
     const origOther = readFileSync(other, 'utf8');
+    const tamperedOther = origOther + '\n// out-of-contract tamper\n';
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(other, origOther + '\n// out-of-contract tamper\n');
+    writeFileSync(other, tamperedOther);
     let r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `modified out-of-contract source must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(other, 'utf8'), origOther, 'modified source restored via git checkout HEAD');
+    assert.equal(readFileSync(other, 'utf8'), tamperedOther, 'modified source LEFT ON DISK — no checkout (dc616f69)');
+    assert.notEqual(readFileSync(other, 'utf8'), origOther, 'and specifically NOT restored');
 
-    // (b) UNTRACKED out-of-contract FILE → deleted
+    // (b) UNTRACKED out-of-contract FILE → denied, survives
+    // ISOLATION, previously supplied BY THE RESTORE ITSELF: each arm used to
+    // start from a clean tree because H17 had just put arm (a)'s file back.
+    // It no longer does, so the TEST restores the tree — otherwise arm (b) runs
+    // with a pre-dirty src/other.ts and its denial has two possible causes.
+    clearLatch(dir); // arm (a) latched; this arm must be denied by its OWN violation
+    git(dir, ['checkout', 'HEAD', '--', 'src/other.ts'], { must: true });
     const evilFile = join(dir, 'src', 'evil.mjs');
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'PRECONDITION: with the previous incident cleared, Pre allows again');
     writeFileSync(evilFile, 'console.log("planted");\n');
     r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `untracked out-of-contract file must deny — ${oneLine(r.stderr)}`);
-    assert.equal(existsSync(evilFile), false, 'untracked out-of-contract file deleted');
+    assert.equal(existsSync(evilFile), true, 'untracked out-of-contract file LEFT ON DISK — H17 deletes nothing (dc616f69)');
+    assert.equal(readFileSync(evilFile, 'utf8'), 'console.log("planted");\n', 'byte-identical to what the command wrote');
 
-    // (c) UNTRACKED out-of-contract DIR — git collapses to `?? src/evildir/` → removed recursively
+    // (c) UNTRACKED out-of-contract DIR — git collapses to `?? src/evildir/`
+    clearLatch(dir);
+    rmSync(evilFile, { force: true }); // same isolation as above: the sweep no longer clears it
     const evilDir = join(dir, 'src', 'evildir');
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0, 'PRECONDITION: with the previous incident cleared, Pre allows again');
     mkdirSync(evilDir, { recursive: true });
     writeFileSync(join(evilDir, 'a.ts'), 'x');
     writeFileSync(join(evilDir, 'b.ts'), 'y');
     r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `untracked out-of-contract dir must deny — ${oneLine(r.stderr)}`);
-    assert.equal(existsSync(evilDir), false, 'untracked dir removed recursively (?? dir/ collapse handled)');
+    assert.equal(existsSync(evilDir), true, 'the collapsed untracked dir is LEFT ON DISK — no recursive removal (dc616f69)');
+    assert.equal(readFileSync(join(evilDir, 'a.ts'), 'utf8'), 'x', 'and its children are untouched');
+    assert.equal(readFileSync(join(evilDir, 'b.ts'), 'utf8'), 'y', 'both of them');
   } finally {
     cleanup();
   }
@@ -1406,21 +1514,81 @@ test('H17 AC5: no agent_id (conductor) → exit 0, nothing touched, short-circui
 });
 
 // ---------------------------------------------------------------------------
-// AC8 (v3.1 EXPANDED, addition arm RE-CUT 2026-08-27 per user ruling) — gitignored
+// AC8 (v3.1 EXPANDED, addition arm RE-CUT 2026-08-27 per user ruling; RESTORE ARM
+// INVERTED 2026-08-29 — Ruling D of decision 532a4383, refined by fac9a69b: the
+// WHOLE (B) set moves to DETECT-AND-DENY, NO RESTORE, closing the two-call
+// laundering bypass a call-window-only restore would leave open) — gitignored
 //   enforcement writes caught via the (B) baseline;
 //   agents/evil.md (new → DENIED + REPORTED, left ON DISK — deleting an unexpected
 //     addition is irreversible and H17 cannot tell a malicious plant from a
 //     legitimate file the conductor just created; the sweep is a detector, not
 //     an eraser, so a real plant survives on disk until a human removes it),
-//   .sterling/config.json (modified→restore — UNCHANGED by the ruling: git is a
-//     recoverable source of truth for a tracked/known baseline, so restore-on-modify
-//     still applies),
-//   .claude/settings.local.json (v3.1 NEW, modified→restore — also unchanged).
-//   sterling.db change NOT flagged.
+//   .sterling/config.json (modified → DENIED, bytes LEFT EXACTLY AS THE COMMAND
+//     WROTE THEM — restore-on-modify is RETIRED for the whole (B) set; there is
+//     no longer a git-recoverable-baseline carve-out for a tracked/known (B) file),
+//   .claude/settings.local.json (modified → DENIED, same no-restore rule — also
+//     inverted from the prior restore-on-modify behaviour).
+//   sterling.db change NOT flagged (unchanged — explicitly excluded from the (B)
+//     set per decision fac9a69b / the h17 article).
+//
+// SPLIT INTO FRESH-FIXTURE ARMS 2026-08-29 — decision `b-surface-adoption-point-
+// closes-with-an-incident-bound-taint-latch-not-a-persisted-manifest` (bcd2cc09),
+// RULINGS 7-11. These four behaviours used to run SEQUENTIALLY inside ONE project
+// fixture. Under the taint latch that is no longer a valid oracle: the FIRST arm's
+// denial creates a durable latch at `.sterling/enforcement-taint.json`, and WHILE
+// IT EXISTS every subsequent agent tool call is denied BEFORE execution — so arms
+// 2 and 3 would be denied by the latch instead of by the no-restore rule they were
+// written to check, and arm 4 (the excluded-DB control) could not observe its
+// ALLOW at all. Each behaviour now owns a FRESH project dir with no inherited
+// latch, and every existing byte-survival / denial-wording assertion is preserved
+// verbatim. Also anti-pattern f1d66bef (an early assertion failure aborts the whole
+// test and hides every later assertion) — the settings arm below carried a comment
+// recording that exactly that had happened to it.
+//
+// The excluded-DB control is placed FIRST deliberately: it is the arm that must
+// pass for the OPPOSITE reason (ALLOW), so a DENY in any arm below cannot be
+// explained by "this fixture denies everything".
+//
+// The LAST test in this block pins the latch's cross-call consequence for these
+// arms; the full latch ruling (set points, fail-closed shapes, clearance) is
+// pinned in scripts/tests/h17-b-taint-latch.test.mjs.
 // ---------------------------------------------------------------------------
 
-test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+left in place, modified files restored; sterling.db NOT flagged', { skip: GIT_SKIP }, () => {
+// THE LATCH — decision bcd2cc09 Ruling 7: `.sterling/enforcement-taint.json`, a
+// plain file, deliberately outside the sealed DB and outside BASELINE_GLOBS.
+function latchPath(dir) {
+  return join(dir, '.sterling', 'enforcement-taint.json');
+}
+
+// dc616f69: BOTH the clean-at-Pre violation arm and the changed-pre-dirty arm
+// now LATCH eagerly at detection, and a standing latch denies the NEXT Pre
+// before it re-baselines. Any fixture that runs more than ONE Pre/Post pair
+// after a violation must clear the latch between windows, or the later Pre is
+// denied by the EARLIER case's incident rather than by its own subject.
+function clearLatch(dir) {
+  rmSync(latchPath(dir), { force: true });
+}
+
+test('H17 AC8-DB-CONTROL: a sterling.db change is NOT in the (B) set and is NOT flagged (the ALLOW control for every AC8 arm below)', { skip: GIT_SKIP }, () => {
   const { dir, store, cleanup } = makeGitProject();
+  try {
+    // --- sterling.db change is NOT in the (B) set and git is blind to it → NOT flagged ---
+    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
+    store.create(briefRecord()); // a legit store write mutates sterling.db between Pre and Post
+    const r = h17(dir, 'PostToolUse', A1);
+    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(r.code, 0, `a sterling.db change must NOT be flagged (${oneLine(r.stderr)})`);
+    // Sabotage: add `.sterling/sterling.db` (or a `.sterling/**` catch-all) to the
+    // (B) BASELINE_GLOBS → this ALLOW flips to a DENY, and every ordinary store
+    // write during an agent call becomes an incident that latches the surface.
+    assert.equal(existsSync(latchPath(dir)), false, 'and no taint latch is created by an ordinary, allowed call');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H17 AC8-ADDITION: a new gitignored .claude/agents file is DENIED + REPORTED and left ON DISK byte-identical', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
   try {
     // --- .claude/agents/evil.md : NEW → DENIED, file SURVIVES byte-identical on disk ---
     const evilAgent = join(dir, '.claude', 'agents', 'evil.md');
@@ -1428,7 +1596,7 @@ test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+l
     const plantedBytes = Buffer.from('# smuggled agent (hooks stripped)\n');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
     writeFileSync(evilAgent, plantedBytes);
-    let r = h17(dir, 'PostToolUse', A1);
+    const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `new gitignored agent file must deny — ${oneLine(r.stderr)}`);
     // Verdict carrier for this arm: SURVIVAL + BYTE-IDENTITY, not the exit code above.
     // Measured on this exact file: an exit-code-only assertion stayed GREEN even with
@@ -1459,31 +1627,117 @@ test('H17 AC8: gitignored (B)-set writes caught via baseline; new files denied+l
     // message (e.g. revert to a generic "denied" with no disposition stated) →
     // this assertion goes red.
     assert.ok(existsSync(legitAgent), 'a legit pre-existing agent file is left untouched');
+  } finally {
+    cleanup();
+  }
+});
 
-    // --- .sterling/config.json : MODIFIED → restored (kept valid so h17 config reads still succeed) ---
+test('H17 AC8-CONFIG: a modified .sterling/config.json is DENIED and left byte-identical to what the command wrote (no restore)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    // --- .sterling/config.json : MODIFIED → DENIED, bytes LEFT AS WRITTEN (Ruling D: no restore) ---
     const configPath = join(dir, '.sterling', 'config.json');
     const origConfig = readFileSync(configPath, 'utf8');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(configPath, JSON.stringify({ ...CONFIG, HACKED: true }));
-    r = h17(dir, 'PostToolUse', A1);
+    const hackedConfig = JSON.stringify({ ...CONFIG, HACKED: true });
+    writeFileSync(configPath, hackedConfig);
+    const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `modified gitignored config must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(configPath, 'utf8'), origConfig, '.sterling/config.json restored to baseline');
+    // Sabotage: reintroduce a restore-to-baseline write on this (B) arm (e.g. call
+    // the old writeUnder-to-HEAD/baseline routine for .sterling/config.json before
+    // returning) → this assertion goes red, because the bytes would revert to
+    // origConfig instead of staying as the command wrote them.
+    assert.equal(readFileSync(configPath, 'utf8'), hackedConfig, '.sterling/config.json is DENIED but left byte-identical to what the command wrote — never restored (Ruling D, decision 532a4383/fac9a69b)');
+    assert.notEqual(readFileSync(configPath, 'utf8'), origConfig, 'and specifically NOT reverted to the pre-write baseline');
+  } finally {
+    cleanup();
+  }
+});
 
-    // --- .claude/settings.local.json (the GITIGNORED hook-disable file, v3.1 NEW): MODIFIED → restored ---
+test('H17 AC8-SETTINGS: a modified .claude/settings.local.json is DENIED and left byte-identical to what the command wrote (no restore)', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    // --- .claude/settings.local.json (the GITIGNORED hook-disable file): MODIFIED →
+    // DENIED, bytes LEFT AS WRITTEN (Ruling D: no restore). This arm used to sit
+    // BEHIND the config.json arm inside one shared fixture and never ran once that
+    // arm's first assertion aborted the chain (anti-pattern f1d66bef); it now owns
+    // its own fresh fixture and reports its own verdict. settings.local.json is
+    // named in the same (B) set as config.json in both 532a4383 and fac9a69b, so
+    // the same no-restore rule applies. ---
     const settingsLocal = join(dir, '.claude', 'settings.local.json');
     const origSettings = readFileSync(settingsLocal, 'utf8');
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(settingsLocal, JSON.stringify({ hooks: 'DISABLED' }));
-    r = h17(dir, 'PostToolUse', A1);
+    const hackedSettings = JSON.stringify({ hooks: 'DISABLED' });
+    writeFileSync(settingsLocal, hackedSettings);
+    const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1);
-    assert.equal(r.code, 2, `v3.1: gitignored settings.local.json write must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(settingsLocal, 'utf8'), origSettings, 'settings.local.json restored to baseline');
+    assert.equal(r.code, 2, `gitignored settings.local.json write must deny — ${oneLine(r.stderr)}`);
+    // Sabotage: reintroduce a restore-to-baseline write on this (B) arm → this
+    // assertion goes red, because the bytes would revert to origSettings instead of
+    // staying as the command wrote them.
+    assert.equal(readFileSync(settingsLocal, 'utf8'), hackedSettings, 'settings.local.json is DENIED but left byte-identical to what the command wrote — never restored (Ruling D)');
+    assert.notEqual(readFileSync(settingsLocal, 'utf8'), origSettings, 'and specifically NOT reverted to the pre-write baseline');
+  } finally {
+    cleanup();
+  }
+});
 
-    // --- sterling.db change is NOT in the (B) set and git is blind to it → NOT flagged ---
-    assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    store.create(briefRecord()); // a legit store write mutates sterling.db between Pre and Post
-    r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 0, `a sterling.db change must NOT be flagged (${oneLine(r.stderr)})`);
+// The cross-call half of the AC8 arms above (decision bcd2cc09, RULINGS 7-11).
+// Each arm above ends at its own denial; NONE of them shows what the next call
+// sees. That gap IS the defect bcd2cc09 was ruled to close: the bytes are
+// deliberately left on disk, so the NEXT call's Pre re-collected them as its own
+// legitimate baseline and allowed — one denial bought a permanent edit to the
+// agent GRANT DEFINITIONS. The latch closes it: while
+// `.sterling/enforcement-taint.json` exists, EVERY subsequent agent tool call is
+// denied BEFORE execution, and only a separate conductor reconciliation clears it
+// (never an ordinary call, never the stamp producer).
+//
+// Lanes carry a tool_use_id here (`tu`), unlike the A1 arms above, so the two
+// calls are genuinely distinct windows rather than the degraded-loud fallback.
+test('H17 AC8-LATCH: after a latching (B) arm, the NEXT call is DENIED AT PRE by the taint latch — the adoption point is closed', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    const configPath = join(dir, '.sterling', 'config.json');
+    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch exists before call N');
+
+    // CONTROL, PLACED FIRST, passing for the OPPOSITE reason: on this same
+    // fixture with no incident on record, Pre ALLOWS. Without it, call N+1's
+    // denial below could equally be explained by "this fixture/mode denies every
+    // Pre" — a green that carries no evidence.
+    const L1 = tu('ac8-latch-calln');
+    const pre1 = h17(dir, 'PreToolUse', L1);
+    assert.notEqual(pre1.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(pre1.code, 0, `CONTROL: with no incident on record, Pre must ALLOW — actual ${pre1.code}, stderr: ${oneLine(pre1.stderr)}`);
+
+    // --- call N: the config.json arm again, this time only as the LATCHING event ---
+    const hackedConfig = JSON.stringify({ ...CONFIG, HACKED: true });
+    writeFileSync(configPath, hackedConfig);
+    const r1 = h17(dir, 'PostToolUse', L1);
+    assert.notEqual(r1.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(r1.code, 2, `call N: the unattested (B) modify must deny — actual ${r1.code}, stderr: ${oneLine(r1.stderr)}`);
+    // Sabotage: remove the latch-creation call from the (B)-denial branch (leaving
+    // the denial itself intact) → this assertion flips from true to false.
+    assert.equal(existsSync(latchPath(dir)), true, 'call N: the denial creates the durable taint latch at .sterling/enforcement-taint.json');
+
+    // --- call N+1: a different window that changes NOTHING of its own ---
+    const L2 = tu('ac8-latch-calln1');
+    const pre2 = h17(dir, 'PreToolUse', L2);
+    assert.notEqual(pre2.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    // Sabotage: with the latch still created, drop the latch consult at Pre (the
+    // "deny before execution while latched" check) → this flips from 2 back to 0,
+    // reproducing the adoption bug exactly while the latch-creation guard above
+    // stays green. THIS assertion is the one that carries the verdict.
+    assert.equal(
+      pre2.code,
+      2,
+      `THE ADOPTION CLOSURE: while the latch stands, the NEXT agent call is denied BEFORE execution even though nothing changed in its own window — actual ${pre2.code}, stderr: ${oneLine(pre2.stderr)}`
+    );
+    assert.match(oneLine(pre2.stderr), /taint|latch/i, 'the denial names the ONGOING taint, not a fresh in-window violation (there is none in this window)');
+
+    // Deliberately NO Post for call N+1: a denied Pre means the command never ran,
+    // so simulating its execution would assert against a state production cannot reach.
+    assert.equal(readFileSync(configPath, 'utf8'), hackedConfig, "the (B) bytes still sit exactly as call N's command wrote them — never restored, and never adopted as a fresh baseline");
+    assert.equal(existsSync(latchPath(dir)), true, 'an ordinary call never clears the latch — only a separate conductor reconciliation does (Rulings 3/5/10)');
   } finally {
     cleanup();
   }
@@ -1583,10 +1837,12 @@ function tu(tag) {
 test('H17: a PRE-EXISTING dirty hooks/ file that is UNCHANGED across the window no longer denies — it is VERIFIED, and the uncommitted work survives', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    // The conductor's own uncommitted work — e.g. a mid-run bundle rebuild, which
-    // only the conductor can run (the coder's allowlist holds the toolchain
-    // run_commands only). Under the old ruling this alone denied every parallel
-    // lane, including lanes running read-only commands.
+    // The conductor's own uncommitted work — e.g. a mid-run bundle rebuild. NOTE:
+    // this is not conductor-exclusive at HEAD — the coder's allowlist admits any
+    // declared toolchain run_commands entry, and this repo's .sterling/config.json
+    // declares build_hooks: "npm run build:hooks" inside run_commands, so a
+    // coder-run rebuild is equally plausible. Under the old ruling this alone
+    // denied every parallel lane, including lanes running read-only commands.
     const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
     writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
     const conductorBytes = readFileSync(bundle, 'utf8');
@@ -1604,21 +1860,30 @@ test('H17: a PRE-EXISTING dirty hooks/ file that is UNCHANGED across the window 
   }
 });
 
-test('H17: a write made DURING the command is still reverted and attributed — the gate is not weakened', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69 on TWO counts, both of them the ruling's point.
+// (1) The write is no longer reverted — it is denied and left on disk.
+// (2) The message no longer CLAIMS AUTHORSHIP: R13 forbids "BY THIS COMMAND"
+// because authorship is unprovable in a shared worktree (a same-UID hook has no
+// non-forgeable author signal), so the honest vocabulary is OBSERVED-in-window.
+// The old `/BY THIS COMMAND/` assertion is deleted rather than re-pointed: it
+// pinned a false claim, and pinning its replacement wording would re-pin the
+// exact phrasing the ruling is still settling.
+test('H17: a write made DURING the command is DETECTED, denied and left on disk — the gate is not weakened, and it claims no authorship', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
     const committed = readFileSync(bundle, 'utf8');
+    const tampered = '// tampered by the agent mid-command\n';
 
     h17(dir, 'PreToolUse', A1); // clean at Pre
-    writeFileSync(bundle, '// tampered by the agent mid-command\n'); // the bypass H17 exists to catch
+    writeFileSync(bundle, tampered); // the bypass H17 exists to catch
     const r = h17(dir, 'PostToolUse', A1);
 
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /BY THIS COMMAND/, 'attributed to the command that made it');
     assert.match(r.stderr, /hooks\/h3-contract-gate\.mjs/);
     assert.match(r.stderr, /only the last is amendable by scope/, 'and names which of the three predicates can be amended');
-    assert.equal(readFileSync(bundle, 'utf8'), committed, 'reverted to HEAD');
+    assert.equal(readFileSync(bundle, 'utf8'), tampered, 'dc616f69: left on disk exactly as observed');
+    assert.notEqual(readFileSync(bundle, 'utf8'), committed, 'and specifically NOT reverted to HEAD');
   } finally {
     cleanup();
   }
@@ -1641,160 +1906,23 @@ test('H17: a missing attribution record fails CLOSED — never silently unattrib
   }
 });
 
-// ---------------------------------------------------------------------------
-// THE ENFORCEMENT STAMP (decision h17-enforcement-stamp-conductor-attested-dirt,
-// knowledge_get 6e132e19-0da1-47c2-9fa5-710bc7365014): a CONDUCTOR-run stamp
-// (scripts/enforcement-stamp.mjs -> .sterling/transient/enforcement-stamp.json)
-// records, for each currently-dirty enforcement path, the sha256 of its bytes at
-// stamp time, so conductor-attested work-in-flight stops blocking agent Bash.
-//
-// WHERE THE STAMP STILL DECIDES, AND WHERE IT NO LONGER DOES. Since decision
-// h17-pre-state-snapshot-closes-false-denial-not-the-restore-hole (7021526c) the
-// stamp is NOT causally relevant to an UNCHANGED pre-existing dirty path: that
-// path is allowed by OBSERVATION, whatever any stamp says — so "a fresh stamp
-// allows unchanged pre-dirt" has ceased to be a distinct behaviour and is
-// deliberately NOT pinned as one anywhere (a test asserting it would pass while
-// pinning nothing: exactly the hollow-test trap board 5402a024 records). It
-// remains causally DECISIVE the moment the state CHANGED — that arm consults it
-// fresh against the CURRENT state and allows on an exact match (7021526c v2;
-// pinned in h17-pre-state-snapshot.test.mjs). Irrelevant on one arm, decisive on
-// the other, one order of operations, no contradiction. The tests immediately
-// below therefore pin the surviving, load-bearing halves:
-//   * a stamp of ANY shape — matching, mismatched, corrupt, non-array, absent —
-//     is irrelevant to an UNCHANGED pre-dirty path, which allows regardless
-//     (under the OLD ruling a mismatched/corrupt/absent stamp DENIED, so this is
-//     a real behavioural flip, not a restatement). The claim is scoped to the
-//     UNCHANGED arm deliberately: on a CHANGED pre-dirty path the same shapes
-//     are decisive, because a stamp that cannot be parsed or matched is not an
-//     attestation;
-//   * a stamp that is corrupt or the wrong shape still grants NO exemption where
-//     an exemption would actually matter — a CLEAN-at-Pre in-window change,
-//     which is restored to HEAD and denied (decision 4d9b76e8's arm, untouched
-//     by this ruling);
-//   * existence is a state term in both directions (deleted in-window; absent
-//     at Pre and recreated in-window), which is what the old deleted:true
-//     stamp-entry test was reaching for.
-//
-// EXPECTED FAILURE TODAY: every "must now ALLOW" assertion below fires against
-// the current always-deny-while-dirty behaviour (actual 2, expected 0). The
-// "must still DENY" tests are boundary/regression guards that already hold and
-// must keep holding. The two standalone scripts/enforcement-stamp.mjs CLI tests
-// are untouched by this ruling — their posture is whatever it already was.
-// ---------------------------------------------------------------------------
+// DELETED S4 (decision `b-baseline-hash-list-concrete-design`, fe861066; ruling
+// 78dc9bd6): scripts/enforcement-stamp.mjs and every stamp/attestation concept
+// are removed outright — a same-UID-forgeable attestation may never change a
+// verdict. The persistent (B) baseline hash list at
+// .sterling/enforcement-baseline.json is the cross-call comparator now; its
+// full pin suite lives in scripts/tests/h17-b-baseline-list.test.mjs. The two
+// standalone enforcement-stamp.mjs CLI tests that lived here are deleted with
+// it — there is no producer CLI to test.
 
-function runStampCli(dir) {
-  return spawnSync(process.execPath, [join(root, 'scripts', 'enforcement-stamp.mjs')], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
-}
-
-test('enforcement-stamp.mjs: refuses (nonzero) with "nothing to attest" when hooks/ is clean', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const r = runStampCli(dir);
-    // EXPECTED FAILURE TODAY: the script does not exist — spawnSync reports a
-    // launch/module-not-found failure, which is itself nonzero, so THIS particular
-    // assertion may pass by accident; the message assertion below is the one that
-    // actually pins post-fix behavior and fails today (no matching text is produced).
-    assert.notEqual(r.status, 0, 'a clean tree has nothing to attest — the CLI must not exit 0');
-    assert.match((r.stderr || '') + (r.stdout || ''), /nothing to attest/i, 'names why it refused');
-    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json')), false, 'no stamp is written on a clean tree');
-  } finally {
-    cleanup();
-  }
-});
-
-test('enforcement-stamp.mjs: stamps every dirty hooks/ path with the sha256 of its CURRENT bytes, and a re-run overwrites rather than merges', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    writeFileSync(bundle, '// first dirty content\n');
-    let r = runStampCli(dir);
-    assert.equal(r.status, 0, `stamp CLI must succeed while hooks/ is dirty: ${oneLine(r.stderr)}`);
-    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    let stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    assert.equal(stamp.length, 1);
-    assert.equal(stamp[0].path, 'hooks/h3-contract-gate.mjs');
-    assert.equal(stamp[0].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
-    assert.ok(typeof stamp[0].at === 'string' && stamp[0].at.length > 0);
-
-    // further drift + a second dirty path: re-running OVERWRITES with the fresh
-    // set, never appends the stale entry alongside the new ones
-    writeFileSync(bundle, '// SECOND, different dirty content\n');
-    const hooksJson = join(dir, 'hooks', 'hooks.json');
-    writeFileSync(hooksJson, JSON.stringify({ hooks: { PreToolUse: [] }, TAMPERED: true }));
-    r = runStampCli(dir);
-    assert.equal(r.status, 0, oneLine(r.stderr));
-    stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-    assert.equal(stamp.length, 2, 'the fresh stamp lists both currently-dirty paths, not appended to the first, single-entry stamp');
-    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e.sha256]));
-    assert.equal(byPath['hooks/h3-contract-gate.mjs'], createHash('sha256').update(readFileSync(bundle)).digest('hex'), "the NEW bytes are hashed, not the first stamp's stale hash");
-    assert.equal(byPath['hooks/hooks.json'], createHash('sha256').update(readFileSync(hooksJson)).digest('hex'));
-  } finally {
-    cleanup();
-  }
-});
-
-// Was: "a stamp matching every dirty hooks/ path's CURRENT bytes lets the
-// command proceed". That behaviour survives but has stopped being a behaviour OF
-// THE STAMP — an unchanged pre-dirty path allows whether or not any stamp exists
-// — so pinning the matching-stamp case here would pin nothing. What IS newly
-// pinnable, and what the old ruling got the other way round, is the negative: a
-// stamp that does NOT match, cannot be parsed, or is the wrong shape used to
-// force the denial, and now cannot, because the guard no longer needs the
-// attestation for a path it can compare itself.
-//
-// EXPECTED FAILURE SHAPE (RED): all three arms fire on `assert.equal(r.code, 0)`
-// with actual 2 — today any pre-dirty enforcement path denies, and specifically
-// these three stamp shapes are today's "no exemption" cases.
-//
-// CATCHES SABOTAGE: equality forced to always-UNEQUAL (`if (false) continue`),
-// and any implementation that keeps consulting the stamp before deciding an
-// unchanged pre-dirty path (all three arms would then deny again).
-test('H17 pre-state: a MISMATCHED, CORRUPT or NON-ARRAY stamp is irrelevant to an UNCHANGED pre-dirty path — it allows regardless', { skip: GIT_SKIP }, () => {
-  const cases = [
-    ['mismatched hash', () => JSON.stringify([{ path: 'hooks/h3-contract-gate.mjs', sha256: createHash('sha256').update('completely different bytes').digest('hex'), at: NOW }])],
-    ['corrupt json', () => '{ not json at all'],
-    ['non-array object', () => JSON.stringify({ path: 'hooks/h3-contract-gate.mjs', sha256: 'deadbeef' })],
-  ];
-  for (const [label, body] of cases) {
-    const { dir, cleanup } = makeGitProject();
-    try {
-      const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-      writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
-      const conductorBytes = readFileSync(bundle, 'utf8');
-      const stamp = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-      mkdirSync(dirname(stamp), { recursive: true });
-      writeFileSync(stamp, body());
-
-      const L = tu('stampshape');
-      h17(dir, 'PreToolUse', L);
-      const r = h17(dir, 'PostToolUse', L); // the command wrote nothing
-
-      assert.notEqual(r.code, 1, `[${label}] a security gate never fails with a non-blocking exit 1`);
-      assert.equal(r.code, 0, `[${label}] an unchanged pre-dirty path is verified by observation, so this stamp cannot make it deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
-      assert.equal(readFileSync(bundle, 'utf8'), conductorBytes, `[${label}] and the uncommitted work survives`);
-    } finally {
-      cleanup();
-    }
-  }
-});
-
-test('H17 stamp fix: the normal write-sweep still catches a tamper made DURING the command even with a matching stamp for the pre-existing dirt', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    writeFileSync(bundle, '// conductor rebuild, not yet committed\n');
-    assert.equal(runStampCli(dir).status, 0);
-
-    h17(dir, 'PreToolUse', A1);
-    // the agent's own command ALSO tampers an out-of-contract source file — the
-    // stamp exempts only the pre-attested hooks/ dirt, never widens the sweep.
-    writeFileSync(join(dir, 'src', 'other.ts'), 'export const other = 999; // tampered\n');
-    const r = h17(dir, 'PostToolUse', A1);
-    assert.equal(r.code, 2, 'the stamp narrows the enforcement-dirty exemption; it never widens the normal write-sweep');
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4: the second producer-CLI test, the SLICE1 hardlink-clobber pair,
+// and the two stamp-shape-irrelevance/stamp-fix pins that lived here all
+// exercised scripts/enforcement-stamp.mjs directly (runStampCli / a hand-
+// written .sterling/transient/enforcement-stamp.json) — the whole file and
+// concept are deleted (decision 78dc9bd6/fe861066). The hardlink-clobber
+// SAFETY PROPERTY this slice pinned is superseded by
+// h17-b-baseline-list.test.mjs's malformed/non-regular-file arms over the new
+// persistent .sterling/enforcement-baseline.json.
 
 // Was: "a dirty path MISSING from the stamp still denies". The stamp's
 // all-or-nothing shape over the whole pre-existing set was one of the reasons it
@@ -1935,82 +2063,12 @@ test('H17 pre-state: a pre-dirty enforcement path whose BYTES changed in-window 
   }
 });
 
-// ---------------------------------------------------------------------------
-// H17/enforcement-stamp PIN strengthening (upgrade-polish review round,
-// 2026-08-21) — additive, written against the FIX C spec above. The fixer
-// lands in parallel; postures are noted per test.
-// ---------------------------------------------------------------------------
-
-// Same subject as before — a CORRUPT stamp grants no exemption — moved to the
-// site where the stamp is still load-bearing: a path CLEAN at Pre and changed
-// INSIDE the window, which the fresh-stamp check (decision 4d9b76e8) is
-// consulted for before any restore. Asserted at the old site it would now be
-// hollow, because an unchanged pre-dirty path allows whatever the stamp says.
-//
-// EXPECTED FAILURE SHAPE: expected GREEN today (no exemption mechanism can be
-// fooled by a corrupt stamp today). The restored-bytes assertion is what keeps
-// it honest: it distinguishes "no exemption, swept normally" from an error-shaped
-// deny that never reaches the sweep.
-//
-// CATCHES SABOTAGE: any widening of the exemption to an unparseable stamp, and
-// (via the restored-bytes assertion) a corrupt stamp being promoted into an
-// AC9-style error deny that skips the restore.
-test('H17 stamp fix: a CORRUPT stamp file (invalid JSON) gives NO exemption to a CLEAN-at-Pre in-window change — restored to HEAD and denied', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    const committed = readFileSync(bundle, 'utf8'); // CLEAN at Pre
-    const stampPath = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    mkdirSync(dirname(stampPath), { recursive: true });
-    writeFileSync(stampPath, '{ not json at all');
-
-    const L = tu('corruptstamp');
-    h17(dir, 'PreToolUse', L);
-    writeFileSync(bundle, '// tampered in-window, "attested" by an unparseable stamp\n');
-    const r = h17(dir, 'PostToolUse', L);
-
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `a corrupt (unparseable) stamp file must not exempt an in-window change — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(bundle, 'utf8'), committed, 'and it is swept normally: restored to HEAD, exactly as with no stamp at all');
-  } finally {
-    cleanup();
-  }
-});
-
-// Same move as the corrupt-JSON case above, for the wrong-SHAPE case: the stamp
-// is valid JSON but an object rather than an array, and the entry it carries
-// even names the tampered path. It must exempt nothing at the site where an
-// exemption would matter.
-//
-// EXPECTED FAILURE SHAPE: expected GREEN today; the restored-bytes assertion is
-// the honest half, as above.
-//
-// CATCHES SABOTAGE: a stamp reader that accepts an object as a single entry (or
-// coerces it), which would let one hand-written line attest a tamper.
-test('H17 stamp fix: a NON-ARRAY stamp file (a JSON object naming the tampered path) gives NO exemption to a CLEAN-at-Pre in-window change', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    const committed = readFileSync(bundle, 'utf8'); // CLEAN at Pre
-    const stampFile = join(dir, '.sterling', 'transient', 'enforcement-stamp.json');
-    mkdirSync(dirname(stampFile), { recursive: true });
-
-    const L = tu('nonarraystamp');
-    h17(dir, 'PreToolUse', L);
-    const tampered = '// tampered in-window, "attested" by a non-array stamp\n';
-    writeFileSync(bundle, tampered);
-    // the object even carries the CORRECT hash of the tampered bytes — shape
-    // alone must be enough to refuse it
-    writeFileSync(stampFile, JSON.stringify({ path: 'hooks/h3-contract-gate.mjs', sha256: createHash('sha256').update(readFileSync(bundle)).digest('hex') }));
-
-    const r = h17(dir, 'PostToolUse', L);
-    assert.notEqual(r.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(r.code, 2, `a stamp file that is a JSON OBJECT, not an array, must not exempt anything — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(bundle, 'utf8'), committed, 'and it is swept normally: restored to HEAD, exactly as with no stamp at all');
-  } finally {
-    cleanup();
-  }
-});
+// DELETED S4: both stamp-shape "no exemption" pins (CORRUPT / NON-ARRAY)
+// exercised the deleted enforcement-stamp apparatus directly. There is no
+// exemption route of any kind any more (decision 78dc9bd6 R11) — an in-window
+// (A)/(B) change is always detected and denied, unconditionally, so a test
+// asserting "this stamp shape grants no exemption" would pin nothing once no
+// stamp shape exists to be consulted in the first place.
 
 // Was: "a deleted:true stamp entry is honored iff the path is ABSENT". The
 // stamp entry has stopped being what decides this — EXISTENCE is one of the
@@ -2098,55 +2156,31 @@ test('H17 pre-state: a pre-dirty NON-hooks BRIEF-SCOPE violation that is unchang
   }
 });
 
-test('enforcement-stamp.mjs (widened, EXPECTED RED today): stamps a dirty non-hooks TRACKED file alongside hooks/**, and expands an untracked directory into its contained files rather than one dir-shaped entry', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const bundle = join(dir, 'hooks', 'h3-contract-gate.mjs');
-    writeFileSync(bundle, '// dirty hooks bundle\n');
-    const other = join(dir, 'src', 'other.ts');
-    const dirtiedOther = readFileSync(other, 'utf8') + '\n// dirty tracked src file, non-hooks\n';
-    writeFileSync(other, dirtiedOther);
-    // an untracked directory with two files — must expand to per-file entries,
-    // not a single directory-shaped entry (mirrors AC3(c)'s `?? dir/` collapse handling)
-    const evilDir = join(dir, 'src', 'evildir');
-    mkdirSync(evilDir, { recursive: true });
-    writeFileSync(join(evilDir, 'a.ts'), 'export const a = 1;\n');
-    writeFileSync(join(evilDir, 'b.ts'), 'export const b = 1;\n');
+// DELETED S4: the widened stamp-CLI EXPECTED-RED pin exercised the deleted
+// scripts/enforcement-stamp.mjs producer directly (runStampCli) — there is no
+// producer CLI, widened or otherwise, to pin any more.
 
-    const r = runStampCli(dir);
-    assert.equal(r.status, 0, `stamp CLI must succeed with hooks + non-hooks dirt: ${oneLine(r.stderr)}`);
-    const stamp = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'enforcement-stamp.json'), 'utf8'));
-    const byPath = Object.fromEntries(stamp.map((e) => [e.path, e]));
-
-    assert.ok(byPath['hooks/h3-contract-gate.mjs']?.sha256, 'the hooks bundle is still stamped with its sha256 (unchanged)');
-    assert.equal(byPath['hooks/h3-contract-gate.mjs'].sha256, createHash('sha256').update(readFileSync(bundle)).digest('hex'));
-
-    assert.ok(byPath['src/other.ts']?.sha256, 'the widened CLI now also stamps a dirty non-hooks tracked file');
-    assert.equal(byPath['src/other.ts'].sha256, createHash('sha256').update(readFileSync(other)).digest('hex'));
-
-    assert.ok(byPath['src/evildir/a.ts']?.sha256, 'an untracked directory expands to its contained files, not a single dir entry');
-    assert.ok(byPath['src/evildir/b.ts']?.sha256);
-    assert.equal(byPath['src/evildir/a.ts'].sha256, createHash('sha256').update(readFileSync(join(evilDir, 'a.ts'))).digest('hex'));
-    assert.ok(!stamp.some((e) => e.path === 'src/evildir' || e.path === 'src/evildir/'), 'no directory-shaped entry is written, only expanded per-file entries');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H17 AC9c: restore fs-error (deterministic EISDIR dir-swap) → deny, not exit 1', { skip: GIT_SKIP }, () => {
+// RENAMED per dc616f69: there is no restore left to raise an fs-error. The
+// FIXTURE and the ASSERTIONS are unchanged and still live — a (B) path whose
+// TYPE was swapped file→directory in-window is an fs-shaped can't-verify, and
+// AC9's universal rule (every can't-verify path denies, never a non-blocking
+// exit 1) is what this block has always been for. Only the CAUSE named in the
+// title moved, from the restore write to the read/classify layer.
+// SABOTAGE: make the type-swap path fall through to exit 0 or exit 1 → RED.
+test('H17 AC9c: an fs-error on an enforcement path (deterministic EISDIR dir-swap) → deny, not exit 1', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const configPath = join(dir, '.sterling', 'config.json');
     // Pre snapshots config.json as a FILE...
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    // ...then swap the file for a DIRECTORY of the same name: on restore, h17's
-    // read/write of that path throws EISDIR — a deterministic restore fs-error.
+    // ...then swap the file for a DIRECTORY of the same name, so h17's read of
+    // that path throws EISDIR — a deterministic fs-error on a (B) path.
     rmSync(configPath, { force: true });
     mkdirSync(configPath, { recursive: true });
     writeFileSync(join(configPath, 'blocker'), 'x');
     const r = h17(dir, 'PostToolUse', A1);
-    assert.notEqual(r.code, 1, 'a restore fs-error must not fail open');
-    assert.equal(r.code, 2, `restore fs-error → deny — ${oneLine(r.stderr)}`);
+    assert.notEqual(r.code, 1, 'an fs-error must not fail open');
+    assert.equal(r.code, 2, `fs-error → deny — ${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }
@@ -2232,7 +2266,17 @@ test('H17 AC10: crafted baseline with ../ + absolute keys → deny + NO out-of-t
 // AC11 — rename R dual-path (git mv restore); spaced path via -z; multiple violations → one deny naming each
 // ---------------------------------------------------------------------------
 
-test('H17 AC11 (rename): staged out-of-contract rename (R, dual-path) → deny + origin restored', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69. The AC's subject — `-z` DUAL-PATH parsing of an `R`
+// entry, i.e. that H17 sees BOTH sides of a staged rename — survives intact and
+// is now carried by the DENIAL NAMING BOTH PATHS rather than by undoing the
+// rename. That is a strictly better oracle for this AC: the old
+// `existsSync(origin)` assertion could be satisfied by a restore that never
+// parsed the second path at all, whereas naming both proves the parse.
+// EXPECTED FAILURE SHAPE: if `-z` dual-path parsing regresses to space-splitting
+// or to the first path only, one of the two `match` assertions fires.
+// SABOTAGE: parse the R entry as a single path → the `/other\.ts/` assertion
+// goes RED while the exit code stays green.
+test('H17 AC11 (rename): staged out-of-contract rename (R, dual-path) → deny naming BOTH paths, rename left in place', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const origin = join(dir, 'src', 'other.ts'); // out-of-contract tracked
@@ -2246,47 +2290,65 @@ test('H17 AC11 (rename): staged out-of-contract rename (R, dual-path) → deny +
     const r = h17(dir, 'PostToolUse', A1);
     assert.notEqual(r.code, 1);
     assert.equal(r.code, 2, `staged rename of an out-of-contract file must deny — ${oneLine(r.stderr)}`);
-    assert.ok(existsSync(origin), 'rename origin restored (dual-path handled)');
-    assert.equal(readFileSync(origin, 'utf8'), origContent, 'origin content restored');
-    assert.equal(existsSync(target), false, 'rename destination removed');
+    // THE STATE-UNCHANGED HALF: the rename the command performed stands.
+    assert.equal(existsSync(origin), false, 'dc616f69: the rename is NOT undone — the origin stays gone');
+    assert.ok(existsSync(target), 'and the destination stays on disk');
+    assert.equal(readFileSync(target, 'utf8'), origContent, 'byte-identical to what was moved');
+    // THE DUAL-PATH HALF: both sides of the R entry were parsed and reported.
+    assert.match(r.stderr, /renamed\.ts/, 'the denial names the rename destination');
+    assert.match(r.stderr, /other\.ts/, 'AND the origin — proving the `R new\\0old` dual-path parse (this is what the AC is for)');
   } finally {
     cleanup();
   }
 });
 
-test('H17 AC11 (spaced path): out-of-contract path with a space parsed via -z → deny + restore', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69. As with the rename arm, the AC's real subject is `-z`
+// NUL parsing (no space-split), and the surviving oracle for it is that the
+// denial names the WHOLE spaced path — a space-split parse would name `a` or
+// `b.ts`, never `a b.ts`.
+// SABOTAGE: parse porcelain on whitespace instead of NUL → the full-path
+// `match` assertion goes RED.
+test('H17 AC11 (spaced path): out-of-contract path with a space parsed via -z → deny naming the whole path, bytes left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const spaced = join(dir, 'src', 'a b.ts'); // out-of-contract, embedded space
     const orig = readFileSync(spaced, 'utf8');
+    const tampered = orig + '\n// tamper on a spaced path\n';
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(spaced, orig + '\n// tamper on a spaced path\n');
+    writeFileSync(spaced, tampered);
     const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `spaced-path change must deny — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(spaced, 'utf8'), orig, 'spaced path restored — proves -z NUL parsing (no space-split)');
+    assert.match(r.stderr, /a b\.ts/, 'the denial names the WHOLE spaced path — proves -z NUL parsing (no space-split)');
+    assert.equal(readFileSync(spaced, 'utf8'), tampered, 'and the bytes are left on disk (dc616f69)');
   } finally {
     cleanup();
   }
 });
 
-test('H17 AC11 (multiple): two out-of-contract violations → ONE deny naming each + both restored', { skip: GIT_SKIP }, () => {
+// INVERTED per dc616f69: ONE deny naming each survives untouched (it was always
+// the AC's subject); "both restored" becomes "both left on disk".
+// SABOTAGE: deny on the first violation and return before collecting the rest
+// → the `/old\.ts/` assertion goes RED.
+test('H17 AC11 (multiple): two out-of-contract violations → ONE deny naming each, both left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const other = join(dir, 'src', 'other.ts'); // outside blast radius
     const legacy = join(dir, 'src', 'legacy', 'old.ts'); // out_of_scope
     const origOther = readFileSync(other, 'utf8');
     const origLegacy = readFileSync(legacy, 'utf8');
+    const tamperedOther = origOther + '\n// tamper 1\n';
+    const tamperedLegacy = origLegacy + '\n// tamper 2\n';
 
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(other, origOther + '\n// tamper 1\n');
-    writeFileSync(legacy, origLegacy + '\n// tamper 2\n');
+    writeFileSync(other, tamperedOther);
+    writeFileSync(legacy, tamperedLegacy);
 
     const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `multiple violations must deny — ${oneLine(r.stderr)}`);
     assert.match(r.stderr, /other\.ts/, 'the single deny names the first violation');
     assert.match(r.stderr, /old\.ts/, 'the single deny names the second violation');
-    assert.equal(readFileSync(other, 'utf8'), origOther, 'first violation restored');
-    assert.equal(readFileSync(legacy, 'utf8'), origLegacy, 'second violation restored');
+    assert.equal(readFileSync(other, 'utf8'), tamperedOther, 'first violation LEFT ON DISK (dc616f69)');
+    assert.equal(readFileSync(legacy, 'utf8'), tamperedLegacy, 'second violation LEFT ON DISK');
   } finally {
     cleanup();
   }
@@ -2426,17 +2488,24 @@ test('H17 (amendment): a run.scope_amendments path is in-contract — the edit s
   }
 });
 
-// H17 ordering: an amended path that ALSO matches out_of_scope is still swept + restored.
-test('H17 (amendment ordering): an amended path that ALSO matches out_of_scope stays swept + restored', { skip: GIT_SKIP }, () => {
+// H17 ordering: an amended path that ALSO matches out_of_scope is still DENIED.
+// INVERTED per dc616f69 (restore → left on disk). The ORDERING property — that
+// out_of_scope beats the amendment — is carried entirely by the exit code, and
+// reads against the amendment test above it, which allows on the same fixture
+// shape with a non-out_of_scope amended path. That pairing is what keeps this
+// verdict single-caused now that the disk outcome no longer distinguishes them.
+test('H17 (amendment ordering): an amended path that ALSO matches out_of_scope is still DENIED — and left on disk', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject({ amendments: [{ path: 'src/legacy/old.ts', reason: 'stray amendment', at: NOW }] });
   try {
     const legacy = join(dir, 'src', 'legacy', 'old.ts'); // out_of_scope AND amended
     const orig = readFileSync(legacy, 'utf8');
+    const tampered = orig + '\n// tamper on an out_of_scope path\n';
     assert.equal(h17(dir, 'PreToolUse', A1).code, 0);
-    writeFileSync(legacy, orig + '\n// tamper on an out_of_scope path\n');
+    writeFileSync(legacy, tampered);
     const r = h17(dir, 'PostToolUse', A1);
     assert.equal(r.code, 2, `out_of_scope beats the amendment — ${oneLine(r.stderr)}`);
-    assert.equal(readFileSync(legacy, 'utf8'), orig, 'out_of_scope amended path still restored to HEAD');
+    assert.match(r.stderr, /old\.ts/, 'and the denial names the out_of_scope amended path');
+    assert.equal(readFileSync(legacy, 'utf8'), tampered, 'left on disk — the amendment ordering is a CLASSIFICATION rule, and classification no longer mutates anything (dc616f69)');
   } finally {
     cleanup();
   }

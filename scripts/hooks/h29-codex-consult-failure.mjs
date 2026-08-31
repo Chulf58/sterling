@@ -45,6 +45,7 @@
 // ship time — the same author-time-import / bundle-time-resolve mechanism h20
 // uses for @sterling/store). No heuristic is duplicated here.
 import { readStdin, allow, warnNonBlocking } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { looksLikeAuthFailure, consultFailureMessage } from '../lib/codex-mcp.mjs';
 
 // A real error message is terse; a full Codex review is many KB. Below this
@@ -208,6 +209,7 @@ try {
   // BOTH channels: stderr so the human sees it in the terminal, additionalContext
   // so the model reading the consult result sees it too. exit 0 — advisory, never
   // a gate (AC3), never exit 2.
+  recordAdvisoryFire(input.cwd, 'h29', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   process.stderr.write(block + '\n');
   process.stdout.write(
     JSON.stringify({

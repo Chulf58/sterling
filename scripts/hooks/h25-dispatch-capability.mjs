@@ -46,6 +46,7 @@
 // edit mid-work if the dispatch proceeds anyway — this catches the
 // misdispatch before the spawn, exactly like the capability advisory above.
 import { readStdin, allow, warnNonBlocking, loadConfig } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { hasUnsuppressedMatch, isReviewerClass, escapeRe as escapeReShared } from './lib/dispatch-advisory.mjs';
 import { PIPELINE_AGENT_TYPES, matchesGlob } from '@sterling/schemas';
 import { existsSync, readFileSync } from 'node:fs';
@@ -81,7 +82,8 @@ const PLATFORM_TOOLS = [
 ];
 const MCP_SHORT_NAMES = [
   'knowledge_query', 'knowledge_get', 'knowledge_create', 'knowledge_update',
-  'knowledge_append', 'knowledge_edit', 'knowledge_link', 'knowledge_retire',
+  'knowledge_append', 'knowledge_edit', 'knowledge_split',
+  'knowledge_extract', 'knowledge_array_remove', 'knowledge_link', 'knowledge_retire',
   'knowledge_supersede', 'knowledge_promote', 'knowledge_schema',
   'knowledge_stats', 'knowledge_preflight', 'board_add', 'board_edit',
   'board_get', 'board_query', 'board_remove', 'board_update',
@@ -261,6 +263,7 @@ try {
 }
 
 function emit(additionalContext) {
+  recordAdvisoryFire(input.cwd, 'h25', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext },

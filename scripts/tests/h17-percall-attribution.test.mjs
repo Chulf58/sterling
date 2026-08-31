@@ -306,10 +306,17 @@ function preDirtyBundle(dir, bytes) {
 // SABOTAGE: drop the call-key from the attribution-record filename (key it
 // by project tag + runId only again). Then B's Pre OVERWRITES the single
 // shared record with no P entry; A's Post reads that shared record,
-// coveringPre resolves to null, falls into the clean-at-Pre arm, and
-// restoreTracked reverts P to committedBytes and denies — BOTH assertions
-// below flip (bytes equal committedBytes instead of conductorBytes; exit
-// code 2 instead of 0).
+// coveringPre resolves to null, and P falls into the clean-at-Pre arm.
+//
+// WHICH ASSERTION THAT SABOTAGE STILL REDS, after dc616f69 (2026-08-30):
+// the EXIT-CODE assertion, not the bytes one. The clean-at-Pre arm no longer
+// calls `restoreTracked` — R11 deletes it — so a mis-keyed record now produces
+// a FALSE DENIAL rather than a destroyed file. The bytes assertion is therefore
+// defended BY DELETION and is kept as a regression tripwire against a restore
+// arm returning; the exit code carries the verdict for the per-call keying.
+// This is the board 489554d4 invariant's whole point arriving by a second,
+// stronger route: the conductor's bytes cannot be HEAD-restored because nothing
+// HEAD-restores any more.
 // =========================================================================
 
 test(

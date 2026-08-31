@@ -59,6 +59,7 @@
 // context branch ("board <hex>"); a bare ambiguous prefix with no trigger
 // word beside it is a known, accepted miss.
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MountedStores, resolveDomainMounts } from '@sterling/store';
 import { parseConfig } from '@sterling/schemas';
 import { buildResolver } from '../lib/citations.mjs';
@@ -213,6 +214,7 @@ try {
   }
   if (!findings.length) allow();
 
+  recordAdvisoryFire(input.cwd, 'h30', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {

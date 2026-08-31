@@ -4,19 +4,24 @@
 // irreversible and H17 cannot tell a malicious plant from a legitimate file the
 // conductor just created.
 //
-// THE DEFECT THESE PINS COVER. v4.0 deleted the (B) addition arm's unlink
+// THE DEFECT THESE PINS COVERED (PAST TENSE since dc616f69 / 78dc9bd6 — the (A)
+// arm no longer restores or removes ANYTHING, so the route below is closed by
+// deletion rather than by a guard). v4.0 deleted the (B) addition arm's unlink
 // (`removeUnder`/`removeFileAt`), which closed the (B) ROUTE to the (B) surface
 // and left the (A) ROUTE open:
 //   1. Pre records no `.claude/agents/new.md`.
 //   2. The guarded command creates it and runs `git add -f .claude/agents/new.md`.
-//   3. Post's `git status --porcelain` reports it as ADDED, so it enters the (A)
-//      TRACKED sweep, which runs BEFORE the (B) collection.
-//   4. `isEnforcementSurface` makes it an (A) violation -> `restoreTracked`.
-//   5. It is NOT IN HEAD, so the not-in-HEAD arm called `removeTreeAt` — DELETING
+//   3. Post's `git status --porcelain` reported it as ADDED, so it entered the (A)
+//      TRACKED sweep, which ran BEFORE the (B) collection.
+//   4. `isEnforcementSurface` made it an (A) violation -> `restoreTracked`.
+//   5. It was NOT IN HEAD, so the not-in-HEAD arm called `removeTreeAt` — DELETING
 //      the file the ruling says must survive.
 //   6. The (B) collection then ran against a surface the hook had already
 //      changed, so it never recorded the addition and never emitted the
 //      "left on disk" disposition.
+// dc616f69 R11 deleted `restoreTracked`, `removeTreeAt` and the whole restore
+// chain, so steps 4-6 are unreachable. Every pin below is re-cut to the DURABLE
+// oracle: DETECT, DENY, LATCH — bytes untouched on disk (dc616f69 R16).
 //
 // THE VERDICT CARRIER IS SURVIVAL + BYTE-IDENTITY, NEVER THE EXIT CODE.
 // Measured on this exact hook: an exit-code assertion stays GREEN with the guard
@@ -26,18 +31,35 @@
 // `code === 2` as a NECESSARY-BUT-INSUFFICIENT companion — a file that is
 // neither deleted nor denied is a total bypass and strictly worse than the bug.
 //
-// CAUSE ISOLATION (control-arm discipline, controls PLACED FIRST):
+// CAUSE ISOLATION (control-arm discipline, controls PLACED FIRST). RE-CUT per
+// dc616f69: both original controls were "deletion/restore still happens here",
+// and that evidence no longer exists to be had — the sweep DID stop mutating
+// anything, deliberately. The opposite-cause arm is now PIN 6: a CLEAN window
+// on the same fixture must ALLOW and leave NO latch, which is what keeps every
+// deny below from being explained by "this fixture denies everything".
 //   * PIN 1 is a force-added file OUTSIDE the (B) surface (`hooks/newdir/…`).
-//     It must STILL be deleted, so a treatment pass below cannot be satisfied by
-//     "this sweep stopped deleting anything".
-//   * PIN 2 is a MODIFIED TRACKED enforcement file. It must STILL be restored to
-//     HEAD's bytes, so the repair cannot be satisfied by "the restore arm was
-//     disabled" — the in-HEAD arm has a recoverable source of truth and the
-//     ruling deliberately does not touch it.
+//     It must STILL be DETECTED and DENIED — and now also left on disk.
+//   * PIN 2 is a MODIFIED TRACKED enforcement file: the primary (A) contract
+//     case, carrying the full oracle (bytes unchanged, latch written, next Pre
+//     denied before re-baselining).
 //
-// SABOTAGE TABLE (specified; mutation runs are conductor-only, decision
-// 02e03ed8, and in-place mutation of scripts/hooks/** is anti-pattern 37b3cb0a).
-// Rows S6-S11 are the same table carried in the hook at the `removeUnder`
+// SABOTAGE TABLE, POST-dc616f69 (specified; mutation runs are conductor-only,
+// decision 02e03ed8, and in-place mutation of scripts/hooks/** is anti-pattern
+// 37b3cb0a):
+//   N1  delete the `latchOnDetection`/`noteTrackedViolation` call from the (A)
+//       detection site (leave the denial intact) -> PIN 2's latch-exists
+//       assertion goes RED while its exit-code assertion stays green.
+//   N2  drop the standing-latch consult at Pre -> PIN 2's next-Pre assertion
+//       goes RED (exit 0 instead of 2) — the adoption bug reproduced.
+//   N3  reintroduce ANY write to a detected (A) path (a `git checkout HEAD --`
+//       on the violation set) -> PIN 2's byte-identity assertion goes RED.
+//   N4  drop the (A) violation push entirely (detect nothing) -> PIN 1 and
+//       PIN 2 both go RED on `code === 2`, and PIN 6 stays green — which is
+//       what makes PIN 6 a control rather than a duplicate.
+//
+// HISTORICAL TABLE (the guards below were DELETED with the restore chain; kept
+// as the record of what the pre-dc616f69 layering was, not as live sabotages).
+// Rows S6-S11 were the same table carried in the hook at the `removeUnder`
 // gravestone:
 //   S6  strip LAYER 1 (the isEnforcementSurface early return in restoreTracked's
 //       not-in-HEAD arm) -> PIN 3 STAYS GREEN (layer 2 carries it); PIN 4 green.
@@ -237,14 +259,38 @@ function lane(tag) {
   return { agent_id: 'a1', tool_use_id: `toolu_${tag}_${randomUUID().replace(/-/g, '').slice(0, 16)}` };
 }
 
+// dc616f69: an (A) detection now LATCHES at `.sterling/enforcement-taint.json`,
+// so any fixture reused across more than one Pre/Post pair must clear it between
+// cases or the later Pre is denied by the PREVIOUS case's incident.
+function latchPath(dir) {
+  return join(dir, '.sterling', 'enforcement-taint.json');
+}
+
+// dc616f69 R13: the new denial carries an explicit NON-action disclaimer
+// ("NOTHING WAS REVERTED"). Strip the disclaimer sentence before asserting that
+// no ACTION claim survives — the pin is "H17 never claims it undid anything",
+// which the disclaimer STATES rather than violates. Without this the disclaimer
+// itself would fire the very assertion that exists to forbid a false claim.
+function actionClaims(stderr) {
+  // LITERAL disclaimer only (security review LOW): an unbounded uppercase-run
+  // mask would also swallow a genuine all-caps false claim sitting adjacent to
+  // the disclaimer.
+  return oneLine(stderr).replace(/NOTHING WAS REVERTED/g, ' ');
+}
+
 // ===========================================================================
-// PIN 1 — CONTROL, PLACED FIRST. A force-added NEW file OUTSIDE the (B) surface
-// is STILL DELETED. If this ever goes green-by-refusal (file survives), every
-// treatment pin below is meaningless: the sweep would simply have stopped
-// deleting. EXPECTED FAILURE SHAPE if the repair over-reaches: the
-// `existsSync(fresh) === false` assertion fires.
+// PIN 1 — INVERTED per dc616f69 (the (A) arm stops restoring). This arm used to
+// assert the force-added file was DELETED. Nothing is deleted any more, so that
+// control's discriminating power is dead BY DESIGN and cannot be restated; what
+// it still controls for is that a NON-(B) enforcement-surface addition is
+// DETECTED AT ALL (PIN 3's survival must not be explained by "the (A) sweep
+// stopped looking"). Opposite-cause evidence moved to PIN 6.
+// EXPECTED FAILURE SHAPE: `post.code === 2` fires (actual 0) if detection is
+// dropped; the byte-identity assertion fires if any write to the path returns.
+// SABOTAGE: reintroduce a removal of not-in-HEAD (A) paths -> the
+// `existsSync(fresh) === true` assertion goes RED.
 // ===========================================================================
-test('PIN 1 CONTROL: a force-added file OUTSIDE the (B) surface is still deleted and denied (handled as before)', { skip: GIT_SKIP }, () => {
+test('PIN 1 CONTROL: a force-added file OUTSIDE the (B) surface is still DETECTED and DENIED — and now left on disk (dc616f69)', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     assert.equal(porcelain(dir), '', 'PRECONDITION: clean tree at Pre');
@@ -253,44 +299,74 @@ test('PIN 1 CONTROL: a force-added file OUTSIDE the (B) surface is still deleted
 
     mkdirSync(join(dir, 'hooks', 'newdir'), { recursive: true });
     const fresh = join(dir, 'hooks', 'newdir', 'evil.mjs');
-    writeFileSync(fresh, '// new untracked enforcement file, created in-window\n');
+    const freshBytes = Buffer.from('// new untracked enforcement file, created in-window\n');
+    writeFileSync(fresh, freshBytes);
     git(dir, ['add', '-f', 'hooks/newdir/evil.mjs'], { must: true });
     assert.match(porcelain(dir), /A\s+hooks\/newdir\/evil\.mjs/, 'PRECONDITION: force-added and individually visible, not in HEAD');
 
     const post = h17(dir, 'PostToolUse', L);
     assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(post.code, 2, `an out-of-contract addition must deny — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
-    assert.equal(existsSync(fresh), false, 'CONTROL: a NON-(B) force-added path is still removed by the (A) sweep — the repair must not disarm the sweep wholesale');
+    assert.equal(existsSync(fresh), true, 'dc616f69: a NON-(B) addition is DENIED and LEFT ON DISK — H17 no longer removes anything');
+    assert.deepEqual(readFileSync(fresh), freshBytes, 'and left byte-identical to what the command wrote');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// PIN 2 — CONTROL, PLACED SECOND. A MODIFIED TRACKED enforcement file is STILL
-// restored to HEAD's bytes. In-HEAD means git holds a recoverable source of
-// truth; the ruling is about ADDITIONS, and this arm must not be weakened.
-// EXPECTED FAILURE SHAPE if the repair over-reaches: the restored-bytes
-// assertion fires with the tampered bytes still on disk.
+// PIN 2 — INVERTED per dc616f69, and now THE PRIMARY (A) CONTRACT CASE. A
+// MODIFIED TRACKED enforcement file used to be restored to HEAD's bytes; the
+// ruling deletes that arm outright, because no heuristic proves authorship in a
+// shared worktree, so an in-HEAD "recoverable source of truth" does not make the
+// conductor's uncommitted replacement bytes recoverable. The new oracle is the
+// full R16 shape: exact pre-Post bytes recorded, exit 2, bytes UNCHANGED, the
+// disposition STATED, no action claim, the latch written, and the NEXT Pre
+// denied BEFORE it can re-baseline the surviving bytes.
+// EXPECTED FAILURE SHAPE: if any restore returns, `deepEqual(after, tampered)`
+// fires with the pristine bytes on disk; if latching is dropped, the
+// `existsSync(latchPath) === true` assertion fires; if the Pre consult is
+// dropped, the `pre2.code === 2` assertion fires with actual 0.
+// SABOTAGE (one per assertion): N3 restores the path -> byte assertion RED;
+// N1 removes the latch write -> latch assertion RED; N2 removes the Pre latch
+// consult -> next-Pre assertion RED. No single mutation reds all three.
 // ===========================================================================
-test('PIN 2 CONTROL: a MODIFIED TRACKED enforcement file is still HEAD-restored and denied', { skip: GIT_SKIP }, () => {
+test('PIN 2 TREATMENT: a MODIFIED TRACKED enforcement file is DENIED, LATCHED and LEFT ON DISK — never HEAD-restored (dc616f69)', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeGitProject();
   try {
     const rel = 'hooks/h3-contract-gate.mjs';
     const abs = join(dir, ...rel.split('/'));
     const pristine = readFileSync(abs);
     assert.equal(porcelain(dir), '', 'PRECONDITION: clean tree at Pre');
-    const L = lane('modified-control');
+    assert.equal(existsSync(latchPath(dir)), false, 'PRECONDITION: no latch stands before this window');
+    const L = lane('modified-treatment');
     assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree allows');
 
-    writeFileSync(abs, '// TAMPERED in-window\nprocess.exit(0);\n');
+    const tampered = Buffer.from('// TAMPERED in-window\nprocess.exit(0);\n');
+    writeFileSync(abs, tampered);
+    assert.notDeepEqual(tampered, pristine, 'PRECONDITION: the command genuinely changed the bytes');
     assert.match(porcelain(dir), /hooks\/h3-contract-gate\.mjs/, 'PRECONDITION: git reports the tracked file dirty');
 
     const post = h17(dir, 'PostToolUse', L);
     assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(post.code, 2, `an in-window tamper of a tracked enforcement file must deny — stderr: ${oneLine(post.stderr)}`);
-    assert.deepEqual(readFileSync(abs), pristine, 'CONTROL: the in-HEAD restore arm is untouched — the committed bytes are put back');
-    assert.match(oneLine(post.stderr), /reverted/i, 'CONTROL: a genuine revert is still reported with the `violations` wording');
+
+    // --- THE VERDICT CARRIER: the observed state is UNCHANGED by H17 ---
+    assert.deepEqual(readFileSync(abs), tampered, 'THE RULING: the bytes stay exactly as the command wrote them — H17 performs no restore (dc616f69 R11)');
+    const err = oneLine(post.stderr);
+    assert.match(err, /left on disk/i, 'the denial STATES the disposition — denied, and the bytes are still there');
+    assert.doesNotMatch(
+      actionClaims(err),
+      /reverted|restored to HEAD|rolled back to/i,
+      'R13: no false action claim survives once the explicit non-action disclaimer is stripped'
+    );
+
+    // --- the durable half: the incident is persisted and the next call is stopped ---
+    assert.equal(existsSync(latchPath(dir)), true, 'dc616f69: the detection LATCHES eagerly at .sterling/enforcement-taint.json');
+    const pre2 = h17(dir, 'PreToolUse', lane('modified-nextcall'));
+    assert.notEqual(pre2.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(pre2.code, 2, `THE ADOPTION CLOSURE: while the latch stands the NEXT Pre denies BEFORE re-baselining — actual ${pre2.code}, stderr: ${oneLine(pre2.stderr)}`);
+    assert.match(oneLine(pre2.stderr), /taint|latch/i, 'and it names the STANDING incident, not a fresh in-window violation');
   } finally {
     cleanup();
   }
@@ -329,7 +405,10 @@ test('PIN 3 TREATMENT: a force-added NEW (B)-surface file SURVIVES byte-identica
     assert.match(err, /unauthorized addition/i, 'the denial must use the ADDITION disposition wording');
     assert.match(err, /left in place on disk|left on disk/i, 'the denial must STATE the disposition — the gate denied and the file is still there');
     assert.match(err, /\.claude\/agents\/new\.md/, 'the denial must name the surviving path so a human can inspect it');
-    assert.doesNotMatch(err, /reverted/i, 'NEVER the `violations` vocabulary — claiming a revert that did not happen is a false action claim (586bccdc)');
+    // dc616f69 R13: the (A) section now carries an explicit "NOTHING WAS
+    // REVERTED" disclaimer, so this assertion is scoped to ACTION CLAIMS via
+    // actionClaims() rather than to the bare word. Same property, same strength.
+    assert.doesNotMatch(actionClaims(err), /reverted|restored to HEAD/i, 'NEVER the `violations` vocabulary — claiming a revert that did not happen is a false action claim (586bccdc)');
     assert.equal(err.split('.claude/agents/new.md').length - 1, 1, 'named ONCE: both the (A) and (B) surfaces detect it, but one path is one finding');
   } finally {
     cleanup();
@@ -337,41 +416,15 @@ test('PIN 3 TREATMENT: a force-added NEW (B)-surface file SURVIVES byte-identica
 });
 
 // ===========================================================================
-// PIN 4 — THE DESCENDANT CASE (layer 2's own reach). A not-in-HEAD DIRECTORY
-// whose OWN rel is not (B) surface but whose CHILDREN are: `.claude/` created
-// in-window while git can see it. The recursive delete must keep every (B)
-// descendant (and therefore not rmdir its parents), while a non-(B) sibling
-// inside the same tree is still removed.
+// PIN 4 — RETIRED per dc616f69 R16(ii), not inverted. Its entire subject was
+// making the RECURSIVE DELETE safe: "the recursion keeps every (B) descendant
+// while still removing a non-(B) sibling". `removeTreeAt` is deleted, so the
+// survival half would pass vacuously (nothing is removed) and the discriminating
+// half — `existsSync(collateral) === false` — asserts a behaviour the ruling
+// removed on purpose. Inverting it produces exactly the vacuous green R16
+// forbids. The remaining live property (a not-in-HEAD (B) addition survives and
+// denies) is carried by PIN 3.
 // ===========================================================================
-test('PIN 4 TREATMENT: a recursive (A) delete of a not-in-HEAD directory keeps its (B) descendants and removes the rest', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeGitProject({ ignoreClaude: false, seedClaude: false });
-  try {
-    assert.equal(porcelain(dir), '', 'PRECONDITION: clean tree at Pre — .claude/ does not exist yet');
-    const L = lane('descendant-b');
-    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree allows (baseline holds .sterling/config.json, so it is not empty-at-rest)');
-
-    mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
-    mkdirSync(join(dir, '.claude', 'plans'), { recursive: true });
-    const protectedLeaf = join(dir, '.claude', 'agents', 'coder.md');
-    const protectedBytes = Buffer.from('# coder — protected (B) surface, created in-window\n');
-    writeFileSync(protectedLeaf, protectedBytes);
-    const collateral = join(dir, '.claude', 'plans', 'notes.txt');
-    writeFileSync(collateral, 'not (B) surface\n');
-    assert.match(porcelain(dir), /\?\?\s+\.claude\//, 'PRECONDITION: git collapses the whole new directory into one untracked entry `?? .claude/`');
-
-    const post = h17(dir, 'PostToolUse', L);
-
-    assert.equal(existsSync(protectedLeaf), true, 'THE RULING: a (B) DESCENDANT of a swept directory survives — the recursion must test every node, not just the swept rel');
-    assert.deepEqual(readFileSync(protectedLeaf), protectedBytes, 'THE RULING: byte-identical');
-    assert.equal(existsSync(join(dir, '.claude', 'agents')), true, 'a directory holding a survivor is not rmdir-ed out from under it');
-    assert.equal(existsSync(collateral), false, 'a NON-(B) file inside the same swept tree is still removed — the guard is path-scoped, not a blanket disarm');
-    assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
-    assert.equal(post.code, 2, `the sweep must still deny — stderr: ${oneLine(post.stderr)}`);
-    assert.match(oneLine(post.stderr), /\.claude\/agents\/coder\.md/, 'the surviving (B) path is named in the denial');
-  } finally {
-    cleanup();
-  }
-});
 
 // ===========================================================================
 // PIN 5 — ORDERING IS NOT A GUARD (kills sabotage S9). With a CORRUPT store the
@@ -393,10 +446,43 @@ test('PIN 5 TREATMENT: with a BROKEN store (the (B) stage skipped), a force-adde
 
     const post = h17(dir, 'PostToolUse', L);
 
+    // dc616f69: since the restore chain is deleted, the survival half below is
+    // now defended BY DELETION rather than by a path-level guard — it is a
+    // cheap regression tripwire, and the LOAD-BEARING assertion in this block is
+    // the fail-closed deny under a broken store, which no other pin here covers.
     assert.equal(existsSync(plant), true, 'the survival guarantee cannot depend on the (B) stage running — it is skipped here');
     assert.deepEqual(readFileSync(plant), plantedBytes, 'byte-identical under the degraded path too');
     assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
     assert.equal(post.code, 2, `a broken store fails CLOSED — stderr: ${oneLine(post.stderr)}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// PIN 6 — THE CLEAN CONTROL (dc616f69 R16: "assert a clean control produces NO
+// marker"). It replaces the deletion-based controls PIN 1 and PIN 2 used to
+// carry, and it is what makes every deny above evidence rather than assertion:
+// on the SAME fixture, a window that writes nothing must ALLOW at Post and leave
+// NO latch behind. An implementation that denied and latched unconditionally
+// would satisfy PINs 1/2/3/5 identically and fail only here.
+// EXPECTED FAILURE SHAPE: `post.code === 0` fires (actual 2) or the
+// `existsSync(latchPath) === false` assertion fires.
+// SABOTAGE: latch unconditionally at Post (move the latch write out of the
+// detection branch) -> the no-latch assertion goes RED while every other pin in
+// this file stays green.
+// ===========================================================================
+test('PIN 6 CONTROL: a window that changes NOTHING allows and leaves NO taint latch — the denials above are not unconditional', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    assert.equal(porcelain(dir), '', 'PRECONDITION: clean tree at Pre');
+    const L = lane('clean-control');
+    assert.equal(h17(dir, 'PreToolUse', L).code, 0, 'Pre on a clean tree allows');
+
+    const post = h17(dir, 'PostToolUse', L); // the audited command wrote nothing
+    assert.notEqual(post.code, 1, 'a security gate never fails with a non-blocking exit 1');
+    assert.equal(post.code, 0, `CONTROL: a clean window must ALLOW — actual ${post.code}, stderr: ${oneLine(post.stderr)}`);
+    assert.equal(existsSync(latchPath(dir)), false, 'CONTROL: and no incident is persisted — the latch is minted by DETECTION, never by the Post call itself');
   } finally {
     cleanup();
   }

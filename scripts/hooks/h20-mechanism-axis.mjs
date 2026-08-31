@@ -54,6 +54,7 @@
 // that a match matching ONLY generic terms (test, check, file, ...) cannot
 // clear on its own.
 import { readStdin, allow, deny, warnNonBlocking, openStore } from './lib/common.mjs';
+import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
@@ -75,7 +76,7 @@ import {
   markDelivered,
   DENY_RULING_TYPES,
   STRICT_MIN_HITS,
-  STRICT_MIN_RECORD_TERMS,
+  hasFullNarrowCentralityCoverage,
   DELTA_MIN_NEW_TERMS,
   subQuestionText,
   denyLedgerPath,
@@ -211,7 +212,12 @@ try {
           (x) =>
             x.hits.length >= STRICT_MIN_HITS &&
             hasDiscriminatingHit(x.hits) &&
-            hasRecordCentralityHit(x.record, subText, { minTerms: STRICT_MIN_RECORD_TERMS })
+            // FULL coverage of the record's PRE-UNION narrow top-K. NOT
+            // hasRecordCentralityHit: this rung exits 2 and blocks the user's
+            // question, so it must never see the title-union central set (a
+            // bigger set makes full coverage a weaker per-term demand — see
+            // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
+            hasFullNarrowCentralityCoverage(x.record, subText)
         );
       // Truthy fallback, not nullish (fix 3, dual-review finding): header:''
       // is falsy but not nullish, so `??` let an empty-string header win over
@@ -292,6 +298,7 @@ try {
     // further is owed on it) exactly as much as a never-matched one.
     if (unresolved.length) {
       const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
+      recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
       deny(renderDenyOnceMessage(unresolved, questions.length, open));
     }
     // Every ruled sub-question was validly overridden (or never ruled at
@@ -430,6 +437,7 @@ try {
   // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19 (council wf_db9a59aa-0af):
   // the guard is what makes delivery once-per-session, so writing it before the
   // delivery lands turns any failure into permanent silent loss with no retry.
+  recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join('\n\n') },

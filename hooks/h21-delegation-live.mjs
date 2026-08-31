@@ -5153,7 +5153,7 @@ function fileExt(p) {
   const m = /\.([A-Za-z0-9]+)$/.exec(String(p ?? ""));
   return m ? m[1].toLowerCase() : "";
 }
-var ARTICLE_WRITE_RE = /^(mcp__sterling__|mcp__plugin_sterling_sterling__)(knowledge_update|knowledge_append|knowledge_edit)$/;
+var ARTICLE_WRITE_RE = /^(mcp__sterling__|mcp__plugin_sterling_sterling__)(knowledge_update|knowledge_append|knowledge_edit|knowledge_array_remove)$/;
 var toolName = input.tool_name ?? "";
 try {
   if (ARTICLE_WRITE_RE.test(toolName)) {

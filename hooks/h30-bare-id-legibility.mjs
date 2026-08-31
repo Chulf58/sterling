@@ -5745,6 +5745,32 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
+function appendPathSegment(path, segment) {
+  if (typeof segment === "number")
+    return `${path}[${segment}]`;
+  return path ? `${path}.${segment}` : segment;
+}
+function allKeyPathsUnder(value, path, depth, out) {
+  if (depth > MAX_BODY_COMPARE_DEPTH) {
+    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+  }
+  if (value === null || typeof value !== "object")
+    return out;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const here = appendPathSegment(path, i);
+      out.push(here);
+      allKeyPathsUnder(value[i], here, depth + 1, out);
+    }
+    return out;
+  }
+  for (const key of Object.keys(value)) {
+    const here = appendPathSegment(path, key);
+    out.push(here);
+    allKeyPathsUnder(value[key], here, depth + 1, out);
+  }
+  return out;
+}
 function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
   if (depth > MAX_BODY_COMPARE_DEPTH) {
     throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
@@ -5753,20 +5779,22 @@ function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
     return out;
   if (Array.isArray(before)) {
     if (!Array.isArray(after))
-      return out;
+      return allKeyPathsUnder(before, path, depth, out);
     for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i);
       if (i >= after.length)
-        out.push(`${path}[${i}]`);
+        out.push(here);
       else
-        droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
+        droppedKeyPaths(before[i], after[i], here, depth + 1, out);
     }
     return out;
   }
-  if (after === null || typeof after !== "object" || Array.isArray(after))
-    return out;
+  if (after === null || typeof after !== "object" || Array.isArray(after)) {
+    return allKeyPathsUnder(before, path, depth, out);
+  }
   const parsed = after;
   for (const key of Object.keys(before)) {
-    const here = path ? `${path}.${key}` : key;
+    const here = appendPathSegment(path, key);
     if (!Object.prototype.hasOwnProperty.call(parsed, key))
       out.push(here);
     else
@@ -5780,6 +5808,22 @@ function assertNoFieldLoss(op, before, after) {
     return;
   const type = typeof before.type === "string" ? before.type : "unknown";
   throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+}
+function unrecognizedKeyPaths(error) {
+  const issues = error?.issues;
+  if (!Array.isArray(issues))
+    return [];
+  const out = [];
+  for (const raw of issues) {
+    const issue = raw;
+    if (issue.code !== "unrecognized_keys" || !Array.isArray(issue.keys))
+      continue;
+    const segments = Array.isArray(issue.path) ? issue.path : [];
+    const base2 = segments.reduce((acc, segment) => appendPathSegment(acc, typeof segment === "number" ? segment : String(segment)), "");
+    for (const key of issue.keys)
+      out.push(appendPathSegment(base2, String(key)));
+  }
+  return out;
 }
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
@@ -6152,7 +6196,16 @@ var SterlingStore = class _SterlingStore {
     if (prepared.lifecycle === "retired" && !prepared.input.superseded_by) {
       throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
     }
-    const record = validateRecord(prepared.input);
+    let record;
+    try {
+      record = validateRecord(prepared.input);
+    } catch (err) {
+      const refused = unrecognizedKeyPaths(err);
+      if (refused.length === 0)
+        throw err;
+      const type = typeof prepared.input.type === "string" ? prepared.input.type : "unknown";
+      throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
+    }
     assertNoFieldLoss("create", prepared.input, record);
     this.tx(() => {
       this.insertRecord(record);
@@ -7521,6 +7574,31 @@ function openStore(cwd) {
   return existsSync3(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/hooks/lib/advisory-counter.mjs
+import { appendFileSync, existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
+function recordAdvisoryFire(root, hook, sessionId) {
+  try {
+    if (!root || !hook) return;
+    if (!existsSync4(join4(root, ".sterling"))) return;
+    const dir = join4(root, ".sterling", "transient");
+    mkdirSync3(dir, { recursive: true });
+    let session = typeof sessionId === "string" && sessionId ? sessionId : null;
+    if (!session) {
+      try {
+        const parsed = JSON.parse(readFileSync2(join4(dir, "session.json"), "utf8"));
+        session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
+      } catch {
+      }
+    }
+    appendFileSync(
+      join4(dir, "advisory-fires.ndjson"),
+      JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
+    );
+  } catch {
+  }
+}
+
 // scripts/lib/citations.mjs
 function buildResolver(store) {
   const index = store.recordIdIndex();
@@ -7552,8 +7630,8 @@ function buildResolver(store) {
 }
 
 // scripts/hooks/h30-bare-id-legibility.mjs
-import { existsSync as existsSync4 } from "node:fs";
-import { join as join4 } from "node:path";
+import { existsSync as existsSync5 } from "node:fs";
+import { join as join5 } from "node:path";
 var CANDIDATE_RE = /(?<![0-9A-Za-z])(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|[0-9A-Fa-f]{8})(?![0-9A-Za-z-])/g;
 var CITATION_CONTEXT_RE = /\b(?:board|todo|task|maintenance|decision|anti_pattern|article|feature_article|finding|research_finding|brief|knowledge_get)\b[^\n]{0,12}$/i;
 var GENERIC_TYPE_WORDS = /* @__PURE__ */ new Set(["board", "item", "record", "decision", "todo", "task", "id", "uuid"]);
@@ -7584,8 +7662,8 @@ function isGlossed(text, start, end) {
   return !GENERIC_TYPE_WORDS.has(folded) && !FILLER_WORDS.has(folded);
 }
 function openUniverse(cwd) {
-  const dbPath = join4(cwd ?? ".", ".sterling", "sterling.db");
-  if (!existsSync4(dbPath)) return null;
+  const dbPath = join5(cwd ?? ".", ".sterling", "sterling.db");
+  if (!existsSync5(dbPath)) return null;
   try {
     return new MountedStores(dbPath, resolveDomainMounts(parseConfig(loadConfig(cwd) ?? {})), { skipMissing: true });
   } catch {
@@ -7638,6 +7716,7 @@ try {
     );
   }
   if (!findings.length) allow();
+  recordAdvisoryFire(input.cwd, "h30", input.session_id);
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {

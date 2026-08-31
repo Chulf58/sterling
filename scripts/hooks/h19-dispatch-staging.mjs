@@ -21,6 +21,18 @@
 // Never a gate (AC7 precedent): internal failure degrades to no output, exit 1
 // non-blocking (P5) — dispatch staging is an aid layered on top of the file-
 // touch delivery, never a second place that can deny a spawn.
+//
+// H28 FOLD (2026-08-30, decision 04982f45): h28-return-contract.mjs absorbed
+// here — same SubagentStart event, same advisory/fail-open posture (both
+// warnNonBlocking). EXEMPT_AGENT_TYPES and RETURN_CONTRACT below are its
+// unchanged substance; the return contract is injected on EVERY dispatch
+// regardless of the payload path above (ALWAYS inject, no dedup — the text
+// is self-subordinating, so repeated injection is harmless). `finish()`
+// combines the knowledge-delivery payload (may be empty) with the return
+// contract into ONE additionalContext emission so neither clobbers the
+// other (mirrors H25's two-advisory merge), and both arms stay inside this
+// file's existing try/warnNonBlocking shape — the fold does not change h19's
+// own failure posture.
 import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel } from './lib/common.mjs';
 // Prompt recovery + path extraction moved to lib/dispatch-prompt.mjs when H22's
 // dispatch register became a second consumer — one mechanism, imported never
@@ -50,11 +62,52 @@ import {
 // match is weaker evidence than a file_keys join, so it earns less attention.
 const SUBJECT_MAX_DECISIONS = 5;
 
+// True platform-internal agents whose output configures the harness rather
+// than being a human-facing work product (h28 fold) — kept deliberately
+// NARROW: only agents whose report a return contract would be noise for.
+const EXEMPT_AGENT_TYPES = new Set(['statusline-setup']);
+
+// STATIC and SELF-SUBORDINATING (h28 fold) — the first clause cedes
+// precedence to any explicit brief/role output contract, so combining it
+// with the knowledge payload above is always harmless.
+const RETURN_CONTRACT =
+  'STERLING DEFAULT RETURN CONTRACT — Explicit output requirements in your ' +
+  'agent definition or dispatch brief take precedence. Otherwise, return the ' +
+  'conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw ' +
+  'logs, or step-by-step narration. Report only the outcome, decisive evidence, ' +
+  'relevant files/tests, and unresolved risks.';
+
 const input = readStdin();
+
+// Set the moment ANY additionalContext actually reaches stdout — guards the
+// catch block below against a double-emit (review finding, S7 fixer-mode):
+// once something has gone out, a later throw must never write a second time.
+let emitted = false;
+
+// Combines PAYLOAD (the knowledge-delivery text, may be '') with the return
+// contract (h28 fold — omitted only for EXEMPT_AGENT_TYPES) into one string.
+function combinedContext(payload) {
+  const out = [];
+  if (payload) out.push(payload);
+  if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
+  return out.join('\n\n');
+}
+
+// Emits the combined context (if any) and allows — used at every early exit
+// below so the return contract still injects even when the knowledge-payload
+// path has nothing to stage (h28's own posture: ALWAYS inject).
+function finish(payload) {
+  const out = combinedContext(payload);
+  if (out) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: out } }));
+    emitted = true;
+  }
+  allow();
+}
 
 try {
   const store = openStore(input.cwd);
-  if (!store) allow(); // not a Sterling project — no ceremony (P1)
+  if (!store) finish(''); // not a Sterling project — no ceremony for the payload half (P1)
 
   const prompts = lastDispatchPrompts(input.transcript_path);
   const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
@@ -110,7 +163,7 @@ try {
   // no frontier notice here (that signal belongs to the file-touch hook, which
   // fires once the agent actually touches the path; staging is a bonus, not a
   // second frontier surface).
-  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) allow();
+  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) finish('');
 
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
@@ -119,7 +172,7 @@ try {
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
   const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
   const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) allow();
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) finish('');
 
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
   const parts = [];
@@ -171,13 +224,46 @@ try {
   // Side effect first, guard second (council wf_db9a59aa-0af precedent,
   // mirrored from h19-knowledge-delivery.mjs): a throw before this line leaves
   // the guard untouched, so a later touch of the same territory — the main
-  // file-touch hook, or a later dispatch — still delivers it.
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: payload } }));
+  // file-touch hook, or a later dispatch — still delivers it. The return
+  // contract (h28 fold) rides the SAME emission — combinedContext() folds it
+  // in — so a fresh knowledge payload and the return contract never clobber
+  // each other in two separate writes.
+  const out = combinedContext(payload);
+  if (out) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: out } }));
+    emitted = true;
+  }
   guard.records.push(...fresh.map((r) => r.id));
   writeGuard(gPath, guard);
   allow();
 } catch (e) {
   // Staging is an aid, never a gate: internal failure is loud but NON-blocking
-  // (P5 visibility without an AC7-style violation).
-  warnNonBlocking(`H19: dispatch staging failed: ${(e && e.message) || e}`);
+  // (P5 visibility without an AC7-style violation). The return contract (h28
+  // fold) must still land on a throw here — pre-fold it ran in its own
+  // process and was unaffected by an h19 crash (a malformed config, a
+  // store-query throw, a render throw all now share this one process).
+  // `emitted` guards against a double write when the throw lands AFTER a
+  // successful emit above; an EXEMPT agent still gets nothing, since
+  // combinedContext('') reduces to '' for it exactly as it does elsewhere.
+  // EXIT CODE IS LOAD-BEARING when the contract is delivered: a hook that
+  // exits NONZERO cannot rely on the platform honoring its hookSpecificOutput,
+  // so a catch-emit followed by exit 1 would be theatre — the failure note
+  // rides stderr (try-wrapped) and the process exits 0 via allow(), exactly
+  // the finish('') shape the review prescribed. Only when NOTHING was emitted
+  // (exempt agent, or a write failure) does the old warnNonBlocking exit-1
+  // posture remain, preserving the platform's failed-hook signal.
+  try {
+    process.stderr.write(`H19: dispatch staging failed: ${(e && e.message) || e}\n`);
+  } catch {
+    /* a failed stderr note must not change the delivery outcome */
+  }
+  if (!emitted) {
+    const out = combinedContext('');
+    if (out) {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: out } }));
+      emitted = true;
+    }
+  }
+  if (emitted) allow();
+  warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
 }

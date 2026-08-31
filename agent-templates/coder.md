@@ -47,6 +47,11 @@ hooks:
       hooks:
         - type: command
           command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
+  PostToolUseFailure:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h17-bash-write-sweep.mjs"'
 ---
 
 # Role & owned judgment

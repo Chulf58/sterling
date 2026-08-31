@@ -4,8 +4,7 @@
       {
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h28-return-contract.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-dispatch-staging.mjs\"" }
         ]
       }
     ],
@@ -29,7 +28,6 @@
       {
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h2-selection-inject.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h13-clear-conductor.mjs\"" },
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-delivery-drain.mjs\"" }
         ]
       }
@@ -68,7 +66,7 @@
         ]
       },
       {
-        "matcher": "mcp__sterling__knowledge_update|mcp__sterling__knowledge_append|mcp__sterling__knowledge_edit|mcp__plugin_sterling_sterling__knowledge_update|mcp__plugin_sterling_sterling__knowledge_append|mcp__plugin_sterling_sterling__knowledge_edit|Read|Grep|Glob|Task|Agent",
+        "matcher": "mcp__sterling__knowledge_update|mcp__sterling__knowledge_append|mcp__sterling__knowledge_edit|mcp__plugin_sterling_sterling__knowledge_update|mcp__plugin_sterling_sterling__knowledge_append|mcp__plugin_sterling_sterling__knowledge_edit|mcp__sterling__knowledge_array_remove|mcp__plugin_sterling_sterling__knowledge_array_remove|Read|Grep|Glob|Task|Agent",
         "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h21-delegation-live.mjs\"" }]
       }
     ],

@@ -8,7 +8,8 @@
 // FRESHNESS, and "the file changed" is the truth that per-prompt clearing only
 // approximated (at the cost of ~7 forced re-reads of byte-current files in one
 // measured session). Hashless legacy entries keep the old per-prompt window:
-// h13-clear-conductor prunes exactly those at each UserPromptSubmit. Context
+// h19-delivery-drain prunes exactly those at each UserPromptSubmit (folded in
+// from h13-clear-conductor, decision 04982f45). Context
 // The two cases a hash cannot vouch for get an explicit clear in H1:
 // SessionStart source=compact (compaction can drop a read from the model's
 // window with the bytes unchanged — the old per-prompt clear never covered
@@ -76,7 +77,8 @@ export function fileHash(absPath) {
  * Read-evidence with FRESHNESS (board 776d2b65): a hashed entry counts only
  * while the file's current bytes still match its read-time hash; a hashless
  * (legacy) entry counts unconditionally — it lives inside the old per-prompt
- * window, because h13-clear-conductor prunes exactly those at each prompt.
+ * window, because h19-delivery-drain prunes exactly those at each prompt
+ * (folded in from h13-clear-conductor, decision 04982f45).
  */
 export function hasFreshRead(path, repoRelPath, absPath) {
   return readLedger(path).some((e) => {

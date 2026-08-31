@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ZodError } from 'zod';
-import { normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -161,6 +161,60 @@ export type Projection = 'full' | 'digest' | 'count';
  */
 export type BoardProjection = Projection | 'headline';
 
+/**
+ * PARALLEL-LANE SEED — one collision group in board_query's `lane_advisory`:
+ * the user-source items that declare a write path in common, and the path(s)
+ * they share.
+ */
+export interface LaneCollision {
+  /** the shared file_keys entries, sorted — every item below declares ALL of them */
+  paths: string[];
+  /**
+   * the colliding items, newest-updated first. `name` is the item's slug or,
+   * for a legacy slugless item, its clipped headline — because a bare id in
+   * front of a human is unanswerable (CLAUDE.md, decision
+   * `human-readable-ids-for-board-items`). The full id rides alongside it.
+   */
+  items: { id: string; name: string }[];
+}
+
+/**
+ * PARALLEL-LANE SEED — the derived, ADVISORY reading of a board page's shared
+ * write paths. Present only when two or more USER-source items in the matched
+ * set declare a path in common; absent (not empty) otherwise, so its mere
+ * presence is the signal.
+ *
+ * WHAT IT IS FOR: a slice decomposes into lanes — read-only scoping (write-set
+ * empty), test authoring (write-set inside the test-path globs, where H5's
+ * frozen-tests wall keeps it) and implementation (everything else) — and a
+ * shared write path collides the IMPLEMENTATION lane ONLY. Measured 2026-08-29:
+ * five slices of one objective all wrote a single hook file, the conductor
+ * serialized the SLICES, and every scoping and test-authoring lane sat idle
+ * although none of them ever collided. This block states which lane the
+ * collision actually constrains, so that reasoning does not have to be
+ * re-derived by hand at each dispatch moment.
+ *
+ * WHAT IT IS NOT: it never denies, filters, reorders or refuses anything —
+ * `records` comes back exactly as it would without it — and it never counts
+ * agents toward a target. Under-delegation and over-dispatch are the same
+ * defect (delegation contract), so a mechanism that pushes toward a NUMBER
+ * reintroduces the quota pathology it exists to cure. A parallel-safe lane is
+ * not thereby a lane worth dispatching.
+ *
+ * SYSTEM-SOURCE ITEMS NEVER JOIN A GROUP: the maintenance queue is
+ * mechanism-detected debt drained by an artifact-write, not parallel work, so
+ * a queue item sharing a path with a board slice is not a lane collision.
+ * maintenance_query therefore never carries this key at all.
+ */
+export interface LaneAdvisory {
+  /** the ONE lane a shared write path constrains */
+  serialized_lane: 'implementation';
+  /** the lanes of a file-colliding slice that stay dispatchable */
+  parallel_safe_lanes: ('read_only_scoping' | 'test_authoring')[];
+  /** one entry per set of items colliding on the same path(s); never empty when present */
+  collisions: LaneCollision[];
+}
+
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
   /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
@@ -181,6 +235,11 @@ export interface BoardQueryResult {
    * one (P5).
    */
   provenance: string;
+  /**
+   * PARALLEL-LANE SEED: present ONLY when two or more user-source items in the
+   * matched set share a file_keys path — see LaneAdvisory. Absent, never empty.
+   */
+  lane_advisory?: LaneAdvisory;
   /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
@@ -1078,7 +1137,7 @@ export class SterlingTools {
 
   private refuseServerOwnedFields(
     fields: Record<string, unknown>,
-    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede'
+    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede' | 'knowledge_array_remove'
   ): void {
     const attempted = SterlingTools.WRITE_REFUSED_FIELDS.filter((k) => k in fields);
     if (attempted.length === 0) return;
@@ -2154,6 +2213,228 @@ export class SterlingTools {
         ...this.citedIdWarnings(replace),
         ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
       ],
+    };
+  }
+
+  /**
+   * knowledge_array_remove — the DELETE verb the append/edit family never had
+   * (board 39673f6a, article `knowledge-array-element-removal`).
+   *
+   * knowledge_append only ADDS to files[]/history/current_ac; knowledge_edit's
+   * `arr[key=value].sub` selector replaces one STRING inside one element but
+   * cannot remove the element. So dropping a single stale path meant a
+   * knowledge_update retransmitting the whole array — exactly the shape that
+   * produced a measured silent-truncation incident (recorded in a consuming
+   * project's store): the write succeeds and the article quietly loses
+   * entries nobody re-sent. The
+   * asymmetry was the smell: append is protected from retransmission, edit is
+   * protected from retransmission, and removal — the one operation that
+   * DESTROYS content — was the one demanding you re-send everything correctly.
+   *
+   * SAME SELECTOR GRAMMAR, ONE LEVEL SHORTER: `arr[key=value]` with no trailing
+   * `.sub`, because the whole matched element goes, not one of its strings. A
+   * destroying operation with its own bespoke addressing form is how a wrong
+   * target gets selected, so this reuses knowledge_edit's grammar rather than
+   * inventing a second one — and its refuse-on-any-count-but-one contract.
+   *
+   * EXACT FULL ID ONLY. Every path that DESTROYS demands the exact full id
+   * (anti-pattern `no-bounded-trail-guard-for-destructive-addressing`, severity
+   * block — the collision-guard design that tried to make a forgiving form safe
+   * was retracted the same day it shipped). An unambiguous 8-char prefix
+   * resolves fine on knowledge_get/knowledge_update, whose worst case is a
+   * recoverable edit; here the worst case is content gone from an array too
+   * large to have read in full, so the ladder stops at the door.
+   *
+   * VERSIONED, and expected_version is REQUIRED rather than optional: the
+   * caller of a destroy states which version it read, and a stale token refuses
+   * naming BOTH versions instead of silently removing an element from a body
+   * the caller never saw.
+   */
+  knowledgeArrayRemove(
+    id: string,
+    selector: string,
+    expectedVersion: number,
+    resolves?: string[]
+  ): { record: DurableRecord; removed: { selector: string; element: unknown }; warnings: string[] } {
+    // EXACT FULL ID ONLY — checked FIRST, before any lookup, so a prefix is
+    // refused on its SHAPE and never gets the chance to resolve to something.
+    if (!SterlingTools.FULL_UUID_RE.test(id)) {
+      throw new Error(
+        `knowledge_array_remove: '${id}' is not a full uuid — this call DESTROYS an array element, so it addresses records by their EXACT ` +
+          `full id only (no slug, no 8-char citation prefix), even though knowledge_get, knowledge_update and knowledge_edit resolve all three. ` +
+          `An abbreviation whose worst case is a recoverable edit is not the same abbreviation on a call that removes content you may not be able ` +
+          `to re-read; that is why the full id is required here (anti-pattern no-bounded-trail-guard-for-destructive-addressing). ` +
+          `Re-read the record with knowledge_get and re-issue with its full uuid; nothing was written.`
+      );
+    }
+    const old = this.store.get(id);
+    if (!old) {
+      throw new Error(
+        `knowledge_array_remove: no record '${id}' — this tool matches the EXACT full uuid only (no slug, no 8-char citation prefix), ` +
+          `because it destroys content. Look the record up with knowledge_get and re-issue with its full uuid; nothing was written.`
+      );
+    }
+    this.refuseStaleAddress(old, id, 'knowledge_array_remove');
+    // expected_version is REQUIRED here (it is optional on knowledge_update):
+    // a destroy states what it read, or it is not a conditional write at all.
+    // INVALID ARGUMENT, not a CAS conflict — and it is checked HERE rather than
+    // left to server.ts's `.int().positive()`, because this method is directly
+    // callable and a guarantee that exists only at the MCP surface is not a
+    // guarantee of the method. The two refusals are deliberately distinct: no
+    // record is ever at version 0, -1 or 1.5, so calling a garbage token a
+    // "version conflict" would teach the caller to retry with the current
+    // version when the real fix is to pass a real token.
+    if (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 1) {
+      throw new Error(
+        `knowledge_array_remove: 'expected_version' is REQUIRED and must be a positive integer (got ${String(expectedVersion)}) — pass the ` +
+          `version you read, so a removal can never land on a body you never saw. This is an invalid argument, not a stale token: no record is ` +
+          `ever at version 0 or below, so re-reading the record will not help until a real version is supplied. Nothing was written.`
+      );
+    }
+    const currentVersion = (old as unknown as { version?: number }).version;
+    // A record carrying NO stored version cannot satisfy the CAS contract that
+    // `expected_version` exists to provide: there is nothing for the stated
+    // token to be checked against, so ANY token — right, wrong or invented —
+    // would be accepted, which is precisely the outcome the required token is
+    // there to forbid. Skipping the check on a DESTROYING call is therefore the
+    // one thing that must not happen; an unversionable record is not
+    // destroyable through this door.
+    if (currentVersion === undefined) {
+      throw new Error(
+        `knowledge_array_remove: record '${id}' carries no stored version, so this destroying removal is REFUSED — 'expected_version' is a ` +
+          `conditional-write token and an unversioned record cannot be version-checked against it: any token at all would be accepted, which is ` +
+          `exactly the guarantee the required token exists to provide. Nothing was written; repair the record's version before removing from it.`
+      );
+    }
+    if (expectedVersion !== currentVersion) {
+      throw new Error(
+        `knowledge_array_remove: version conflict — the caller supplied expected_version ${expectedVersion} but record '${id}' is at version ` +
+          `${currentVersion}: it moved while you held it. Nothing was written; re-read the record and retry against version ${currentVersion}.`
+      );
+    }
+    // `arr[key=value]` — knowledge_edit's grammar minus the `.sub` tail.
+    const parsed = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]$/.exec(selector);
+    if (!parsed) {
+      throw new Error(
+        `knowledge_array_remove: selector '${selector}' is not of the form arr[key=value] (e.g. "files[path=scripts/prep.mjs]") — removal takes ` +
+          `the WHOLE matched element, so it carries NO trailing '.sub'; that longer form is knowledge_edit's in-place string edit. Nothing was written.`
+      );
+    }
+    const [, base, key, value] = parsed;
+    // Both refusals name THIS tool: a caller mistyping a base field on a
+    // knowledge_array_remove call was previously told "knowledge_update:",
+    // sending them to read the wrong tool's contract.
+    this.refuseServerOwnedFields({ [base]: [] }, 'knowledge_array_remove');
+    this.refuseUnknownFields(old.type, { [base]: [] }, 'knowledge_array_remove');
+    const arr = (old as unknown as Record<string, unknown>)[base];
+    if (!Array.isArray(arr)) {
+      throw new Error(
+        `knowledge_array_remove: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector ` +
+          `addresses array elements. Nothing was written.`
+      );
+    }
+    // SCALAR-DISCRIMINATOR RULE, checked across the WHOLE array before any
+    // matching is trusted: `String(el[key]) === value` compares a non-scalar
+    // value LOSSILY (an object stringifies to "[object Object]", an array to
+    // a comma-joined list), so a key that any element owns as an object or
+    // array is unsound to address elements by — even for an element that
+    // itself holds the key as a clean scalar, because the destroy is keyed on
+    // the selector's KEY, not on any one element's value. Scanned over every
+    // element that OWNS the key with a defined value (absent/undefined stays
+    // a plain non-match, covered by the zero-match refusal below), so the
+    // refusal fires regardless of whether the naive string comparison would
+    // have produced a match.
+    const nonScalarOwners = arr.filter((el) => {
+      if (!el || typeof el !== 'object') return false;
+      const rec = el as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
+      return typeof rec[key] === 'object';
+    });
+    if (nonScalarOwners.length > 0) {
+      throw new Error(
+        `knowledge_array_remove: selector key '${key}' is not a scalar discriminator on ${old.type}.${base} — ${nonScalarOwners.length} ` +
+          `element(s) own '${key}' with a non-scalar (object, array, or null) value. knowledge_array_remove addresses elements by scalar discriminators ` +
+          `only (string, number, or boolean): a non-scalar value compares lossily via String() and can turn an unrelated element into a false ` +
+          `match or hide a true one. Nothing was written.`
+      );
+    }
+    // OWNERSHIP FIRST, then value. `String(el[key]) === value` alone reads an
+    // ABSENT key as the string 'undefined', so `[anykey=undefined]` matched
+    // every element LACKING that key — on a destroying call that turns "this
+    // property does not exist" into "delete this element". The fix is an
+    // ownership test, NOT a ban on the token `undefined` (an element whose
+    // value genuinely IS the string "undefined" stays selectable) and NOT a
+    // ban on optional keys (a present optional key stays selectable by its
+    // real value). A missing key simply matches nothing, so the outcome is
+    // zero matches and the refusal below already covers it.
+    const hits = arr.filter((el) => {
+      if (!el || typeof el !== 'object') return false;
+      const rec = el as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
+      return String(rec[key]) === value;
+    });
+    if (hits.length !== 1) {
+      throw new Error(
+        `knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, ` +
+          `nothing was written. ` +
+          (hits.length === 0
+            ? `Confirm the ${key} value against the live array.`
+            : `A blind delete inside an array too large to read is exactly the unreviewable write this grammar exists to prevent — select on a key whose value is unique in the array.`)
+      );
+    }
+    // THE SCHEMA FLOOR, mirrored from knowledge_split's own refusal: a
+    // feature_article must retain at least one owned file. featureArticleSchema
+    // does not put .min(1) on files[], so an empty array would validate and the
+    // article would silently become un-ownable territory — the floor has to be
+    // stated here, as knowledge_split states it, and for the same reason (full
+    // donation is retire-and-replace, rejected by decision 8b87efcb).
+    if (old.type === 'feature_article' && base === 'files' && arr.length === 1) {
+      throw new Error(
+        `knowledge_array_remove: this would remove the LAST entry of feature_article.files — the article must retain at least one owned file ` +
+          `(an empty files[] leaves the code it describes unowned; emptying an article is retire-and-replace, not a removal, and knowledge_split ` +
+          `refuses a full donation for the same reason). Nothing was written.`
+      );
+    }
+    // THE AUDIT-TRAIL FLOOR — A POLICY FLOOR, NOT A SCHEMA FACT. Stated
+    // precisely because the first version of this comment got it wrong and an
+    // independent security review caught it: `featureArticleSchema` puts NO
+    // `.min(1)` on `history`, a `history: []` article parses, and there is a
+    // green test proving exactly that (packages/schemas/src/tests/schemas.test.ts
+    // ~:593). So the earlier claim that "no record is born without history" was
+    // FALSE, and a maintainer who checked the schema would have found the
+    // rationale contradicted and been entitled to delete this floor.
+    //
+    // The floor stands on POLICY instead, which is the stronger ground anyway:
+    // `history` is the record's own account of what happened to it, and
+    // anti-pattern no-bounded-trail-guard-for-destructive-addressing rests its
+    // whole protection on that trail surviving — so a destroying call able to
+    // empty it is that anti-pattern's root case, not an exception to it.
+    //
+    // The asymmetry with current_ac and live_test_refs is deliberate and rests
+    // on a DIFFERENT footing, which is schema-real: both are routinely BORN
+    // empty, so a removal returning one to a birth-legal state is refused by
+    // nothing. History being schema-legal-empty too is why this floor must be
+    // justified as policy rather than smuggled in as a schema consequence.
+    if (base === 'history' && arr.length === 1) {
+      throw new Error(
+        `knowledge_array_remove: this would remove the LAST entry of ${old.type}.history — the record must retain at least one history entry ` +
+          `(history is the record's audit trail; a destroying call that can empty it is the root case of anti-pattern ` +
+          `no-bounded-trail-guard-for-destructive-addressing, whose whole protection rests on that trail surviving). The selector DID match — ` +
+          `this is the floor refusing, not a failed selection. Nothing was written.`
+      );
+    }
+    const el = hits[0];
+    // Filter by IDENTITY, not by re-testing the predicate: the surviving
+    // elements are the same object references in their original order, so
+    // nothing is reordered, renormalised, or re-serialised on the way through.
+    const nextArr = arr.filter((e) => e !== el);
+    const { record } = this.splitSameSubject(
+      this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, expectedVersion, 'knowledge_array_remove')
+    );
+    return {
+      record,
+      removed: { selector, element: el },
+      warnings: [...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
     };
   }
 
@@ -4830,6 +5111,50 @@ export class SterlingTools {
 
   // -- board (§3.2.7) ----------------------------------------------------------
 
+  /**
+   * A RE-CHECKABLE REFERENCE, in any one of the accepted forms (board fd0e0907,
+   * article `board-add-evidence-notice`).
+   *
+   * A board item states its EVIDENCE, not its conclusion: "the view faces one
+   * fixed direction (camera.gd:1591 writes an identity basis)" can be re-checked
+   * in one grep; "the facing is broken" cannot, and rots invisibly. MEASURED in
+   * a consuming project (2026-08-28): of eight open defects re-audited, two were
+   * already fixed and three had changed shape — 5 of 8 wrong, and none of it
+   * failed loudly; it failed by sending a session at work that did not need
+   * doing.
+   *
+   * ANY ONE FORM SUFFICES, and the notice therefore fires only on the absence of
+   * ALL of them together. The signal is deliberately NOT "contains a number" —
+   * the board item names that heuristic as too weak, because dates, ids and
+   * priorities are all numbers. What counts is something a later reader can go
+   * and CHECK.
+   *
+   * DELIBERATELY GENEROUS. A noisy advisory gets ignored, and the true positive
+   * goes with it, so every form here errs toward ACCEPTING the text: a false
+   * alarm costs the author's trust in the whole channel, while a missed
+   * evidence-free item costs one un-warned write.
+   */
+  private hasCheckableEvidence(text: string): boolean {
+    return [
+      // a repo-relative path — a token carrying a separator and an extension
+      /[\w.-]+\/[\w./-]*\.\w{1,8}\b/,
+      // a path with a line number (the canonical form the contract quotes)
+      /[\w.-]+\.\w{1,8}:\d+/,
+      // a double-quoted literal, quoted from code or output
+      /"[^"\n]+"/,
+      // a backticked literal
+      /`[^`\n]+`/,
+      // a measured number carrying a unit or a counted noun (never a bare digit)
+      /\b\d[\d,]*(\.\d+)?\s*%/,
+      /\b\d[\d,]*(\.\d+)?\s+[A-Za-z]{3,}/,
+      // a spelled-out count with the thing counted — the AC's worked example
+      // ("three commits") is exactly this shape
+      /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)\s+[A-Za-z]{3,}/i,
+      // a record id, or the 8-char citation prefix this repo cites by
+      /\b[0-9a-f]{8}\b/,
+    ].some((re) => re.test(text));
+  }
+
   boardAdd(args: Record<string, unknown>): CreateResult & { notice?: string } {
     const { text, source, objective, measured_at_head, ...rest } = args;
     // Objective grouping (decision a8d2ce6c): a grouping key for the human's
@@ -4880,6 +5205,26 @@ export class SterlingTools {
       // caller identity, so a refusal could lose a user-stated task).
       notices.push(
         `objective undeclared — saved as standalone; if this task is a slice of a larger objective, set it via board_update {objective: "<name>"}`
+      );
+    }
+    // EVIDENCE, NOT CONCLUSION (board fd0e0907). A NOTICE, NEVER A REFUSAL:
+    // some legitimate items genuinely have no file evidence yet — a design
+    // question, a user ruling to obtain, a coordinating parent — and a refusal
+    // would force either ceremony or a fake citation, both worse than the gap.
+    // It also has to be a notice for the same reason the objective default is:
+    // the server has no caller identity, so refusing could lose a user-stated
+    // task outright. Write time is the only cheap moment to fix this — the
+    // author is still holding the evidence they are about to omit.
+    //
+    // USER ITEMS ONLY (AC4): the maintenance queue is mechanism-minted and
+    // carries a registered system_reason, not prose evidence. Noticing it would
+    // fire on every enqueue forever, which is how a channel gets ignored.
+    if (source === 'user' && !this.hasCheckableEvidence(String(text ?? ''))) {
+      notices.push(
+        `no checkable evidence in this item's text — it reads as a CONCLUSION rather than the evidence for one, so a later reader cannot re-check ` +
+          `it and it will rot invisibly (measured: of eight defects re-audited in one consuming project, 5 of 8 were wrong at HEAD). ` +
+          `Quote the deciding reference: a file:line citation such as src/foo.ts:42, a repo-relative path, the literal string you saw, ` +
+          `a measured count, or the id of the record this concerns. The item WAS saved — fix it in place with board_edit.`
       );
     }
     // NO HANDLE COULD BE DERIVED — SAY SO (review finding 3, 2026-08-29). The
@@ -4983,6 +5328,95 @@ export class SterlingTools {
     return chain;
   }
 
+  /**
+   * PARALLEL-LANE SEED — derive `lane_advisory` from the FULL MATCHED SET.
+   *
+   * Deliberately fed `matching`, never the post-cap `records` window: a
+   * collision the caller's cap happens to split across two pages is exactly the
+   * collision most likely to be missed by hand, so scanning the page would make
+   * the advisory least useful precisely where it is most needed.
+   *
+   * `file_keys` is read as a proxy for a slice's WRITE-SET. That proxy was
+   * MEASURED before this shipped (2026-08-29, 14 sampled open user items / ~29
+   * entries): all but ~2 entries were write targets, the exceptions being paths
+   * an item named as the mechanism to derive FROM. So false collisions from
+   * read-only entries are rare; and because this never denies anything, a false
+   * collision costs a line of prose rather than a serialized lane. The blast
+   * radius of the proxy being wrong is bounded BY the advisory-only design.
+   *
+   * Returns undefined — not an empty block — when nothing collides: an empty
+   * advisory is a claim ("checked, nothing found") this cannot honestly make
+   * for items that declare no file_keys at all, and absence keeps the envelope
+   * silent on a board with nothing to say.
+   */
+  private laneAdvisory(matching: DurableRecord[]): LaneAdvisory | undefined {
+    // AC4: system-source items are maintenance debt drained by an artifact-write,
+    // not parallel work — they never join a group, so maintenance_query (all
+    // system) never carries this key.
+    const userItems = matching.filter((r) => (r as unknown as { source?: string }).source === 'user');
+    // path -> the user items declaring it, in `matching` order (updated_at DESC).
+    const byPath = new Map<string, DurableRecord[]>();
+    for (const item of userItems) {
+      const keys = (item as unknown as { file_keys?: unknown }).file_keys;
+      if (!Array.isArray(keys)) continue;
+      // Dedupe WITHIN one item: a path listed twice by one item is not a
+      // collision with itself.
+      for (const path of new Set(keys.filter((k): k is string => typeof k === 'string' && k.length > 0))) {
+        const bucket = byPath.get(path);
+        if (bucket) bucket.push(item);
+        else byPath.set(path, [item]);
+      }
+    }
+    // Merge paths sharing the IDENTICAL item set into one group — that is what
+    // makes `paths` plural. Five slices that all write the same hook AND the
+    // same test file read as one collision, not two.
+    const groups = new Map<string, { paths: string[]; items: DurableRecord[] }>();
+    for (const [path, items] of byPath) {
+      if (items.length < 2) continue; // AC1: two or more, or it is not a collision
+      const key = items.map((i) => (i as unknown as { id: string }).id).join(' ');
+      const group = groups.get(key);
+      if (group) group.paths.push(path);
+      else groups.set(key, { paths: [path], items });
+    }
+    if (groups.size === 0) return undefined; // AC3: absent, never an empty block
+    const collisions: LaneCollision[] = [...groups.values()]
+      .map((g) => ({
+        paths: [...g.paths].sort(),
+        // AC7: name first, id retained — never a bare id in front of a human.
+        items: g.items.map((i) => {
+          const rec = i as unknown as Record<string, unknown>;
+          return { id: String(rec.id), name: SterlingTools.boardItemName(rec) };
+        }),
+      }))
+      // Deterministic and useful: the widest collision first, ties broken on the
+      // first path so the order never depends on Map insertion order.
+      .sort((a, b) => b.items.length - a.items.length || (a.paths[0] < b.paths[0] ? -1 : a.paths[0] > b.paths[0] ? 1 : 0));
+    return {
+      serialized_lane: 'implementation',
+      parallel_safe_lanes: ['read_only_scoping', 'test_authoring'],
+      collisions,
+    };
+  }
+
+  /**
+   * A board item's human-readable name: its slug, or — for a legacy slugless
+   * item — its clipped headline, which IS the item's title in practice (board
+   * text opens with an all-caps statement of the finding). Deliberately more
+   * forgiving than headlineRecord's slug-or-nothing rule: that surface prints a
+   * name BESIDE a field the reader can already see, whereas a collision group's
+   * whole job is to let a human recognise which items collide, and a group of
+   * bare uuids is the unanswerable-question failure this rule exists to close.
+   */
+  private static boardItemName(rec: Record<string, unknown>): string {
+    const slug = typeof rec.slug === 'string' ? rec.slug.trim() : '';
+    if (slug) return clipName(slug);
+    const text = typeof rec.text === 'string' ? rec.text : '';
+    const headline = text.split('\n').find((line) => line.trim().length > 0)?.trim() ?? '';
+    // Last resort only — an item with neither slug nor text should not exist,
+    // and a marker beats an empty string that reads as a missing field.
+    return headline ? clipName(headline) : '(unnamed board item)';
+  }
+
   boardQuery(filter: BoardFilter = {}): DurableRecord[] {
     const offset = filter.offset ?? 0;
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
@@ -5035,6 +5469,10 @@ export class SterlingTools {
     // this keeps the annotation visible through whichever projection the
     // caller asked for without adding a wire field no projection declares).
     const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    // PARALLEL-LANE SEED: derived from `matching` (the FULL matched set), NOT
+    // from `records` — see laneAdvisory. Advisory only: it is computed after
+    // `records` is already fixed and never touches it.
+    const lane_advisory = this.laneAdvisory(matching);
     const projectRecord = (r: DurableRecord): Record<string, unknown> => {
       const base =
         projection === 'headline'
@@ -5058,7 +5496,11 @@ export class SterlingTools {
       capped,
       offset,
       provenance,
+      // AC3: the key is ABSENT when nothing collides, never an empty block.
+      ...(lane_advisory ? { lane_advisory } : {}),
       ...(notes.length ? { note: notes.join('; ') } : {}),
+      // AC6: unchanged, unfiltered, unreordered — the advisory above is derived
+      // FROM this page's matched set and never acts on it.
       records: records.map(projectRecord),
     };
   }

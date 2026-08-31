@@ -1,16 +1,19 @@
-// H17 — dual-mode Bash write-sweep (v3.1 hardened hybrid). Decision 2422e76a.
+// H17 — dual-mode Bash write-sweep (v6.0: detect-deny-latch tripwire; born v3.1
+// as a restore-and-deny boundary, decision 2422e76a).
 // Registered on the coder frontmatter's Bash PreToolUse (baseline snapshot) AND
-// PostToolUse (verify + restore). Closes the H14 `node --test <writer>` arbitrary
+// PostToolUse (verify: detect + deny + latch — nothing restores since v6.0).
+// Closes the H14 `node --test <writer>` arbitrary
 // -write bypass (decision f404dfb4): after an agent Bash command it detects any
 // write to
-//   (A) TRACKED files — via `git status --porcelain -z` (HEAD-anchored restore);
+//   (A) TRACKED files — via `git status --porcelain -z` (compared against the
+//       per-call Pre-state snapshot; violations denied + latched, bytes left);
 //       a VIOLATION iff isEnforcementSurface(rel) || matchesGlob(rel,'hooks/**')
 //       OR (run+brief resolvable AND scopeCheck({brief,rel}).deny);
 //   (B) the gitignored BASELINE set — `.claude/agents/**` + `.sterling/config.json`
 //       + `.claude/settings*.json` (v3.1; NOT sterling.db), snapshotted Pre to
 //       os.tmpdir()/sterling-enforce-<runId>.json and diffed Post.
 // v3.1 UNIVERSAL FAIL-CLOSED: during an active agent run ANY unexpected error
-// (missing/corrupt baseline, restore fs-error, store/git throw, brief-unresolvable)
+// (missing/corrupt baseline, fs-error, store/git throw, brief-unresolvable)
 // DENIES (exit 2), NEVER a non-blocking exit 1. Non-deny only: no agent_id
 // (conductor) → allow; no active run (L2) → baseline + always-set (surface|hooks/**).
 // v3.2 (decision h17-stamp-honor-loud-restore, 4d9b76e8): FIX-A — before an
@@ -115,10 +118,43 @@
 // can emulate any fd number a probe samples, but it cannot fabricate a kernel
 // filesystem magic (residual 1). (3) Residual 2 — repo-root authentication — is
 // OUT OF THE THREAT MODEL and closed by disclosure, not mechanism (decision
-// h17-repo-root-authentication-is-out-of-scope). S3 (git read-blob restore),
-// S4 ((B) detect-and-deny) and S5 (Pre-snapshot atomicity) are the remaining
-// slices and are NOT in this file yet; restoreTracked's in-HEAD `git checkout`
-// arm is the one primitive still resolved by pathname, and it is S3's to close.
+// h17-repo-root-authentication-is-out-of-scope). S4 ((B) detect-and-deny) and S5
+// (Pre-snapshot atomicity) were the remaining slices when this was written; S4
+// landed as v5.0 below.
+// v3.10 SLICE 3 of the same redesign — THE LOCK-FREE READ-BLOB RESTORE (Ruling A
+// of 532a4383, plus the index-consequence arm of decision fd549420). The LAST
+// primitive still resolved by pathname is gone: `restoreTracked`'s in-HEAD arm no
+// longer invokes `git checkout HEAD -- <rel>`. It resolves the HEAD tree entry
+// NUL-safely (`ls-tree -z` + `--literal-pathspecs`), ACCEPTS ONLY regular-file
+// modes (a symlink/gitlink/tree entry refuses loudly and materializes nothing),
+// reads the raw blob (`cat-file blob <oid>`) and writes it through the Slice 2
+// descriptor-pinned primitives, restoring the executable bit BY FD. Every git
+// call on the path is READ-ONLY, so nothing takes `.git/index.lock` — which was
+// the SECOND, measured motivation (fan-out contention was making a correct gate
+// fail closed on an unrelated lock). THE INDEX IS THEREFORE NOT REPAIRED, and is
+// NOT misreported: a path whose index entry still differs from HEAD after the
+// worktree restore is DENIED with that disposition NAMED (`indexUnrepaired`), and
+// index repair stays a conductor-controlled serialized operation. Full reasoning,
+// the `git checkout` gravestone and the disclosed .gitattributes caveat sit at
+// the Slice 3 block above `restoreTracked`.
+// v3.10a — INDEPENDENT SECURITY REVIEW OF THE ABOVE, same day, four findings
+// folded in before the slice was committed. The HIGH was an S3 REGRESSION and is
+// the one to remember: replacing `git checkout` with a truncate-in-place write
+// reopened a content-safety hole that checkout had closed by accident of shape,
+// because checkout UNLINKED AND RECREATED and truncate-in-place does not — a
+// HARDLINK planted at a tracked enforcement path made the restore overwrite an
+// arbitrary out-of-repo file. THE LESSON, recorded because it generalises past
+// this file: the whole S1-S3 threat model is about NAME RESOLUTION (symlinks,
+// ancestor swaps, pathspec magic), and a hardlink defeats it by not using a name
+// — descriptor pinning constrains which NAME resolves to which object, and says
+// nothing about how many names an object has. The (A) restore now unlinks before
+// it creates; the residual claim that overstated this is corrected at its own
+// site in the Slice 2 residual list; and the (B) restore's `writeUnder` path
+// still truncates in place, which is a PRE-EXISTING exposure this slice neither
+// introduced nor closed, named there and reported to the conductor.
+// THAT LAST CLAUSE IS HISTORICAL AS OF S4 (2026-08-29) — read the v5.0 paragraph
+// below before trusting it: the (B) truncate-in-place exposure was REPRODUCED LIVE
+// and is now closed by DELETING the primitive, not by hardening it.
 // v4.0 (USER RULING 2026-08-27) — THE (B) ADDITION ARM NO LONGER DELETES. A file
 // that appears in protected (B) territory with no entry in this call's Pre
 // baseline is DENIED and REPORTED, and it SURVIVES ON DISK BYTE-IDENTICAL.
@@ -128,14 +164,40 @@
 // cost: a real plant stays on disk until a human takes it off. Everything the
 // v3.5 paragraph above says about "the (B) delete arm" is therefore HISTORICAL —
 // `removeUnder`/`removeFileAt` are deleted, not merely uncalled (gravestones at
-// their old sites), and the only delete primitive left in this file is
-// `removeTreeAt`, reachable ONLY from `restoreTracked`. THE RESTORE ARMS ARE
-// UNCHANGED: a modified/deleted baselined file still has its bytes put back,
-// because a recorded pre-image (and, on the (A) side, HEAD) is a recoverable
-// source of truth that an ADDITION by definition lacks. Additions are reported
-// through their own `unauthorizedAdditions` list with their own wording — never
-// through `violations`, whose text says "reverted" and would be a false action
-// claim (anti-pattern 586bccdc).
+// their old sites), and the only delete primitive left in this file was
+// `removeTreeAt`, reachable ONLY from `restoreTracked` (both deleted at v6.0 —
+// no delete primitive remains at all). THE (B) RESTORE ARMS ARE
+// UNCHANGED BY *THIS* RULING: a modified/deleted baselined file still has its bytes
+// put back, because a recorded pre-image (and, on the (A) side, HEAD) is a
+// recoverable source of truth that an ADDITION by definition lacks. Additions are
+// reported through their own `unauthorizedAdditions` list with their own wording —
+// never through `violations`, whose text says "reverted" and would be a false
+// action claim (anti-pattern 586bccdc).
+// THE SENTENCE ABOVE ABOUT THE (B) RESTORE ARMS IS SUPERSEDED — see v5.0. It is
+// left standing rather than rewritten because it records what v4.0 decided and WHY
+// it stopped where it did; only v5.0 changed that verdict, and on evidence v4.0
+// did not have.
+// v5.0 (S4, 2026-08-29) — THE (B) SURFACE IS NOW DETECT-AND-DENY IN FULL, so the
+// restore/addition ASYMMETRY v4.0 preserved is gone: RULING D of decision
+// h17-baseline-integrity-redesign-rulings-abcd (532a4383), refined by
+// h17-ruling-d-needs-a-b-enumerating-stamp-producer-and-stamp-invalidation
+// (fac9a69b). A changed (B) path is ALLOWED only where a TRUSTED conductor stamp
+// entry attests its CURRENT bytes; otherwise it is DENIED and LEFT EXACTLY AS THE
+// COMMAND LEFT IT. WHAT CHANGED THE VERDICT, because v4.0's asymmetry argument was
+// sound on its own terms: the (B) pre-image is NOT the recoverable source of truth
+// that sentence assumes — it lives in an os.tmpdir() record the audited command can
+// itself write, unlike HEAD on the (A) side — and the restore primitive wrote by
+// TRUNCATING IN PLACE, so a (B) path replaced by a hardlink to an outside file made
+// the "restore" land baseline bytes on a file outside the repository (reproduced
+// live by the S4 red bar, board 59765a46). `writeUnder` is DELETED, not merely
+// uncalled (gravestone at its old site), so the (B) stage now holds NO write and NO
+// delete primitive at all. (B) modify/delete findings are reported through their own
+// `baselineDenied` list with "denied, left in place" wording, for exactly the reason
+// additions are — `violations` claims a rollback that no longer happens.
+// THE STAMP ITSELF IS NOW PROTECTED, which it previously was not by anything: it is
+// witnessed at Pre and re-witnessed at Post, an in-window change DENIES, and the
+// stamp is DELETED (invalidated) so a forgery cannot be adopted by the next Pre.
+// The integrity check is ORDERED BEFORE every exemption consult in the same Post.
 // v4.1 (2026-08-27, outside-family review of v4.0 — CONFIRMED HIGH): DELETING
 // THE (B) ADDITION ARM'S UNLINK WAS NOT STRUCTURALLY SUFFICIENT. The (B) surface
 // has a SECOND route into this hook, and it runs EARLIER. `git add -f
@@ -161,18 +223,86 @@
 // IS UNTOUCHED: in-HEAD means git holds the bytes, so reverting is recoverable
 // and stays. The dangerous intersection is NOT-IN-HEAD ∧ (B)-SURFACE, and that
 // is exactly what the two layers cut out.
+// v6.0 (S3 of the de-complication campaign, 2026-08-30) — THE (A) RESTORE IS
+// DELETED. Decisions dc616f69 (the (A) arm stops restoring) and 78dc9bd6 (H17
+// demotes from security boundary to TRIPWIRE), user-ruled 2026-08-30. Authorship
+// is UNPROVABLE in a same-UID shared worktree — `agent_id` labels the hook
+// EVENT, never the filesystem bytes written while it was open — so a destructive
+// rollback on unprovable attribution could always clobber a conductor's
+// concurrent uncommitted work; no heuristic narrowing fixes possibility, only
+// probability. An in-window change on a clean-at-Pre path is now DETECTED,
+// DENIED and LATCHED (the same eager latch the (B) triggers use, so the next Pre
+// blocks before it can adopt the surviving bytes), and the bytes are LEFT ON
+// DISK exactly as the command wrote them. GONE, not uncalled: `restoreTracked`,
+// `materializeHeadBlob`, `headTreeEntry`, `assertRestorableHeadEntry`,
+// `headBlobBytes`, `indexDispositionAgainstHead`, `removeTreeAt`,
+// `writeRegularAt`, `mintRestorePerformed` (the `restore_performed` maintenance
+// lane is no longer minted; its schema enum survives so existing records stay
+// readable, dc616f69 R12). The (A)-side stamp exemptions died with the restore
+// (dc616f69 R11: a same-UID-forgeable stamp may explain a finding, never exempt
+// one); the remaining (B)/pre-existing stamp apparatus follows in S4. This file
+// now holds NO primitive that writes, deletes or restores a repo path — its only
+// in-repo mutations are the create-only taint latch and the best-effort stamp
+// invalidation. Every earlier paragraph's present-tense "restore"/"revert"
+// language is HISTORICAL as of this version.
+// v7.0 (S4 of the de-complication campaign, 2026-08-30) — THE ENFORCEMENT STAMP
+// AND ITS WHOLE ATTESTATION APPARATUS ARE DELETED, AND A PERSISTENT (B) BASELINE
+// HASH LIST TAKES OVER AS THE (B) COMPARATOR. Decisions
+// h17-demotes-to-tripwire-with-minimal-b-hash-list (78dc9bd6, user-ruled) and
+// b-baseline-hash-list-concrete-design (fe861066, two-round sparred).
+// EVERY PRESENT-TENSE MENTION OF A STAMP IN THE PARAGRAPHS ABOVE IS HISTORICAL AS
+// OF THIS VERSION — v3.2's FIX-A, v3.3's step (2), v3.4's finding (2)/(3), v5.0's
+// "ALLOWED only where a TRUSTED conductor stamp entry attests its CURRENT bytes"
+// and its stamp-witness paragraph. None of it survives.
+// GONE, not uncalled: `stampRel`, `stampWitnessFile`, `stampCouldAttest`,
+// `readStampSnapshot`, `readStampAt`, `readStampFromFd`, `stampWitness`,
+// `invalidateStamp`, `verifyStampAttestation`, `stampAttestsCurrentBytes`,
+// `stampBaselineManifest`, `stampAttestsDirectory`, `isDirectoryAt`,
+// `lstatKindUnder`, `sha256OfRegularFile`, `assertRealAncestors` (retained-uncalled
+// since v6.0, and S4 is the slice that owned the judgment on it), the
+// `stampTrusted`/`stampTampered`/`stampInvalidated` state with its
+// `observeStampTamper` producer and `stampAttestsPath` gate, the RULING-4
+// exact-manifest block, the pre-existing stamp exemption, and
+// `scripts/enforcement-stamp.mjs` itself. H1's unconditional SessionStart deletion
+// of the stamp went with it — and was NOT repointed at the new list, which is
+// persistent by design.
+// WHY: hook and audited command run as the SAME UID with no privilege boundary
+// (research_finding 79942bda), so every conductor-only attestation is forgeable by
+// the actor it constrains. Keeping the stamp even as a false-positive damper
+// preserves exactly the theatrical trust mechanism that finding killed — a
+// forgeable token MAY EXPLAIN A FINDING, NEVER EXEMPT ONE. So H17 stops claiming
+// to be a security boundary and is a TRIPWIRE: detect, deny, latch, leave the
+// bytes on disk.
+// WHAT REPLACES IT, and the difference is the whole design: `.sterling/
+// enforcement-baseline.json` — {version:1, minted_at (diagnostic only), entries:
+// sorted [{path, sha256}]} — minted ONLY by the conductor-gated clearer
+// (scripts/enforcement-reconcile.mjs), never by this hook and never at
+// SessionStart. It is compared set-exactly against the live (B) surface on every
+// gated Post, INDEPENDENT of store health and of every per-call record, early
+// enough that no later hard-exit denial can preempt it. ABSENT -> skipped with a
+// one-line degraded-loud notice (bootstrap reality; the accepted, documented
+// weakness is that cross-call coverage is then disabled and H17 cannot tell
+// "never enrolled" from "evidence taken off disk"). MALFORMED -> deny AND latch,
+// because deny-only launders: remove the malformed file and the next call sees
+// ABSENT, skips, and adopts. MISMATCH -> deny AND latch. EXACT -> nothing at all;
+// never an early allow, never the suppression of another finding.
+// THE ASYMMETRY THAT MAKES READING AN AGENT-WRITABLE FILE SAFE: the stamp could
+// REMOVE a finding, so forging it bought an exemption. The list can only ADD one,
+// so forging it buys a louder denial. An actor that rewrites the surface and the
+// list together is a MISSED TRIPWIRE — accepted and stated, not defended against.
+// LATCH TRIGGERS (fe861066 D6) are now `violations` ∪ `changedPreDirty` ∪
+// `baselineDenied` ∪ `unauthorizedAdditions` ∪ `listDenied` — a strict superset of
+// v6.0's; `preExisting` stays denial-only. THE ONLY TRUE VOCABULARY LEFT is
+// observed / denied / latched / left on disk.
 import {
   writeFileSync,
   existsSync,
   rmSync,
-  rmdirSync,
-  mkdirSync,
   readdirSync,
   opendirSync,
   openSync,
   readSync,
   writeSync,
-  ftruncateSync,
   closeSync,
   fstatSync,
   lstatSync,
@@ -183,7 +313,7 @@ import {
 } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { matchesGlob } from '@sterling/schemas';
 import { readStdin, allow, deny, openStore, withRetry, environmentDefectDenial } from './lib/common.mjs';
@@ -194,13 +324,72 @@ import { scopeCheck, isEnforcementSurface } from './lib/contract.mjs';
 const BASELINE_GLOBS = ['.claude/agents/**', '.sterling/config.json', '.claude/settings*.json'];
 const NO_RUN = 'no-run'; // L2 baseline-file discriminator when no active run
 
+// GRAVESTONE — `stampRel()` stood here, naming the conductor's attestation input
+// `.sterling/transient/enforcement-stamp.json` (written by the deleted
+// scripts/enforcement-stamp.mjs). DELETED 2026-08-30 (S4) by decisions
+// h17-demotes-to-tripwire-with-minimal-b-hash-list (78dc9bd6) and
+// b-baseline-hash-list-concrete-design (fe861066). WHY, because a ruling stripped
+// of its justification gets re-opened: hook and audited command share a UID with
+// no privilege boundary (research_finding 79942bda), so a stamp is FORGEABLE by
+// the very actor it was meant to constrain — and a forgeable attestation that can
+// EXEMPT a finding is the theatrical trust mechanism this repo already ruled
+// unenforceable. It may explain a finding; it may never excuse one. The whole
+// apparatus went with it: the witness record, the invalidation, every exemption
+// consult and the exact-manifest block.
+//
+// ITS SUCCESSOR IS BELOW AND IS A DIFFERENT KIND OF OBJECT. The persistent (B)
+// baseline hash list at `.sterling/enforcement-baseline.json` never authorizes:
+// an exact match merely produces NO ADDITIONAL FINDING, and every mismatch (or
+// malformation) produces a first-class deny plus an eager latch. Forging it can
+// therefore only manufacture a louder denial, never a quieter one — the same
+// asymmetry that makes the taint latch safe to leave in an agent-writable place.
+//
+// A FUNCTION, NOT A `const`, AND THAT PLACEMENT IS LOAD-BEARING RATHER THAN
+// STYLISTIC. A module-scope STATEMENT runs at IMPORT — before the deny decision
+// and outside any try whose catch reaches deny() — so
+// scripts/check-failclosed-boundary.mjs counts it as a hole: if it threw, the
+// hook would exit 1, the runner reads non-2 as NON-BLOCKING, and the gate is
+// voided. A string literal cannot realistically throw, but that baseline is a
+// RATCHET THAT ONLY SHRINKS, and its two growth doors are deliberately narrow:
+// raise the exact, test-pinned founding total (reserved for UNJUSTIFIED
+// entries), or add an `admitted` entry REPRINTED ON EVERY RUN FOREVER. Inlining
+// these values into their consumers is the wrong remedy here (the sibling fix in
+// a5a8e81 did that for two single-consumer constants): the list path, its leaf
+// and its byte bound are read from three different functions, and copies of a
+// security-relevant path string are chances for one of them to drift out of step
+// with the others. A hoisted function declaration keeps ONE definition, stays
+// visible everywhere, and is not a top-level statement — same disposition
+// `taintLatchPaths()` already takes.
+//
+// DELIBERATELY NOT UNDER `.sterling/transient/` (fe861066 D1, adopting a Codex
+// round-2 correction): `transient/` is lifecycle-bound throughout this repo, and
+// persistent evidence living under that name invites exactly the H1 SessionStart
+// cleanup arm that made the stamp's cross-session value zero. Also deliberately
+// OUTSIDE `BASELINE_GLOBS` — like the taint latch, the record of the surface must
+// not become part of the surface it describes.
+function baselineListPaths() {
+  return {
+    rel: '.sterling/enforcement-baseline.json',
+    // Bounded like every other record this hook reads back (board 55fcccac
+    // clause 4). The list is ONE {path, sha256} entry per (B) member — a few
+    // hundred bytes each — so 8 MiB is far past any legitimate shape. An
+    // over-budget file is MALFORMED (deny + latch), never a reason to allocate:
+    // a guard that allocates and then measures has already paid the cost it
+    // exists to refuse.
+    maxBytes: 8 * 1024 * 1024,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // THE SHARED SECURE-I/O LAYER — SLICE 1: READ + CLASSIFY (decision 532a4383
 // h17-baseline-integrity-redesign-rulings-abcd, design f2bc631f, platform
 // posture 2a69a8d7). Everything below exists so that a path this hook reads or
 // classifies cannot be REDIRECTED by a symlink swapped in under the gate. The
-// write/delete primitives (S2), the git read-blob restore (S3) and the (B)
-// detect-and-deny stamp manifest (S4) are separate slices and are NOT here.
+// S2 write/delete primitives and the S3 read-blob restore are DELETED as of
+// v6.0 (dc616f69) — only the READ side below survives. v7.0 (S4, 78dc9bd6) then
+// took the stamp's own reads with the apparatus; what remains is shared by the
+// (A) state snapshot, the (B) baseline collection and the persistent (B)
+// baseline-list read.
 //
 // TWO ARMS, ONE FLOW (2a69a8d7):
 //   * LINUX — PREVENTION. Every component is resolved RELATIVE TO A PINNED
@@ -597,30 +786,56 @@ function openLeafNoFollow(abs, extraFlags = 0) {
 //     exchange WHICH ENTRY lives under that leaf name between the classification
 //     and the mutation. The blast radius is bounded to the pinned parent
 //     directory — never outside the repo — but it is not zero.
-//   * A RECURSIVE DELETE PINS EVERY DIRECTORY IT DESCENDS, so it can never be
-//     re-aimed out of the tree; but if a racer RENAMES that directory elsewhere
-//     mid-delete, the pinned descriptor still names the same directory OBJECT
-//     and the delete proceeds against it. Descriptor identity is preserved;
-//     namespace containment is not. Denying untracked-directory restoration
-//     outright would close it, at the cost of a real capability — that is a
-//     conductor decision, not one this layer takes.
-//   * There is NO renameat, so there is no atomic replace: `writeRegularAt`
-//     truncates and rewrites in place. A crash mid-write leaves a partial file
-//     (loud on the next hash), never a file redirected elsewhere.
-//   * restoreTracked's in-HEAD arm still shells out to `git checkout HEAD --
-//     <rel>`, which resolves the path itself, outside every descriptor this
-//     layer holds. That is S3's read-blob rewrite (Ruling A) and stays open here.
+//     CORRECTED 2026-08-29 (independent security review of Slice 3): the
+//     "never outside the repo" half was stated too widely and was FALSE OF THE
+//     WRITE SIDE. Descriptor pinning constrains NAME RESOLUTION; a HARDLINK
+//     bypasses names entirely, so a `writeRegularAt` that TRUNCATES AN EXISTING
+//     ENTRY IN PLACE writes to an inode that may be linked anywhere the user can
+//     read — outside the repo included, with no symlink and no ancestor swap
+//     involved. Scoped honestly rather than softened: it is true of mkdir /
+//     unlink / rmdir (they operate on the NAME, so an exchanged entry costs at
+//     most the wrong entry in THIS directory), and it is NOT true of an in-place
+//     write. The (A) restore closes it by unlinking before it creates (see
+//     `materializeHeadBlob`); the (B) restore's `writeUnder` -> `writeRegularAt`
+//     path STILL truncates in place and so still carries it — a pre-existing
+//     exposure this slice did not introduce and does not close, named here
+//     because a residual list that omits it is the false-claim failure again.
+//     [CLOSED by S4, 2026-08-29 — the (B) half only.] The exposure was REPRODUCED
+//     LIVE (a (B) path hardlinked to an outside victim had the victim's bytes
+//     overwritten by the "restore"), and it is closed by DELETING the aiming site
+//     rather than hardening the primitive: `writeUnder` is gone and the (B) surface
+//     is detect-and-deny, so no (B) path reaches a write at all.
+//     [CLOSED IN FULL by v6.0, 2026-08-30.] `writeRegularAt` itself is now
+//     deleted with the (A) restore (dc616f69), so NO path of any class reaches an
+//     in-place write — this file no longer holds a file-writing primitive.
+//   * [MOOT as of v6.0 — no recursive delete exists any more.] A RECURSIVE
+//     DELETE PINS EVERY DIRECTORY IT DESCENDS, so it can never be re-aimed out
+//     of the tree; but if a racer RENAMES that directory elsewhere mid-delete,
+//     the pinned descriptor still names the same directory OBJECT and the
+//     delete proceeds against it. Descriptor identity was preserved; namespace
+//     containment was not. Resolved by deletion: `removeTreeAt` went with the
+//     restore family (dc616f69).
+//   * [MOOT as of v6.0 — no write primitive exists any more.] There is NO
+//     renameat, so there was no atomic replace: `writeRegularAt` truncated and
+//     rewrote in place. Resolved by deletion, not by hardening.
+//   * [CLOSED by SLICE 3, kept so the residual's history is legible] This bullet
+//     used to read: "restoreTracked's in-HEAD arm still shells out to
+//     `git checkout HEAD -- <rel>`, which resolves the path itself, outside every
+//     descriptor this layer holds." Ruling A removed that call — the in-HEAD arm
+//     now materializes a HEAD blob through `withPinnedParent`/`writeRegularAt`
+//     like every other write here. No primitive in this file resolves a write
+//     target by pathname any more.
 //   * THE CLASSIFY→USE PAIR IS CLOSED FOR READS, AND ONLY FOR READS — stated
 //     precisely because the loose version of this claim ("the lstat/open pair is
 //     gone") was WRONG when first written and a review caught it. Every path that
 //     READS bytes now classifies BY OPENING and reads from that same descriptor:
 //     the (A) state hash, the (B) baseline bytes, the enforcement stamp. What is
-//     NOT closed is the pair on the MUTATING side — `removeTreeAt` (the last
-//     delete primitive in this file) lstats the leaf and then unlinks the NAME,
-//     and `writeUnder`'s
-//     ancestor walk lstats each component before pinning it. Those are the same
-//     bounded exposure the first bullet describes and cannot be closed without
-//     unlinkat/renameat, which Node does not expose.
+//     NOT closed is the pair on the MUTATING side — since v6.0 that means only
+//     the surviving pinned-ancestor walks (`withPinnedParent`, used by the taint
+//     latch and the S4 stamp invalidation — `removeTreeAt` and the restore's
+//     walks are gone with the restore family), which lstat each component before
+//     pinning it. That is the same bounded exposure the first bullet describes
+//     and cannot be closed without unlinkat/renameat, which Node does not expose.
 //   * A DIRENT IS A PRE-FILTER, NEVER THE VERDICT. The (B) walk still reads
 //     Dirent kinds to decide what to descend or read, but every decision is
 //     RE-ESTABLISHED by the open that follows (O_NOFOLLOW + fstat), so a stale or
@@ -691,15 +906,17 @@ function withPinnedDir(dirPath, fn) {
 // `fn(parentHandle, leaf)` WHILE THE PARENT IS STILL PINNED — which is the whole
 // point: the callback's operation resolves through a descriptor this process
 // holds, not through a path string the OS re-walks.
-// `opts.createParents` creates a missing ancestor ONE COMPONENT AT A TIME
-// through the pinned parent, then re-pins it — never `mkdirSync(dirname,
-// {recursive:true})`, which resolves and traverses the whole string and so
-// creates directories THROUGH a linked ancestor.
-// A MISSING ancestor without `createParents` is not a violation: `fn` is called
-// with a NULL handle, meaning "nothing to resolve" — the same disposition the
-// Slice 1 component walk expressed as its 'absent' return.
+// A MISSING ancestor is not a violation: `fn` is called with a NULL handle,
+// meaning "nothing to resolve" — the same disposition the Slice 1 component
+// walk expressed as its 'absent' return.
+// v6.0 (Codex review of the S3 excision): the `opts.createParents` mode — a
+// per-component `mkdirSync` through the pinned parent — is DELETED with the
+// restore family; its last caller was `materializeHeadBlob`, and a dormant
+// directory-creation arm would falsify the no-write-primitive claim the
+// restore gravestone makes (dc616f69 R11/R17). `opts` is retained in the
+// signature so the many call sites keep their shape; no option is currently
+// read from it.
 function withPinnedParent(cwd, rel, what, opts, fn) {
-  const createParents = !!(opts && opts.createParents);
   const segments = rel.replace(/\/+$/, '').split('/');
   for (const s of segments) assertResolvableComponent(s, rel, what);
   const leaf = segments[segments.length - 1];
@@ -711,16 +928,8 @@ function withPinnedParent(cwd, rel, what, opts, fn) {
     // lstat THROUGH the pinned parent, never openSync: an lstat cannot block, so
     // a fifo/socket/device component is classified ('other') instead of hanging
     // the hook, and only a component confirmed a real directory is ever opened.
-    let kind = lstatKind(anchored);
-    if (kind === 'absent') {
-      if (!createParents) return fn(null, leaf);
-      try {
-        mkdirSync(anchored); // ONE component, through the pinned parent
-      } catch (e) {
-        if (!e || e.code !== 'EEXIST') throw e; // a racing create is fine; re-classify below
-      }
-      kind = lstatKind(anchored);
-    }
+    const kind = lstatKind(anchored);
+    if (kind === 'absent') return fn(null, leaf);
     if (kind !== 'dir') {
       throw new Error(
         `${what} path component '${nextRel}' (an ancestor of '${rel}') is not a directory (lstat kind: ${kind}) — refusing to read/walk/write ` +
@@ -803,78 +1012,20 @@ function dirHandleOf(h) {
   return IS_WIN32 ? h.anchored : `${PROCFS_FD_DIR}/${h.fd}`;
 }
 
-// A leaf's own lstat kind, resolved through its PINNED parent. Replaces
-// `lstatKind(join(cwd, rel))`, which re-walked the whole string from the root
-// and so could be re-aimed by an ancestor swap. A missing ancestor is 'absent'
-// (nothing to classify); a non-directory ancestor THROWS into the caller's
-// fail-closed catch, which is the settled disposition for ancestor ambiguity.
-function lstatKindUnder(cwd, rel, what = 'path classification') {
-  return withPinnedParent(cwd, rel, what, {}, (parentHandle, leaf) => (parentHandle === null ? 'absent' : lstatKind(`${parentHandle}/${leaf}`)));
-}
+// GRAVESTONE — `lstatKindUnder(cwd, rel, what)` stood here: a leaf's own lstat
+// kind resolved through its PINNED parent. DELETED 2026-08-30 (S4, 78dc9bd6):
+// every caller was a stamp consult (`isDirectoryAt`, `verifyStampAttestation`,
+// `stampAttestsCurrentBytes`) and all three went with the attestation apparatus.
+// `classifyPathComponents` is the surviving spelling of the same walk for the (B)
+// side, and `withPinnedParent` is the primitive both were built from.
 
-// WRITE a regular file through a PINNED parent. Two arms, and the ORDER inside
-// the existing-entry arm is load-bearing:
-//   * EXISTING: open O_WRONLY|O_NOFOLLOW|O_NONBLOCK, fstat to prove the
-//     descriptor is a REGULAR FILE, and only THEN ftruncate + write. O_TRUNC on
-//     the open would mutate the object BEFORE its type was known — a guard that
-//     destroys first and validates second has already done the damage it was
-//     meant to refuse.
-//   * ABSENT: O_CREAT|O_EXCL, so a racer who plants an entry between the ENOENT
-//     and the create loses the race loudly (EEXIST) instead of having the write
-//     land on whatever they planted.
-// O_NOFOLLOW means a symlink standing at the leaf fails the open (ELOOP) rather
-// than being written through; on win32, where libuv ignores it, the leaf is
-// lstat-screened first — the disclosed detection arm (2a69a8d7).
-function writeRegularAt(parentHandle, leaf, buf, rel) {
-  const anchored = `${parentHandle}/${leaf}`;
-  if (IS_WIN32) {
-    const kind = lstatKind(anchored);
-    if (kind !== 'file' && kind !== 'absent') {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: ${kind}) — a symlink or other ` +
-          `non-regular entry is never written through by a restore`
-      );
-    }
-  }
-  let fd = null;
-  let creating = false;
-  try {
-    fd = openSync(anchored, FS.O_WRONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
-  } catch (e) {
-    const code = e && e.code;
-    if (code === 'ENOENT') {
-      creating = true;
-      fd = openSync(anchored, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o666);
-    } else if (code === 'ELOOP') {
-      throw new Error(
-        `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (lstat kind: symlink) — a symlink or other ` +
-          `non-regular entry is never written through by a restore`
-      );
-    } else {
-      throw e;
-    }
-  }
-  let primary;
-  try {
-    if (!creating) {
-      const st = fstatSync(fd);
-      if (!st.isFile()) {
-        throw new Error(
-          `refusing to restore (B) baseline path '${rel}': the existing entry is not a regular file (fstat type on the OPEN descriptor) — a symlink, ` +
-            `directory or other non-regular entry is never written through by a restore, and nothing has been truncated`
-        );
-      }
-      ftruncateSync(fd, 0); // AFTER the type check, never via O_TRUNC on the open
-    }
-    let written = 0;
-    while (written < buf.length) written += writeSync(fd, buf, written, buf.length - written, null);
-  } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    closePinned(fd, primary);
-  }
-}
+// GRAVESTONE — `writeRegularAt(parentHandle, leaf, buf, rel, opts)` stood here:
+// the descriptor-pinned regular-file write primitive (existing-entry
+// open→fstat→ftruncate arm, plus a `createOnly` O_CREAT|O_EXCL security mode).
+// DELETED 2026-08-30 (v6.0, dc616f69 R11): its last caller was the (A) restore's
+// `materializeHeadBlob`, and the restore is gone — see the restore-family
+// gravestone further down. With it gone this file holds NO primitive that writes
+// a repo path.
 
 // [DELETED 2026-08-27, user ruling — see the `removeUnder` gravestone further
 // down.] `removeFileAt(parentHandle, leaf, rel)` used to unlink a single regular
@@ -884,108 +1035,16 @@ function writeRegularAt(parentHandle, leaf, buf, rel) {
 // left, keeping the primitive would leave an unlink sitting in the file that a
 // later edit could re-aim at the addition path — the structural point of the
 // ruling is that this file no longer HOLDS a single-file delete for baseline
-// diffing to reach. `removeTreeAt` below is now the only delete primitive here,
-// and its only caller is `restoreTracked`'s NOT-IN-HEAD arm.
+// diffing to reach.
 // CORRECTION (v4.1, 2026-08-27): the parenthetical that used to end the sentence
 // above — "(git-recoverable)" — WAS FALSE, AND BELIEVING IT WAS THE DEFECT.
 // NOT-IN-HEAD is precisely the arm with NO blob to recover from, and a
-// `git add -f`'d (B) file lands there via the (A) sweep. `removeTreeAt` now
-// refuses (B) paths itself — see its own header.
+// `git add -f`'d (B) file lands there via the (A) sweep.
+// v6.0 (2026-08-30): `removeTreeAt` — the recursive-delete primitive that was
+// "the only delete primitive here", reachable only from `restoreTracked`'s
+// not-in-HEAD arm — is deleted with the restore family (dc616f69 R11). This
+// file now holds NO delete primitive of any shape.
 
-// RECURSIVE DELETE, one pinned directory at a time — the replacement for
-// `rmSync(join(cwd, rel), {recursive:true})`, which resolved the WHOLE path
-// string before it started deleting and so could be re-aimed at a tree outside
-// the repository by a single swapped ancestor. Every directory is pinned before
-// its entries are enumerated, and every child is removed through ITS pinned
-// parent, so the recursion can never leave the subtree it was handed.
-// Non-directories (including symlinks) are unlinked as NAMES — a planted link is
-// removed, never followed. Budgeted for the same reason every other walk here
-// is: unbounded recursion that overflows the stack kills the process, and a
-// killed guard exits non-2, which the platform reads as ALLOW.
-// RETURNS `leftOnDisk` — the accumulated list of PROTECTED (B) paths this walk
-// refused to unlink. Empty means the subtree is gone; non-empty means the caller
-// must report those paths through the DETECT-AND-LEAVE disposition instead of
-// claiming a revert.
-//
-// LAYER 2 OF THE (B)-SURVIVAL GUARD (2026-08-27 defect repair; the ruling itself
-// is the `removeUnder` gravestone below). The v4.0 ruling took the delete out of
-// the (B) ADDITION ARM, but the (B) SURFACE is reachable by a SECOND route that
-// the deletion of `removeUnder` did not close: a (B) file `git add -f`'d into the
-// index is reported by `git status --porcelain` as an ADDITION, so it enters the
-// EARLIER (A) sweep, `isEnforcementSurface` makes it an (A) violation, and the
-// (A) restore's NOT-IN-HEAD arm lands HERE — deleting the very file the ruling
-// says must survive, BEFORE the (B) collection ever runs to notice it. The guard
-// lives INSIDE the delete primitive (and inside its recursion, keyed on the rel
-// it is about to remove) rather than only at the call site, so the deletion is
-// STRUCTURALLY UNREACHABLE for a (B) path no matter who calls, by what route, or
-// whether a future caller remembers to check. It also covers the case the
-// call-site check cannot see: a not-in-HEAD DIRECTORY (`?? .claude/`) whose own
-// rel is not enforcement surface but whose CHILDREN are — the recursion tests
-// every descendant, so a recursive delete can never reach a protected leaf.
-// A directory that kept anything is NOT rmdir'd (the rmdirSync below is gated on
-// the accumulator not having grown), so the surviving file keeps its parents.
-function removeTreeAt(parentHandle, leaf, rel, depth = 0, leftOnDisk = []) {
-  WALK_BUDGET.chargeDepth(depth, rel);
-  if (isEnforcementSurface(rel)) {
-    // NOT read, NOT written, NOT truncated, NOT unlinked — the only thing that
-    // happens to a protected path here is that it is NAMED for the denial.
-    leftOnDisk.push(rel);
-    return leftOnDisk;
-  }
-  const anchored = `${parentHandle}/${leaf}`;
-  const kind = lstatKind(anchored);
-  if (kind === 'absent') return leftOnDisk;
-  if (kind !== 'dir') {
-    rmSync(anchored, { force: true });
-    return leftOnDisk;
-  }
-  const keptBefore = leftOnDisk.length;
-  withPinnedDir(anchored, (dirHandle) => {
-    // INCREMENTAL, NOT MATERIALIZING (board 55fcccac clause 3, review finding A):
-    // readdirSync builds the WHOLE listing — every Dirent — before the first
-    // chargeNode could fire, so a very large flat directory kills the process
-    // before its own bound is ever consulted, and a killed guard exits non-2,
-    // which the platform reads as ALLOW. opendirSync/readSync charges as each
-    // entry arrives, which is what lets the budget stop this walk MID-DIRECTORY.
-    // TWO PHASES ON PURPOSE, and the second reason is independent of the budget:
-    // unlinking entries from a directory WHILE a readdir stream is open over it
-    // has unspecified behaviour for entries not yet returned, so a delete-as-you-
-    // iterate loop can silently SKIP siblings and leave the rmdir below failing
-    // ENOTEMPTY. Names are collected under the budget (so the collection itself
-    // can never grow past MAX_WALK_NODES), the handle is closed, and only then
-    // does anything get removed.
-    const names = [];
-    const dir = opendirSync(dirHandle);
-    let primary;
-    try {
-      for (;;) {
-        const de = dir.readSync();
-        if (de === null) break;
-        WALK_BUDGET.chargeNode(rel);
-        names.push(de.name);
-      }
-    } catch (e) {
-      primary = e;
-      throw e;
-    } finally {
-      try {
-        dir.closeSync();
-      } catch (closeErr) {
-        // Codex F5: a swallowed close error leaks the handle toward an EMFILE
-        // fail-open. Propagate only when no primary exception is already driving
-        // the verdict (a tripped budget).
-        if (!primary) throw closeErr;
-      }
-    }
-    for (const name of names) removeTreeAt(dirHandle, name, `${rel}/${name}`, depth + 1, leftOnDisk);
-  });
-  // GATED, not unconditional: a directory that still holds a protected (B)
-  // descendant must survive too, or the survival guarantee for the leaf is
-  // undone by the rmdir of its parent (and the rmdirSync would fail ENOTEMPTY
-  // anyway, throwing a misattributed environment-defect denial).
-  if (leftOnDisk.length === keptBefore) rmdirSync(anchored);
-  return leftOnDisk;
-}
 
 // ---------------------------------------------------------------------------
 // THE BOUNDED-RESOURCE LAYER (board 55fcccac). Everything below exists so that
@@ -1042,7 +1101,10 @@ const MAX_WALK_DEPTH = 64;
 // 717 KB measured live), so 16 MiB is ~20x headroom, while the stamp is a list
 // of {path, sha256} entries and never approaches 8 MiB.
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
-const MAX_STAMP_BYTES = 8 * 1024 * 1024;
+// (`MAX_STAMP_BYTES` stood here — the enforcement stamp's own read budget. It
+// went with the stamp at S4 (78dc9bd6); the persistent (B) baseline list's
+// equivalent bound lives on `baselineListPaths().maxBytes`, inside a hoisted
+// function rather than as a second top-level statement.)
 
 // A tripped structural budget, distinguishable from every other throw so the
 // two call sites can dispose of it differently: PRE records it as an
@@ -1373,8 +1435,21 @@ function dirtyFile(cwd, runId, key) {
 }
 
 /** Repo-relative paths of everything git reports as changed, Pre-snapshot shape. */
+// HARDENED AGAINST THE REPO-LOCAL `core.fsmonitor` EXEC VECTOR (the clearer's
+// AC-R59, applied here to the hook's own invocations). `git status` HONOURS
+// `core.fsmonitor` — an arbitrary COMMAND — out of `.git/config`, which is NOT
+// enforcement surface and NOT covered by any glob this hook protects. An agent
+// that can write `.git/config` therefore gets code execution under the conductor's
+// UID at exactly the moment the gate runs, and it runs BEFORE the sweep can
+// observe anything. `-c core.fsmonitor=` empties the setting for this invocation
+// only (a command-line `-c` outranks repo config and mutates nothing on disk), and
+// `--no-optional-locks` keeps a read-only observation from taking `.git/index.lock`
+// — which also removes a fan-out contention route that could make a correct gate
+// fail closed on an unrelated lock. BOTH `git status` sites in this file carry
+// this: hardening one and not the other leaves the vector fully open, since either
+// invocation alone is enough to execute the hook.
 function dirtyTrackedRels(cwd) {
-  const status = spawnSync('git', ['-C', cwd, 'status', '--porcelain', '-z'], { encoding: 'utf8' });
+  const status = spawnSync('git', ['-C', cwd, '--no-optional-locks', '-c', 'core.fsmonitor=', 'status', '--porcelain', '-z'], { encoding: 'utf8' });
   if (status.error || status.status !== 0) {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
   }
@@ -1415,6 +1490,22 @@ function callKey(toolUseId) {
 function stateFile(cwd, runId, key) {
   return join(tmpdir(), `sterling-enforce-${projectTag(cwd)}-${runId}-call-${key}.json`);
 }
+
+// GRAVESTONE — `stampWitnessFile(cwd, runId, key)` stood here: the per-call
+// os.tmpdir() record holding the stamp's own observable state as Pre saw it, so
+// Post could tell an in-window stamp write from a legitimate conductor rewrite
+// between windows (Ruling 2 of fac9a69b). DELETED 2026-08-30 (S4, 78dc9bd6) with
+// the rest of the attestation apparatus.
+// THE LESSON WORTH KEEPING, because it is why the successor is shaped differently:
+// this witness was itself AGENT-WRITABLE — os.tmpdir() is writable by the audited
+// command and the filename is derived from values that command can compute — so
+// the whole integrity comparison rested on an input the adversary controlled. The
+// persistent (B) baseline list is forgeable in exactly the same way, and that is
+// ACCEPTED rather than defended, because forging it cannot buy an exemption: the
+// list never suppresses a finding, it only ever adds one.
+// NOTE FOR ANYONE CHASING LEAKED TEMP RECORDS: H1's tmpdir reclamation sweeps by
+// the shared `sterling-enforce-<tag>` prefix, so a `.stamp.json` left behind by a
+// pre-S4 bundle is reclaimed by prefix without any code here knowing the name.
 
 // Current INDEX entries (`mode:oid:stage`, conflict stages joined) for the given
 // repo-relative paths, as a Map path -> string. Its own term in the comparison
@@ -1854,62 +1945,19 @@ function stateShapeError(cwd, v, where) {
   return null;
 }
 
-// WHAT A STAMP CAN ATTEST (review finding 2). A stamp entry is only
-// {path, sha256} or {path, deleted:true} (decision 4d9b76e8) — it structurally
-// cannot express a MODE, a file TYPE, a symlink TARGET or the git INDEX entry.
-// Decision 7021526c step 2 says the stamp is consulted against the CURRENT
-// STATE, so a state difference the stamp cannot speak for falls to step 3 and
-// DENIES without any consult: otherwise a chmod-only change, or a `git add`
-// that moves only the index, or a regular file swapped for a symlink leaves the
-// bytes identical, matches the stamp, and is wrongly allowed. Returns true only
-// when the difference between the recorded and current state is confined to
-// what a byte hash (or a {deleted:true} entry) can attest.
-function stampCouldAttest(recorded, current) {
-  if (!isStateObject(recorded) || !isStateObject(current)) return false;
-  // RULING B / UNATTESTABLE (532a4383): a state the snapshot could not know is
-  // not a difference a byte hash can speak for — same disposition the
-  // walk_budget_exceeded marker already gets below, hoisted so it covers every
-  // shape carrying a marker (a symlink today).
-  if (recorded.unattestable || current.unattestable) return false;
-  // BOARD fabf21d8: bytes that could not be attested are not a difference a BYTE
-  // HASH can speak for — the marker must be NON-LAUNDERABLE through the stamp
-  // exactly as `walk_budget_exceeded` is. Hoisted so it covers every shape the
-  // marker can land on, and repeated on the file arm below (defense in depth).
-  if (recorded.file_unattested || current.file_unattested) return false;
-  if (recorded.index !== current.index) return false; // INDEX: unattestable
-  if (!current.exists) return recorded.exists === true; // present -> absent: {path, deleted:true}
-  if (!recorded.exists) return false; // absent -> present: an existence flip, unattestable
-  if (recorded.type !== current.type) return false; // TYPE: unattestable
-  if (recorded.mode !== current.mode) return false; // MODE: unattestable
-  if (current.type === 'file') {
-    if (recorded.file_unattested || current.file_unattested) return false; // defense in depth with the hoisted check above
-    return true; // only the bytes can still differ
-  }
-  if (current.type === 'symlink') return false; // link TARGET: unattestable
-  if (current.type === 'dir') {
-    // An over-budget Pre walk (board 55fcccac) recorded NO children, so there
-    // is no per-child difference for a stamp to speak for — unattestable, the
-    // same disposition an added/removed child already gets below.
-    if (recorded.walk_budget_exceeded || current.walk_budget_exceeded) return false;
-    // A directory attests through its child FILES (stampAttestsDirectory walks
-    // what is there NOW), so a child that was ADDED or REMOVED leaves nothing
-    // for the walk to attest — fail closed on any change to the child key set,
-    // and require every differing child to be bytes-only in the same sense.
-    if (!isStateObject(recorded.children) || !isStateObject(current.children)) return false;
-    const ak = ownKeys(recorded.children);
-    const bk = ownKeys(current.children);
-    if (ak.length !== bk.length) return false;
-    for (const k of ak) {
-      if (!Object.prototype.hasOwnProperty.call(current.children, k)) return false;
-      const a = recorded.children[k];
-      const b = current.children[k];
-      if (sameState(a, b)) continue;
-      if (!stampCouldAttest(a, b)) return false;
-    }
-    return true;
-  }
-  return false;
-}
+// GRAVESTONE — `stampCouldAttest(recorded, current)` stood here: the predicate
+// deciding whether the difference between a recorded and a current state was
+// confined to what a {path, sha256} / {path, deleted:true} stamp entry could
+// speak for (a stamp structurally cannot express a MODE, a file TYPE, a symlink
+// TARGET or a git INDEX entry). It has been uncalled since v6.0 deleted the
+// changed-pre-dirty consult with the restore branch (dc616f69 R11), and it is
+// DELETED here at S4 with the apparatus whole (78dc9bd6).
+// WHAT SURVIVES IT: the markers it honoured — `unattestable` (Ruling B),
+// `file_unattested` (board fabf21d8) and `walk_budget_exceeded` (board 55fcccac)
+// — are still enforced by `sameState`, which is the only comparison left. Their
+// job there is unchanged and strictly stronger: a state the snapshot could not
+// KNOW is never reported "unchanged", and with no attestation route left there
+// is nothing that could have laundered one.
 
 // Validate a per-call record key BEFORE the record is trusted: repo-relative
 // POSIX only, no absolute path, no drive prefix, no NUL, no `..` traversal, and
@@ -2031,66 +2079,608 @@ function lstatKind(abs) {
   }
 }
 
-// LSTAT, not stat (review finding 3): a symlink is NEVER a directory for this
-// purpose, so a link pointing at a directory can never route the stamp consult
-// into a recursive walk outside the repo.
-// SLICE 2: resolved through the pinned parent, so a linked ancestor can no
-// longer re-aim the question at a directory outside the repo (it throws into the
-// caller's fail-closed catch instead).
-function isDirectoryAt(cwd, rel) {
-  return lstatKindUnder(cwd, rel, `(A) directory classification of '${rel}'`) === 'dir';
+// (`isDirectoryAt(cwd, rel)` stood here — the lstat-not-stat classifier that
+// routed a stamp consult to the directory arm or the file arm. Its only caller
+// was `stampAttestsPath`; both went at S4 with the attestation apparatus.)
+
+// GRAVESTONE — `readStampSnapshot(cwd)` stood here: THE sweep's single read of
+// the enforcement stamp, returning { kind, sha256, present, entries } and serving
+// every downstream consult from those same in-memory bytes. DELETED 2026-08-30
+// (S4, 78dc9bd6) with the apparatus whole.
+// THE TOCTOU LESSON IT ENCODED IS STILL LIVE AND IS INHERITED BY THE (B) BASELINE
+// LIST, so it is kept rather than deleted with the code: the audited command can
+// BACKGROUND a child that OUTLIVES the command itself (`(sleep 0.3; cp forged
+// <path>) &`), so any security-relevant file read TWICE in one sweep can be
+// substituted between the two reads. `readBaselineList` therefore reads the list
+// exactly once, from a descriptor it classified by opening, and compares those
+// bytes and no others.
+
+// GRAVESTONE — `stampWitness(cwd)` and `invalidateStamp(cwd)` stood here: the
+// per-call witness of the stamp's own observable state, and the best-effort
+// DELETION that closed the two-call laundering bypass (call N plants a forged
+// stamp and is denied; Pre of call N+1 snapshots the forgery as its legitimate
+// starting state and call N+1 spends it). Both DELETED 2026-08-30 (S4, 78dc9bd6)
+// with the apparatus they protected.
+// THE ARGUMENT THAT OUTLIVES THEM, because it is the whole reason the taint latch
+// exists and now the reason the (B) list mismatch latches too (fe861066 D4): A
+// DENIAL WITH NO CROSS-CALL CONSEQUENCE TURNS THE NEXT PRE INTO AN ADOPTION
+// POINT. That is exactly why a MALFORMED baseline list denies AND latches rather
+// than merely denying — deny-only would launder (deny, delete the malformed
+// object, the next call sees ABSENT, skips the comparator, and adopts whatever is
+// on disk as legitimate).
+// AND THE FILE IS QUIETER FOR IT: with the invalidation gone, H17's only in-repo
+// mutation of any kind is the create-only taint latch. It holds no write, no
+// delete and no restore primitive aimed at a repo path.
+
+// ---------------------------------------------------------------------------
+// THE ENFORCEMENT TAINT LATCH — born as the (B) SURFACE latch, decision
+// b-surface-adoption-point-closes-with-an-incident-bound-taint-latch-not-a-
+// persisted-manifest (bcd2cc09), RULINGS 7-11, refining fac9a69b and Ruling D
+// of 532a4383. Since v6.0 (dc616f69 R15) the (A) sweep's in-window violations
+// latch here too, through the same eager `latchOnDetection` producer path: with
+// the restore deleted, their bytes also survive on disk, and the same
+// next-Pre-adoption argument below applies to them verbatim (a clean-at-Pre
+// violation left on disk is pre-existing dirt to the NEXT call's snapshot, and
+// an unchanged pre-dirty path verifies by observation).
+//
+// WHAT IT CLOSES, stated here because a mechanism stripped of its reason gets
+// re-opened: Pre re-collects the (B) baseline from CURRENT DISK STATE on every
+// call (`collectBaseline` at the Pre arm below), so an in-window (B) change is
+// denied EXACTLY ONCE — the bytes are deliberately LEFT ON DISK (fac9a69b) —
+// and the NEXT call's Pre adopts those tampered bytes as its own legitimate
+// baseline, sees no difference, and ALLOWS. Forever, silently. ONE DENIAL BOUGHT
+// A PERMANENT EDIT TO LIVE ENFORCEMENT CONFIG, and `.claude/agents/**` IS the
+// agent GRANT DEFINITIONS.
+//
+// WHAT IS PERSISTED IS THE UNRESOLVED INCIDENT, NEVER A SOURCE OF TRUTH
+// (RULING 2), AND THE ASYMMETRY IS THE WHOLE DESIGN. A persisted last-known-good
+// (B) manifest that AUTHORIZED — the conductor's own first proposal — would, on a
+// same-UID machine (research_finding 79942bda), have to be defended exactly like
+// the stamp, reproducing the forgeable-plain-file problem it was meant to solve.
+// THE LATCH AUTHORIZES NOTHING: forging it can only produce a LOUD DENIAL (a
+// self-inflicted DoS), never a false allow. That is why PRESENCE ALONE IS THE
+// VERDICT and why NO FIELD INSIDE THE FILE MAY REDUCE ENFORCEMENT (RULING 7) — no
+// `cleared`, no `trusted`, no expiry, no session key, no boolean of any kind. The
+// JSON body is DIAGNOSTIC ONLY and is parsed strictly AFTER presence has already
+// decided the verdict.
+// READ THAT PARAGRAPH CAREFULLY BEFORE CONCLUDING S4 CONTRADICTED IT. The
+// persistent (B) baseline hash list added at S4 (fe861066) IS a persisted record
+// of the surface, and it lives beside this latch — but it is not the rejected
+// design, because it does not AUTHORIZE. An exact match produces no finding; it
+// never removes one. Forging the list, exactly like forging the latch, can only
+// make a denial louder. The rejected shape was "a persisted manifest that
+// EXEMPTS"; the shipped shape is "a persisted description that ACCUSES".
+//
+// DELIBERATELY NOT IN `BASELINE_GLOBS` (RULING 7): the incident marker must not
+// become part of the surface whose incident it records.
+// DELIBERATELY NOT IN THE SQLITE STORE (RULING 7): the latch must be readable
+// BEFORE this hook trusts the store, and `openStore()` returns null on an absent
+// DB (lib/common.mjs:241) — so making the DB both the protected object AND the
+// sole record that protecting it failed is circular. A hook writing the DB would
+// also violate the MCP-only store-write rule and invariant 4, and SQLite is
+// same-UID forgeable anyway.
+// NOTHING HERE CLEARS IT (RULING 5, which overturned the conductor's own round-1
+// answer as fatal): clearance is a SEPARATE, EXPLICIT conductor action that
+// re-enumerates and re-hashes the whole (B) set — `scripts/enforcement-reconcile.mjs`,
+// run with agents quiesced. NOTHING THAT AN AUDITED COMMAND CAN CAUSE TO RUN MAY
+// EVER CLEAR IT: that would hand a laundering route to a background child which
+// outlives the audited Bash call, a threat this file recognises throughout. There
+// is no clearer in this file by design.
+//
+// THE PATHS ARE NAMED ONCE, and named by a FUNCTION rather than module-scope
+// consts, for a mechanical reason: a top-level `const` WITH AN INITIALIZER in a
+// blocking hook is a fail-closed-boundary finding (scripts/check-failclosed-
+// boundary.mjs), and its ratchet only shrinks. Same disposition the other S3
+// constants already took.
+function taintLatchPaths() {
+  return {
+    sterlingDir: '.sterling',
+    dbLeaf: 'sterling.db',
+    leaf: 'enforcement-taint.json',
+    rel: '.sterling/enforcement-taint.json',
+    // The diagnostic body is bounded like every other record this hook reads
+    // (board 55fcccac clause 4). It is never allowed to change a verdict, so the
+    // bound can be small: an oversize or torn read simply yields no explanation.
+    maxDiagnosticBytes: 64 * 1024,
+  };
 }
 
-// The stamp's entries, as { present, entries }. `entries` is null whenever the
-// stamp cannot be used (absent, not a JSON array, or — review finding 3 — not a
-// REGULAR FILE: the stamp is read through lstat too, so
-// .sterling/transient/enforcement-stamp.json cannot be a symlink pointing the
-// consult at bytes outside the repo). `present` keeps the existing message
-// distinction between "no stamp at all" and "a stamp that attests nothing".
-// A parse error propagates to the caller's fail-closed catch, unchanged.
-// SLICE 2: the stamp's own ancestors ('.sterling', 'transient') are now pinned
-// across the classify→read, so a '.sterling' swapped for a symlink cannot route
-// the consult at a stamp outside the repo — it throws, and every caller treats a
-// throw as attesting NOTHING.
-function readStamp(cwd) {
-  return withPinnedParent(cwd, '.sterling/transient/enforcement-stamp.json', 'enforcement stamp', {}, (parentHandle, leaf) =>
-    parentHandle === null ? { present: false, entries: null } : readStampAt(parentHandle, leaf)
-  );
-}
-
-// SLICE 2 (review finding B): CLASSIFIED BY THE OPEN, not by an lstat followed
-// by a reopen of the same name. The pair this replaces left a window in which a
-// racer could swap one regular file for another between the classification and
-// the read, so bytes were attested that had never been classified. Now the
-// descriptor that answered "is this a regular file?" is the descriptor the JSON
-// is read from.
-function readStampAt(parentHandle, leaf) {
-  const stampPath = `${parentHandle}/${leaf}`;
-  const h = classifyLeafAt(parentHandle, leaf);
-  let primary;
+// RULING 11 — FAIL-CLOSED READ, DECIDED BY SHAPE BEFORE CONTENTS, classified
+// through a PINNED PARENT. Returns `{ tainted, environmentDefect, reason }`.
+//
+// THE SHAPE TABLE, verbatim from the ruling:
+//   * regular file at the latch path        -> TAINTED, regardless of contents
+//   * symlink / directory / FIFO / device /
+//     socket / unreadable / classify error  -> TAINTED (environment defect)
+//   * absent leaf under a VERIFIED REAL
+//     `.sterling` directory                 -> UNLATCHED
+//   * `.sterling` itself a symlink, a
+//     non-directory, or unreadable          -> FAIL CLOSED
+//   * `.sterling` present but `sterling.db`
+//     ABSENT                                -> BROKEN STATE, fail closed, and
+//                                              NEVER worded "not a Sterling
+//                                              project" — `.sterling` exists,
+//                                              only the DB is missing.
+//
+// NAMED LIMIT, NOT SOLVED (the ruling requires this be disclosed rather than
+// papered over): a WHOLLY ABSENT `.sterling/` cannot be mechanically told apart
+// from a genuine non-Sterling project, because project discovery itself defines
+// non-Sterling as "no ancestor containing .sterling/sterling.db"
+// (lib/common.mjs:62). For H17's PER-AGENT invocation the disposition is FAIL
+// CLOSED: this hook only ever runs from a spawned agent's frontmatter inside a
+// Sterling project, so an absent `.sterling` here is broken state, not a
+// neighbouring repository. A future GLOBAL `PreToolUse "*"` registration needs
+// an explicit project-recognition rule, and this reader must not be claimed to
+// supply one.
+//
+// THE PIN IS ACQUIRED BY WALKING, NEVER BY AN ABSOLUTE-PATH OPEN (anti-pattern
+// descriptor-pin-defeated-at-acquisition-when-the-directory-fd-is-opened-by-
+// absolute-path, severity BLOCK): `withClassifiedDir` -> `withPinnedParent`
+// starts at the one retained root anchor and resolves `.sterling` THROUGH it,
+// then both leaves are addressed as `<pinnedHandle>/<leaf>`. No pathname in this
+// function is ever re-resolved from the root, and a prior lstat is never treated
+// as though it still binds across a later open.
+function readTaintLatch(cwd) {
+  const P = taintLatchPaths();
   try {
-    if (h.kind !== 'file') return { present: h.kind !== 'absent', entries: null };
-    return readStampFromFd(h, stampPath);
+    return withClassifiedDir(cwd, P.sterlingDir, (kind, dirHandle) => {
+      if (kind === 'absent') {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason:
+            `'${P.sterlingDir}/' is absent, so the enforcement taint latch at '${P.rel}' cannot be read at all. This hook runs only from a spawned ` +
+            `agent's frontmatter INSIDE a Sterling project, so an absent '${P.sterlingDir}/' here is broken state — and it is a NAMED, UNSOLVED LIMIT that ` +
+            `it cannot be mechanically distinguished from a directory that was never a Sterling project (project discovery defines non-Sterling as "no ` +
+            `ancestor holding ${P.sterlingDir}/${P.dbLeaf}"). Failing closed rather than guessing`,
+        };
+      }
+      if (kind !== 'dir') {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason:
+            `'${P.sterlingDir}' is not a directory (kind: ${kind}) — the enforcement taint latch at '${P.rel}' cannot be classified through it. A symlink or ` +
+            `other non-regular entry standing in for '${P.sterlingDir}' is denied on sight, never followed`,
+        };
+      }
+      // BROKEN STATE, AND SPECIFICALLY NOT "not a Sterling project": the
+      // directory the latch lives in exists, so the project IS one — only its
+      // store is gone. Wording the two the same way would tell a human to ignore
+      // a gate that is in fact reporting a damaged installation.
+      const dbKind = lstatKind(`${dirHandle}/${P.dbLeaf}`);
+      if (dbKind !== 'file') {
+        return {
+          tainted: true,
+          environmentDefect: true,
+          reason:
+            `'${P.sterlingDir}/' exists but '${P.sterlingDir}/${P.dbLeaf}' is ${dbKind} — BROKEN STATE. The enforcement taint latch is read before this hook ` +
+            `trusts the store precisely so a damaged store cannot silence it, and a half-present '${P.sterlingDir}/' is exactly the state in which the ` +
+            `enforcement surface is least verifiable. Failing closed`,
+        };
+      }
+      const h = classifyLeafAt(dirHandle, P.leaf);
+      let primary;
+      try {
+        // ABSENT UNDER A VERIFIED REAL DIRECTORY IS THE ONLY UNLATCHED VERDICT.
+        if (h.kind === 'absent') return { tainted: false, environmentDefect: false, reason: null };
+        if (h.kind !== 'file') {
+          return {
+            tainted: true,
+            environmentDefect: true,
+            reason:
+              `'${P.rel}' exists but is ${h.kind}, not a regular file — an abnormal shape at the latch path is TAINTED, exactly as a normal one is. ` +
+              `H17 took no action on it: it was neither read through, replaced, nor removed`,
+          };
+        }
+        // PRESENCE HAS NOW DECIDED. The body is read ONLY to enrich the
+        // explanation, and every failure inside `taintLatchDiagnostic` yields
+        // null — malformed content changes the EXPLANATION, never the DENIAL.
+        const diagnostic = taintLatchDiagnostic(h, P);
+        return {
+          tainted: true,
+          environmentDefect: false,
+          reason: `'${P.rel}' is present${diagnostic ? ` (diagnostic body: ${diagnostic})` : ' (its body carries no readable diagnostic, which changes nothing)'}`,
+        };
+      } catch (e) {
+        primary = e;
+        throw e;
+      } finally {
+        closePinned(h.fd, primary);
+      }
+    });
   } catch (e) {
-    primary = e;
-    throw e;
-  } finally {
-    closePinned(h.fd, primary);
+    // A CLASSIFICATION ERROR IS TAINTED, never "no latch". An unreadable leaf
+    // (EACCES), an unresolvable ancestor, a walk refusal — every one of them is a
+    // state in which this gate cannot establish that the surface is clean, and
+    // "cannot establish" is fail-closed here (P5).
+    return {
+      tainted: true,
+      environmentDefect: true,
+      reason: `the enforcement taint latch at '${P.rel}' could not be classified (${(e && e.message) || e}) — an unclassifiable latch path is TAINTED, never "unlatched"`,
+    };
   }
 }
 
-function readStampFromFd(h, stampPath) {
-  // BOUNDED (board 55fcccac clause 4): the stamp lives in gitignored
-  // .sterling/transient/, which no gate protects, so an oversize file there
-  // could OOM the readFileSync+JSON.parse this replaces — killing the guard
-  // outside its own control flow. Size-prechecked and refused before
-  // allocation; the throw joins the parse error's existing route (every caller
-  // catches it and treats the stamp as attesting NOTHING). That is what makes
-  // an unreadable stamp fail closed exactly WHERE IT MATTERS and nowhere else:
-  // "no attestation available" only bites on a path that needs attestation, so
-  // a garbage stamp for a window with nothing to attest changes no verdict.
-  const stamp = JSON.parse(readClassifiedBytes(h, MAX_STAMP_BYTES, 'enforcement stamp', stampPath).toString('utf8'));
-  return { present: true, entries: Array.isArray(stamp) ? stamp : null };
+// The latch's diagnostic body, read THROUGH THE DESCRIPTOR IT WAS CLASSIFIED BY
+// and strictly AFTER the verdict is already fixed. Returns a short clipped
+// string, or null. It can only ever change the WORDING of a denial that is
+// already owed — there is no path from this function to an allow, which is what
+// makes "no field inside the file may reduce enforcement" (RULING 7) structural
+// rather than a promise.
+function taintLatchDiagnostic(h, P) {
+  try {
+    const bytes = readClassifiedBytes(h, P.maxDiagnosticBytes, 'enforcement taint latch', h.anchored);
+    if (bytes.length === 0) return null;
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    const text = JSON.stringify(parsed);
+    return typeof text === 'string' ? text.slice(0, 400) : null;
+  } catch {
+    return null; // unreadable, oversize, torn, or unparseable — the verdict stands
+  }
+}
+
+// RULING 8 — THE SET PRIMITIVE IS CREATE-ONLY, or latching becomes its own
+// truncate primitive: the very class S1 removed from the producer and the S4
+// slice removed from the (B) restore (`writeUnder`'s gravestone). ONE
+// `O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW` open through a PINNED parent is the whole
+// gate — there is no pre-open, no lstat screen and no truncate arm to reach, so
+// a hardlink planted at the latch name resolves to EEXIST rather than to a write
+// through a shared inode at a victim outside the repository.
+// IF THE LEAF EXISTS IN ANY SHAPE THE LATCH IS ALREADY SET. EEXIST covers a
+// regular file, a directory, a FIFO and a hardlink; ELOOP covers a symlink
+// (O_NOFOLLOW refuses to follow it). Both mean "an object already stands at the
+// incident marker's name", which is exactly what `readTaintLatch` calls TAINTED —
+// so returning `set: true` here is not optimism, it is the same verdict the
+// reader will reach.
+// A CRASH AFTER CREATION BUT BEFORE THE BODY FINISHES leaves a partial file that
+// still reads as PRESENT, hence still TAINTED: fail-safe by construction, which
+// is why the write failure below is deliberately not an error.
+// THE PIN IS ACQUIRED BY WALKING (`withPinnedParent` from the retained root
+// anchor), never by `openSync` on an absolute pathname and never by
+// `mkdirSync(abs, {recursive:true})` — see the BLOCK-severity anti-pattern cited
+// at `readTaintLatch`.
+function setTaintLatch(cwd, incidents) {
+  const P = taintLatchPaths();
+  try {
+    const payload = Buffer.from(
+      JSON.stringify(
+        {
+          // A NOTE, NOT A CONTROL. Nothing in this object is ever read back as
+          // authority — `readTaintLatch` decides on PRESENCE and parses this
+          // only to quote it.
+          note: 'DIAGNOSTIC ONLY. Presence of this file is the verdict; no field in it can reduce enforcement, and H17 never clears it.',
+          at: new Date().toISOString(),
+          incident: incidents,
+        },
+        null,
+        2
+      ) + '\n',
+      'utf8'
+    );
+    return withPinnedParent(cwd, P.rel, 'enforcement taint latch', {}, (parentHandle, leaf) => {
+      if (parentHandle === null) {
+        return { set: false, error: `'${P.sterlingDir}' is absent, so there is no pinned directory to create '${P.rel}' in` };
+      }
+      let fd = null;
+      try {
+        fd = openSync(`${parentHandle}/${leaf}`, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o600);
+      } catch (e) {
+        const code = e && e.code;
+        if (code === 'EEXIST' || code === 'ELOOP') return { set: true, error: null }; // already latched, in whatever shape
+        return { set: false, error: `${code || 'error'} — ${(e && e.message) || e}` };
+      }
+      try {
+        writeSync(fd, payload);
+      } catch {
+        /* the leaf EXISTS and therefore already reads as TAINTED; a missing body only costs the explanation */
+      } finally {
+        try {
+          closeSync(fd);
+        } catch {
+          /* a leaked fd in a process that is about to exit(2) cannot change the verdict already owed */
+        }
+      }
+      return { set: true, error: null };
+    });
+  } catch (e) {
+    return { set: false, error: `${(e && e.message) || e}` };
+  }
+}
+
+// THE GATE. RULING 10: THE LATCH ALWAYS WINS, WITH NO EXCEPTION — it is
+// consulted before the store, before git, before the baseline and before the
+// stamp, and a matching exact stamp is evidence that reconciliation MAY proceed,
+// never proof that the outstanding incident was discharged. Called from BOTH
+// arms, because Post is where the incident is detected and PRE is where the
+// adoption used to happen: denying at Pre is what makes "the adoption point is
+// closed" true rather than merely claimed.
+// THE CONDUCTOR IS ALREADY EXEMPT — this hook short-circuits to `allow()` on an
+// absent `agent_id` before either call site — which is what keeps the recovery
+// path open: the conductor can run the producer and the reconciler while every
+// spawned agent stays denied, and is never required to hand-edit the latch.
+function denyIfTainted(cwd, agentId) {
+  const P = taintLatchPaths();
+  const verdict = readTaintLatch(cwd);
+  if (!verdict.tainted) return;
+  if (verdict.environmentDefect) {
+    deny(
+      environmentDefectDenial(
+        'H17',
+        `ENFORCEMENT TAINT LATCH — FAIL-CLOSED READ: ${verdict.reason}. The latch is decided by SHAPE before contents, and every abnormal shape is TAINTED ` +
+          `(decision b-surface-adoption-point-closes-with-an-incident-bound-taint-latch-not-a-persisted-manifest, RULING 11). Nothing at '${P.rel}' was ` +
+          `written, replaced or removed by this hook.`,
+        { agentId }
+      )
+    );
+  }
+  // SCOPE STATED EXACTLY, NOT OVERSTATED (fd9d24af, security review). This used
+  // to say "and so is every spawned-agent call", which is false today: H17 rides
+  // the agent's OWN FRONTMATTER on Bash and is absent from hooks/hooks.json, so
+  // while latched it denies spawned-agent BASH and not an agent's Edit, Write or
+  // Task calls. The global PreToolUse '*' registration that would make the wider
+  // claim true is a later slice and has not landed. A security surface that
+  // claims a protection it does not implement is anti-pattern 586bccdc — the
+  // false claim is worse than the gap, because it stops the next reader looking.
+  deny(
+    `H17: THE ENFORCEMENT SURFACE IS TAINTED — this tool call is DENIED BEFORE EXECUTION, and so is every spawned-agent BASH call that H17 gates ` +
+      `(it is registered on Bash in agent frontmatter, not globally in hooks/hooks.json, so it does not gate an agent's Edit, Write or Task calls), ` +
+      `until the taint is cleared by a conductor. ${verdict.reason}. One of the following was OBSERVED and left unresolved: the protected (B) enforcement ` +
+      `surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) was changed inside an audited command's window; the persistent ` +
+      `(B) baseline list (\`.sterling/enforcement-baseline.json\`) contradicted that surface or was malformed; or a write landed in tracked enforcement ` +
+      `territory (an (A) audit incident, v6.0) — and in every case the ` +
+      `bytes were deliberately LEFT ON DISK. Without this latch the very next PreToolUse would re-collect those tampered bytes as its own legitimate ` +
+      `baseline and allow them forever — one denial would buy a permanent edit to the agent GRANT DEFINITIONS. PRESENCE OF THE LATCH IS THE VERDICT: no ` +
+      `field inside it can reduce enforcement, and H17 never clears it. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE — exit \`blocked\`, citing this ` +
+      `message VERBATIM. A CONDUCTOR clears it with a deliberate reconciliation that re-verifies the current enforcement surface, ` +
+      `and only then removes '${P.rel}'. Re-running the command will not help; routing around it is never sanctioned.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// THE PERSISTENT (B) BASELINE HASH LIST — decision
+// b-baseline-hash-list-concrete-design (fe861066), settling the concrete
+// mechanism for the ADD clause of h17-demotes-to-tripwire-with-minimal-b-hash-
+// list (78dc9bd6). It REPLACES the deleted stamp manifest as the (B)
+// comparator, and it is a different KIND of object: the stamp EXEMPTED findings
+// observation had already produced, while the list's match merely produces NO
+// ADDITIONAL finding. Forging it can only make a denial louder.
+//
+// WHAT IT BUYS THAT NOTHING ELSE DOES: CROSS-CALL, CROSS-SESSION detection.
+// Pre-vs-Post can only see a change made INSIDE one Bash window — the next
+// call's Pre re-collects whatever is on disk and adopts it — so a (B) edit made
+// BETWEEN calls, or between sessions, was invisible. The list is persistent and
+// minted ONLY by the conductor-gated clearer (scripts/enforcement-reconcile.mjs);
+// H17 never writes it.
+//
+// SHAPE, VALIDATED STRICTLY BECAUSE A LOOSE READ IS THE LAUNDERING SURFACE
+// (fe861066 D1): `{version: exactly 1, minted_at, entries: [{path, sha256}]}`.
+//   * `entries` is an ARRAY, not an object, so a DUPLICATED path is DETECTABLE.
+//     A JSON object silently keeps the last of two identical keys, and a
+//     duplicated claim has no single meaning — the same ambiguity that made the
+//     old `entries.find()` stamp lookup unusable as an exact manifest.
+//   * SORTED ASCENDING BY PATH, and unsorted is MALFORMED rather than merely
+//     unusual: sortedness is what makes the duplicate check a single-pass
+//     neighbour comparison instead of a set the reader has to trust.
+//   * `minted_at` is DIAGNOSTIC ONLY. It is never freshness and never authority —
+//     nothing in this file reads it, deliberately, so no future edit can grow an
+//     expiry out of it.
+//   * every path must pass `validateBaselineKey` (the ONE definition of "is a (B)
+//     path", reused so a second notion cannot drift from the first) and every
+//     hash must be lowercase 64-hex.
+//
+// ABSENT vs MALFORMED IS THE LOAD-BEARING DISTINCTION (fe861066 D4):
+//   * ABSENT   -> the comparator is SKIPPED, with a one-line non-fatal stderr
+//                 notice. Bootstrap reality — denying here would brick every
+//                 agent Bash call in every project from fresh init until a
+//                 clearer run, which is exactly the producer friction that killed
+//                 the stamp CLI. THE DOCUMENTED WEAKNESS, stated rather than
+//                 buried: cross-call coverage is DISABLED whenever the list is
+//                 absent, and H17 cannot distinguish "never enrolled" from
+//                 "evidence taken off disk". Deleting the artifact is easier than
+//                 forging it. Accepted for a tripwire.
+//   * MALFORMED -> a first-class deny AND the taint latch. Deny-only would
+//                 LAUNDER: deny, take the malformed object off disk, and the next
+//                 call sees ABSENT, skips, and adopts current bytes as
+//                 legitimate. The recurring denial exists only while the
+//                 malformed object remains, so the observed contradiction must
+//                 have a cross-call consequence.
+// ---------------------------------------------------------------------------
+
+// Returns `{ kind: 'absent' }`, `{ kind: 'malformed', reason }`, or
+// `{ kind: 'valid', byPath: Map<rel, sha256> }`.
+//
+// NEVER THROWS FOR A SHAPE OR ACCESS PROBLEM, and that is deliberate: "the list
+// cannot be read" and "the list contradicts the surface" carry the SAME
+// disposition (deny + latch), so collapsing an unclassifiable path into
+// 'malformed' keeps one verdict path instead of two. Only ABSENCE is exempt, and
+// absence is decided ONLY by a genuine ENOENT under a resolvable ancestor chain —
+// an EACCES, an ELOOP or a non-directory ancestor is malformed, never "no list".
+//
+// READ THROUGH THE SURVIVING PINNED, NO-FOLLOW, BOUNDED LAYER: the ancestors are
+// walked from the one retained root anchor (`withPinnedParent`), the leaf is
+// CLASSIFIED BY BEING OPENED (`classifyLeafAt`, O_NOFOLLOW on Linux) and its
+// bytes come from THAT SAME DESCRIPTOR (`readClassifiedBytes`) — one read, one
+// resolution, so a backgrounded child cannot substitute the file between a
+// classification and a read.
+function readBaselineList(cwd) {
+  const P = baselineListPaths();
+  try {
+    return withPinnedParent(cwd, P.rel, '(B) baseline list', {}, (parentHandle, leaf) => {
+      if (parentHandle === null) return { kind: 'absent', reason: null, byPath: null }; // no '.sterling' at all
+      const h = classifyLeafAt(parentHandle, leaf);
+      let primary;
+      try {
+        if (h.kind === 'absent') return { kind: 'absent', reason: null, byPath: null };
+        if (h.kind !== 'file') {
+          return {
+            kind: 'malformed',
+            reason:
+              `'${P.rel}' exists but is ${h.kind}, not a regular file — an abnormal SHAPE at the baseline-list path is MALFORMED, never "absent". ` +
+              `H17 took no action on it: it was neither read through, replaced, nor taken off disk`,
+            byPath: null,
+          };
+        }
+        let bytes;
+        try {
+          bytes = readClassifiedBytes(h, P.maxBytes, '(B) baseline list', h.anchored);
+        } catch (e) {
+          return { kind: 'malformed', reason: `'${P.rel}' could not be read within its ${P.maxBytes}-byte budget (${(e && e.message) || e})`, byPath: null };
+        }
+        return parseBaselineList(bytes, P);
+      } catch (e) {
+        primary = e;
+        throw e;
+      } finally {
+        closePinned(h.fd, primary);
+      }
+    });
+  } catch (e) {
+    return {
+      kind: 'malformed',
+      reason: `'${P.rel}' could not be classified (${(e && e.message) || e}) — an unclassifiable baseline-list path is MALFORMED, never "absent"`,
+      byPath: null,
+    };
+  }
+}
+
+// The shape validator. Every refusal names WHAT was wrong, because the denial it
+// composes is what tells a conductor whether to re-mint the list or to go looking
+// for who rewrote it. FAIL-CLOSED WHOLE, never "skip the bad entry and trust the
+// rest": the rest is precisely what a bad entry would be written to launder.
+//
+// ############################################################################
+// ## PARITY CONTRACT — THIS VALIDATOR AND `validateListShape` IN            ##
+// ## scripts/enforcement-reconcile.mjs MUST ACCEPT EXACTLY THE SAME LISTS.  ##
+// ############################################################################
+// The clearer is the ONLY sanctioned writer of this file and this hook is its
+// only consumer, so the two are two READERS OF ONE FORMAT and the format is only
+// as well-defined as their agreement. A DIVERGENCE IS A DEFECT IN WHICHEVER
+// DIRECTION IT RUNS, and both directions are live failures, not theory:
+//   * HOOK LOOSER THAN CLEARER (the shape found by outside-family delta review,
+//     and the reason this block exists) — the hook accepts a list the clearer
+//     refuses. That is the DANGEROUS direction: a hand-written or laundered list
+//     satisfies the gate on every agent call while the conductor's own verify run
+//     refuses it, so the surface reads as attested by the mechanism that
+//     ENFORCES and unattested only by the mechanism nobody runs per-call.
+//   * HOOK STRICTER THAN CLEARER — a freshly ADOPTED, correctly minted list
+//     denies every agent Bash call immediately, with no route forward: re-running
+//     the clearer reproduces the identical bytes. A self-inflicted wedge.
+// SO: EDIT BOTH OR NEITHER. Each of the checks below has a named counterpart in
+// `validateListShape`; the acceptance SET must match byte-for-byte, and only the
+// refusal WORDING and the return shape may differ (the clearer throws a
+// discriminated refusal and returns the entries array; this returns a
+// `{kind:'malformed', reason}` verdict that the caller turns into deny + latch).
+// The two checks most easily lost, because both look like harmless tidiness:
+//   (a) THE ENTRY SHAPE IS CLOSED, not merely required — a key beyond exactly
+//       {path, sha256} is REFUSED, never ignored. The field most likely to appear
+//       there is the dead stamp's `deleted: true`, whose whole meaning was "this
+//       absence is attested"; silently dropping it would accept a list written
+//       against a MEANING NEITHER READER IMPLEMENTS, and its writer would believe
+//       an absence was covered when nothing here would ever honour it.
+//   (b) THE PATH MUST BE EXACTLY CANONICAL — the test is
+//       `validateBaselineKey(e.path) !== e.path`, an IDENTITY test, never "does it
+//       validate". NEVER NORMALIZE A LIST PATH INTO VALIDITY. `validateBaselineKey`
+//       rewrites '\' -> '/' on win32, so the earlier `const rel =
+//       validateBaselineKey(entry.path)` shape silently ACCEPTED a backslash-
+//       bearing entry there and then compared under the normalized key — two
+//       distinct on-disk paths collapsing onto one list slot, which is the exact
+//       non-injectivity `collectBaseline` and `validateStateKey` refuse
+//       fail-closed elsewhere in this file. A path that needs normalizing to be
+//       valid is not valid.
+function parseBaselineList(bytes, P) {
+  const malformed = (reason) => ({ kind: 'malformed', reason, byPath: null });
+  let parsed;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch (e) {
+    return malformed(`'${P.rel}' is not parseable JSON (${(e && e.message) || e})`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return malformed(`'${P.rel}' is not a JSON object`);
+  if (parsed.version !== 1) {
+    return malformed(`'${P.rel}' declares version ${JSON.stringify(parsed.version)}; this H17 reads version 1 only, and an unknown version is refused rather than guessed at`);
+  }
+  const entries = parsed.entries;
+  if (!Array.isArray(entries)) return malformed(`'${P.rel}' has no 'entries' ARRAY (an array, not an object, so a duplicated path is detectable rather than silently collapsed)`);
+  const byPath = new Map();
+  let previous = null;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return malformed(`'${P.rel}' carries an entry (#${i}) that is not a {path, sha256} object (${JSON.stringify(entry)})`);
+    if (typeof entry.path !== 'string') return malformed(`'${P.rel}' carries an entry (#${i}) whose 'path' is not a string (${JSON.stringify(entry.path)})`);
+    // (a) CLOSED ENTRY SHAPE — parity with `validateListShape`'s `unknown` check.
+    const unknown = Object.keys(entry)
+      .filter((k) => k !== 'path' && k !== 'sha256')
+      .sort();
+    if (unknown.length > 0) {
+      return malformed(
+        `'${P.rel}' entry #${i} (${JSON.stringify(entry.path)}) carries unknown entry key${unknown.length === 1 ? '' : 's'} (${unknown.join(', ')}) — ` +
+          `the entry shape is EXACTLY {path, sha256} (fe861066 D1), so an entry carrying more than that was written against a meaning neither this hook nor ` +
+          `the clearer implements (\`deleted: true\` is the likely one, and no deletion attestation exists any more). Refused WHOLE rather than partly honoured`
+      );
+    }
+    // (b) EXACT CANONICAL PATH — an IDENTITY test, deliberately not "does it
+    // validate". Parity with `validateListShape`'s `validateBaselineKey(e.path) !== e.path`.
+    if (validateBaselineKey(entry.path) !== entry.path) {
+      return malformed(
+        `'${P.rel}' entry #${i} names ${JSON.stringify(entry.path)}, which is not a repo-relative POSIX path in exactly canonical form inside the fixed (B) ` +
+          `surface definition (${BASELINE_GLOBS.join(', ')}) — absolute, traversing, off-glob, or merely NON-NORMALIZED. A path that would have to be ` +
+          `rewritten to become valid is refused rather than rewritten: normalizing it here would let two distinct on-disk paths collapse onto one list slot`
+      );
+    }
+    const rel = entry.path;
+    if (previous !== null && !(previous < rel)) {
+      return malformed(
+        previous === rel
+          ? `'${P.rel}' names '${rel}' more than once — a duplicated claim has no single meaning, so the list is refused whole`
+          : `'${P.rel}' is not sorted ascending by path ('${previous}' precedes '${rel}') — an unsorted list is refused, because sortedness is what makes the duplicate check sound`
+      );
+    }
+    if (typeof entry.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.sha256)) {
+      return malformed(`'${P.rel}' carries a sha256 for '${rel}' that is not lowercase 64-hex (${JSON.stringify(entry.sha256)})`);
+    }
+    byPath.set(rel, entry.sha256);
+    previous = rel;
+  }
+  return { kind: 'valid', reason: null, byPath };
+}
+
+// THE SET-EXACT 4-ARM COMPARE (fe861066 D3), run against a (B) view this
+// function collects ITSELF. Four arms, each its own finding:
+//   * a listed (B) path MISSING from the live surface        -> finding
+//   * a listed (B) path whose CURRENT BYTES differ           -> finding
+//   * a live (B) path with NO entry in the list              -> finding
+//   * exact match                                            -> NOTHING HAPPENS
+// THAT LAST ARM IS THE WHOLE SAFETY ARGUMENT AND IS STATED AS A NEGATIVE ON
+// PURPOSE: an exact match is never an early allow and never suppresses any other
+// finding this sweep makes. A list rewritten to agree with tampered bytes is not
+// authorization — the ordinary in-window (B) arm still denies it (pinned by the
+// NO-SUPPRESSION arm of scripts/tests/h17-b-baseline-list.test.mjs).
+//
+// `collectBaseline` THROWS on a swapped/non-regular (B) surface path; that throw
+// is deliberately NOT caught here — it reaches the Post body's fail-closed catch
+// and DENIES, which is the settled AC9c disposition.
+//
+// The hash comes from the base64 `collectBaseline` already read through a pinned,
+// no-follow, classified-by-the-open descriptor, never from a second disk read:
+// re-opening every (B) path here would reintroduce exactly the classify->use
+// window the secure-I/O layer exists to close.
+function compareBaselineList(cwd, list, note) {
+  const current = collectBaseline(cwd);
+  const has = (rel) => Object.prototype.hasOwnProperty.call(current, rel);
+  for (const [rel, sha256] of list.byPath) {
+    if (!has(rel)) {
+      note(`the baseline list attests '${rel}', but that path is MISSING from the live (B) surface`);
+      continue;
+    }
+    const currentHash = createHash('sha256').update(Buffer.from(current[rel], 'base64')).digest('hex');
+    if (currentHash !== sha256) note(`the baseline list attests '${rel}' as ${sha256}, but its CURRENT bytes hash to ${currentHash}`);
+  }
+  for (const rel of Object.keys(current)) {
+    if (!list.byPath.has(rel)) {
+      note(`'${rel}' exists on the live (B) surface but has NO entry in the baseline list — the list is not an exact description of the surface it claims to describe`);
+    }
+  }
 }
 
 // Read a leaf's bytes THROUGH THE DESCRIPTOR IT WAS CLASSIFIED BY. On Linux that
@@ -2103,35 +2693,18 @@ function readClassifiedBytes(h, maxBytes, what, label) {
   return readBoundedBuffer(h.anchored, maxBytes, what);
 }
 
-// One path's CURRENT bytes hashed for a stamp comparison — only ever for a
-// REGULAR FILE (review finding 3). Returns null for anything else, so the
-// consult can never hash THROUGH a symlink: the attack that closes is replacing
-// a stamped enforcement file with a link to an out-of-repo file holding the
-// stamped bytes, which the hook loader would then execute from outside every
-// sweep's reach.
-// STREAMED (board 55fcccac clause 1): constant memory, no size cap — a stamped
-// enforcement file of any size is hashable without the guard's heap tracking
-// it.
-// SLICE 2: addressed by (cwd, rel) and resolved through a PINNED parent, and the
-// classification is the OPEN itself — so the bytes hashed are the bytes of the
-// object that was classified, not of whatever a racer put under the name
-// afterwards. Returns null for anything that is not a regular file.
-function sha256OfRegularFile(cwd, rel, what = `stamp attestation of '${rel}'`) {
-  return withPinnedParent(cwd, rel, what, {}, (parentHandle, leaf) => {
-    if (parentHandle === null) return null;
-    const h = classifyLeafAt(parentHandle, leaf);
-    let primary;
-    try {
-      if (h.kind !== 'file') return null;
-      return hashClassifiedLeaf(h, rel);
-    } catch (e) {
-      primary = e;
-      throw e;
-    } finally {
-      closePinned(h.fd, primary);
-    }
-  });
-}
+// GRAVESTONE — `sha256OfRegularFile(cwd, rel, what)` stood here: one path's
+// CURRENT bytes hashed for a stamp comparison, returning null for anything that
+// was not a REGULAR FILE so a consult could never hash THROUGH a symlink.
+// DELETED 2026-08-30 (S4) on the SECOND reference-graph pass, not the first: it
+// was not in the ruled dead set, it became an orphan when its only two callers
+// (`verifyStampAttestation`, `stampAttestsCurrentBytes`) went with the
+// attestation apparatus. Recorded explicitly because "delete by reachability,
+// not by proximity" (dc616f69 R11) requires the second pass to be visible.
+// ITS PROPERTY IS NOT LOST: the (B) comparator hashes from the base64
+// `collectBaseline` already read through a pinned, no-follow,
+// classified-by-the-open descriptor, and `collectBaseline` refuses a symlink at
+// any level outright — so nothing in this file hashes through a link either.
 
 // (`toRel(cwd, abs)` used to live here. It existed because collectBaseline built
 // ABSOLUTE child paths and then derived the (B) record's key back from them.
@@ -2211,28 +2784,26 @@ function classifyPathComponents(cwd, rel, what = '(B) baseline') {
 // classify-then-act pair is not atomic however good the classification is, so
 // the (B) write, the (B) delete, the (A) state snapshot and the untracked-restore
 // delete all moved onto `withPinnedParent`, which keeps the parent descriptor
-// HELD while the operation runs. ONE caller remains — restoreTracked's in-HEAD
-// arm, which shells out to `git checkout HEAD -- <rel>`: git resolves the path
-// itself, in another process, outside every descriptor this hook can hold, so
-// classification is the only guard available there. That is a NAMED, OPEN
-// residual and it is S3's to close (Ruling A: resolve the blob and materialize
-// it through the pinned write primitive instead of invoking checkout).
-// Returns the IMMEDIATE PARENT's own kind ('dir' when it is already there,
-// 'absent' when the primitive may create it fresh — nothing to follow yet);
-// throws on anything else, and on the first non-directory component above it.
-function assertRealAncestors(cwd, rel, what) {
-  const segments = rel.replace(/\/+$/, '').split('/');
-  const ancestorRel = segments.slice(0, -1).join('/');
-  if (!ancestorRel) return 'dir'; // a repo-root child: the root is the trust anchor, never lstat'd
-  const kind = classifyPathComponents(cwd, ancestorRel, what);
-  if (kind !== 'dir' && kind !== 'absent') {
-    throw new Error(
-      `${what}: refusing to act on '${rel}' — its ancestor '${ancestorRel}' is not a directory (lstat kind: ${kind}); a symlink or other ` +
-        `non-regular ancestor is never created through, written through, deleted through or restored through`
-    );
-  }
-  return kind;
-}
+// HELD while the operation runs. ONE caller remained — restoreTracked's in-HEAD
+// arm, which shelled out to `git checkout HEAD -- <rel>`, where git resolved the
+// path itself in another process and classification was the only guard available.
+// SLICE 3 CLOSED THAT (Ruling A): the in-HEAD arm materialized the HEAD blob
+// through `withPinnedParent` too, so its containment became STRUCTURAL.
+// v6.0 (2026-08-30) DELETED the restore itself (dc616f69), taking the function's
+// LAST caller with it, and it was retained UNCALLED for exactly one slice so that
+// S4 — which owns the judgment on how much descriptor-pinning depth a detect-only
+// tripwire still needs — could rule on it rather than have it pre-empted.
+// S4 HAS NOW RULED, AND THE ANSWER IS DELETE (78dc9bd6): with no write, delete or
+// restore primitive left in this file there is no operation whose ancestors it
+// could guard, and a retained-uncalled helper is a standing invitation to aim a
+// future primitive at it. Every surviving path resolves through
+// `withPinnedParent`, which performs the same per-component refusal INLINE and
+// keeps the descriptor HELD across the operation — a strictly stronger guarantee
+// than this classify-then-return-a-kind shape could give.
+// GRAVESTONE — `assertRealAncestors(cwd, rel, what)` stood here: the ancestor
+// guard every write/create/delete/restore primitive used to take first (board
+// 128fedb7), returning the immediate parent's own kind and throwing on the first
+// non-directory component above it.
 
 // Snapshot every existing (B)-set file as { repoRelPath -> raw bytes, base64 }.
 // LSTAT-GUARDED AT EVERY LEVEL, ancestors included (board 8b53dc84): the old
@@ -2467,34 +3038,63 @@ function validateBaselineKey(key) {
   return fwd;
 }
 
-// The restore's OWN write primitive (board 8b53dc84, ROUND 2 — folds in board
-// 4d7d188d) — the serious half of the defect: a plain writeFileSync to a path
-// currently occupied by a symlink FOLLOWS it, landing baseline bytes on a
-// destination the agent chose, outside the repository; and
-// mkdirSync(dirname(abs), {recursive:true}) creates directories THROUGH an
-// existing symlinked ANCESTOR exactly the same way. Guarded here with its own
-// component-by-component classification (`classifyPathComponents`, ancestors
-// AND the final segment), deliberately SEPARATE from collectBaseline's
-// read-side scan above (which already denies before this is ever reached in
-// the ordinary flow, since a kind transition makes "current" throw first) — a
-// write primitive that can be aimed is worse than one that can merely be
-// evaded, so it is never trusted to be safe only because an earlier scan said
-// so. `content` is base64 of the raw bytes to restore (collectBaseline's own
-// encoding), decoded back to a Buffer so the write is byte-exact.
-// SLICE 2: the classification and the WRITE now share one held parent
-// descriptor. Slice 1's shape classified the chain, dropped every descriptor,
-// then let `mkdirSync(dirname(abs), {recursive:true})` and `writeFileSync(abs)`
-// each re-resolve the whole string — so an ancestor swapped in that gap was
-// created through and written through by primitives that had been authorized
-// against a different chain. `withPinnedParent` holds the parent open for the
-// whole operation, creates any missing ancestor ONE COMPONENT AT A TIME through
-// that pin (never a recursive mkdir, which walks the string), and hands
-// `writeRegularAt` a parent that cannot be re-aimed.
-function writeUnder(cwd, rel, content) {
-  withPinnedParent(cwd, rel, `(B) baseline restore of '${rel}'`, { createParents: true }, (parentHandle, leaf) => {
-    writeRegularAt(parentHandle, leaf, Buffer.from(content, 'base64'), rel);
-  });
-}
+// GRAVESTONE — `writeUnder(cwd, rel, content)` WAS the (B) sweep's RESTORE
+// primitive: the modify arm called it to put a changed (B) file's pre-image bytes
+// back, and the delete arm called it to recreate a (B) file that had vanished.
+// DELETED 2026-08-29 by RULING D of decision h17-baseline-integrity-redesign-
+// rulings-abcd (532a4383), as refined by h17-ruling-d-needs-a-b-enumerating-stamp-
+// producer-and-stamp-invalidation (fac9a69b): the (B) surface moved to
+// DETECT-AND-DENY, so a changed (B) path is DENIED and LEFT EXACTLY AS THE COMMAND
+// LEFT IT.
+// WHY, kept here because the reason IS the ruling and a ruling stripped of its
+// justification gets re-opened:
+//   (1) THE HARDLINK CLOBBER. This primitive wrote through `writeRegularAt`'s
+//       truncate-in-place arm, and truncate-in-place does not care how many names
+//       an object has. A (B) path replaced by a HARDLINK to a file OUTSIDE the
+//       repository made the "restore" write baseline bytes straight through the
+//       shared inode onto that outside file. Descriptor pinning cannot close it:
+//       the whole S1–S3 threat model is about NAME RESOLUTION, and pinning
+//       constrains which NAME resolves to which object while saying nothing about
+//       how many names an object has. REPRODUCED LIVE, not reasoned — the S4 red
+//       bar caught the victim's bytes coming back as the restored baseline content.
+//   (2) THE PRE-IMAGE IS NOT A TRUSTWORTHY SOURCE. The (A) restore is justified by
+//       an asymmetry that does NOT hold here: (A) reverts to HEAD, which git can
+//       always hand back, whereas the (B) pre-image lives only in an os.tmpdir()
+//       record that the audited command can itself write. Restoring from it makes
+//       the guard a writer of attacker-influenceable bytes.
+// STRUCTURAL, NOT ADVISORY: the function is GONE, not merely uncalled, so the (B)
+// stage now holds NO write primitive and NO delete primitive at all — there is
+// nothing left in that scope for a future edit to re-aim, and no comment standing
+// in for a guard (anti-pattern 586bccdc). Its two callers were the modify and
+// delete arms it served, and both are now `noteBaselineDenied(rel)` (which
+// records the finding and latches; it is the ONLY writer of `baselineDenied`).
+// `writeRegularAt` survived this ruling for its one legitimate (A) caller — the
+// read-blob restore of a TRACKED path. v6.0 (2026-08-30) then deleted the (A)
+// restore itself (dc616f69), and `writeRegularAt` went with it: the WHOLE FILE
+// now holds no write primitive, not just the (B) stage.
+// SABOTAGE TABLE for this ruling (specified, never run in-place — mutation runs are
+// conductor-only, decision 02e03ed8, and in-place mutation of scripts/hooks/** is
+// anti-pattern 37b3cb0a):
+//   S1: restore `writeUnder` and call it where `noteBaselineDenied(rel)` now sits.
+//       REAL CARRIER: the BYTE-IDENTITY assertions in AC1/AC6-DENY of
+//       scripts/tests/h17-b-detect-and-deny.test.mjs (`deepEqual(readFileSync(coder),
+//       newBytes)`). NOT the exit code — the same trap the `removeUnder` gravestone
+//       records: the old code restored FIRST and denied (exit 2) anyway, so an
+//       exit-code assertion stays GREEN while the disk outcome is inverted.
+//   S2: recreate a DELETED (B) path from the Pre baseline. CARRIER: AC2's
+//       `existsSync(coder) === false`, which `assert.equal(r.code, 2)` cannot see.
+//   S3: push (B) modify/delete findings back into `violations`. CARRIER: AC3's
+//       `doesNotMatch(/reverted|rolled\s*back/i)` — the `violations` wording claims
+//       a rollback that no longer happens.
+//   S4: drop the disposition wording from the (B) denial (generic "denied").
+//       CARRIER: AC3's `match(/left (in place|on disk|untouched|as[- ]is)/i)`.
+//   S5: drop `baselineDenied.length` from the deny condition below. CARRIER: the
+//       exit-code assertions — this is the ONE sabotage here the exit code does
+//       catch, because it is the one that stops the denial firing at all.
+//   S6: keep the restore but unlink-and-recreate instead of truncating in place.
+//       CARRIER: AC11's shared-inode + `nlink >= 2` assertions — the victim's bytes
+//       survive, so the byte assertions alone would stay green, and only the link
+//       relationship reveals that H17 still took a write action.
 
 // GRAVESTONE — `removeUnder(cwd, rel)` WAS the (B) sweep's DELETE primitive
 // (board 128fedb7 site 2): the addition arm called it on every live (B) file
@@ -2513,8 +3113,10 @@ function writeUnder(cwd, rel, content) {
 // addition path therefore holds NO delete primitive at all — there is nothing
 // for a future edit to re-aim, and no comment standing in for a guard
 // (anti-pattern 586bccdc: a security surface must never claim a protection that
-// only prose implements). The one delete primitive left in this file is
-// `removeTreeAt`, and its ONLY caller is `restoreTracked`'s NOT-IN-HEAD arm.
+// only prose implements). The one delete primitive that remained after this
+// ruling — `removeTreeAt`, reachable only from `restoreTracked`'s NOT-IN-HEAD
+// arm — was itself deleted with the restore family in v6.0 (dc616f69): the file
+// now holds no delete primitive anywhere.
 // AND THAT WAS NOT ENOUGH — read this before trusting the paragraph above (v4.1,
 // 2026-08-27, outside-family review, CONFIRMED). Removing the (B) arm's delete
 // closed the (B) ROUTE to the (B) surface; it left the (A) ROUTE open. A (B) file
@@ -2526,16 +3128,22 @@ function writeUnder(cwd, rel, content) {
 // NOTICED IT. Both `restoreTracked`'s not-in-HEAD arm and `removeTreeAt` itself
 // (recursion included) now refuse `isEnforcementSurface` paths, and the (A) sweep
 // routes the survivor into `unauthorizedAdditions`.
-// THE RESTORE PATH IS DELIBERATELY UNCHANGED and the asymmetry is the point: a
-// MODIFIED TRACKED file has a recoverable source of truth (its committed bytes),
-// so reverting it destroys nothing that git cannot hand back. An ADDITION has no
-// such source — the bytes exist nowhere else — which is exactly why detection,
-// not deletion, is the correct disposition for it.
+// THE RESTORE PATH WAS DELIBERATELY UNCHANGED BY THIS RULING and the asymmetry
+// was the point: a MODIFIED TRACKED file has a recoverable source of truth (its
+// committed bytes), so reverting it destroys nothing that git cannot hand back.
+// An ADDITION has no such source — the bytes exist nowhere else — which is
+// exactly why detection, not deletion, was the correct disposition for it.
+// v6.0 (2026-08-30) then removed the asymmetry from the other side: recoverable
+// BYTES were never the whole question, because AUTHORSHIP is unprovable in a
+// shared worktree — restoring recoverable bytes still destroys a conductor's
+// uncommitted replacement bytes (dc616f69). Detection is now the disposition for
+// EVERY (A) finding, additions and modifications alike.
 // SABOTAGE TABLE for this ruling (specified, never run in-place — mutation runs
 // are conductor-only, decision 02e03ed8, and in-place mutation of
 // scripts/hooks/** is anti-pattern 37b3cb0a):
 //   S1: reintroduce an unlink on the addition arm (restore removeUnder and call
-//       it where `unauthorizedAdditions.push(rel)` now sits).
+//       it where `noteUnauthorizedAddition(rel)` now sits — that helper is the
+//       ONLY writer of `unauthorizedAdditions`, and it latches).
 //       REAL CARRIER: enforcement.test.mjs AC8's SURVIVAL + BYTE-IDENTITY
 //       assertions (`existsSync(evilAgent)` + `deepEqual(readFileSync(...),
 //       plantedBytes)`). NOT the exit code — MEASURED ON THIS EXACT FILE: an
@@ -2556,9 +3164,16 @@ function writeUnder(cwd, rel, content) {
 //       CARRIER: the exit-code assertion — this is the ONE addition-arm sabotage
 //       the exit code does catch, precisely because it is the one that stops the
 //       denial from firing at all.
-// SABOTAGE TABLE, v4.1 (A)-ROUTE ADDENDUM — same rules (specified, never run
-// in-place). The scenario for every row: Pre baseline has no `.claude/agents/
-// evil.md`; the audited command creates it and runs `git add -f` on it.
+// SABOTAGE TABLE, v4.1 (A)-ROUTE ADDENDUM — HISTORICAL AS OF v6.0: rows S6-S10
+// name `restoreTracked`/`removeTreeAt` layers that are now DELETED with the
+// restore family (dc616f69), so those sabotages have nothing to strip any more —
+// the (A) route cannot delete a file because it holds no delete primitive at
+// all. S11's wording carrier survives in spirit (the `violations` denial must
+// never claim a removal). Kept because the two-layer lesson — strip every layer
+// to tell a hollow pin from a defended one — is what the table teaches.
+// Original rules: specified, never run in-place. The scenario for every row:
+// Pre baseline has no `.claude/agents/evil.md`; the audited command creates it
+// and runs `git add -f` on it.
 //   S6: remove LAYER 1 only (the `isEnforcementSurface` early return in
 //       `restoreTracked`'s not-in-HEAD arm).
 //       EXPECTED: STILL GREEN. Layer 2 catches the same exact-path hit inside
@@ -2608,290 +3223,64 @@ function parsePorcelainZ(out) {
   return entries;
 }
 
-// Decision h17-enforcement-stamp-conductor-attested-dirt (6e132e19): a
-// CONDUCTOR-written stamp (.sterling/transient/enforcement-stamp.json, written
-// by scripts/enforcement-stamp.mjs — never by an agent, which cannot self-
-// attest its own tamper) lists each dirty enforcement path with the sha256 of
-// its bytes at stamp time. When EVERY path in `preExistingRels` is listed with
-// a hash matching its CURRENT bytes, the pre-existing dirt is conductor-
-// attested work-in-flight rather than an unverifiable defect. FAIL-CLOSED:
-// any error reading/parsing the stamp, any unlisted path, or any hash mismatch
-// yields no exemption — never partial credit for a subset that DID match.
-// NARROWED by decision 7021526c: `preExistingRels` is now populated ONLY on the
-// degraded fallback (no per-call Pre-STATE record to compare against), so this
-// all-or-nothing consult governs the degraded path alone. A pre-dirty path whose
-// state genuinely CHANGED is attested PER PATH by stampAttestsCurrentBytes /
-// stampAttestsDirectory in the sweep, because one unstamped unchanged path must
-// never collapse attestation for a changed stamped one.
-function verifyStampAttestation(cwd, preExistingRels) {
-  try {
-    const { present, entries } = readStamp(cwd);
-    if (!present) return { attested: false, stampPresent: false, failedPath: null };
-    if (!entries) return { attested: false, stampPresent: true, failedPath: null };
-    const byPath = new Map();
-    for (const entry of entries) {
-      if (entry && typeof entry.path === 'string') byPath.set(entry.path, entry);
-    }
-    for (const rel of preExistingRels) {
-      const entry = byPath.get(rel);
-      if (!entry) return { attested: false, stampPresent: true, failedPath: rel };
-      // FIX L1 (upgrade-polish, 2026-08-21): a stamped DELETION attests iff the
-      // path is STILL absent — the path reappearing is not the attested state,
-      // so no exemption (fail-closed, no partial credit). LSTAT-guarded (review
-      // finding 3): a dangling symlink is present, not absent, so it can never
-      // pass as an attested deletion. SLICE 2: resolved through the pinned
-      // parent, so a linked ancestor cannot answer the question from outside.
-      if (entry.deleted === true) {
-        if (lstatKindUnder(cwd, rel, `stamp attestation of '${rel}'`) !== 'absent') return { attested: false, stampPresent: true, failedPath: rel };
-        continue;
-      }
-      if (typeof entry.sha256 !== 'string') return { attested: false, stampPresent: true, failedPath: rel };
-      // Only a REGULAR FILE can be hashed for attestation — never a symlink
-      // (whose bytes may live outside the repo), a directory, or a device.
-      const current = sha256OfRegularFile(cwd, rel);
-      if (current === null) return { attested: false, stampPresent: true, failedPath: rel };
-      if (current !== entry.sha256) return { attested: false, stampPresent: true, failedPath: rel };
-    }
-    return { attested: true, stampPresent: true, failedPath: null };
-  } catch {
-    // Fail-closed (P5): an unreadable/corrupt stamp exempts nothing.
-    return { attested: false, stampPresent: true, failedPath: null };
-  }
-}
+// GRAVESTONE — THE STAMP CONSULT FAMILY LIVED HERE: `verifyStampAttestation`
+// (the all-or-nothing consult that could exempt the WHOLE degraded pre-existing
+// set, decision 6e132e19), `stampAttestsCurrentBytes` (the per-path FIX-A consult
+// of 4d9b76e8), `stampBaselineManifest` (RULING 4 of bcd2cc09's consumer
+// validation) and `stampAttestsDirectory` (the child-file walk that attested a
+// collapsed untracked directory). ALL DELETED 2026-08-30 (S4) by decisions
+// h17-demotes-to-tripwire-with-minimal-b-hash-list (78dc9bd6) and
+// b-baseline-hash-list-concrete-design (fe861066).
+//
+// WHY THEY WENT, kept because a ruling stripped of its justification gets
+// re-opened: hook and audited command run as the SAME UID with no privilege
+// boundary between them (research_finding 79942bda), so the stamp these functions
+// consulted was forgeable by the very actor they were meant to constrain. Keeping
+// it even as a "false-positive damper" preserves exactly the theatrical trust
+// mechanism that finding killed — A FORGEABLE ATTESTATION MAY EXPLAIN A FINDING,
+// NEVER EXEMPT ONE. What every one of these functions did was EXEMPT, so all four
+// went whole rather than being hardened again.
+//
+// WHAT REPLACED THEM IS NOT A NARROWER CONSULT BUT AN OPPOSITE-SIGNED ONE. The
+// persistent (B) baseline list (`readBaselineList` / `compareBaselineList` above)
+// can only ever ADD a finding; there is no input to it that produces an allow
+// which observation had not already produced. That asymmetry is the entire
+// security argument for reading an agent-writable file at all.
+//
+// THE FALSE-POSITIVE COST IS REAL AND IS DISCHARGED ELSEWHERE, not denied: dirt
+// on the enforcement surface that a conductor legitimately made now denies with
+// no exemption route, and the sanctioned discharge is the taint latch plus a
+// deliberate conductor clearer run (scripts/enforcement-reconcile.mjs) with agent
+// Bash quiesced — which is already the standing posture across a build.
 
-// FIX-A (decision h17-stamp-honor-loud-restore, 4d9b76e8): a fresh conductor
-// attestation for a SINGLE in-window path — read the stamp NOW and hash the
-// file's CURRENT bytes. Deliberately separate from verifyStampAttestation
-// above (FIX C): that one attests a whole preExisting SET at once, all-or-
-// nothing; this one gates a single restore decision for a path that was NOT
-// dirty at Pre. FAIL-CLOSED: any error (missing/corrupt stamp, unlisted path,
-// hash mismatch, deleted-entry shape) attests nothing.
-function stampAttestsCurrentBytes(cwd, rel) {
-  try {
-    const { entries } = readStamp(cwd);
-    if (!entries) return false;
-    const entry = entries.find((e) => e && e.path === rel);
-    if (!entry) return false;
-    // Review fix 5: a stamped DELETION (enforcement-stamp.mjs writes
-    // {path, deleted:true} for a dirty path with no bytes) attests iff the
-    // path is STILL absent — mirrors verifyStampAttestation's deleted arm.
-    // Without this, an attested in-window deletion was silently resurrected.
-    // SLICE 2: resolved through the pinned parent, like the hash below it.
-    const kind = lstatKindUnder(cwd, rel, `stamp attestation of '${rel}'`);
-    if (kind === 'absent') return entry.deleted === true;
-    // Review finding 3: a path that is not a REGULAR FILE is UNATTESTED, full
-    // stop. The old existsSync/readFileSync pair FOLLOWED a link, so a stamped
-    // file replaced by a symlink to an out-of-repo file holding the stamped
-    // bytes was attested and allowed — and the hook loader would then execute
-    // content from outside the repo that no sweep covers.
-    if (kind !== 'file') return false;
-    if (typeof entry.sha256 !== 'string') return false;
-    const current = sha256OfRegularFile(cwd, rel);
-    return current !== null && current === entry.sha256;
-  } catch {
-    return false;
-  }
-}
+// GRAVESTONE — THE (A) RESTORE FAMILY LIVED HERE: `restoreTracked` (the
+// executor), `materializeHeadBlob`, `headTreeEntry`, `assertRestorableHeadEntry`,
+// `headBlobBytes`, `indexDispositionAgainstHead`, `mintRestorePerformed`, plus
+// `writeRegularAt` and `removeTreeAt` further up — the write and recursive-delete
+// primitives whose only remaining caller was the restore. DELETED 2026-08-30
+// (v6.0) by decisions dc616f69 (the (A) arm stops restoring) and 78dc9bd6 (H17
+// demotes to tripwire). WHY, kept because a ruling stripped of its justification
+// gets re-opened: no signal available to a same-UID hook in a shared worktree
+// can prove which PROCESS authored a write — `agent_id` labels the hook EVENT,
+// not the filesystem bytes written while it was open — so every automatic
+// rollback carried the POSSIBILITY (not merely the probability) of destroying a
+// conductor's concurrent uncommitted work, and no heuristic narrowing fixes
+// that: narrowing changes the odds, never the possibility. The disposition for
+// an in-window (A) violation is now the same one the (B) surface already uses —
+// DETECT, DENY, LATCH, leave the bytes on disk for a human. If rollback is ever
+// genuinely required it belongs UPSTREAM (per-agent worktrees, a copy-on-write
+// sandbox, a separate authority), never in this hook. STRUCTURAL, NOT ADVISORY:
+// the functions are GONE, not uncalled — this file no longer holds ANY primitive
+// that writes, deletes or restores a repo path (its only in-repo mutations are
+// the create-only taint latch and the best-effort stamp invalidation), so there
+// is nothing left for a future edit to re-aim (anti-pattern 586bccdc).
+// `restore_performed` maintenance items are no longer minted; the schema lane
+// survives so existing records stay readable (dc616f69 R12).
 
-// Review fix 6 (h17-stamp-honor-loud-restore adjudication): an untracked
-// DIRECTORY reaches the (A) restore point as its bare collapsed path (`?? dir/`
-// → `dir`), while the stamp CLI expands a dirty dir into its child FILES — so
-// a per-path lookup can never match and an attested dir was rmSync'd. Attest
-// the dir by walking its child files: EVERY child stamp-attested → the dir is
-// conductor work-in-flight (skip restore + deny). Empty dir, any unattested or
-// mismatched child, or any fs error → false (fail-closed, restore as before).
-function stampAttestsDirectory(cwd, relDir) {
-  try {
-    const files = [];
-    // INCREMENTAL + BUDGETED (board 55fcccac clause 3), for the same reason
-    // pathState's walk is: this walk runs on an agent-influenced dirty
-    // directory, so its size is not ours to assume. A tripped budget throws
-    // into the catch below and the directory simply attests NOTHING — the
-    // fail-closed answer this function already gives for every other walk
-    // failure (the caller then restores and denies).
-    // SLICE 2: the enumeration walks PINNED directory descriptors instead of
-    // re-resolving `join(cwd, rel)` at every level — a linked ancestor can no
-    // longer route this walk out of the repository between one level and the
-    // next. (The per-file hash below is a SEPARATE pinned resolution per path;
-    // that is a deliberate boundary, not an oversight — each hash re-walks from
-    // the root under its own pin, and a swap between the two can only ever make
-    // this consult attest LESS, never more, since every failure is fail-closed.)
-    const walk = (dirHandle, rel, depth) => {
-      WALK_BUDGET.chargeDepth(depth, rel);
-      const dir = opendirSync(dirHandle);
-      let primary;
-      try {
-        for (;;) {
-          const de = dir.readSync();
-          if (de === null) break;
-          WALK_BUDGET.chargeNode(rel);
-          const childRel = `${rel}/${de.name}`;
-          // Review finding 3: Dirent classification is lstat-shaped, and this
-          // walk keeps it that way — a symlink is never recursed into and never
-          // counted as an attestable file, so the recursion cannot leave the repo
-          // and no child's bytes are ever hashed through a link. Anything that is
-          // neither a real directory nor a regular file aborts the walk into the
-          // catch below (fail-closed: the directory attests nothing).
-          if (de.isDirectory()) withPinnedDir(`${dirHandle}/${de.name}`, (childHandle) => walk(childHandle, childRel, depth + 1));
-          else if (de.isFile()) files.push(childRel);
-          else throw new Error(`unattestable entry '${childRel}' (not a regular file or directory)`);
-        }
-      } catch (e) {
-        primary = e;
-        throw e;
-      } finally {
-        try {
-          dir.closeSync();
-        } catch (closeErr) {
-          // Codex F5: propagate a leaked-handle close error only when no primary
-          // exception is already driving the verdict; a swallowed leak marches
-          // toward an EMFILE fail-open. (The outer catch here turns any throw
-          // into an unattested `return false`, so this stays fail-safe.)
-          if (!primary) throw closeErr;
-        }
-      }
-    };
-    withClassifiedDir(cwd, relDir, (kind, dirHandle) => {
-      if (kind !== 'dir') throw new Error(`'${relDir}' is not a directory (kind: ${kind}) — it attests nothing`);
-      walk(dirHandle, relDir, 0);
-    });
-    if (!files.length) return false;
-    return files.every((f) => stampAttestsCurrentBytes(cwd, f));
-  } catch {
-    return false;
-  }
-}
 
-// FIX-B (decision h17-stamp-honor-loud-restore, 4d9b76e8): every ACTUAL
-// restore mints ONE deduped maintenance item per restored path, so a restore
-// that used to be conductor-invisible (reported only on the agent's own
-// stderr, recorded nowhere) leaves a durable trace. enqueueSystemTodo does the
-// per-path dedup (system_reason, feature_link, file_keys) INSIDE its own
-// insert transaction — a repeat restore of the same path refreshes the one
-// open item rather than minting a second (PIN4). FAIL-OPEN by construction:
-// called only AFTER the restore(s) it names already succeeded, and every
-// failure here is caught and disclosed on stderr — it never throws, so it can
-// never turn the restore/deny that already happened into anything else
-// (PIN5). Agent-facing deny stderr is composed elsewhere and stays unchanged.
-function mintRestorePerformed(cwd, paths, agentId) {
-  let mstore = null;
-  try {
-    mstore = openStore(cwd);
-    if (!mstore) {
-      // Review fix 4: a null store loses the queue item — disclose, never silent.
-      process.stderr.write(`H17: restore_performed maintenance item(s) NOT written (store unavailable); restore/deny proceed regardless.\n`);
-      return;
-    }
-    const now = new Date().toISOString();
-    for (const rel of paths) {
-      try {
-        mstore.enqueueSystemTodo({
-          id: randomUUID(),
-          type: 'todo',
-          created_at: now,
-          updated_at: now,
-          author: 'system',
-          status: 'active',
-          superseded_by: null,
-          links: [],
-          scope: 'project',
-          stack_tags: [],
-          text: `H17 restored '${rel}' to HEAD, reverting a Bash write by agent '${agentId}' at ${now} (no matching conductor stamp).`,
-          source: 'system',
-          system_reason: 'restore_performed',
-          file_keys: [rel],
-        });
-      } catch (e) {
-        process.stderr.write(`H17: restore_performed maintenance item failed to write for '${rel}': ${(e && e.message) || e}\n`);
-      }
-    }
-  } catch (e) {
-    process.stderr.write(`H17: restore_performed maintenance queue unavailable (${(e && e.message) || e}); restore/deny proceed regardless.\n`);
-  } finally {
-    try {
-      mstore?.close();
-    } catch {
-      /* best-effort close — never blocks the deny path */
-    }
-  }
-}
 
-// Restore a tracked path: in HEAD → git checkout (modified/deleted/rename-origin);
-// not in HEAD → new/untracked/added → remove (file or `?? dir/`).
-// ANCESTOR-GUARDED (board 128fedb7 site 3): both arms are aimable primitives —
-// `git checkout HEAD -- <rel>` writes wherever the resolved path lands and the
-// recursive `rmSync` resolves the whole string before deleting, so a symlink at
-// any DIRECTORY component (a linked `hooks/`, or a linked subdirectory inside a
-// legitimately dirty untracked tree) redirects the restore or the delete out of
-// the repository. A non-directory ancestor throws → the caller's fail-closed
-// catch → deny WITHOUT restoring.
-// The FINAL component is deliberately NOT kind-restricted here, unlike the (B)
-// primitives: `git checkout` replaces a symlink standing in for a tracked file
-// with HEAD's blob without following it (which is exactly what makes the
-// clean-at-Pre symlink swap recoverable), and unlinking a planted symlink leaf
-// removes the LINK, never its target — refusing there would leave an
-// attacker-planted link live at an enforcement path, which is strictly worse
-// than removing it.
-// SLICE 2 SPLIT THE TWO ARMS, because only one of them can be pinned:
-//   * NOT-IN-HEAD (delete) moved onto `removeTreeAt`, which pins every directory
-//     it descends. The `rmSync(join(cwd, rel), {recursive:true})` it replaces
-//     resolved the WHOLE string before deleting anything, so one swapped
-//     ancestor aimed a recursive delete at a tree outside the repository.
-//   * IN-HEAD (checkout) STILL RESOLVES BY PATHNAME and keeps the classify-then-
-//     act guard, because `git checkout` does its own resolution in another
-//     process where no descriptor of ours reaches. NAMED, OPEN RESIDUAL — it is
-//     S3's to close (Ruling A: read the blob and materialize it through the
-//     pinned write primitive instead of invoking checkout at all).
-// RETURNS THE DISPOSITION, because since the 2026-08-27 addition ruling the two
-// outcomes must be REPORTED DIFFERENTLY and the caller cannot tell them apart
-// from the path alone:
-//   { restored: true,  leftOnDisk: [] }        → bytes were put back (violations)
-//   { restored: false, leftOnDisk: [paths] }   → protected (B) path(s) DETECTED
-//                                                and LEFT ON DISK (additions)
-function restoreTracked(cwd, relRaw) {
-  const rel = relRaw.replace(/\/+$/, ''); // untracked dir collapses to `?? dir/`
-  const inHead = spawnSync('git', ['-C', cwd, 'cat-file', '-e', 'HEAD:' + rel], { encoding: 'utf8' }).status === 0;
-  if (inHead) {
-    // UNCHANGED, AND DELIBERATELY SO: a path IN HEAD has a recoverable source of
-    // truth, so reverting it destroys nothing git cannot hand back. This arm is
-    // NOT narrowed by the (B) guard below — the asymmetry between a MODIFIED
-    // TRACKED file and an ADDITION is the whole content of the ruling.
-    assertRealAncestors(cwd, rel, `(A) tracked restore of '${rel}'`);
-    const r = spawnSync('git', ['-C', cwd, 'checkout', 'HEAD', '--', rel], { encoding: 'utf8' });
-    if (r.error || r.status !== 0) throw new Error(`checkout HEAD -- ${rel} failed: ${r.stderr || r.error}`);
-    return { restored: true, leftOnDisk: [] };
-  }
-  // LAYER 1 OF THE (B)-SURVIVAL GUARD — the NOT-IN-HEAD arm is the DELETE arm,
-  // and deletion is the irreversible half of this function. A path that is on the
-  // protected (B) surface AND absent from HEAD has its bytes NOWHERE ELSE: that
-  // intersection is exactly the v4.0 ruling's "unexpected ADDITION", whichever
-  // sweep noticed it first. `git add -f .claude/agents/x.md` routes such a file
-  // through the (A) sweep, which used to reach `removeTreeAt` below and destroy
-  // it before the (B) collection could report it. Returning HERE means no delete
-  // primitive is entered at all for this path — no ancestor walk, no classify, no
-  // unlink — and the caller routes it to the DETECTED-DENIED-LEFT-ON-DISK
-  // disposition. `isEnforcementSurface` is the same predicate the (A) violation
-  // test and the (B) glob set use; there is deliberately no second notion of
-  // "protected" in this file.
-  // DEFENCE IN DEPTH, NOT REDUNDANCY: `removeTreeAt` refuses the same paths on
-  // its own (layer 2), so each layer independently carries the verdict for an
-  // exact-path hit — see the sabotage table at the `removeUnder` gravestone,
-  // which records that stripping EITHER layer alone leaves the pin green and
-  // only stripping BOTH turns it red. Their REACH differs, which is why both
-  // exist: layer 1 also skips the ancestor walk (so a swapped ancestor cannot
-  // turn a protected addition into a misattributed environment-defect denial),
-  // while layer 2 also covers protected DESCENDANTS of a non-protected directory.
-  if (isEnforcementSurface(rel)) return { restored: false, leftOnDisk: [rel] };
-  const leftOnDisk = withPinnedParent(cwd, rel, `(A) tracked restore of '${rel}'`, {}, (parentHandle, leaf) => {
-    if (parentHandle === null) return []; // ancestor absent → nothing to remove
-    return removeTreeAt(parentHandle, leaf, rel);
-  });
-  // A PARTIAL removal (a not-in-HEAD directory holding protected descendants) is
-  // reported as an ADDITION LEFT ON DISK and NOT as a revert: `violations` says
-  // the named path was "reverted", and that would be a false action claim for a
-  // tree whose protected members are still standing (anti-pattern 586bccdc).
-  return { restored: leftOnDisk.length === 0, leftOnDisk };
-}
+
+
 
 // THE INPUT BOUNDARY IS ITSELF A GATE (repair of an outside-family review
 // finding). `readStdin()` reads fd 0 and JSON.parses it, both unguarded. Called
@@ -2954,6 +3343,14 @@ const event = input.hook_event_name;
 // ---------------------------------------------------------------------------
 if (event === 'PreToolUse') {
   try {
+    // THE TAINT LATCH IS CONSULTED FIRST — before the store, before git, before
+    // the baseline (decision bcd2cc09, RULING 10: the latch
+    // ALWAYS wins). THIS POSITION IS THE MECHANISM, not tidiness: PRE IS THE
+    // ADOPTION POINT. `collectBaseline` two dozen lines below reads CURRENT DISK
+    // STATE as the pre-image, so a Pre that runs at all over a tainted surface
+    // records the tamper as legitimate and every later call compares equal. The
+    // deny has to land BEFORE that snapshot or the latch closes nothing.
+    denyIfTainted(cwd, input.agent_id);
     const store = openStore(cwd);
     let runId = NO_RUN;
     try {
@@ -3005,6 +3402,13 @@ if (event === 'PreToolUse') {
     // removes (P4).
     const dirtyRels = dirtyTrackedRels(cwd);
     writeFileSync(dirtyFile(cwd, runId, key), JSON.stringify(dirtyRels));
+    // (THE STAMP WITNESS was written here — a fourth per-call os.tmpdir() record
+    // holding the enforcement stamp's own observable state, so Post could detect
+    // an in-window stamp write. DELETED 2026-08-30 with the whole attestation
+    // apparatus, S4/78dc9bd6. Pre now writes THREE records, not four. The
+    // persistent (B) baseline list needs no Pre witness of its own: it is not
+    // compared across the window — it is compared against the LIVE (B) SURFACE at
+    // Post, so there is nothing for a Pre snapshot to carry.)
     // PER-CALL Pre-STATE record (7021526c): the STATE of every dirty path, so
     // Post can compare rather than deny the whole result for being unable to.
     // Written ONLY when tool_use_id is usable — a null key degrades LOUDLY at
@@ -3042,14 +3446,16 @@ if (event === 'PreToolUse') {
 }
 
 // ---------------------------------------------------------------------------
-// PostToolUse — verify + restore. The ENTIRE body is fail-closed: ANY unexpected
-// error during an active agent run denies (exit 2), NEVER a non-blocking exit 1.
+// PostToolUse — verify: detect + deny + latch (v6.0 — nothing restores). The
+// ENTIRE body is fail-closed: ANY unexpected error during an active agent run
+// denies (exit 2), NEVER a non-blocking exit 1.
 // ---------------------------------------------------------------------------
 try {
-  // FIX-B (h17-stamp-honor-loud-restore, 4d9b76e8), PIN5: an unopenable/
-  // throwing store must never suppress the tracked-write restore below —
+  // PIN5 (born as FIX-B, 4d9b76e8; restated at v6.0): an unopenable/throwing
+  // store must never suppress the (A) detect sweep below —
   // captured here, not thrown, so section (A) still runs on what git alone can
-  // tell it (glob-only violations; no brief, no pre-existing attribution, both
+  // tell it (glob-only violations, denied AND latched; no brief, no
+  // pre-existing attribution, both
   // of which need a working store to resolve). The original deny still fires,
   // but only AFTER the restore (and its mint attempt) had their chance —
   // denying immediately here is exactly what silently dropped the restore.
@@ -3057,7 +3463,178 @@ try {
   // per-call records (the (A) Pre-STATE snapshot and the (B) content baseline,
   // board 11609d1f) are addressed by it, and both degrade LOUDLY — never
   // silently — when it is unusable.
+  // THE TAINT LATCH IS CONSULTED FIRST HERE TOO (decision bcd2cc09, RULING 10 —
+  // the latch ALWAYS wins, with no exception). A surface with an outstanding,
+  // undischarged incident is not verifiable by this sweep, and an exactly-matching
+  // (B) baseline list is evidence that reconciliation MAY proceed, never proof
+  // that the incident was discharged.
+  denyIfTainted(cwd, input.agent_id);
   const callId = callKey(input.tool_use_id);
+
+  // -------------------------------------------------------------------------
+  // THE EAGER TAINT-LATCH PRODUCER — decision
+  // taint-latch-persists-eagerly-at-detection-because-deny-is-a-hard-exit
+  // (fd9d24af), RULING A, correcting RULING 9 of bcd2cc09.
+  //
+  // WHY, and the reason travels with the rule because the previous placement
+  // carried a comment claiming it saw every trigger while it did not
+  // (anti-pattern 886cc903): `deny()` is `process.stderr.write(message);
+  // process.exit(2)` (scripts/hooks/lib/common.mjs) — A HARD EXIT, NOT A THROW.
+  // A dozen unconditional `deny()` sites and two throws sit between the earliest
+  // detection and the end of the (B) stage, so ANY of them could end the process
+  // with the incident detected and NOTHING on disk. Call N+1's Pre then
+  // re-collected the tampered bytes as its own legitimate baseline — one denial
+  // bought a permanent edit to the agent GRANT DEFINITIONS, which is the adoption
+  // point the latch exists to close.
+  //
+  // HOISTED TO THE TOP OF POST AT S4, AND THE POSITION IS NOW LOAD-BEARING TWICE
+  // OVER (fe861066 D3). It used to sit after the store/run/brief resolution,
+  // which was fine while every producer ran later. The persistent (B) baseline
+  // list comparator runs BEFORE all of that — it must, because it is INDEPENDENT
+  // of store health and of the per-call records, and because a later hard-exit
+  // denial (an unresolvable brief, a broken store, a missing attribution record)
+  // must not be able to preempt an observable list contradiction from latching.
+  // A producer defined after its first caller would be a temporal-dead-zone
+  // ReferenceError, so the machinery moves up rather than the comparator down.
+  //
+  // WHAT EAGER LATCHING DOES **NOT** CLOSE — STATED HERE BECAUSE AN EARLIER
+  // VERSION OF THIS COMMENT CLAIMED OTHERWISE AND A REVIEWER CAUGHT IT
+  // (anti-pattern 886cc903). The motivating exploit — append to an agent
+  // template, then `rm` the os.tmpdir() records — IS NOT FIXED BY EAGER
+  // PLACEMENT. It does not evade the latch; it DESTROYS THE EVIDENCE THE
+  // DETECTION DEPENDS ON, and a latch at the detection site cannot fire for a
+  // detection that never happens. All the Pre record classes share one
+  // `sterling-enforce-<tag>` prefix, so one glob removes them together and Post
+  // exits at the "nothing attributable" deny. THAT IS THE STILL-OPEN
+  // `baselineAuditUnavailable` family, ruled in decision
+  // an-a-audit-failure-must-not-abort-the-b-audit-unverifiable-b-latches and
+  // assigned to its own slice, not here. NOTE WHAT S4 DOES NARROW IT BY, though:
+  // the (B) baseline-list comparator consults NO os.tmpdir() record at all, so
+  // for a persisted list a cross-call contradiction is still detected — and still
+  // latches — after every temp record has been destroyed.
+  //
+  // SO WHAT EAGER PLACEMENT ACTUALLY BUYS, precisely: a detection that DID occur
+  // survives an unrelated later hard exit.
+  //
+  // THE PRINCIPLE: the latch records THAT AN INCIDENT WAS OBSERVED, so the
+  // OBSERVATION SITE is the only correct persistence point — nothing downstream
+  // may un-observe it. `noteListDenied`, `noteUnauthorizedAddition`,
+  // `noteBaselineDenied`, `noteTrackedViolation` and `noteChangedPreDirty` are
+  // therefore the ONLY producers of their respective lists; a direct push to any
+  // of them would reintroduce exactly this loss.
+  //
+  // NO LATCH-AWARE `deny()` WRAPPER (RULING C — considered and REJECTED): it
+  // would duplicate the invariant across every existing and future exit, still
+  // miss a direct `process.exit` and fatal termination, and make ordinary
+  // environment-denial plumbing responsible for incident persistence.
+  //
+  // NO LOCAL "already latched?" CACHE, deliberately: RULING 8's set primitive is
+  // create-only (`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`) and treats an existing
+  // leaf in ANY shape as already-set, so a repeat call is a cheap EEXIST no-op.
+  // A cache here would be a second source of truth that can itself be wrong.
+  // -------------------------------------------------------------------------
+  let latchOutcome = null; // the FIRST meaningful set/failure outcome, kept for the composed denial below
+  const latchOnDetection = (why) => {
+    // NEVER THROWS (RULING A). A helper that threw would convert a detection into
+    // an exception and reintroduce the same class of loss this design closes.
+    let outcome;
+    try {
+      outcome = setTaintLatch(cwd, [why]);
+    } catch (e) {
+      outcome = { set: false, error: `${(e && e.message) || e}` };
+    }
+    // FIRST MEANINGFUL OUTCOME WINS, IN BOTH DIRECTIONS: a later successful set
+    // must not erase an earlier failure, and a later failure must not erase an
+    // earlier success. The first call is the one that decided what is on disk.
+    if (latchOutcome === null) latchOutcome = outcome;
+    if (!outcome.set) {
+      // IMMEDIATE, BEST-EFFORT WARNING. A hard exit further down can mean the
+      // composed final message is never printed at all, and a conductor told only
+      // "attribution record missing" would never learn that cross-call protection
+      // was not established. Deliberately avoids the SET path's vocabulary —
+      // nothing here may read as "repeated denial established".
+      try {
+        process.stderr.write(
+          `H17: THE CROSS-CALL ENFORCEMENT TAINT LATCH COULD NOT BE PERSISTED (${taintLatchPaths().rel}: ${outcome.error}) at the moment the incident was ` +
+            `observed (${why}). Whatever denial this call ends with is therefore a ONE-CALL denial only: without the latch on disk, the next ` +
+            `PreToolUse re-collects the bytes this command left behind as its own legitimate baseline and allows them from then on. THE (B) SURFACE ` +
+            `MUST BE TREATED AS TAINTED BY HAND until a conductor has inspected it and re-attested it.\n`
+        );
+      } catch {
+        /* best-effort trace — a failed stderr write must never change the verdict already owed */
+      }
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // THE PERSISTENT (B) BASELINE LIST COMPARATOR — decision
+  // b-baseline-hash-list-concrete-design (fe861066) D3/D4/D6. Successor to the
+  // deleted stamp-manifest block, and deliberately NOT in the same place.
+  //
+  // PLACEMENT IS THE MECHANISM, NOT TIDINESS, and the old block's placement is
+  // exactly what this corrects (a Codex round-2 correction, adopted): the
+  // exact-manifest check sat INSIDE the store-healthy `if (!storeErr)` stage, so
+  // a broken store SUSPENDED it entirely. That placement is not inherited. This
+  // runs:
+  //   * BEFORE `openStore` — so store health cannot suspend it. A list
+  //     contradiction denies AND latches with the store unreadable (the deny is
+  //     then carried by the storeErr exit below, and the latch by this producer).
+  //   * BEFORE every per-call record read — it consults NONE of them, so a
+  //     missing/corrupt attribution or state record cannot preempt it.
+  //   * EARLY ENOUGH THAT NO LATER HARD-EXIT DENIAL CAN PREEMPT THE LATCH. Every
+  //     unconditional `deny()` in this body sits after this point.
+  // It computes its OWN current (B) view via `collectBaseline`, whose throw on a
+  // swapped or non-regular (B) path is deliberately uncaught — it reaches the
+  // outer fail-closed catch and denies (AC9c).
+  //
+  // AN EXACT MATCH DOES NOTHING AT ALL. It is never an early allow, it never
+  // short-circuits the sweep, and it suppresses no other finding: a list rewritten
+  // to agree with tampered bytes is not authorization, and the ordinary in-window
+  // (B) arm still denies that case.
+  // -------------------------------------------------------------------------
+  const listDenied = [];
+  // THE ONLY PRODUCER OF `listDenied` (fd9d24af RULING A pattern, mirroring
+  // `noteBaselineDenied`): record the finding, then IMMEDIATELY persist the
+  // incident. A cross-call list contradiction is precisely the incident class the
+  // latch exists for — it is observed with NOTHING necessarily changed in this
+  // window, so a deny alone would re-fire only while the contradiction survives,
+  // and the discharge is a deliberate conductor clearer run (fe861066 D3,
+  // resolving board c9734f21).
+  const noteListDenied = (finding) => {
+    listDenied.push(finding);
+    latchOnDetection(`(B) baseline-list contradiction: ${finding}`);
+  };
+  {
+    const listVerdict = readBaselineList(cwd);
+    if (listVerdict.kind === 'malformed') {
+      noteListDenied(`the persistent (B) baseline list is MALFORMED — ${listVerdict.reason}`);
+    } else if (listVerdict.kind === 'valid') {
+      compareBaselineList(cwd, listVerdict, noteListDenied);
+    } else {
+      // ABSENT — the comparator is SKIPPED (fe861066 D4). DEGRADED-LOUD ON THE
+      // ALLOW PATH TOO, which is the whole point: what absence costs is
+      // CROSS-CALL coverage, and a call whose in-window arms all pass is exactly
+      // the call where that loss is invisible. One non-fatal line, never a deny
+      // and never a latch. WRAPPED, mirroring `baselineShared` below: this write
+      // sits inside the outer fail-closed try, so a throwing stderr (EPIPE/EBADF)
+      // on a clean-ALLOW path would reach the outer catch and flip allow -> deny.
+      // A best-effort trace may never alter a verdict.
+      try {
+        process.stderr.write(
+          `H17: NO PERSISTENT (B) BASELINE LIST — '${baselineListPaths().rel}' is ABSENT, so cross-call (B) coverage is DISABLED for this call: H17 can ` +
+            `compare the gitignored enforcement surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) only against THIS ` +
+            `call's own Pre image, and cannot see a change made BETWEEN Bash calls or between sessions. This is the documented bootstrap weakness ` +
+            `(decision b-baseline-hash-list-concrete-design, D4), not a defect, and it is disclosed rather than denied so a fresh project is not bricked ` +
+            `from init until a conductor run. Stated flatly: H17 cannot tell "never enrolled" from "the evidence was taken off disk", and taking the file ` +
+            `off disk is easier than forging it. A CONDUCTOR mints the list with the clearer (scripts/enforcement-reconcile.mjs --adopt), agents quiesced. ` +
+            `No verdict was changed by this notice.\n`
+        );
+      } catch {
+        /* best-effort trace — a failed write must never change the verdict */
+      }
+    }
+  }
+
   let storeErr = null;
   let store = null;
   try {
@@ -3104,43 +3681,172 @@ try {
   }
   store?.close();
 
+  // In-window (A) violations — clean at Pre, changed inside this command's
+  // window, on enforcement surface / hooks/** / off-brief. Since v6.0 each one
+  // is DENIED, LATCHED (eagerly, at its detection site — see
+  // `noteTrackedViolation` below) and LEFT ON DISK; nothing restores.
   const violations = [];
   // Dirty BEFORE this command — reported, never reverted, never blamed on the
-  // agent (decision f76d7c5c). Safe to skip the revert because an agent cannot
-  // produce this state: H3's self-protection denies spawned agents every
-  // Edit/Write inside the bundled hooks dir or matching ENFORCEMENT_SURFACE, and
-  // its only other write vector is Bash — which this very branch reverts, so a
-  // previous command's dirt is already gone by the next Pre.
+  // agent (decision f76d7c5c). An agent cannot produce this state silently ON
+  // THE ATTRIBUTED PATH: H3's self-protection denies spawned agents every
+  // Edit/Write inside the bundled hooks dir or matching ENFORCEMENT_SURFACE,
+  // and its only other write vector is Bash — whose in-window writes this very
+  // sweep denies AND latches, so there a previous command's surviving dirt sits
+  // behind a standing latch (v6.0: the old wording said the branch "reverts",
+  // which it no longer does). DISCLOSED RESIDUAL (v6.0 security review): the
+  // DEGRADED route carries no such guarantee — with an unusable tool_use_id a
+  // concurrent lane's Pre can overwrite the SHARED per-run attribution record,
+  // an agent-written path is then recorded pre-dirty, lands in THIS arm
+  // (denied, deliberately NOT latched — no state change was observed), and the
+  // next Pre baselines the surviving bytes. That is the shared-record
+  // laundering class the per-call key (board 489554d4) closed for the normal
+  // path; the degraded arm keeps the old exposure, and the degraded-loud
+  // stderr disclosure is its only trace.
   const preExisting = [];
   // Pre-dirty paths whose recorded STATE CHANGED inside this command's window
   // (7021526c step 3): denied and NAMED, and deliberately NOT restored.
   const changedPreDirty = [];
-  // Paths this Post ACTUALLY restored (FIX-B, 4d9b76e8) — one deduped
-  // restore_performed maintenance item is minted per path here, once every
-  // restore attempt below has run.
-  const restoredPaths = [];
+
+  // (THE EAGER TAINT-LATCH PRODUCER was defined here until S4. It now sits at the
+  // TOP of this Post body, because the persistent (B) baseline-list comparator
+  // runs before the store is even opened and needs it — see the block at
+  // `latchOnDetection` for the full reasoning, which is unchanged apart from that
+  // hoist. Everything below still latches through that one producer.)
+
   // UNEXPECTED ADDITIONS in the (B) enforcement surface — live files with no
   // entry in this call's Pre baseline (user ruling 2026-08-27; see the
   // `removeUnder` gravestone). DELIBERATELY A SEPARATE LIST FROM `violations`,
-  // and this is not cosmetics: the `violations` denial says the named bytes were
-  // "reverted", which is TRUE for the restore arms and would be a FALSE ACTION
-  // CLAIM for an addition now that nothing deletes it. A security surface that
-  // claims a protection it does not implement is anti-pattern 586bccdc — the
-  // false claim is worse than the gap, because it stops the next reader looking.
+  // and this is not cosmetics: the two arms carry DIFFERENT dispositions — an
+  // addition has no Pre-image entry at all, while a `violations` path is an
+  // in-window change to something the baseline knows — and folding them would
+  // let one arm's wording assert facts about the other (historically the
+  // `violations` text said "reverted", which was the 586bccdc false-action-claim
+  // hazard; since v6.0 both arms truthfully say left-on-disk).
   // These paths are DENIED, REPORTED, and LEFT ON DISK BYTE-IDENTICAL.
-  // TWO PRODUCERS since the 2026-08-27 defect repair — the (B) collection AND
-  // the earlier (A) sweep, which meets a `git add -f`'d (B) file first — so the
-  // list is fed through a DEDUPING writer. One path detected by both surfaces is
-  // ONE finding; naming it twice in the denial makes the report look like two
-  // plants.
+  // v6.0: STILL TWO PRODUCERS — the (B) collection AND the (A) sweep, which
+  // routes a clean-at-Pre `isEnforcementSurface` path here directly (the
+  // deleted restoreTracked's leftOnDisk refusal used to do the same), so one
+  // path stays one finding and, under a broken store, the (A) route's latch and
+  // denial carry the finding the skipped (B) stage cannot. The dedup guard is
+  // what makes the two producers compose. The addition wording states the
+  // force-add ambiguity honestly (new file vs pre-existing ignored file — v6.0
+  // review fix; it used to assert baseline-absence this sweep never checked).
+  // KNOWN IMPRECISION, pre-existing at HEAD and deferred to S4's wording
+  // rework (Codex delta review, MEDIUM): a bytes-changed force-added file is
+  // ALSO named by baselineDenied — two dispositions for one path, deduped only
+  // within each list. Disposition (deny + latch + leave on disk) is correct for
+  // every shape either way.
   const unauthorizedAdditions = [];
+  // THE ONLY PRODUCER OF `unauthorizedAdditions` (fd9d24af RULING A): it records
+  // the finding and IMMEDIATELY persists the incident, before any caller can
+  // reach a `deny()` that would exit the process. The dedup guard also skips the
+  // latch call for a path already met — the first sighting already latched, and
+  // the set primitive is create-only anyway.
   const noteUnauthorizedAddition = (rel) => {
-    if (!unauthorizedAdditions.includes(rel)) unauthorizedAdditions.push(rel);
+    if (unauthorizedAdditions.includes(rel)) return;
+    unauthorizedAdditions.push(rel);
+    latchOnDetection(`unauthorized (B) addition: ${rel}`);
   };
+  // (B) paths MODIFIED or DELETED in-window — unconditionally, since S4 deleted
+  // the last exemption route (RULING D of 532a4383 as refined by fac9a69b, then
+  // narrowed by 78dc9bd6). A SEPARATE LIST FROM
+  // `violations` because the two surfaces are different claims — (B) is the
+  // gitignored baseline set compared against this call's Pre image, (A) is
+  // git-visible state — and each denial must assert only what its own surface
+  // established (the historical reason was sharper: `violations` used to say
+  // "reverted", a 586bccdc false action claim for a (B) path nothing wrote;
+  // since v6.0 neither arm claims any write action).
+  // These paths are DENIED, REPORTED, and LEFT EXACTLY AS OBSERVED.
+  const baselineDenied = [];
+  // THE ONLY PRODUCER OF `baselineDenied` (fd9d24af RULING A + RULING B). No
+  // `deny()` sits between this list's push and the composed denial TODAY, and it
+  // latches eagerly anyway: excluding it because of the current control flow
+  // would make a security invariant depend on the shape of the code below it,
+  // which is the dependency the eager design exists to remove.
+  const noteBaselineDenied = (rel) => {
+    baselineDenied.push(rel);
+    // "unattested" was the S4-superseded vocabulary — it named the absence of a
+    // stamp entry, and there is no stamp to lack any more. The true statement is
+    // the OBSERVATION: this path's state differs from the Pre image.
+    latchOnDetection(`in-window (B) change: ${rel}`);
+  };
+  // THE ONLY PRODUCER OF `violations` (v6.0 — dc616f69 R10/R15). The (A) arm's
+  // restore is DELETED, so a clean-at-Pre in-window violation follows the exact
+  // pattern of the two (B) producers above: record the finding, then IMMEDIATELY
+  // persist the incident, before any downstream `deny()` can hard-exit the
+  // process. The latch is load-bearing here, not decoration — the denied bytes
+  // stay ON DISK, so without it the very next Pre would record them as
+  // pre-existing dirt and the state comparison would verify them BY OBSERVATION
+  // from then on: one denial would buy a permanent adoption of the write. R15's
+  // split rule exists for exactly this: the restore's deletion and the (A) latch
+  // land in the SAME commit, never a state that merely leaves bytes and words.
+  const noteTrackedViolation = (rel) => {
+    if (violations.includes(rel)) return;
+    violations.push(rel);
+    latchOnDetection(`in-window (A) enforcement write: ${rel}`);
+  };
+  // THE ONLY PRODUCER OF `changedPreDirty` (v6.0, Codex review HIGH on the S3
+  // excision — EXTERNAL-MODEL finding, adopted): a pre-dirty path whose recorded
+  // state CHANGED inside this window is an OBSERVED (A) incident with its bytes
+  // left on disk, so without a latch the NEXT call's Pre snapshots the changed
+  // state and, unchanged thereafter, verifies it BY OBSERVATION — the same
+  // adoption hole the clean-at-Pre latch closes, one arm over. Same eager
+  // pattern; deny-without-latch here would satisfy R15's letter and leak its
+  // point. (The blanket `preExisting` denial deliberately does NOT latch: no
+  // state CHANGE was observed there — it is unverifiable pre-existing dirt, and
+  // latching it would turn every degraded call over ordinary conductor dirt
+  // into a conductor-reconciliation stop. The audit-failure deny paths that
+  // exit before any producer runs are the ruled `baselineAuditUnavailable`
+  // family — their own slice, not this one.)
+  const noteChangedPreDirty = (rel) => {
+    if (changedPreDirty.includes(rel)) return;
+    changedPreDirty.push(rel);
+    latchOnDetection(`in-window state change on pre-dirty path: ${rel}`);
+  };
+  // (`manifestDenied` — the EXACT-MANIFEST finding list of RULING 4 of bcd2cc09 —
+  // was declared here. Its successor is `listDenied`, declared at the TOP of this
+  // Post body beside the comparator that fills it. THREE things changed with the
+  // move, and each is a correction rather than a relocation:
+  //   (1) THE EVIDENCE. The old arm compared the live surface against a per-call,
+  //       session-bound, forgeable-and-EXEMPTING stamp; the new one compares it
+  //       against a PERSISTENT list that can only ever add a finding.
+  //   (2) THE SCOPE. The old arm sat inside `if (!storeErr)`, so a broken store
+  //       SUSPENDED it; the new one runs before the store is opened at all.
+  //   (3) THE LATCH. The old arm was deliberately NOT a latch trigger, on the
+  //       reasoning that a stale stamp is commonly a legitimate writer's doing and
+  //       latching it would be a DoS. `listDenied` IS a latch trigger (fe861066
+  //       D6, resolving board c9734f21): the list is minted only by a deliberate
+  //       conductor act, so a contradiction is not routine churn — it is exactly
+  //       the incident class the latch exists for, and the clearer is its
+  //       discharge. The DoS argument does not carry across because the premise
+  //       (an incidentally-stale artifact) no longer holds.
+  // The old comment also recorded a correction worth keeping: it once claimed the
+  // manifest arm "needs no latch because it is already durable by construction",
+  // which was FALSE — it was session-bound, stamp-present and store-healthy
+  // protection (fd9d24af RULING F). The persistent list is durable in the way that
+  // claim assumed, and it still latches.)
+
+  // (STAMP INTEGRITY — the Pre/Post witness comparison of fac9a69b RULING 2, its
+  // `stampTrusted` / `stampTampered` / `stampInvalidated` state, the
+  // `observeStampTamper` producer, the single `readStampSnapshot` read and the
+  // `stampAttestsPath` exemption gate — ALL STOOD HERE. DELETED 2026-08-30 (S4,
+  // 78dc9bd6/fe861066).
+  // THE WHOLE BLOCK EXISTED TO PROTECT AN EXEMPTION, so deleting the exemption
+  // deleted its reason: it ordered the integrity check BEFORE every consult so a
+  // stamp forged inside the window could not excuse a path in the same Post. With
+  // no consult left there is nothing to order and nothing worth counterfeiting. An
+  // in-window (B) change now denies UNCONDITIONALLY.
+  // THE ACCEPTED CONSEQUENCE IS UNCHANGED AND STILL DISCLOSED: conductor edits to
+  // the enforcement surface belong BETWEEN audited Bash windows, not inside one —
+  // an edit made inside an agent's window is observationally identical to the
+  // agent's own write, and no coordination channel exists on a same-UID machine to
+  // tell them apart (79942bda). What changed is only the discharge: the taint
+  // latch plus a deliberate clearer run, instead of a pre-written attestation.)
 
   // No working store → no runId to key the attribution record on, so
   // `preDirty` stays empty: unverifiable attribution is never treated as
-  // pre-existing (P5) — every glob-matched tracked violation restores.
+  // pre-existing (P5) — every glob-matched tracked violation is denied and
+  // latched as in-window.
   let preDirty = new Set();
   // The per-call Pre-STATE map (7021526c), or null when this command has no
   // comparable record — in which case the pre-dirty branch keeps the OLD blanket
@@ -3156,9 +3862,14 @@ try {
   // changes what the guard trusts and says nothing is the defect, not the
   // degradation.
   let baselineShared = null;
-  // The (B) paths this Post restored/removed, kept beside `violations` (which
-  // mixes (A) and (B)) so the shared-baseline disclosure can name exactly the
-  // writes it applies to.
+  // The (B) paths this Post found a DIFFERENCE on — modified, deleted, or added —
+  // kept beside `violations` (which is now purely (A)) so the shared-baseline
+  // disclosure can name exactly the paths that disclosure applies to.
+  // "restored/removed" was accurate while the (B) arm wrote and unlinked. Since S4
+  // it neither writes nor deletes ANY (B) path, so the noun is now COMPARISONS, not
+  // writes — and the degraded-(B) notice composed from this list says "compared",
+  // which is what is true of every member (anti-pattern 586bccdc: never let a name
+  // or a comment assert an action the code stopped taking).
   const baselineViolations = [];
   // Set when the (A) ATTRIBUTION record had to fall back to the SHARED per-run
   // file because this call carries no usable tool_use_id (board 489554d4), the
@@ -3177,8 +3888,8 @@ try {
         'this hook call carries no usable `tool_use_id` (absent, empty/whitespace, or not a string), so the (A) ATTRIBUTION record in play is the ' +
         'legacy PER-RUN, RUN-KEYED file SHARED by every concurrent Bash lane in this run instead of one keyed to this call — while it is shared, a ' +
         "second lane's Pre can OVERWRITE it after this lane's Pre ran, and a path that was genuinely dirty at this lane's Pre but MISSING from the " +
-        'overwritten record is then treated as clean-at-Pre and HEAD-restored (DELETED) as this command\'s write, destroying pre-existing conductor ' +
-        'work (that is exactly why the per-call key exists, board 489554d4, and why this fallback is reported rather than assumed harmless)';
+        "overwritten record is then treated as clean-at-Pre and DENIED + LATCHED as this command's write — a false attribution, though no longer a " +
+        'destructive one since v6.0 (that is exactly why the per-call key exists, board 489554d4, and why this fallback is reported rather than assumed harmless)';
     }
     // The two early-deny paths just below (a MISSING or CORRUPT attribution
     // record) return BEFORE the "on every path" stderr disclosure at the end of
@@ -3235,17 +3946,17 @@ try {
     // DEGRADED-LOUD ON EVERY PATH (board 489554d4), the (A) mirror of
     // `baselineShared`'s stderr disclosure: the moment the attribution record fell
     // back to the SHARED per-run file, say so — allow path included — because the
-    // destructive laundering a shared record admits (a genuinely pre-dirty path
-    // missing from an overwritten record HEAD-restored as this command's write)
-    // must never be inferred from silence. Best-effort/wrapped exactly like
-    // mintRestorePerformed: a throwing stderr must never flip the verdict.
+    // laundering a shared record admits (a genuinely pre-dirty path missing
+    // from an overwritten record denied + latched as this command's write)
+    // must never be inferred from silence. Best-effort/wrapped so a throwing
+    // stderr can never flip the verdict.
     if (attributionShared) {
       try {
         process.stderr.write(
           `H17: DEGRADED (A) ATTRIBUTION — this Bash call carries no usable \`tool_use_id\`, so the attribution record it compared against was the ` +
             `legacy PER-RUN, RUN-KEYED file SHARED by every concurrent lane in this run, not one keyed to this call. A concurrent lane's Pre could have ` +
             `OVERWRITTEN it after this lane's Pre ran — in which case a genuinely pre-dirty path MISSING from it is treated as this command's write and ` +
-            `HEAD-restored (deleted). The verdict stands; what is unverifiable is that the pre-dirty set it trusted belonged to this call. (board 489554d4)\n`
+            `denied + latched (nothing restores since v6.0). The verdict stands; what is unverifiable is that the pre-dirty set it trusted belonged to this call. (board 489554d4)\n`
         );
       } catch {
         /* best-effort trace — a failed write must never change the verdict */
@@ -3394,7 +4105,11 @@ try {
   }
 
   // --- (A) TRACKED writes via git ---
-  const status = spawnSync('git', ['-C', cwd, 'status', '--porcelain', '-z'], { encoding: 'utf8' });
+  // SAME `core.fsmonitor` HARDENING AS THE PRE SITE, and it matters MORE here:
+  // this invocation runs AFTER the audited command, so a `.git/config` the command
+  // itself just wrote would be honoured on the very call that is supposed to
+  // detect it. See the full statement of the vector at `dirtyTrackedRels`.
+  const status = spawnSync('git', ['-C', cwd, '--no-optional-locks', '-c', 'core.fsmonitor=', 'status', '--porcelain', '-z'], { encoding: 'utf8' });
   if (status.error || status.status !== 0) {
     throw new Error(`git status --porcelain -z failed (status ${status.status}: ${status.stderr || status.error})`);
   }
@@ -3402,33 +4117,33 @@ try {
   // THE SWEEP SET = the UNION of what git reports dirty NOW and what the record
   // says was dirty at Pre (review finding 1, CRITICAL — a fail-closed
   // violation). Iterating only the CURRENT status skipped every path that was
-  // dirty at Pre and is CLEAN at Post, so it was never compared, never
-  // stamp-consulted and never denied: a command running
+  // dirty at Pre and is CLEAN at Post, so it was never compared and never
+  // denied: a command running
   // `git checkout HEAD -- hooks/h3-contract-gate.mjs` destroyed the conductor's
   // uncommitted enforcement work and exited 0. Dirty-at-Pre + clean-at-Post is
   // a STATE CHANGE like any other — it lands on the ordinary comparison below
-  // (the bytes moved from the in-flight image to HEAD's), reaches the stamp
-  // consult, then the deny, so ONE code path governs and there is no
-  // special-cased unconditional denial to keep in sync.
-  // Value = the RAW porcelain path (a `?? dir/` keeps its trailing slash for
-  // restoreTracked); a recorded-only path is its own raw form.
-  const sweep = new Map();
+  // (the bytes moved from the in-flight image to HEAD's) and reaches the deny,
+  // so ONE code path governs and there is no special-cased unconditional
+  // denial to keep in sync.
+  // Keyed by the normalized rel (trailing slashes stripped) — nothing downstream
+  // needs the raw porcelain form since the restore's deletion (v6.0).
+  const sweep = new Set();
   for (const entry of postEntries) {
     for (const p of entry.paths) {
       const rel = p.replace(/\/+$/, '');
-      if (rel && !sweep.has(rel)) sweep.set(rel, p);
+      if (rel) sweep.add(rel);
     }
   }
   for (const rel of preDirty) {
-    if (typeof rel === 'string' && rel && !sweep.has(rel)) sweep.set(rel, rel);
+    if (typeof rel === 'string' && rel) sweep.add(rel);
   }
   // Current INDEX entries for the whole sweep set, in ONE chunked call — the
   // index term of the state comparison. Skipped entirely when there is no
   // record to compare against, so the degraded path keeps exactly today's
   // behaviour and gains no new failure mode. A git failure throws -> deny (AC9).
   let postIndex = new Map();
-  if (preState) postIndex = indexEntriesFor(cwd, [...sweep.keys()]);
-  for (const [rel, p] of sweep) {
+  if (preState) postIndex = indexEntriesFor(cwd, [...sweep]);
+  for (const rel of sweep) {
     const isViolation =
       isEnforcementSurface(rel) ||
       matchesGlob(rel, 'hooks/**') ||
@@ -3440,28 +4155,19 @@ try {
       // coveringPreDirtyPath for why coverage is computed per swept path here
       // and never expanded into the record at Pre.
       //
-      // ORDERING HAZARD, and the rule that closes it. The sweep Map holds the
-      // CURRENT porcelain entries BEFORE the recorded-only ancestors, so a
-      // descendant is visited FIRST: were a covered descendant ever
-      // destructively restored, the deletion would land before the ancestor's
-      // own recursive comparison ran, and that comparison would then be
-      // observing state H17 ITSELF mutated (it would report the ancestor as
-      // changed because of the hook's own write, and the agent would be blamed
-      // for it). THE RULE, stated so it is explicit rather than true by
-      // accident: NO PATH COVERED BY A RECORDED DIRTY ANCESTOR IS EVER
-      // DESTRUCTIVELY RESTORED — every arm inside this branch either continues
-      // or pushes onto `changedPreDirty`, and none of them calls
-      // restoreTracked. Anything that wants to restore must first prove no
-      // recorded ancestor covers it, i.e. take the clean-at-Pre arm below.
+      // v6.0: the ORDERING HAZARD that used to be documented here — a covered
+      // descendant destructively restored before its ancestor's comparison ran —
+      // is gone WITH the restore. Coverage now decides only which DENIAL a path
+      // gets (pre-dirty comparison vs in-window violation), never whether
+      // anything is mutated, because nothing is.
       //
-      // THAT RULE IS CONDITIONAL ON A WORKING STORE, and the condition is
-      // stated because a reader will otherwise take it as absolute (the same
-      // conditionality AC12 already carries for "a pre-dirty path is never
-      // restored"). Under `storeErr` there is no runId to key the attribution
-      // record on, so `preDirty` stays EMPTY by design (see the comment above
-      // it): nothing is covered, and every enforcement-surface dirty path —
-      // a covered descendant included — is restored to HEAD before the deny.
-      // Coverage protects work only as far as the record can be read at all.
+      // COVERAGE IS CONDITIONAL ON A WORKING STORE, stated because a reader
+      // will otherwise take it as absolute. Under `storeErr` there is no runId
+      // to key the attribution record on, so `preDirty` stays EMPTY by design
+      // (see the comment above it): nothing is covered, and every
+      // enforcement-surface dirty path — a covered descendant included — is
+      // denied and latched as in-window. Coverage protects attribution only as
+      // far as the record can be read at all.
       const coveringPre = coveringPreDirtyPath(preDirty, rel);
       if (coveringPre) {
           // Already dirty at Pre — not this command's write, and never reverted:
@@ -3469,14 +4175,15 @@ try {
           // enforcement-surface work and reported it as the agent's (f76d7c5c).
           //
         // Decision 7021526c: it is no longer DENIED merely for being dirty
-        // either. The order is exactly (1) compare the recorded Pre STATE with
-        // the CURRENT state — unchanged means the surface is verified BY
-        // OBSERVATION and no stamp is consulted or needed; (2) changed ->
-        // consult the stamp FRESH against the CURRENT state, PER PATH
-        // (4d9b76e8's rule is general, not confined to the clean-at-Pre arm:
-        // a stamp can only be written by a deliberate conductor-run CLI,
-        // 6e132e19, so a match means the change is conductor-attested);
-        // (3) otherwise deny. No arm restores — a pre-image restore across
+        // either. The order is now exactly TWO steps, not three: (1) compare the
+        // recorded Pre STATE with the CURRENT state — unchanged means the surface
+        // is verified BY OBSERVATION; (2) changed -> deny. The middle step, a
+        // fresh per-path stamp consult against the CURRENT state (4d9b76e8), was
+        // deleted at v6.0/S4 — a same-UID-forgeable token may explain a finding,
+        // never exempt one — so a changed pre-dirty path now denies
+        // UNCONDITIONALLY. What 7021526c actually bought is untouched by that: the
+        // COMPARISON, which is what stopped an unchanged pre-dirty path from
+        // denying at all. No arm restores — a pre-image restore across
         // overlapping Bash windows would clobber a concurrent lane's
         // legitimate write (board 0b848342 finding 1, deferred by decision).
         if (!preState) {
@@ -3532,62 +4239,49 @@ try {
         // ALLOWS the write.
         const nowState = pathState(cwd, rel, postIndex, WALK_BUDGET, 0);
         if (sameState(wasState, nowState)) continue; // (1) verified by observation
-        // (2) conductor-attested — but ONLY where a stamp can actually speak
-        // for the difference (review finding 2). A {path, sha256} /
-        // {path, deleted:true} entry attests BYTES or an ABSENCE and nothing
-        // else, so a mode flip, an index-only move, a type swap or a retargeted
-        // link is unattestable by construction and falls straight to (3): those
-        // leave the bytes identical, match the stamp, and were wrongly allowed.
-        if (stampCouldAttest(wasState, nowState)) {
-          if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
-        }
-        changedPreDirty.push(rel); // (3) denied, and still not restored
+        // (2) — THE STAMP CONSULT THAT STOOD HERE IS GONE (v6.0, dc616f69 R11 /
+        // 78dc9bd6): a same-UID-forgeable stamp may explain a finding, never
+        // exempt one, so a changed pre-dirty path now always lands on the deny.
+        noteChangedPreDirty(rel); // (3) denied, LATCHED, and still not restored
         continue;
       }
-      // FIX-A (h17-stamp-honor-loud-restore, 4d9b76e8): an IN-WINDOW change
-      // (no recorded pre-dirty path covers it — neither itself nor any
-      // ancestor, board 7dd39b85) gets one fresh-stamp chance before the
-      // restore — a stamped conductor edit landing inside an agent's Bash
-      // window used to be silently HEAD-restored (the measured defect). Read
-      // the stamp NOW, hash the CURRENT bytes: an exact match exempts this
-      // path from both the restore and the deny; no match falls straight
-      // through to the restore+deny exactly as before. UNCHANGED by the
-      // finding-2 gate above: this arm has no recorded Pre state to diff, so
-      // there is no "difference confined to bytes" to establish — AC13's
-      // clean-at-Pre behaviour stays exactly as it was.
-      if (isDirectoryAt(cwd, rel) ? stampAttestsDirectory(cwd, rel) : stampAttestsCurrentBytes(cwd, rel)) continue;
-      const outcome = restoreTracked(cwd, p); // may throw (restore fs-error) → outer catch → deny
-      if (!outcome.restored) {
-        // PROTECTED (B) PATH, DETECTED BY THE (A) SWEEP (2026-08-27 defect
-        // repair). Nothing was deleted; route it to the addition disposition so
-        // the user ruling holds on THIS path too. This push is load-bearing, not
-        // a duplicate of the (B) arm's: the (B) stage is skipped entirely under
-        // `storeErr`, and it only sees paths `collectBaseline` returns — without
-        // this the addition could be denied with no wording at all, or (under a
-        // broken store) not reported at all.
-        for (const kept of outcome.leftOnDisk) noteUnauthorizedAddition(kept);
-        continue; // NOT a `violations` entry — nothing was reverted here
+      // v6.0 (dc616f69 R10/R15): an IN-WINDOW change on a clean-at-Pre path is
+      // DETECTED, DENIED and LATCHED — the bytes are LEFT ON DISK exactly as the
+      // command wrote them. The restore that stood here is DELETED, not narrowed:
+      // no signal available to a same-UID hook in a shared worktree can prove
+      // AUTHORSHIP, so a destructive rollback here could always clobber a
+      // conductor's concurrent legitimate write (the measured f76d7c5c failure
+      // class). The eager latch is what replaces the restore's cross-call
+      // guarantee: without it the next Pre would record the surviving bytes as
+      // pre-existing dirt and verify them BY OBSERVATION forever after — one
+      // denial would buy a permanent adoption. FIX-A's fresh-stamp exemption
+      // died with the restore for the same reason as the consult above.
+      //
+      // ONE FINDING PER PATH (AC17's force-add route, re-pinned by
+      // h17-b-surface PIN 3 and caught red on this exact excision): a
+      // (B)-surface path reaches this sweep only via `git add -f` (the trio is
+      // gitignored, and none is tracked in HEAD), and the (B) collection will
+      // meet the same path again. Route it to the ADDITION disposition — the
+      // deduped producer both surfaces share — exactly as restoreTracked's
+      // (B)-refusal arm used to, so the composed denial names it ONCE with the
+      // human-facing plant wording, and the finding still survives a broken
+      // store (where the (B) stage never runs). Were a (B)-trio path ever
+      // COMMITTED, the (B) baselineDenied arm would carry that modification —
+      // this route stays the addition route.
+      if (isEnforcementSurface(rel)) {
+        noteUnauthorizedAddition(rel);
+        continue;
       }
-      violations.push(rel);
-      restoredPaths.push(rel); // FIX-B: mints a restore_performed item below
+      noteTrackedViolation(rel);
     }
   }
-
-  // FIX-B (4d9b76e8): mint one deduped restore_performed item PER RESTORED
-  // PATH — immediately after the (A) sweep, BEFORE the (B) baseline stage,
-  // whose immediate denies process.exit(2) and would otherwise drop the mint
-  // for a restore that already happened (review fix 2). Fail-open: any store
-  // failure inside is disclosed on stderr and never thrown, so it can never
-  // turn an already-completed restore into a crash or a non-blocking exit 1
-  // (PIN5).
-  if (restoredPaths.length) mintRestorePerformed(cwd, restoredPaths, input.agent_id);
 
   // --- (B) gitignored BASELINE set via the Pre snapshot ---
   // Guarded on a working store (PIN5): the baseline file is keyed on the
   // store-resolved runId, so with no runId there is no honest baseline file to
   // consult — skipped rather than misread against the wrong run's snapshot.
-  // The storeErr deny below still fires; only the (A) tracked-restore sweep
-  // above (which needs no runId for its glob-only violations) runs regardless.
+  // The storeErr deny below still fires; only the (A) detect sweep above
+  // (which needs no runId for its glob-only violations) runs regardless.
   if (!storeErr) {
     // PER-CALL when this call carries a usable tool_use_id (board 11609d1f);
     // the legacy per-run file only when it does not — and that fallback is
@@ -3703,16 +4397,34 @@ try {
       );
     }
 
-    for (const [rel, content] of Object.entries(valid)) {
-      if (!(rel in current)) {
-        writeUnder(cwd, rel, content); // baseline file deleted → recreate
-        violations.push(rel);
-        baselineViolations.push(rel);
-      } else if (current[rel] !== content) {
-        writeUnder(cwd, rel, content); // modified → restore bytes
-        violations.push(rel);
-        baselineViolations.push(rel);
-      }
+    // (B) DETECT-AND-DENY — RULING D of decision 532a4383, as refined by fac9a69b
+    // and NARROWED TO UNCONDITIONAL at S4 (78dc9bd6). A (B) path whose state
+    // differs from this call's Pre baseline is DENIED, and THE BYTES ARE LEFT
+    // EXACTLY AS THE COMMAND WROTE THEM — never restored, never recreated, never
+    // truncated or rewritten by H17 itself.
+    // THE STAMP EXEMPTION THAT STOOD IN THIS LOOP IS GONE, not narrowed: a
+    // same-UID-forgeable attestation may explain a finding, never exempt one
+    // (78dc9bd6), so there is no longer ANY route by which an in-window (B) change
+    // allows. The persistent baseline list is not an exemption route either — it
+    // is compared separately, at the top of this Post, and its exact match
+    // produces no finding rather than removing one.
+    // WHY THE RESTORE WENT, kept here because a ruling stripped of its reason gets
+    // re-opened: the (B) restore's only write primitive truncated IN PLACE, so a
+    // (B) path replaced by a HARDLINK to a file outside the repository made the
+    // "restore" write baseline bytes straight through the shared inode onto an
+    // arbitrary outside file. That is not a name-resolution bug descriptor pinning
+    // can close — a hardlink defeats pinning by not using a name at all — and the
+    // asymmetry that justifies the (A) restore does not hold here: (A) reverts to
+    // HEAD, a recoverable source of truth git can hand back, while a (B) pre-image
+    // lives only in an os.tmpdir() record the audited command can itself write.
+    // Detection is therefore the correct disposition for the whole (B) surface,
+    // which is why the modify/delete arms now join the ADDITION arm rather than
+    // keeping a delete-free write primitive alive beside it.
+    for (const rel of Object.keys(valid)) {
+      const changed = !(rel in current) || current[rel] !== valid[rel];
+      if (!changed) continue; // (1) verified BY OBSERVATION — the only allow arm left
+      noteBaselineDenied(rel); // (2) denied, deliberately NOT restored, and latched at this detection site
+      baselineViolations.push(rel);
     }
     for (const rel of Object.keys(current)) {
       if (!(rel in valid)) {
@@ -3726,6 +4438,28 @@ try {
         baselineViolations.push(rel);
       }
     }
+
+    // (THE RULING-4 EXACT-MANIFEST BLOCK STOOD HERE — the set-exact comparison of
+    // the stamp's (B) entries against the whole live (B) set, run on every call
+    // regardless of whether this window changed anything, because a claim nobody
+    // re-checks is not an attestation. That INSIGHT survives S4 and is the reason
+    // the persistent baseline list exists at all; the STAMP as its evidence does
+    // not (78dc9bd6 supersedes the stamp-manifest half of bcd2cc09 RULING 4 while
+    // keeping the detect-and-deny).
+    // THE COMPARISON NOW RUNS AT THE TOP OF THIS POST BODY, NOT HERE, AND THAT
+    // MOVE IS A FIX ITS OLD COMMENT ALREADY ADMITTED TO: it conceded that sitting
+    // inside `if (!storeErr)` made the protection "SESSION-BOUND, STAMP-PRESENT
+    // AND STORE-HEALTHY" rather than unconditional. A broken store suspending a
+    // cross-call integrity check is not a property anyone chose — it is where the
+    // code happened to sit. `readBaselineList` / `compareBaselineList` run before
+    // the store is opened, and the persistent list is not deleted at SessionStart,
+    // so all three of those limits are gone.
+    // WHAT IS DELIBERATELY NOT CARRIED OVER: the old block's "a stamp whose (B)
+    // subset is EMPTY makes no (B) claim, so skip it" narrowing. It existed
+    // because one stamp described BOTH surfaces and an (A)-only stamp legitimately
+    // named no (B) path. The baseline list describes the (B) surface and nothing
+    // else, so an empty `entries` array IS a claim — that the surface is empty —
+    // and a live (B) path then correctly lands in the live-but-unlisted arm.)
     // DEGRADED-LOUD ON EVERY PATH (board 11609d1f, reviewer F1). The deny-path
     // notice below fires only when the (B) comparison found a DIFFERENCE — but
     // the laundering failure the per-call key exists to close produces NO
@@ -3733,15 +4467,14 @@ try {
     // compares EQUAL and the call ALLOWs), so a disclosure gated on a violation
     // stays silent exactly when the shared baseline was most dangerous. Emit a
     // NON-FATAL stderr line the moment the fallback was taken — allow path
-    // included — using the same fire-and-continue idiom mintRestorePerformed
-    // uses: it changes no verdict, no allow/deny outcome, and no key. This is
-    // the ONLY audible trace on a clean-allow degraded call.
+    // included — fire-and-continue: it changes no verdict, no allow/deny
+    // outcome, and no key. This is the ONLY audible trace on a clean-allow
+    // degraded call.
     if (baselineShared) {
       // WRAPPED (delta-review LOW): this write is UNGUARDED inside the outer
       // fail-closed try, so a throwing stderr (EPIPE/EBADF) on the clean-ALLOW
       // path would reach the outer catch and flip allow -> deny — a verdict
-      // change. mintRestorePerformed wraps its body for exactly this reason;
-      // match it so a best-effort trace can never alter the outcome.
+      // change. Wrapped so a best-effort trace can never alter the outcome.
       try {
         process.stderr.write(
           `H17: DEGRADED (B) VERIFICATION — this Bash call carries no usable \`tool_use_id\`, so the (B) content baseline it verified against was the ` +
@@ -3755,21 +4488,90 @@ try {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // COMPOSE THE (B) TAINT LATCH CLAUSE — decision bcd2cc09 RULING 9, as
+  // corrected by fd9d24af RULING A.
+  //
+  // THIS BLOCK PERSISTS NOTHING. By the time control reaches here the latch is
+  // already on disk (or its failure is already recorded AND already on stderr):
+  // every trigger latches at its own detection site through `noteListDenied`,
+  // `noteUnauthorizedAddition`, `noteBaselineDenied`, `noteTrackedViolation` and
+  // `noteChangedPreDirty`.
+  // All that is left is to turn the FIRST recorded outcome into the clause the
+  // composed denial carries, so a denial that exits below still tells the reader
+  // what the cross-call consequence is. THE OLD SINGLE-BLOCK PLACEMENT WAS THE
+  // DEFECT: `deny()` is a hard `process.exit(2)`, so any earlier denial site
+  // discarded a detection that had already happened. The comment that used to
+  // stand here asserted this position "sees every trigger"; it did not, and the
+  // assertion is what made the placement feel checked.
+  //
+  // THE LATCH TRIGGER SET (fe861066 D6) is `violations` ∪ `changedPreDirty` ∪
+  // `baselineDenied` ∪ `unauthorizedAdditions` ∪ `listDenied` — a strict SUPERSET
+  // of v6.0's, with `listDenied` added and `stampTampered` gone with the stamp.
+  // THE SUPERSET PART IS A CORRECTION THAT WAS NEARLY MISSED (Codex round 2 rated
+  // the first-drafted set FATAL): a proposal to reduce the set to the three (B)
+  // triggers would have dropped `violations` and `changedPreDirty`, reopening the
+  // exact next-Pre adoption hole v6.0 added them to close. Adding a trigger is
+  // cheap; silently dropping one restores a closed hole.
+  // Explicitly NOT a trigger: `baselineViolations`, which is populated ONLY inside
+  // the normal (B) stage and so misses the earlier force-added route — the (A)
+  // sweep's `noteUnauthorizedAddition` for a protected path it met first, which is
+  // the only route that survives a broken store (the whole (B) stage is skipped
+  // under `storeErr`). And `preExisting`, which stays DENIAL-ONLY: no state CHANGE
+  // was observed there, so latching it would turn every degraded call over
+  // ordinary conductor dirt into a reconciliation stop.
+  //
+  // THE CLAUSE IS STILL COMPOSED BEFORE the `storeErr` deny below, so a broken
+  // store cannot swallow the REPORT of an incident already detected and already
+  // latched — which is exactly the shape a (B) baseline-list contradiction takes
+  // under a broken store, since its comparator runs before the store is opened.
+  let latchNote = null;
+  if (latchOutcome !== null) {
+    latchNote = latchOutcome.set
+      ? // SCOPE STATED EXACTLY, NOT OVERSTATED (fd9d24af, security review): this
+        // used to say "every spawned-agent tool call is now denied BEFORE
+        // EXECUTION", which is false today. H17 is registered in AGENT
+        // FRONTMATTER on Bash only and is absent from hooks/hooks.json, so while
+        // the latch stands it denies the agent's BASH calls and nothing else —
+        // an agent's Edit, Write and Task calls are not gated by it. The global
+        // PreToolUse '*' registration that would make the broader claim true is
+        // a later slice and has not landed. Claiming coverage the code does not
+        // have is anti-pattern 586bccdc at the user-facing surface: it stops the
+        // next reader from looking.
+        `H17: THE ENFORCEMENT TAINT LATCH IS SET (${taintLatchPaths().rel}). Repeated denial is established: every spawned-agent BASH call that H17 ` +
+        `gates is now denied BEFORE EXECUTION until a CONDUCTOR clears it deliberately, because the bytes this sweep denied are still on disk and the ` +
+        `next PreToolUse would otherwise adopt them as its own legitimate baseline. SCOPE, STATED EXACTLY SO IT IS NOT MISREAD AS MORE: H17 is ` +
+        `registered on Bash in agent frontmatter and is NOT in hooks/hooks.json, so this latch gates spawned-agent Bash — it does not gate an agent's ` +
+        `Edit, Write or Task calls. Presence of that file is the whole verdict — no field inside it can reduce enforcement, and H17 never clears it. ` +
+        `Clearing is a separate conductor action that re-verifies the current enforcement surface deliberately.`
+      : environmentDefectDenial(
+          'H17',
+          `THE CROSS-CALL ENFORCEMENT TAINT LATCH COULD NOT BE PERSISTED (${taintLatchPaths().rel}: ${latchOutcome.error}). The denial above stands and is ` +
+            `UNCHANGED — but it is now a ONE-CALL denial only: without the latch on disk, the next PreToolUse re-collects the bytes this command left ` +
+            `behind as its own legitimate baseline and allows them from then on. THE (B) SURFACE MUST BE TREATED AS TAINTED BY HAND until a conductor ` +
+            `has inspected every path named above and re-attested the surface.`,
+          { agentId: input.agent_id }
+        );
+  }
+
   // A store that failed to open/resolve earlier still owes its original deny
-  // — but only now, AFTER the tracked-restore sweep (and its mint attempt)
-  // ran on whatever git alone could tell it. Denying any earlier is exactly
-  // what silently dropped the restore in the first place (PIN5). Wording is
+  // — but only now, AFTER the (A) detect sweep ran on whatever git alone
+  // could tell it (so its detections are already recorded AND latched).
+  // Denying any earlier is exactly the class that once silently dropped the
+  // (A) findings on a broken store (PIN5). Wording is
   // HEAD's original outer-catch shape, class label preserved (review fix 3);
   // any restore performed under the broken store is named — a restore must
   // never be invisible (review fix 1).
   if (storeErr) {
-    const restoredNote = restoredPaths.length
-      ? ` NOTE: ${restoredPaths.length} enforcement path(s) were HEAD-restored during this sweep despite the broken store: ${restoredPaths.join(', ')} — verify none were conductor work-in-flight.`
-      : '';
+    // The latch clause rides ALONG this denial rather than replacing it (RULING
+    // 9: keep the original denial and ADD the clause). A broken store is the one
+    // route on which an incident is detected and the (B) stage never runs, so
+    // dropping the clause here would make exactly that case silent.
+    const latchTail = latchNote ? `\n${latchNote}` : '';
     deny(
       environmentDefectDenial(
         'H17',
-        `Enforcement verification failed (${(storeErr && storeErr.message) || storeErr}) — failing closed (P5).${restoredNote}`,
+        `Enforcement verification failed (${(storeErr && storeErr.message) || storeErr}) — failing closed (P5).${latchTail}`,
         {
           agentId: input.agent_id,
         }
@@ -3777,67 +4579,156 @@ try {
     );
   }
 
-  // Decision h17-enforcement-stamp-conductor-attested-dirt (6e132e19): before
-  // firing the enforcement-surface-dirty denial for the PRE-EXISTING set (which
-  // since 7021526c only fills on the degraded fallback — see above), give
-  // a conductor-written stamp its one sanctioned exemption chance. Attested in
-  // full → the pre-existing dirt is conductor-work-in-flight, not an
-  // unverifiable defect; drop it from `preExisting` entirely so it composes no
-  // denial. Anything short of full attestation (unlisted path, hash mismatch,
-  // missing/corrupt stamp) changes nothing — the existing denial fires exactly
-  // as before, optionally naming which path failed attestation when a stamp
-  // was present but did not fully cover the dirt.
-  let stampFailedPath = null;
-  if (preExisting.length) {
-    const verdict = verifyStampAttestation(cwd, preExisting);
-    if (verdict.attested) {
-      preExisting.length = 0;
-    } else if (verdict.stampPresent) {
-      stampFailedPath = verdict.failedPath;
-    }
-  }
+  // (THE PRE-EXISTING STAMP EXEMPTION STOOD HERE — decision 6e132e19's one
+  // sanctioned chance for a conductor-written stamp to attest the WHOLE degraded
+  // pre-existing set and empty `preExisting` before it composed a denial, plus the
+  // `stampFailedPath` diagnostic naming which path defeated it. DELETED
+  // 2026-08-30 (S4, 78dc9bd6) with the apparatus.
+  // WHAT THIS COSTS, STATED RATHER THAN GLOSSED: the DEGRADED fallback — reached
+  // only when this call carries no usable `tool_use_id`, so no per-call Pre-STATE
+  // record exists to compare against — now blanket-denies pre-dirty enforcement
+  // paths with NO exemption at all. That is a real narrowing, and it is accepted
+  // because the arm is rare and loud, and because the exemption it loses was
+  // forgeable by the audited command anyway.
+  // WHAT IT DOES NOT COST, which is the part worth being precise about: the
+  // NON-DEGRADED path is untouched. A pre-dirty path is still verified BY
+  // OBSERVATION against its recorded Pre state, so decision 7021526c's
+  // false-denial closure holds exactly as before — this deletion removes an
+  // ATTESTATION route, never the COMPARISON route.)
 
   // `unauthorizedAdditions.length` is a FIRST-CLASS deny trigger, not a rider on
   // `violations`: since the addition arm no longer mutates anything, this list is
   // the ONLY trace an unexpected addition leaves — drop it from this condition
   // and a planted file allows silently (sabotage S5 at the gravestone).
-  if (violations.length || unauthorizedAdditions.length || preExisting.length || changedPreDirty.length) {
+  // `baselineDenied.length` is a FIRST-CLASS deny trigger for the same reason:
+  // since the (B) arm stopped restoring, it is the ONLY trace a (B) modify/delete
+  // leaves. Drop it and the corresponding attack allows silently.
+  // `listDenied.length` is a FIRST-CLASS deny trigger and is the one MOST easily
+  // lost, because it is the only trigger whose ordinary case changes NOTHING in
+  // this window: a cross-call (B) tamper, or a malformed baseline list, leaves no
+  // in-window difference for any other arm to see. Drop it from this condition and
+  // the comparator computes a finding nobody ever sees — which is precisely the
+  // shape the deleted stamp manifest failed in.
+  if (violations.length || unauthorizedAdditions.length || baselineDenied.length || listDenied.length || preExisting.length || changedPreDirty.length) {
     const parts = [];
     if (changedPreDirty.length) {
-      // Decision 7021526c step 3. NOT the environment-defect class: the state
-      // moved INSIDE this command's window, so it is attributable — and not the
-      // "reverted" class either, because a pre-image restore stays out of scope.
+      // Decision 7021526c step 3, rewritten at v6.0: the stamp consult this
+      // wording used to cite is DELETED (dc616f69 R11), so the denial may no
+      // longer claim a stamp was checked — and the observed change now LATCHES
+      // (Codex review HIGH), so the cross-call consequence is stated.
       parts.push(
         `H17: PRE-EXISTING dirty path(s) whose state CHANGED inside this command's window, and which are therefore NOT verifiable as untouched: ${changedPreDirty.join(
           ', '
         )}. ` +
-          `The state recorded at PreToolUse (existence, file type, mode, symlink target, index entry, bytes) differs from the state now, and no fresh conductor stamp attests the current state. ` +
-          `These paths are deliberately NOT reverted — restoring a pre-image could clobber a concurrent lane's legitimate write — so the bytes stand as they are; ` +
+          `The state recorded at PreToolUse (existence, file type, mode, symlink target, index entry, bytes) differs from the state now. The change was OBSERVED ` +
+          `inside this command's window — which does not prove this command authored it, and that is exactly why nothing is reverted: restoring a pre-image could ` +
+          `clobber a concurrent lane's legitimate write. The bytes stand as they are, the incident is LATCHED, and a conductor must inspect and clear it; ` +
           `exit contract-violated, never route around.`
       );
     }
     if (violations.length) {
+      // WORDING IS LOAD-BEARING (v6.0, dc616f69 R13): the only true vocabulary
+      // after the restore's deletion is observed / denied / latched / left on
+      // disk. Never "reverted", "rolled back" or "neutralized" — describing an
+      // action that no longer happens is anti-pattern 586bccdc at the
+      // user-facing surface, and it would tell a human the write is gone while
+      // it sits in their working tree.
       parts.push(
-        `H17: write(s) BY THIS COMMAND outside its contract, reverted: ${violations.join(', ')} — exit contract-violated, never route around. ` +
-          `This is the post-Bash restore-and-deny design (decisions 2422e76a, f404dfb4): the bytes were deliberately rolled back to their pre-call state before the denial, not lost work or an automatic reset. ` +
+        `H17: write(s) OBSERVED INSIDE THIS COMMAND'S WINDOW outside its contract — DENIED, LATCHED, and LEFT ON DISK exactly as observed: ${violations.join(', ')} ` +
+          `— exit contract-violated, never route around. NOTHING WAS REVERTED: H17 detects and denies, it does not restore (decision dc616f69 — in a shared ` +
+          `worktree no hook can prove which PROCESS authored a write, and "observed in this window" is not proof this command wrote it; a rollback on that ` +
+          `evidence could destroy a conductor's concurrent legitimate work). The bytes ` +
+          `stand for a HUMAN to inspect; the taint latch keeps denying agent Bash until a conductor clears it, so the surviving write buys nothing but a red gate. ` +
           `A path may be here for any of three reasons: it is enforcement surface, it is under hooks/, or it failed the brief's scope check — ` +
           `only the last is amendable by scope (the first two are denied unconditionally, before the brief is consulted).`
       );
     }
+    // ONE PATH NAMED BY TWO PARAGRAPHS IS DISCLOSED, NEVER LEFT TO LOOK LIKE TWO
+    // FINDINGS (S4 wording rework; the imprecision was pre-existing at HEAD and
+    // carried as a KNOWN one). A (B)-surface path `git add -f`'d into the index is
+    // met by the (A) sweep — which routes it to the ADDITION disposition — and,
+    // when its bytes ALSO differ from this call's Pre image, by the (B) arm, which
+    // records it as a baselineDenied change. Both dispositions are correct and
+    // neither may be dropped: they are independent deny AND latch triggers, and
+    // the addition route is the only one that survives a broken store. So the
+    // overlap is DISCLOSED rather than deduped away — silently removing a path
+    // from one list to tidy the message would remove a trigger with it.
+    const dualReported = unauthorizedAdditions.filter((rel) => baselineDenied.includes(rel));
     if (unauthorizedAdditions.length) {
       // WORDING IS LOAD-BEARING (user ruling 2026-08-27). It must state the
-      // DISPOSITION, because the disposition is unusual: the gate denied and the
-      // file is still there. It must NOT borrow the `violations` vocabulary
-      // above ("reverted") — describing an action that no longer happens is the
-      // 586bccdc failure at the user-facing surface, and it would tell a human
-      // the plant is gone when it is sitting on their disk.
+      // DISPOSITION: the gate denied and the file is still there. Since v6.0
+      // that disposition is no longer unusual — every arm leaves bytes on disk —
+      // but the rule stands: never describe an action the code did not take
+      // (586bccdc), and never tell a human a plant is gone while it sits on
+      // their disk.
+      // THE FORCE-ADD HEDGE IS KEPT VERBATIM IN SUBSTANCE: this sweep genuinely
+      // cannot tell a brand-new file from a pre-existing IGNORED file that was
+      // force-added, so it must not assert Pre-absence for either. That hedge was
+      // itself a v6.0 review fix — the wording before it asserted a
+      // baseline-absence this arm never checked.
       parts.push(
         `H17: UNAUTHORIZED ADDITION(S) DETECTED in the protected (B) enforcement surface, and LEFT IN PLACE ON DISK: ${unauthorizedAdditions.join(', ')} ` +
-          `— exit contract-violated, never route around. These path(s) hold no entry in this call's Pre-image baseline and appeared inside this command's window. ` +
-          `The command is DENIED; the file(s) still sit on disk, BYTE-IDENTICAL to what was written there. H17 DETECTED the addition, it did not delete it: ` +
+          `— exit contract-violated, never route around. Each path surfaced inside this command's window as newly git-visible (B)-surface material: a genuinely ` +
+          `new file with no entry in this call's Pre-image baseline, or a pre-existing gitignored file force-added to the index (this sweep cannot tell the two ` +
+          `apart; where the file existed at Pre, the (B) baseline comparison carries the byte-level verdict). ` +
+          `The command is DENIED; the file(s) still sit on disk, BYTE-IDENTICAL to what was written there. H17 DETECTED the finding, it did not delete or rewrite anything: ` +
           `deleting is IRREVERSIBLE, and this sweep cannot tell a malicious plant from a legitimate file the conductor just created — a detector that deletes ` +
-          `destroys real work on one false positive. A HUMAN must inspect each path above and take it off disk if it is a plant; H17 keeps denying agent Bash ` +
-          `while it stands, so an addition left in place buys nothing but a red gate. Nothing of yours was undone.`
+          `destroys real work on one false positive. A HUMAN must inspect each path above — take a plant off disk, or put a tampered pre-existing file back ` +
+          `deliberately; H17 keeps denying agent Bash while it stands, so a finding left in place buys nothing but a red gate. Nothing of yours was undone.` +
+          (dualReported.length
+            ? ` NAMED TWICE, DISCLOSED SO IT IS NOT READ AS TWO SEPARATE FINDINGS: ${dualReported.join(', ')} ` +
+              `also appear(s) in the (B) in-window paragraph below. That is ONE path met by TWO independent detectors — the (A) git-visible sweep and the (B) ` +
+              `byte comparison — not two incidents. The disposition is identical either way (denied, latched, left on disk), and both are reported because each ` +
+              `is an independent trigger: the (A) route is the only one that survives a broken store.`
+            : '')
+      );
+    }
+    if (baselineDenied.length) {
+      // WORDING IS LOAD-BEARING, exactly as it is for the addition arm above,
+      // and for the same reason: the gate denied and the change is still on
+      // disk, so the message may assert detection only — never a write action
+      // (586bccdc). The "reverted" vocabulary this comment used to warn against
+      // borrowing is itself gone from `violations` since v6.0.
+      // S4: the stamp clause is gone from this text with the stamp. There is no
+      // attestation to lack any more — an in-window (B) change denies
+      // unconditionally — so claiming "no trusted stamp attests it" would point a
+      // human at a mechanism that no longer exists.
+      parts.push(
+        `H17: PROTECTED (B) ENFORCEMENT PATH(S) CHANGED IN THIS COMMAND'S WINDOW — DENIED, AND LEFT IN PLACE EXACTLY AS ` +
+          `THE COMMAND LEFT THEM: ${baselineDenied.join(', ')} — exit contract-violated, never route around. These path(s) are gitignored enforcement ` +
+          `surface (.claude/agents/**, .claude/settings*.json, .sterling/config.json) and their state differs from this call's Pre-image baseline. ` +
+          `An in-window (B) change is denied UNCONDITIONALLY: there is no attestation, exemption or stamp that excuses one, because on a same-UID machine ` +
+          `any such token is forgeable by the very command being audited. H17 DETECTED the change and took NO WRITE ACTION on it: nothing was put back, ` +
+          `recreated, truncated or rewritten, and whatever is on disk now is what your command put there. Putting bytes back was REMOVED deliberately — the ` +
+          `(B) pre-image lives only in a temp record the audited command can itself write, so writing from it made this gate a writer of ` +
+          `attacker-influenceable bytes, and its truncate-in-place write could be aimed THROUGH a hardlink at a file outside the repository. Conductor edits ` +
+          `to this surface belong BETWEEN Bash calls with agents quiesced, never inside one. A HUMAN must inspect each path above.`
+      );
+    }
+    if (listDenied.length) {
+      // WORDING IS LOAD-BEARING, and it deliberately does NOT borrow the
+      // in-window vocabulary of the two arms above: the ORDINARY case for this
+      // arm is a call in which nothing changed at all, so "changed in this
+      // command's window" would be a plain falsehood about the agent's own command
+      // (anti-pattern 586bccdc). What is contradicted here is the persistent
+      // LIST's description of the surface, which may have been broken long before
+      // this command ran — possibly in another session.
+      // NOTE WHAT THIS MESSAGE MAY NOT SAY, since the arm it replaces said it: it
+      // must not describe the list as an ATTESTATION, and must not offer a
+      // producer CLI to "re-attest" with. The list describes; it never authorizes,
+      // and the only sanctioned writer is the clearer.
+      parts.push(
+        `H17: THE PERSISTENT (B) BASELINE LIST (${baselineListPaths().rel}) CONTRADICTS THE LIVE (B) SURFACE — DENIED, AND NOTHING WAS WRITTEN OR TAKEN ` +
+          `OFF DISK: ${listDenied.join('; ')}. — exit contract-violated, never route around. The list is compared against the WHOLE current (B) set on ` +
+          `EVERY gated call, not only when this window changed something (decision b-baseline-hash-list-concrete-design, D3): a listed path missing or ` +
+          `hash-different denies, a live (B) path absent from the list denies, a malformed list denies, and an exact match simply produces no finding — it ` +
+          `never allows anything and never suppresses another finding in this same result. THIS IS THE CROSS-CALL ARM, and it is why the contradiction may ` +
+          `have nothing to do with your command: unlike every other check here it is NOT bounded to one Bash window, NOT suspended by a broken store, and ` +
+          `NOT reset at SessionStart, so it can be reporting a (B) edit made between calls or between sessions. THE INCIDENT IS LATCHED, deliberately: a ` +
+          `denial with no cross-call consequence would let the contradiction be resolved by taking the list off disk, after which the next call sees no ` +
+          `list, skips this check, and adopts whatever is on the surface as legitimate. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE — exit ` +
+          `\`blocked\`, citing this message. A CONDUCTOR inspects the surface and re-mints the list deliberately through the clearer ` +
+          `(scripts/enforcement-reconcile.mjs), with agents quiesced; the agent must not write, repair or delete the list.`
       );
     }
     // DEGRADED-LOUD ON THE (B) SIDE (board 11609d1f), the mirror of
@@ -3859,15 +4750,17 @@ try {
       );
     }
     // DEGRADED-LOUD ON THE (A) SIDE (board 489554d4), the mirror of the (B) block
-    // above: a tracked path HEAD-restored while the attribution record was the
-    // shared per-run file may have been PRE-EXISTING dirt missing from an
+    // above: a path attributed to this command while the attribution record was
+    // the shared per-run file may have been PRE-EXISTING dirt missing from an
     // overwritten record rather than this command's write. Composed only when the
-    // (A) stage actually restored something (P1).
-    if (attributionShared && restoredPaths.length) {
+    // (A) stage actually attributed something (P1). Since v6.0 the exposure is a
+    // FALSE ATTRIBUTION (a wrongly denied + latched path), no longer data
+    // destruction — nothing restores.
+    if (attributionShared && violations.length) {
       parts.push(
-        `H17: DEGRADED (A) ATTRIBUTION — the tracked path(s) HEAD-restored above (${restoredPaths.join(', ')}) were attributed to this command against a ` +
+        `H17: DEGRADED (A) ATTRIBUTION — the tracked path(s) denied above (${violations.join(', ')}) were attributed to this command against a ` +
           `SHARED PER-RUN attribution record, not one keyed to this Bash call: ${attributionShared}. The verdict stands; what is degraded is the ` +
-          `confidence that a restored path was this command's own write rather than pre-existing dirt missing from an overwritten shared record.`
+          `confidence that a denied path was this command's own write rather than pre-existing dirt missing from an overwritten shared record.`
       );
     }
     if (preExisting.length) {
@@ -3897,21 +4790,32 @@ try {
             // landed, this blanket denial fires ONLY when there is no record to
             // compare against — so it must say which input it lacked, or the
             // degrade is silent and indistinguishable from the old behaviour.
-            (degradedReason ? ` This blanket denial is a DEGRADED FALLBACK: ${degradedReason}.` : '') +
-            (stampFailedPath ? ` A conductor-attested stamp exists but does not attest '${stampFailedPath}' — no exemption.` : ''),
+            // S4 (78dc9bd6): the trailing stamp-attestation clause is gone with
+            // the apparatus. There is no exemption route left for this arm at
+            // all, so naming one that "did not attest" would point a human at a
+            // mechanism that no longer exists.
+            (degradedReason ? ` This blanket denial is a DEGRADED FALLBACK: ${degradedReason}.` : ''),
           { agentId: input.agent_id }
         )
       );
     }
+    // THE LATCH CLAUSE IS LAST AND IS NEVER OMITTED WHEN IT EXISTS (RULING 9).
+    // On the SET path it tells the reader that the denial now has a cross-call
+    // consequence; on the FAILED-SET path it is an environment-defect clause
+    // saying the latch could NOT be persisted and the surface must be treated as
+    // tainted by hand. Never the reverse — claiming repeated denial was
+    // established when it was not is precisely the false-action-claim the ruling
+    // forbids here.
+    if (latchNote) parts.push(latchNote);
     deny(parts.join('\n'));
   }
   allow();
 } catch (e) {
   // Universal fail-closed catch-all: anything unforeseen during an active agent
   // run denies (exit 2), never a non-blocking exit 1. This branch is reached
-  // only by UNEXPECTED internal failures (git errors, restore fs-errors, a
-  // corrupt store) — never by an actual verified contract violation, which
-  // denies explicitly above with its own contract-violated wording untouched.
+  // only by UNEXPECTED internal failures (git errors, fs errors, a corrupt
+  // store) — never by an actual verified contract violation, which denies
+  // explicitly above with its own contract-violated wording untouched.
   deny(
     environmentDefectDenial('H17', `Enforcement verification failed (${(e && e.message) || e}) — failing closed (P5).`, {
       agentId: input.agent_id,

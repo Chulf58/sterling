@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h26-dispatch-overlap.mjs
-import { existsSync as existsSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync4 } from "node:fs";
+import { join as join4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5129,6 +5129,31 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/advisory-counter.mjs
+import { appendFileSync, existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+function recordAdvisoryFire(root, hook, sessionId) {
+  try {
+    if (!root || !hook) return;
+    if (!existsSync2(join2(root, ".sterling"))) return;
+    const dir = join2(root, ".sterling", "transient");
+    mkdirSync(dir, { recursive: true });
+    let session = typeof sessionId === "string" && sessionId ? sessionId : null;
+    if (!session) {
+      try {
+        const parsed = JSON.parse(readFileSync2(join2(dir, "session.json"), "utf8"));
+        session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
+      } catch {
+      }
+    }
+    appendFileSync(
+      join2(dir, "advisory-fires.ndjson"),
+      JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
+    );
+  } catch {
+  }
+}
+
 // scripts/hooks/lib/transcript.mjs
 var TAIL_BYTES = 1024 * 1024;
 
@@ -5140,21 +5165,21 @@ function extractPathCandidates(text) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+import { readFileSync as readFileSync3, existsSync as existsSync3 } from "node:fs";
+import { join as join3 } from "node:path";
 function liveDispatches(root) {
-  const path = join2(root, ".sterling", "transient", "dispatch-register.json");
-  if (!existsSync2(path)) return [];
+  const path = join3(root, ".sterling", "transient", "dispatch-register.json");
+  if (!existsSync3(path)) return [];
   let entries;
   try {
-    entries = JSON.parse(readFileSync2(path, "utf8"));
+    entries = JSON.parse(readFileSync3(path, "utf8"));
   } catch {
     return [];
   }
   if (!Array.isArray(entries)) return [];
   let staleMinutes = 60;
   try {
-    const cfg = JSON.parse(readFileSync2(join2(root, ".sterling", "config.json"), "utf8"));
+    const cfg = JSON.parse(readFileSync3(join3(root, ".sterling", "config.json"), "utf8"));
     if (Number.isInteger(cfg?.dispatch_register?.stale_minutes) && cfg.dispatch_register.stale_minutes > 0) {
       staleMinutes = cfg.dispatch_register.stale_minutes;
     }
@@ -5341,6 +5366,7 @@ try {
   warnNonBlocking(`H26: failed to parse stdin: ${e && e.message || e}`);
 }
 function emit(additionalContext) {
+  recordAdvisoryFire(input.cwd, "h26", input.session_id);
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
@@ -5373,7 +5399,7 @@ try {
       if (contested.length) resourceAdvisory = buildResourceAdvisory(contested);
     }
   }
-  if (!existsSync3(join3(input.cwd ?? ".", ".sterling", "sterling.db"))) finish();
+  if (!existsSync4(join4(input.cwd ?? ".", ".sterling", "sterling.db"))) finish();
   if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) finish();
   const candidates = extractPathCandidates(prompt);
   const normalized = candidates.map((raw) => ({ raw, norm: repoRel(raw, input.cwd) })).filter((p) => p.norm).filter(

@@ -141,7 +141,7 @@ function fileExt(p) {
   return m ? m[1].toLowerCase() : '';
 }
 
-const ARTICLE_WRITE_RE = /^(mcp__sterling__|mcp__plugin_sterling_sterling__)(knowledge_update|knowledge_append|knowledge_edit)$/;
+const ARTICLE_WRITE_RE = /^(mcp__sterling__|mcp__plugin_sterling_sterling__)(knowledge_update|knowledge_append|knowledge_edit|knowledge_array_remove)$/;
 const toolName = input.tool_name ?? '';
 
 try {

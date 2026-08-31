@@ -202,7 +202,6 @@ const MANIFEST = {
   'h8-dispatch-cap.mjs': 'blocking',
   'h9-stop-backstop.mjs': 'blocking',
   'h10-direct-capture.mjs': 'blocking',
-  'h13-clear-conductor.mjs': 'advisory',
   'h13-reads-ledger.mjs': 'advisory',
   'h14-bash-allowlist.mjs': 'blocking',
   'h15-store-guard.mjs': 'blocking',
@@ -227,7 +226,6 @@ const MANIFEST = {
   'h25-dispatch-capability.mjs': 'advisory',
   'h26-dispatch-overlap.mjs': 'advisory',
   'h27-dispatch-signatures.mjs': 'blocking',
-  'h28-return-contract.mjs': 'advisory',
   'h29-codex-consult-failure.mjs': 'advisory',
   'h30-bare-id-legibility.mjs': 'advisory',
 };
@@ -460,7 +458,9 @@ const BASELINE = {
     { statement: 'const MAX_WALK_NODES = 10_000;' },
     { statement: 'const MAX_WALK_DEPTH = 64;' },
     { statement: 'const MAX_RECORD_BYTES = 16 * 1024 * 1024;' },
-    { statement: 'const MAX_STAMP_BYTES = 8 * 1024 * 1024;' },
+    // DELETED 2026-08-30 (S4, 78dc9bd6/fe861066): MAX_STAMP_BYTES left with the
+    // stamp apparatus — a stale entry here fails the ratchet, so it is removed,
+    // not kept as history. The list read is bounded by the surviving record cap.
     { statement: "class WalkBudgetError extends Error { constructor(message, budget) { super(message); this.name = 'Wa … #00df15c1" },
     { statement: "class FileUnstableError extends Error { constructor(message) { super(message); this.name = 'FileUnst … #8bb9e374" },
     { statement: 'const WALK_BUDGET = newWalkBudget();' },
@@ -470,7 +470,11 @@ const BASELINE = {
     { statement: 'const secureIoReason = secureIoUnavailableReason(cwd);' },
     { statement: "if (secureIoReason) { deny( environmentDefectDenial( 'H17', `${secureIoReason} — this hook's descrip … #25b0f89d" },
     { statement: 'const event = input.hook_event_name;' },
-    { statement: "if (event === 'PreToolUse') { try { const store = openStore(cwd); let runId = NO_RUN; try { const ru … #10429a2d" },
+    // ROTATED 2026-08-30 twice: (S3, #a98386cd → #64281cab) restore excision
+    // (dc616f69); (S4, #64281cab → #446d4683) stamp excision — Pre lost the
+    // stamp-witness write (78dc9bd6/fe861066). Same statement, same debt — a
+    // digest update, not a new hole.
+    { statement: "if (event === 'PreToolUse') { try { // THE TAINT LATCH IS CONSULTED FIRST — before the store, before … #446d4683" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H17', `[stdin] hook input could not be read or parsed (${(e && e.mes … #9c89b8db" },
     { statement: "deny-arg: deny( environmentDefectDenial('H17', `Enforcement verification failed (${(e && e.message) || e}) — f … #3c876005" },
   ],
@@ -491,7 +495,11 @@ const BASELINE = {
     { statement: "const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');" },
     { statement: 'const store = openStore(input.cwd);' },
     { statement: 'if (!store) allow();' },
-    { statement: 'try { const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS); if (terms.length < AXIS_MIN_HITS) al … #f96e3634' },
+    // ROTATED 2026-08-30 (#f96e3634 → #f084420c): commit 7404cbf wired the
+    // advisory firing counter into h20's top-level try WITHOUT rotating this
+    // entry, so the check was red at HEAD; the S3 commit absorbs the repair and
+    // says so. Same statement, same debt — the counter swallows its own errors.
+    { statement: 'try { const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS); if (terms.length < AXIS_MIN_HITS) al … #f084420c' },
   ],
   // The two entries the outside review named: under the old first-line identity
   // BOTH were the bare string 'try {', so the multiset could not tell them apart
@@ -508,7 +516,10 @@ const BASELINE = {
 // entry, and LOWER this number in the same change — the diff then shows the
 // ratchet turning the only direction it is allowed to turn. A number going UP in a
 // diff is an append, and it is meant to be as conspicuous as that sounds.
-const FOUNDING_BASELINE_TOTAL = 107;
+// 107 → 106 at S4 (2026-08-30): MAX_STAMP_BYTES deleted with the stamp
+// apparatus (78dc9bd6/fe861066); the Pre-statement entry rotated in place.
+// The ratchet only turns downward — fewer is a rotation, never a regression.
+const FOUNDING_BASELINE_TOTAL = 106;
 
 const CLASSES = new Set(['blocking', 'advisory', 'exempt']);
 const LABEL = 'fail-closed boundary';

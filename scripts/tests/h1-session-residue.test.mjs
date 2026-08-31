@@ -510,40 +510,54 @@ test('AC6: other transient files (pressure-nagged.json, conductor-pressure.json)
   }
 });
 
-// ---- FIX C (upgrade-polish, 2026-08-21; decision h17-enforcement-stamp-conductor-
-// attested-dirt, knowledge_get 6e132e19-0da1-47c2-9fa5-710bc7365014): the
-// conductor-attested enforcement stamp (.sterling/transient/enforcement-stamp.json,
-// written by scripts/enforcement-stamp.mjs) is transient, P4 lifecycle-bound state
-// scoped to ONE session — H1 deletes it at SessionStart. It is NOT one of the
-// three residue registers above: it carries no capture debt of its own, so its
-// deletion must never mint a capture_owed item or the RESIDUE_PHRASE mention.
+// ---- FIX C — MOOT, REMOVED S4 (decision `b-baseline-hash-list-concrete-
+// design`, fe861066; ruling 78dc9bd6): the conductor-attested enforcement
+// stamp this stub pinned (.sterling/transient/enforcement-stamp.json, written
+// by scripts/enforcement-stamp.mjs) no longer exists — the whole stamp
+// apparatus is deleted, and per fe861066 D2 "H1's SessionStart stamp-rmSync
+// arm is DELETED, not repointed" (i.e. NOT retargeted at the new baseline
+// list either). There is nothing left at that path for H1 to delete, and
+// nothing to pin about its deletion.
 //
-// SPEC POINT THE EXISTING FIXTURES CANNOT RESOLVE (disclosed, not improvised):
-// the three residue registers deliberately leave source='resume'/'compact'
-// COMPLETELY untouched (AC2 above), while the governing decision states the
-// stamp is deleted "at SessionStart" unqualified by source. Whether the stamp
-// follows the residue registers' resume/compact exemption, or is deleted
-// unconditionally on every SessionStart source, is not pinned by the brief
-// handed to this test-writer. The test below asserts only the UNAMBIGUOUS case
-// (source='startup', where every plausible reading agrees the stamp is deleted)
-// and leaves resume/compact deliberately untested rather than encoding a guess.
-const STAMP = ['.sterling', 'transient', 'enforcement-stamp.json'];
+// ADDED S4 — THE REPLACEMENT INVARIANT, in the opposite direction. The
+// persistent (B) baseline hash list at .sterling/enforcement-baseline.json
+// (decision fe861066 D1/D2) is deliberately NOT transient, NOT P4
+// lifecycle-bound, and NOT session-scoped — it is the whole point of the
+// redesign that it survive across sessions so cross-call/cross-session (B)
+// tampering is finally detectable. If H1 ever ported the old
+// SessionStart-clears-transient-stamp pattern to this new persistent list —
+// by analogy, by a copy-paste, or by widening some future "clear transient
+// enforcement state" sweep — that would silently defeat the entire redesign:
+// every legitimate reboot would look exactly like a cleared taint latch, and
+// the cross-session detection this objective exists to add would vanish
+// exactly where it is needed. Checked on 'startup' AND 'clear' (H1's two
+// SessionStart sources that DO act on the governed residue registers above —
+// the two sources where a mistaken port of the old clear-on-start behaviour
+// would most plausibly land) — BOTH must leave the list untouched.
+const BASELINE_LIST = ['.sterling', 'enforcement-baseline.json'];
 
-test('FIX C: H1 deletes the conductor-attested enforcement stamp at SessionStart (startup), minting no residue debt from it', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    writeReg(dir, STAMP, [{ path: 'hooks/x.mjs', sha256: 'deadbeef', at: T1 }]);
-    const r = h1(dir, 'startup');
-    assert.equal(r.code, 0, r.stderr);
-    // EXPECTED FAILURE TODAY: H1 has no knowledge of this file yet, so it
-    // survives — this assertion fires (actual true, expected false).
-    assert.equal(regExists(dir, STAMP), false, 'the stamp is deleted on startup (P4 lifecycle)');
-    assert.doesNotMatch(additionalContext(r) ?? '', RESIDUE_PHRASE, 'the stamp is not a residue register — no capture debt is minted from it');
-    assert.equal(captureOwedItems(store).length, 0, 'deleting the stamp mints nothing');
-  } finally {
-    cleanup();
-  }
-});
+function baselineListBody() {
+  return { version: 1, minted_at: T1, entries: [{ path: '.claude/agents/coder.md', sha256: 'a'.repeat(64) }] };
+}
+
+for (const source of ['startup', 'clear']) {
+  test(`H1 SessionStart (${source}) NEVER deletes or rewrites the persistent .sterling/enforcement-baseline.json — it is not transient, session-scoped state`, () => {
+    const { dir, cleanup } = makeProject();
+    try {
+      const body = baselineListBody();
+      writeReg(dir, BASELINE_LIST, body);
+      const before = readRegRaw(dir, BASELINE_LIST);
+
+      const r = h1(dir, source);
+      assert.equal(r.code, 0, r.stderr);
+
+      assert.equal(regExists(dir, BASELINE_LIST), true, `the persistent baseline list survives H1 SessionStart (${source}) — it is cross-session evidence, not transient residue`);
+      assert.equal(readRegRaw(dir, BASELINE_LIST), before, `the baseline list bytes are BYTE-IDENTICAL after SessionStart (${source}) — never rewritten, minted, or normalized in passing`);
+    } finally {
+      cleanup();
+    }
+  });
+}
 
 test('AC1a boundary: touched paths in file_keys are deduped and capped at 20', () => {
   // dedup: 5 unique paths, each touched twice — no cap involved

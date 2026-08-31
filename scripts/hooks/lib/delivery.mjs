@@ -32,10 +32,8 @@ export {
   AXIS_MIN_RECORD_TERMS,
   recordCentralityHits,
   hasRecordCentralityHit,
+  hasFullNarrowCentralityCoverage,
 } from '@sterling/store';
-// Also bound locally (not just re-exported) so this file's OWN deny-once
-// constants below can be defined in terms of it.
-import { AXIS_RECORD_TOP_K as _AXIS_RECORD_TOP_K } from '@sterling/store';
 
 /** The OUTGOING text H20 scans, PER SURFACE — the two do not share an input
  *  shape, and assuming they do yields a hook that silently never fires.
@@ -178,20 +176,28 @@ export const DENY_RULING_TYPES = ['decision', 'anti_pattern'];
  *  HONEST NOTE, same caveat AXIS_MIN_HITS itself carries: chosen on the
  *  motivating case, not measured data — tune on observed deny/override rates. */
 export const STRICT_MIN_HITS = 3;
-/** The deny floor requires FULL coverage of the record's own top-K central
- *  terms (every one of hasRecordCentralityHit's own extracted terms present),
- *  not merely AXIS_MIN_RECORD_TERMS (>=2, the loose audit's bar). Raw distinct
- *  hit COUNT alone does not discriminate a genuinely governing ruling from a
- *  topically-adjacent one: a short decision record and a prompt built around
- *  it both tend to land in the same 5-8 hit range regardless of how
- *  thoroughly the prompt actually covers the ruling's own vocabulary — what
- *  discriminates is whether EVERY one of the record's own dominant terms is
- *  present, not just most of them. Passing AXIS_RECORD_TOP_K itself as
- *  `minTerms` composes with hasRecordCentralityHit's own degenerate-scaling
- *  (`Math.min(minTerms, central.length)`), so a terse record's smaller central
- *  set still demands FULL coverage of what it has, never a fixed count larger
- *  than the record can offer. */
-export const STRICT_MIN_RECORD_TERMS = _AXIS_RECORD_TOP_K;
+/** The deny floor's centrality bar is `hasFullNarrowCentralityCoverage`
+ *  (re-exported above), NOT hasRecordCentralityHit with a raised `minTerms`.
+ *  It requires FULL coverage of the record's PRE-UNION narrow top-K — every one
+ *  of the record's own dominant narrow terms present — rather than merely
+ *  AXIS_MIN_RECORD_TERMS (>=2, the loose audit's bar). Raw distinct hit COUNT
+ *  alone does not discriminate a genuinely governing ruling from a topically-
+ *  adjacent one: a short decision record and a prompt built around it both tend
+ *  to land in the same 5-8 hit range regardless of how thoroughly the prompt
+ *  actually covers the ruling's own vocabulary — what discriminates is whether
+ *  EVERY one of the record's own dominant terms is present, not just most of
+ *  them. A terse record's smaller central set still demands full coverage of
+ *  what it has, never a fixed count larger than the record can offer.
+ *
+ *  WHY A DEDICATED FUNCTION AND NOT A CONSTANT: this file used to export
+ *  STRICT_MIN_RECORD_TERMS = AXIS_RECORD_TOP_K and pass it as `minTerms`,
+ *  relying on `Math.min(minTerms, central.length)` collapsing to full coverage
+ *  because central.length could never exceed topK. The title union (decision
+ *  00b23915) broke that invariant — the central set can now reach 2*topK, so
+ *  the same call silently became "ANY six of up to twelve". This rung EXITS 2
+ *  and blocks a question from reaching the user, so a weaker per-term demand is
+ *  fail-CLOSED toward the user: more false denials. The constant is gone rather
+ *  than corrected, so no future caller can re-derive the trick. */
 
 /** How many newly-introduced axis terms a retry must add over the FIRST
  *  denied attempt (same intent key) before its citation counts as stating an

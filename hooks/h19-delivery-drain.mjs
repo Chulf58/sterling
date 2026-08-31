@@ -5121,9 +5121,45 @@ function drainPending(path) {
   return entries;
 }
 
+// scripts/hooks/lib/ledger.mjs
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync as rmSync2, renameSync as renameSync2 } from "node:fs";
+import { join as join3, dirname as dirname3 } from "node:path";
+function ledgerPath(cwd, runId, agentId) {
+  if (runId && agentId) return join3(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
+  if (agentId) return join3(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
+  return join3(cwd, ".sterling", "transient", "conductor-reads.json");
+}
+function readLedger(path) {
+  if (!existsSync3(path)) return [];
+  const raw = readFileSync3(path, "utf8");
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    try {
+      const salvaged = JSON.parse(raw.slice(0, raw.indexOf("]") + 1));
+      return Array.isArray(salvaged) ? salvaged : [];
+    } catch {
+      return [];
+    }
+  }
+}
+function pruneUnhashed(path) {
+  if (!existsSync3(path)) return;
+  const kept = readLedger(path).filter((e) => e.sha256);
+  if (kept.length) writeFileSync2(path, JSON.stringify(kept));
+  else rmSync2(path);
+}
+
 // scripts/hooks/h19-delivery-drain.mjs
 var input = readStdin();
 try {
+  try {
+    pruneUnhashed(ledgerPath(input.cwd, void 0, void 0));
+  } catch (e) {
+    process.stderr.write(`H19 drain: ledger prune failed: ${e && e.message || e}
+`);
+  }
   const entries = drainPending(pendingPath(input.cwd));
   if (!entries.length) allow();
   const context = entries.map((e) => e.payload).join("\n\n");
