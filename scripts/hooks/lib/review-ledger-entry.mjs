@@ -40,6 +40,20 @@
 //   content_evidence.status -> content_evidence_status (v2-ONLY marker, see
 //                              finding F2 below; absent/undefined for a v1
 //                              entry, which never had this concept)
+//   entry_id               -> entry_id (v2-ONLY, campaign slice S2b-2 — see
+//                              the ENTRY_ID note below)
+//
+// ENTRY_ID IS SURFACED (campaign slice S2b-2, decision 57984926 §2). The
+// reviewed-bytes REFUSE flip stamps one `Review-Bytes-Waiver: <identity>`
+// trailer per waived receipt, and §2 names that identity as "entry_id for v2,
+// stable fingerprint for v1". The structural-completeness check (MED-2 below)
+// already READ entry_id here to decide `v2_deficient`, but never exposed the
+// value — so commit-reviewed.mjs could not name the very entry it was
+// withholding or waiving without a `schema_version === 2` branch of its own,
+// which is exactly the second hand-rolled switch this adapter exists to
+// prevent (finding HIGH-3). v2-ONLY, same presence convention as
+// content_evidence_status/agent_id: a v1 entry returns early and never gains
+// the key, so a v1 waiver identity can never be mistaken for a real entry_id.
 //
 // STATUS:'discharged' entries are explicitly OUT OF SCOPE this slice (decision
 // 57984926 part 3; no discharge verb exists yet, so no v2 entry can carry that
@@ -130,6 +144,9 @@ export function normalizeLedgerEntry(entry) {
       ? contentEvidence.blobs
       : undefined;
   return {
+    // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
+    // entry it refuses or waives (decision 57984926 §2). undefined for v1.
+    entry_id: entry.entry_id,
     agent_type: reviewer.agent_type,
     files: territory.files,
     files_source: territory.source,
