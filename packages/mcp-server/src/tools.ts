@@ -2224,8 +2224,9 @@ export class SterlingTools {
    * `arr[key=value].sub` selector replaces one STRING inside one element but
    * cannot remove the element. So dropping a single stale path meant a
    * knowledge_update retransmitting the whole array — exactly the shape that
-   * produced anti-pattern d25f5a9e, a silent truncation where the write
-   * succeeds and the article quietly loses entries nobody re-sent. The
+   * produced a measured silent-truncation incident (recorded in a consuming
+   * project's store): the write succeeds and the article quietly loses
+   * entries nobody re-sent. The
    * asymmetry was the smell: append is protected from retransmission, edit is
    * protected from retransmission, and removal — the one operation that
    * DESTROYS content — was the one demanding you re-send everything correctly.

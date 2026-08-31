@@ -30,7 +30,7 @@ const SERVED_TOOLS = [
   // The DESTROYING sibling of edit/append: removes ONE element from a
   // feature_article's files[] by the same arr[key=value] selector, so a
   // single-entry removal no longer demands a whole-array retransmit (the
-  // shape that produced anti-pattern d25f5a9e's silent truncation).
+  // shape that produced measured silent-truncation incident).
   // expected_version is REQUIRED here, unlike knowledge_update — a destroy
   // states what it read (board 39673f6a).
   'knowledge_array_remove',

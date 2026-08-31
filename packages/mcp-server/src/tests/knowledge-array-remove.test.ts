@@ -4,7 +4,7 @@
 // WHY: knowledge_append only ADDS to files[]; knowledge_edit's `arr[key=
 // value].sub` selector edits one string field inside one element but has no
 // delete verb. Removing a single entry today means retransmitting the whole
-// array — exactly the shape that produced anti-pattern d25f5a9e (a silent
+// array — exactly the shape that produced a measured incident in a consuming project's store (a silent
 // truncation on a whole-array retransmit). The asymmetry is the smell:
 // append and edit are both protected from retransmission; the one operation
 // that DESTROYS content is the one that demands you re-send everything.
