@@ -18,6 +18,30 @@
 // against TODAY's h14-bash-allowlist.mjs (none of AC1–AC3's normalization is
 // implemented yet), never a crash. Per-test expected failure shapes are called
 // out inline and repeated in the handoff.
+//
+// ---------------------------------------------------------------------------
+// SUPERSESSION NOTICE (2026-08-31) — AC3 IS INVERTED.
+// Decision `git-ro-wrapper-fixed-recipes-no-caller-flags`
+// (knowledge_get 1a7f3926-703a-471c-b33a-c3907bc9c3b3), H14 INTEGRATION
+// clause, REMOVES H14's four direct read-only git verb prefixes (git log /
+// git show <ref> --stat / git diff --name-only / git branch --list — the
+// board 4c7b84d3 lineage the header above describes) and replaces them with
+// one exact prefix `node scripts/git-ro.mjs`. The AC3 background in the
+// header above is therefore HISTORY, not the live ruling: those four are now
+// DENIED. Only the AC3 arms are re-pinned below; AC1, AC2, AC4's assertions,
+// AC-Y, AC-Z and the run-gate arms are untouched.
+//
+// SCOPE FENCE: the wrapper GRANT, the removed prefixes' argument variants,
+// the denial's git-ro pointer vocabulary and the exact-prefix lookalike class
+// are pinned in scripts/tests/h14-git-ro-grant.test.mjs and are deliberately
+// NOT duplicated here — AC3's job shrinks to inverting its own superseded
+// pin. That sibling file was read for vocabulary consistency only; it is not
+// modified by this edit.
+//
+// WHAT FLIPS THESE ARMS: the H14 allowlist edit, alone. H14 matches the
+// command STRING, so whether scripts/git-ro.mjs exists on disk changes no
+// verdict in this file.
+// ---------------------------------------------------------------------------
 
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -171,20 +195,57 @@ test('H14 AC2 boundary: cwd robustness is not a path-scope bypass — a path arg
 });
 
 // ---------------------------------------------------------------------------
-// AC3 — read-only git verbs are allowed; mutating git stays denied
+// AC3 — SUPERSEDED AND INVERTED by `git-ro-wrapper-fixed-recipes-no-caller-flags`:
+// the four direct read-only git verb prefixes are REMOVED, so they now DENY.
+// Mutating git stays denied exactly as before.
 // ---------------------------------------------------------------------------
 
-test('H14 AC3: read-only git verbs are allowed for agents (git log / show --stat / diff --name-only / branch --list)', () => {
+test('H14 AC3 (INVERTED by `git-ro-wrapper-fixed-recipes-no-caller-flags`): the four direct read-only git prefixes are now DENIED (git log / show <ref> --stat / diff --name-only / branch --list)', () => {
   const { dir, cleanup } = makeProject();
   try {
-    // EXPECTED FAILURE SHAPE (today): each assert.equal(..., 0) fires because
-    // every git invocation is currently denied outright ("not on the
-    // allowlist") — the reported case is a debugger denied `git log` on a
-    // legitimate history question.
-    assert.equal(bash(dir, 'git log').code, 0, 'git log is read-only history access');
-    assert.equal(bash(dir, 'git show abc123 --stat').code, 0, 'git show <sha> --stat is read-only');
-    assert.equal(bash(dir, 'git diff --name-only').code, 0, 'git diff --name-only is read-only');
-    assert.equal(bash(dir, 'git branch --list').code, 0, 'git branch --list is read-only');
+    // SUPERSESSION. This arm formerly pinned these four as ALLOWED (board
+    // 4c7b84d3). Decision `git-ro-wrapper-fixed-recipes-no-caller-flags`
+    // (knowledge_get 1a7f3926-703a-471c-b33a-c3907bc9c3b3) removes them
+    // verbatim: "the four direct read-only git verb prefixes (git log / git
+    // show <ref> --stat / git diff --name-only / git branch --list, board
+    // 4c7b84d3 lineage) are REMOVED in the same slice and replaced by one
+    // exact prefix 'node scripts/git-ro.mjs'". Keeping them beside the
+    // wrapper is the alternative the decision explicitly REJECTED
+    // ("preserves a bypass around every guarantee the wrapper adds").
+    //
+    // CONTROL (placed first, must pass for the OPPOSITE reason): the four
+    // denials below would be produced equally by a fixture in which H14
+    // denies EVERYTHING (an unreadable config, fail-closed). This allow-side
+    // arm rules that second cause out before any denial is read, so a green
+    // here carries its own evidence.
+    assert.equal(
+      bash(dir, 'node --test scripts/tests/foo.test.mjs').code,
+      0,
+      'control: the declared toolchain command is still ALLOWED in this fixture — the denials below are the git removal, not a deny-everything hook'
+    );
+
+    // EXPECTED FAILURE SHAPE (pre-implementation): the first
+    // assert.equal(r.code, 2) fires receiving 0, because `git log` is still on
+    // today's H14 allowlist; likewise the other three once it is fixed.
+    // NAMED SABOTAGE (post-implementation): restore any ONE of the four
+    // prefixes to H14's allowlist — that command's assert.equal(r.code, 2)
+    // goes red immediately. The /not on the allowlist/ assertion beside it is
+    // the discriminator that carries the verdict's REASON: it proves ordinary
+    // allowlist reasoning rather than a crash or a fail-closed config error.
+    //
+    // The denial's git-ro POINTER vocabulary (stderr naming the wrapper as the
+    // surviving route), the argument variants of these four, and the exact
+    // wrapper prefix grant are pinned in
+    // scripts/tests/h14-git-ro-grant.test.mjs — not re-pinned here.
+    for (const cmd of ['git log', 'git show abc123 --stat', 'git diff --name-only', 'git branch --list']) {
+      const r = bash(dir, cmd);
+      assert.equal(
+        r.code,
+        2,
+        `\`${cmd}\` must now be DENIED — the direct git prefixes were removed in favour of the git-ro wrapper; stdout=${r.stdout} stderr=${r.stderr}`
+      );
+      assert.match(r.stderr, /not on the allowlist/, `\`${cmd}\` is denied by ordinary allowlist reasoning, not a crash`);
+    }
   } finally {
     cleanup();
   }
@@ -203,27 +264,45 @@ test('H14 AC3 regression: mutating git verbs stay denied exactly as today', () =
   }
 });
 
-test('H14 AC3 boundary: the read-only allowance is VERB-SHAPED, not "git anything" — chaining, redirection, and lookalikes stay denied', () => {
+test('H14 AC3 boundary (re-framed by `git-ro-wrapper-fixed-recipes-no-caller-flags`): with the direct git prefixes removed, chaining and redirection still deny FOR THEIR OWN REASON, and git lookalikes stay denied', () => {
   const { dir, cleanup } = makeProject();
   try {
-    // an allowed read-only verb still cannot smuggle a chained mutation
+    // RE-FRAMING, not a weakening: every assertion below is unchanged. What
+    // changed is the PREMISE. There is no longer an "allowed read-only verb"
+    // for these two arms to chain onto, so their exit-code verdict is now
+    // OVER-DETERMINED — code 2 could come from the control-operator /
+    // redirection gate, or simply from `git log` being off the allowlist
+    // since the decision. The stderr assertions are therefore the ones that
+    // carry the pin: they demand the denial cite control operators /
+    // redirection, which is only true if those gates fire BEFORE the
+    // allowlist match. (That ordering is pinned in-file for a non-allowlisted
+    // head by the run-gate ';' arm at the end of this file, and for the
+    // wrapper head in scripts/tests/h14-git-ro-grant.test.mjs.)
+    // NAMED SABOTAGE: move the control-operator / redirection checks AFTER the
+    // allowlist match — the exit codes stay 2 (the head is off-allowlist now)
+    // while both assert.match arms go red. That is precisely the regression
+    // the exit-code assertions alone can no longer see.
     let r = bash(dir, 'git log && git push');
-    assert.equal(r.code, 2, 'chaining onto an allowed git verb is denied same as any other allowed prefix');
+    assert.equal(r.code, 2, 'chaining onto a git verb is denied');
     assert.match(r.stderr, /control operators/);
 
-    // redirection on an allowed read-only verb is still a write vector
+    // redirection is a write vector regardless of the head's allowlist status
     r = bash(dir, 'git log > history.txt');
-    assert.equal(r.code, 2, 'redirection on an allowed git verb is denied');
+    assert.equal(r.code, 2, 'redirection on a git verb is denied');
     assert.match(r.stderr, /redirection/);
 
-    // word-boundary lookalike must not match
+    // HONEST LABELLING: the two arms below no longer pin a word-boundary
+    // distinction — since the decision there is no allowed `git log` for
+    // `git logger` to be confused with, so both are now plain off-allowlist
+    // denials. They are RETAINED as regression pins against a future edit
+    // that reintroduces a broad "git " family allowance; neither is
+    // load-bearing for the removal itself, which the inverted arm above owns.
     r = bash(dir, 'git logger');
-    assert.equal(r.code, 2, 'a lookalike verb (git logger, not git log) must not match');
+    assert.equal(r.code, 2, 'a lookalike verb (git logger) must not match any allowlist entry');
 
-    // a git verb NOT on the read-only list stays denied even though it starts
-    // with "git " (e.g. git stash mutates the working tree)
+    // a mutating git verb stays denied even though it starts with "git "
     r = bash(dir, 'git stash');
-    assert.equal(r.code, 2, 'git stash is neither the declared toolchain nor a listed read-only verb');
+    assert.equal(r.code, 2, 'git stash is not the declared toolchain, and the read-only git verb category no longer exists');
   } finally {
     cleanup();
   }
@@ -251,8 +330,13 @@ test('H14 AC4 regression: chaining/control-operators, redirection, find, arbitra
     r = bash(dir, 'node -e "require(\'fs\').writeFileSync(\'x\',\'y\')"');
     assert.equal(r.code, 2, 'an arbitrary interpreter invocation (node -e) is not the declared "node --test" prefix and stays denied');
 
+    // Assertions unchanged; only the message is corrected. Since decision
+    // `git-ro-wrapper-fixed-recipes-no-caller-flags` there is no "read-only
+    // git verbs" category for `git status` to be measured against — it is an
+    // ordinary off-allowlist command, and the allowlist named in the denial no
+    // longer contains any direct git entry.
     r = bash(dir, 'git status');
-    assert.equal(r.code, 2, 'a command off both the toolchain allowlist and the new read-only git verbs stays denied');
+    assert.equal(r.code, 2, 'a command off the toolchain allowlist stays denied — and there is no read-only git verb category to fall back on either');
     assert.match(r.stderr, /not on the allowlist/);
     assert.match(r.stderr, /node --test/, 'the allowlist is still named in the denial');
   } finally {
