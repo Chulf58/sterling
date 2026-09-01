@@ -6849,7 +6849,7 @@ var SterlingStore = class _SterlingStore {
       orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
       overlapParams.push(...fileKeys);
     }
-    orderBy.push("r.updated_at DESC");
+    orderBy.push("r.updated_at DESC", "r.id DESC");
     const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
@@ -7672,7 +7672,7 @@ function guardPath(cwd, agentId) {
   return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 function lineageKey(record) {
   return record?.slug ?? record?.id;

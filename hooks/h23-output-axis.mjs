@@ -6855,7 +6855,7 @@ var SterlingStore = class _SterlingStore {
       orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
       overlapParams.push(...fileKeys);
     }
-    orderBy.push("r.updated_at DESC");
+    orderBy.push("r.updated_at DESC", "r.id DESC");
     const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
@@ -7671,7 +7671,7 @@ function pendingPath(cwd) {
   return join4(deliveryDir(cwd), "pending.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 function readGuard(path) {
   try {
@@ -7741,7 +7741,12 @@ function enqueuePending(path, entry) {
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 function joinPointerBlock({ header, lines = [], tail } = {}) {
-  return [header, ...lines.map((l) => l.line), ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
+  const body = [];
+  for (const l of lines) {
+    body.push(l.line);
+    if (Array.isArray(l.gapLines)) body.push(...l.gapLines);
+  }
+  return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
 var DELIVERY_RECIPE_VERSION = 2;
 function pointerVerifyRecipe({ header, entries, tail } = {}) {
@@ -7749,7 +7754,11 @@ function pointerVerifyRecipe({ header, entries, tail } = {}) {
     version: DELIVERY_RECIPE_VERSION,
     mode: "pointer_verify",
     header: typeof header === "string" ? header : "",
-    entries: (entries ?? []).map((e) => ({ id: e?.id, line: e?.line })),
+    entries: (entries ?? []).map((e) => {
+      const out = { id: e?.id, line: e?.line };
+      if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
+      return out;
+    }),
     tail: typeof tail === "string" ? tail : ""
   };
 }

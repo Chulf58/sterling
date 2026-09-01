@@ -6584,7 +6584,7 @@ var SterlingStore = class _SterlingStore {
       orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
       overlapParams.push(...fileKeys);
     }
-    orderBy.push("r.updated_at DESC");
+    orderBy.push("r.updated_at DESC", "r.id DESC");
     const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
@@ -7383,7 +7383,19 @@ function pendingPath(cwd) {
   return join3(deliveryDir(cwd), "pending.json");
 }
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+}
+function lineageKey(record) {
+  return record?.slug ?? record?.id;
+}
+function isGapDelivered(guard, record) {
+  return guard.gap_articles.includes(lineageKey(record));
+}
+function markGapDelivered(guard, records) {
+  for (const r of records) {
+    const key = lineageKey(r);
+    if (!guard.gap_articles.includes(key)) guard.gap_articles.push(key);
+  }
 }
 function readGuard(path) {
   try {
@@ -7458,8 +7470,82 @@ function enqueuePending(path, entry) {
     renameSync(tmp, path);
   });
 }
+function clip(text, cap) {
+  const s2 = String(text ?? "");
+  let out = "";
+  let count = 0;
+  for (const ch of s2) {
+    if (count === cap) return `${out}\u2026`;
+    out += ch;
+    count++;
+  }
+  return out;
+}
+function normalizeWs(text) {
+  return String(text ?? "").replace(/\s+/g, " ").trim();
+}
+var GAP_GLOBAL_BUDGET = 3;
 var GAP_EVIDENCE_CHAR_CAP = 400;
+var GAP_KIND_RANK = { mutation_survivor: 0, other: 1 };
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
+var SENTENCE_END_RE = /^.*?[.!?]["'”’)\]]*(?=\s|$)/;
+function firstSentence(text) {
+  const raw = String(text ?? "");
+  const bounded = raw.length > FIRST_SENTENCE_SCAN_CAP ? raw.slice(0, FIRST_SENTENCE_SCAN_CAP) : raw;
+  const s2 = normalizeWs(bounded);
+  const m = SENTENCE_END_RE.exec(s2);
+  return m ? m[0] : s2;
+}
+var GAP_SITE_CLIP = 120;
+function renderGapLine(gap) {
+  const site = clip(normalizeWs(gap.site), GAP_SITE_CLIP);
+  const sentence = clip(firstSentence(gap.evidence), GAP_EVIDENCE_CHAR_CAP);
+  const prefix = gap.kind === "mutation_survivor" ? "WRONG-ON-PURPOSE test survivor: " : "";
+  return `  - ${site}: ${prefix}${sentence}`;
+}
+function budgetKnownGaps(owners, budget = GAP_GLOBAL_BUDGET) {
+  const totals = /* @__PURE__ */ new Map();
+  const candidates = [];
+  owners.forEach((owner, ownerIndex) => {
+    const raw = Array.isArray(owner.known_gaps) ? owner.known_gaps : [];
+    if (!raw.length) return;
+    totals.set(owner.id, raw.length);
+    raw.forEach((gap, gapIndex) => candidates.push({ owner, gap, ownerIndex, gapIndex }));
+  });
+  if (!candidates.length) return /* @__PURE__ */ new Map();
+  const ranked = [...candidates].sort((a, b) => {
+    const rankDiff = (GAP_KIND_RANK[a.gap.kind] ?? 1) - (GAP_KIND_RANK[b.gap.kind] ?? 1);
+    if (rankDiff !== 0) return rankDiff;
+    if (a.ownerIndex !== b.ownerIndex) return a.ownerIndex - b.ownerIndex;
+    return a.gapIndex - b.gapIndex;
+  });
+  const byOwner = /* @__PURE__ */ new Map();
+  for (const owner of owners) {
+    if (totals.has(owner.id)) byOwner.set(owner.id, { shown: [], dropped: 0, total: totals.get(owner.id) });
+  }
+  ranked.forEach((c, i) => {
+    const info = byOwner.get(c.owner.id);
+    if (i < budget) info.shown.push(c.gap);
+    else info.dropped += 1;
+  });
+  const totalDropped = [...byOwner.values()].reduce((sum, info) => sum + info.dropped, 0);
+  for (const info of byOwner.values()) info.totalDropped = totalDropped;
+  return byOwner;
+}
+function renderKnownGapsLines(article, info) {
+  if (!info) return [];
+  const lines = ["KNOWN GAPS recorded for this territory:"];
+  for (const gap of info.shown) lines.push(renderGapLine(gap));
+  if (info.dropped > 0) {
+    const totalNote = info.totalDropped > info.dropped ? `; ${info.totalDropped} total omitted across this delivery` : "";
+    lines.push(
+      `  \u2026 ${info.shown.length} of ${info.total} known gap(s) shown for this article (global budget ${GAP_GLOBAL_BUDGET} per delivery); ${info.dropped} not shown${totalNote} \u2014 knowledge_get ${article.id} for the full set`
+    );
+  } else {
+    lines.push(`  (full record: knowledge_get ${article.id})`);
+  }
+  return lines;
+}
 var BASH_POINTER_PATH_CAP = 8;
 var COMMAND_PATH_SKIP = /* @__PURE__ */ new Set(["--", "-", ".", "./", "..", "../"]);
 function extractCommandPathCandidates(command2) {
@@ -7482,12 +7568,13 @@ function extractCommandPathCandidates(command2) {
   }
   return out;
 }
-function bashPointerBlock(entries) {
+function bashPointerBlock(entries, { gapsByOwner } = {}) {
   const header = [
     "STERLING KNOWLEDGE POINTERS (H19) \u2014 governed paths named in a Bash command.",
     "This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here."
   ].join("\n");
   const lines = [];
+  const gapAttached = /* @__PURE__ */ new Set();
   for (const e of entries) {
     for (const h of e.hazards) {
       const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : h.title ?? h.slug ?? h.id;
@@ -7500,16 +7587,26 @@ function bashPointerBlock(entries) {
       const kind = o.type === "reference_material" ? "reference" : "article";
       const label = o.title && o.slug ? `${o.title} [${o.slug}]` : o.slug ?? o.title ?? o.id;
       const state = o.state ? ` (${o.state})` : "";
-      lines.push({
-        id: o.id,
-        line: `  \u2022 ${e.rel} \u2014 ${kind} '${label}'${state} \xB7 knowledge_get ${o.id}${statusAnnotation(o)}`
-      });
+      const line = `  \u2022 ${e.rel} \u2014 ${kind} '${label}'${state} \xB7 knowledge_get ${o.id}${statusAnnotation(o)}`;
+      const entry = { id: o.id, line };
+      const gapInfo = gapsByOwner?.get(o.id);
+      if (gapInfo && !gapAttached.has(o.id)) {
+        gapAttached.add(o.id);
+        const gapLines = renderKnownGapsLines(o, gapInfo);
+        if (gapLines.length) entry.gapLines = gapLines;
+      }
+      lines.push(entry);
     }
   }
   return { header, lines };
 }
 function joinPointerBlock({ header, lines = [], tail } = {}) {
-  return [header, ...lines.map((l) => l.line), ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
+  const body = [];
+  for (const l of lines) {
+    body.push(l.line);
+    if (Array.isArray(l.gapLines)) body.push(...l.gapLines);
+  }
+  return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
 var DELIVERY_RECIPE_VERSION = 2;
 function pointerVerifyRecipe({ header, entries, tail } = {}) {
@@ -7517,7 +7614,11 @@ function pointerVerifyRecipe({ header, entries, tail } = {}) {
     version: DELIVERY_RECIPE_VERSION,
     mode: "pointer_verify",
     header: typeof header === "string" ? header : "",
-    entries: (entries ?? []).map((e) => ({ id: e?.id, line: e?.line })),
+    entries: (entries ?? []).map((e) => {
+      const out = { id: e?.id, line: e?.line };
+      if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
+      return out;
+    }),
     tail: typeof tail === "string" ? tail : ""
   };
 }
@@ -7555,7 +7656,19 @@ try {
     delivered.push(rel);
   }
   if (!entries.length) allow();
-  const block = bashPointerBlock(entries);
+  const gapOwners = [];
+  const seenGapOwnerIds = /* @__PURE__ */ new Set();
+  for (const e of entries) {
+    for (const o of e.owners) {
+      if (!Array.isArray(o.known_gaps) || !o.known_gaps.length) continue;
+      if (seenGapOwnerIds.has(o.id)) continue;
+      seenGapOwnerIds.add(o.id);
+      if (isGapDelivered(guard, o)) continue;
+      gapOwners.push(o);
+    }
+  }
+  const gapsByOwner = budgetKnownGaps(gapOwners);
+  const block = bashPointerBlock(entries, { gapsByOwner });
   enqueuePending(pendingPath(input.cwd), {
     kind: "bash_pointers",
     rel: delivered.join(" "),
@@ -7564,6 +7677,8 @@ try {
     agent_id: "conductor"
   });
   guard.pointer_files.push(...delivered);
+  const deliveredGapOwners = gapOwners.filter((o) => (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
+  if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {

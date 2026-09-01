@@ -4108,6 +4108,20 @@ function matchesGlob(path, glob) {
   }
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
+var normSep = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+function foldPairForCompare(a, b) {
+  const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
+  return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
+}
+function toRepoRelative(absolutePath, repoRoot) {
+  const abs = normSep(absolutePath);
+  const root = normSep(repoRoot);
+  const [a, r] = foldPairForCompare(abs, root);
+  if (!(a === r || a.startsWith(r + "/"))) {
+    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
+  }
+  return normalizeRepoPath(abs.slice(root.length + 1));
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
@@ -5214,6 +5228,16 @@ function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
+function repoRel(toolPath, cwd) {
+  if (!toolPath) return null;
+  const fwd = String(toolPath).replace(/\\/g, "/");
+  try {
+    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
+    return normalizeRepoPath(fwd);
+  } catch {
+    return null;
+  }
+}
 
 // scripts/hooks/lib/advisory-counter.mjs
 import { appendFileSync, existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2 } from "node:fs";
@@ -5361,9 +5385,41 @@ function isReviewerClass(type) {
   return !!type && type.startsWith("reviewer-");
 }
 
+// scripts/hooks/lib/ledger.mjs
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join as join3, dirname as dirname2 } from "node:path";
+function ledgerPath(cwd, runId, agentId) {
+  if (runId && agentId) return join3(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
+  if (agentId) return join3(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
+  return join3(cwd, ".sterling", "transient", "conductor-reads.json");
+}
+function readLedger(path) {
+  if (!existsSync3(path)) return [];
+  const raw = readFileSync3(path, "utf8");
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    try {
+      const salvaged = JSON.parse(raw.slice(0, raw.indexOf("]") + 1));
+      return Array.isArray(salvaged) ? salvaged : [];
+    } catch {
+      return [];
+    }
+  }
+}
+function fileHash(absPath) {
+  try {
+    return createHash("sha256").update(readFileSync3(absPath)).digest("hex");
+  } catch {
+    return void 0;
+  }
+}
+
 // scripts/hooks/h25-dispatch-capability.mjs
-import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, statSync } from "node:fs";
+import { join as join4 } from "node:path";
 var BUILTIN_AGENT_TYPES = /* @__PURE__ */ new Set([
   "general-purpose",
   "claude",
@@ -5416,7 +5472,8 @@ var MCP_SHORT_NAMES = [
   "run_escalate",
   "capture_pending",
   "concept_designed",
-  "no_capture"
+  "no_capture",
+  "knowledge_render"
 ];
 var KNOWN_TOOLS = [...PLATFORM_TOOLS, ...MCP_SHORT_NAMES];
 var MCP_SET = new Set(MCP_SHORT_NAMES);
@@ -5445,19 +5502,115 @@ function parseToolsLine(content) {
   if (!line) return void 0;
   return line[1].trim();
 }
+var SHELL_TOOLS = /* @__PURE__ */ new Set(["bash", "powershell"]);
+function hasShellCapability(grantList) {
+  return grantList.some((g) => SHELL_TOOLS.has(String(g).toLowerCase()));
+}
+var STRONG_SHAPE_STOPWORDS = [
+  "the",
+  "a",
+  "an",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "them",
+  "some",
+  "any",
+  "all",
+  "your",
+  "my",
+  "our",
+  "their",
+  "through",
+  "again",
+  "once",
+  "more",
+  "here",
+  "there",
+  "now",
+  "later",
+  "first",
+  "next",
+  "before",
+  "after",
+  "via",
+  "using",
+  "with",
+  "without",
+  "over",
+  "away",
+  "so"
+];
+var RUN_TOKEN_EXCLUDED_ALT = [...STRONG_SHAPE_STOPWORDS, ...MCP_SHORT_NAMES].map(escapeRe2).join("|");
+var RUN_TOKEN_RE = new RegExp(
+  `\\b(?:run|execute)\\s+\`?(?!(?:mcp__\\w+__)?(?:${RUN_TOKEN_EXCLUDED_ALT})\\b)([A-Za-z][\\w.-]*)\`?`,
+  "gi"
+);
+var NPM_RUN_RE = /\bnpm\s+run\b/gi;
+var NODE_PATH_RE = /\bnode\b\s+(?:--[\w-]+\s+)*(?:[\w.-]*\/[\w.-]+|[\w-]+\.(?:mjs|cjs|js|ts|py))\b/gi;
+var FENCE_RE = /```[\w-]*\n([\s\S]*?)```/g;
+var INLINE_BACKTICK_RE = /`([^`\n]+)`/g;
+var SHELL_ARG_OR_OP_RE = /[\s|&;<>$(){}]/;
+function firstToken(s) {
+  const m = String(s ?? "").trim().match(/^\w+/);
+  if (!m) return "";
+  return m[0].toLowerCase().replace(/^mcp__\w+?__/, "");
+}
+function isCommandShapedSpan(content) {
+  return SHELL_ARG_OR_OP_RE.test(content) && !MCP_SET.has(firstToken(content));
+}
+function locateClause(clauses, text, absIndex) {
+  let cursor = 0;
+  for (const c of clauses) {
+    const idx = text.indexOf(c.text, cursor);
+    if (idx === -1) continue;
+    if (absIndex >= idx && absIndex < idx + c.text.length) {
+      return { clauseText: c.text, localIndex: absIndex - idx };
+    }
+    cursor = idx + c.text.length;
+  }
+  return null;
+}
+function hasUnsuppressedFenceOrBacktick(text) {
+  const clauses = scanClauses(text);
+  FENCE_RE.lastIndex = 0;
+  let fm;
+  while (fm = FENCE_RE.exec(text)) {
+    if (!isCommandShapedSpan(fm[1])) continue;
+    const loc = locateClause(clauses, text, fm.index);
+    if (!loc || !isSuppressedContext(loc.clauseText, loc.localIndex, false)) return true;
+  }
+  const stripped = text.replace(FENCE_RE, " ");
+  const strippedClauses = scanClauses(stripped);
+  INLINE_BACKTICK_RE.lastIndex = 0;
+  let im;
+  while (im = INLINE_BACKTICK_RE.exec(stripped)) {
+    if (!isCommandShapedSpan(im[1])) continue;
+    const loc = locateClause(strippedClauses, stripped, im.index);
+    if (!loc || !isSuppressedContext(loc.clauseText, loc.localIndex, false)) return true;
+  }
+  return false;
+}
+function hasCommandShapeMention(text) {
+  const t = String(text ?? "");
+  if (!t) return false;
+  if (hasUnsuppressedMatch(t, RUN_TOKEN_RE, { checkSubjectVerb: false })) return true;
+  if (hasUnsuppressedMatch(t, NPM_RUN_RE, { checkSubjectVerb: false })) return true;
+  if (hasUnsuppressedMatch(t, NODE_PATH_RE, { checkSubjectVerb: false })) return true;
+  return hasUnsuppressedFenceOrBacktick(t);
+}
+function commandShapeAdvisory(prompt) {
+  if (!hasCommandShapeMention(prompt)) return null;
+  return `H25 COMMAND-SHAPE ADVISORY \u2014 the brief instructs running commands but the agent holds no shell execution tool (no Bash, no PowerShell in its installed grant). This is a SHAPE match \u2014 run/execute <token>, npm run, node <path>, or fenced/backticked command text \u2014 independent of the tool-NAME scan above, so it catches a brief that names a concrete command (e.g. a linter/formatter) without ever naming a platform tool. Warn-only, never a block: re-target the dispatch to an agent holding shell access, re-scope the brief, or confirm the command is not actually required.`;
+}
 var TEST_NOUN_RE_SRC = String.raw`(?:\btests\b|\btest\s+(?:cases?|files?|suites?)\b|\ba\s+(?:failing\s+)?test\b)`;
 var VERB_TRIGGER_RE = new RegExp(String.raw`\b(?:write|author|add|create)\b[^.!?\n]{0,40}` + TEST_NOUN_RE_SRC, "i");
 var TDD_TRIGGER_RE = /\bTDD\b[^.!?\n]{0,20}\b(?:start(?:ing)?|begin(?:ning)?|first|with\s+the\s+tests?)\b/i;
-var NEGATION_RE = /\b(?:do\s*not|don't|don’t|never)\b[^.!?\n]{0,40}\btests?\b/i;
-var LEAVE_ALONE_RE = /\bleave\b[^.!?\n]{0,40}\btests?\b[^.!?\n]{0,20}\balone\b/i;
-var CLAUSE_SPLIT_RE = /[.!?;\n–—]/;
 function hasVerbOrTddTrigger(text) {
-  const clauses = String(text ?? "").split(CLAUSE_SPLIT_RE);
-  for (const clause of clauses) {
-    if (NEGATION_RE.test(clause) || LEAVE_ALONE_RE.test(clause)) continue;
-    if (VERB_TRIGGER_RE.test(clause) || TDD_TRIGGER_RE.test(clause)) return true;
-  }
-  return false;
+  const t = String(text ?? "");
+  return hasUnsuppressedMatch(t, VERB_TRIGGER_RE, { checkSubjectVerb: false }) || hasUnsuppressedMatch(t, TDD_TRIGGER_RE, { checkSubjectVerb: false });
 }
 function extractPathCandidates2(text) {
   const matches = String(text ?? "").match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.[A-Za-z0-9]+/g) ?? [];
@@ -5485,6 +5638,57 @@ function testAuthoringAdvisory(subagentType, prompt, cwd) {
   if (!hasVerbOrTddTrigger(text) && !hasPathTrigger(text, cwd)) return null;
   return `H25 TEST-AUTHORING ADVISORY \u2014 this is the warn-only doer/checker role lint: you are about to dispatch '${subagentType}', and the brief appears to instruct test authoring, inferred from verbs/paths in the prompt text \u2014 not a claim that a test edit has occurred. Test authoring belongs to the test-writer role (doer/checker separation); if this dispatch proceeds and it edits a test path, H5 will deny that edit mid-work. This is a warning, not a denial \u2014 re-target the dispatch to test-writer, or state explicitly why this agent needs to touch tests.`;
 }
+var CITATION_RE = new RegExp(`(${PATH_CANDIDATE_RE.source}):(\\d+)(?:-\\d+)?`, "g");
+function extractCitedPaths(text) {
+  const found = String(text ?? "").match(CITATION_RE) ?? [];
+  return [...new Set(found.map((m) => m.replace(/:\d+(?:-\d+)?$/, "")))];
+}
+function latestHashedEntry(entries, relPath) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e && e.path === relPath && e.sha256) return e;
+  }
+  return null;
+}
+function citationStalenessAdvisory(prompt, cwd) {
+  try {
+    const text = String(prompt ?? "");
+    if (!text || !cwd) return null;
+    const cited = extractCitedPaths(text);
+    if (!cited.length) return null;
+    let entries;
+    try {
+      entries = readLedger(ledgerPath(cwd));
+    } catch {
+      return null;
+    }
+    if (!entries.length) return null;
+    const stale = [];
+    for (const citedPath of cited) {
+      const rel = repoRel(citedPath, cwd);
+      if (!rel) continue;
+      const abs = join4(cwd, rel);
+      let stat;
+      try {
+        stat = statSync(abs);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      const entry = latestHashedEntry(entries, rel);
+      if (!entry) continue;
+      const currentHash = fileHash(abs);
+      if (currentHash && currentHash !== entry.sha256) stale.push(rel);
+    }
+    if (!stale.length) return null;
+    const lines = stale.map((p) => `  - ${p}`).join("\n");
+    return `H25 CITATION-STALENESS ADVISORY \u2014 file changed since your last Read; remeasure these line citations:
+${lines}
+This does not claim the cited lines are wrong \u2014 only that the file's bytes moved since your last Read of it.`;
+  } catch {
+    return null;
+  }
+}
 var input;
 try {
   input = readStdin();
@@ -5503,15 +5707,19 @@ try {
   let finish = function(capabilityMessage) {
     const parts = [];
     if (capabilityMessage) parts.push(capabilityMessage);
+    if (commandShapeMsg) parts.push(commandShapeMsg);
     if (taAdvisory) parts.push(taAdvisory);
+    if (citeAdvisory) parts.push(citeAdvisory);
     if (parts.length) emit(parts.join("\n\n"));
     allow();
   };
   const subagentType = input.tool_input?.subagent_type;
   if (!subagentType) allow();
   const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
-  const agentPath = join3(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
-  if (!existsSync3(agentPath)) {
+  const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
+  let commandShapeMsg;
+  const agentPath = join4(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
+  if (!existsSync4(agentPath)) {
     if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
     finish(
       `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
@@ -5519,7 +5727,7 @@ try {
   }
   let content;
   try {
-    content = readFileSync3(agentPath, "utf8");
+    content = readFileSync4(agentPath, "utf8");
   } catch (e) {
     warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
   }
@@ -5527,6 +5735,7 @@ try {
   if (toolsRaw === void 0) finish();
   const grantList = toolsRaw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((s) => s.trim()).filter(Boolean);
   if (!grantList.length) finish();
+  if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input.tool_input?.prompt);
   const mentioned = findMentionedTools(input.tool_input?.prompt);
   if (!mentioned.length) finish();
   const missing = mentioned.filter((tool) => !isGranted(tool, grantList));

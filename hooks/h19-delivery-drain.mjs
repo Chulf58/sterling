@@ -6570,7 +6570,7 @@ var SterlingStore = class _SterlingStore {
       orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
       overlapParams.push(...fileKeys);
     }
-    orderBy.push("r.updated_at DESC");
+    orderBy.push("r.updated_at DESC", "r.id DESC");
     const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
@@ -7734,6 +7734,7 @@ function validatePointerVerifyRecipe(r) {
     if (!e || typeof e !== "object" || Array.isArray(e)) return "an entries element is not an object";
     if (!isStr(e.id) || !e.id) return "an entries element carries no string id";
     if (!isStr(e.line)) return "an entries element carries no string line";
+    if (e.gap_lines !== void 0 && !isStrArray(e.gap_lines)) return "an entries element carries a gap_lines that is not an array of strings";
   }
   return null;
 }
@@ -7827,6 +7828,9 @@ function rebuildPointerPayload(store, recipe) {
     }
     out.push(flattenToOneLine(entry.line));
     if (statusAnnotation(served)) out.push(staleServedDisclosure(served));
+    if (Array.isArray(entry.gap_lines)) {
+      for (const gl of entry.gap_lines) out.push(flattenToOneLine(gl));
+    }
   }
   if (recipe.tail) out.push(recipe.tail);
   return out.join("\n");

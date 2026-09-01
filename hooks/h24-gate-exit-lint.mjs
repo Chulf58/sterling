@@ -133,9 +133,9 @@ var util;
     throw new Error();
   }
   util2.assertNever = assertNever;
-  util2.arrayToEnum = (items) => {
+  util2.arrayToEnum = (items2) => {
     const obj = {};
-    for (const item of items) {
+    for (const item of items2) {
       obj[item] = item;
     }
     return obj;
@@ -3036,18 +3036,18 @@ var ZodTuple = class _ZodTuple extends ZodType {
       });
       status.dirty();
     }
-    const items = [...ctx.data].map((item, itemIndex) => {
+    const items2 = [...ctx.data].map((item, itemIndex) => {
       const schema = this._def.items[itemIndex] || this._def.rest;
       if (!schema)
         return null;
       return schema._parse(new ParseInputLazyPath(ctx, item, ctx.path, itemIndex));
     }).filter((x) => !!x);
     if (ctx.common.async) {
-      return Promise.all(items).then((results) => {
+      return Promise.all(items2).then((results) => {
         return ParseStatus.mergeArray(status, results);
       });
     } else {
-      return ParseStatus.mergeArray(status, items);
+      return ParseStatus.mergeArray(status, items2);
     }
   }
   get items() {
@@ -3351,10 +3351,10 @@ var ZodFunction = class _ZodFunction extends ZodType {
   returnType() {
     return this._def.returns;
   }
-  args(...items) {
+  args(...items2) {
     return new _ZodFunction({
       ...this._def,
-      args: ZodTuple.create(items).rest(ZodUnknown.create())
+      args: ZodTuple.create(items2).rest(ZodUnknown.create())
     });
   }
   returns(returnType) {
@@ -5224,7 +5224,7 @@ function matchGate(segment) {
   return null;
 }
 function scanTopLevel(cmd) {
-  const items = [];
+  const items2 = [];
   let current = "";
   let inSingle = false;
   let inDouble = false;
@@ -5266,34 +5266,35 @@ function scanTopLevel(cmd) {
       continue;
     }
     if (c === "&" && cmd[i + 1] === "&") {
-      items.push({ segment: current, sep: "&&" });
+      items2.push({ segment: current, sep: "&&" });
       current = "";
       i++;
       continue;
     }
     if (c === "|" && cmd[i + 1] === "|") {
-      items.push({ segment: current, sep: "||" });
+      items2.push({ segment: current, sep: "||" });
       current = "";
       i++;
       continue;
     }
     if (c === ";") {
-      items.push({ segment: current, sep: ";" });
+      items2.push({ segment: current, sep: ";" });
       current = "";
       continue;
     }
     if (c === "|") {
-      items.push({ segment: current, sep: "|" });
+      items2.push({ segment: current, sep: "|" });
       current = "";
       continue;
     }
     current += c;
   }
-  items.push({ segment: current, sep: null });
-  return items;
+  items2.push({ segment: current, sep: null });
+  return items2;
 }
 var MASKING = /* @__PURE__ */ new Set([";", "||"]);
-for (const { segment, sep } of scanTopLevel(command)) {
+var items = scanTopLevel(command);
+for (const { segment, sep } of items) {
   if (!sep || !MASKING.has(sep)) continue;
   const trimmed = segment.trim();
   if (!trimmed) continue;
@@ -5303,6 +5304,33 @@ for (const { segment, sep } of scanTopLevel(command)) {
     `H24: gate invocation masked \u2014 '${gate}' is followed at top level by '${sep}', which swallows the gate's real exit code.
 Command: ${command}
 Never append ';' or '||' after a gate \u2014 a red suite must never read green. Run the gate as the last command, or chain with '&&' \u2014 a red exit propagates. Decision 6cdd1b02-4d4f-4d7d-b9cd-2887265e7f90.`
+  );
+}
+var SET_PIPEFAIL_RE = /^set\b.*\bpipefail\b/;
+var pipeWarnings = [];
+var pipefailEstablished = false;
+for (let i = 0; i < items.length; i++) {
+  const { segment, sep } = items[i];
+  const trimmed = segment.trim();
+  if (SET_PIPEFAIL_RE.test(trimmed)) pipefailEstablished = true;
+  if (sep !== "|" || pipefailEstablished) continue;
+  const gate = matchGate(trimmed);
+  if (!gate) continue;
+  const target = (items[i + 1]?.segment ?? "").trim() || "(unknown)";
+  pipeWarnings.push({ gate, target });
+}
+if (pipeWarnings.length) {
+  const lines = pipeWarnings.map(({ gate, target }) => `  - '${gate}' piped into '${target}'`).join("\n");
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: input.hook_event_name,
+        additionalContext: `H24 ADVISORY (gate piped \u2014 distinct from the DENY rule above, never a denial) \u2014 a declared gate invocation is piped into another command; a pipeline's exit status is the LAST command's, so the gate's failure can be silently swallowed:
+${lines}
+Command: ${command}
+This is a WARNING, not a denial \u2014 piping to trim output ('| tail', '| grep FAILED') is common and legitimate. Two safe rewrites: prefix the command with 'set -o pipefail' so the pipeline's exit reflects the gate's real status, or redirect to a file and inspect it separately ('<gate> > out.log; grep ... out.log'). Board 07deffab, Codex thread 01a05bbe.`
+      }
+    })
   );
 }
 allow();
