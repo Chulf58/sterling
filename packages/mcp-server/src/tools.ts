@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { ZodError } from 'zod';
+import { ZodError, type ZodIssue } from 'zod';
 import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
@@ -1849,7 +1849,7 @@ export class SterlingTools {
   private renderValidationFailure(err: ZodError, type: string, op: string): Error {
     const described = schemaFor(type);
     const fieldsByName = new Map((described?.fields ?? []).map((f) => [f.name, f]));
-    const parts = err.issues.map((issue) => {
+    const renderIssue = (issue: ZodIssue): string => {
       const path = SterlingTools.renderIssuePath(issue.path as (string | number)[]);
       if (issue.code === 'invalid_enum_value') {
         const topField = typeof issue.path[0] === 'string' ? fieldsByName.get(issue.path[0] as string) : undefined;
@@ -1873,8 +1873,27 @@ export class SterlingTools {
         }
         return text;
       }
+      // Board a9280db7 (decision c48380bf): current_ac/live_test_refs are now a
+      // union (real content OR the structured not_applicable exemption), so a
+      // bad element inside the array branch surfaces as a single top-level
+      // 'invalid_union' issue instead of a direct 'invalid_type' — without
+      // this, the caller-facing message collapsed to a bare "Invalid input",
+      // losing the per-element path/received/expected detail every other
+      // array-of-objects field still reports. Drill into whichever union
+      // branch produced the DEEPEST (most specific) sub-issue — that is the
+      // branch that actually explains the failure, not the sibling branch
+      // that never matched the shape at all — and render THAT issue with the
+      // same rules, recursively.
+      if (issue.code === 'invalid_union') {
+        const subIssues = (issue.unionErrors ?? []).flatMap((sub) => sub.issues);
+        if (subIssues.length) {
+          const deepest = subIssues.reduce((a, b) => (b.path.length > a.path.length ? b : a));
+          return renderIssue(deepest);
+        }
+      }
       return `${path}: ${issue.message}`;
-    });
+    };
+    const parts = err.issues.map(renderIssue);
     return new Error(`${op}: '${type}' failed validation — ${parts.join('; ')}`);
   }
 
@@ -4920,10 +4939,26 @@ export class SterlingTools {
       state: string;
       history: { date: string; event: string; target_id?: string }[];
       files: { path: string; role: string; unverified?: boolean }[];
-      current_ac: { ac_id: string; text: string; verifiable_at: string }[];
-      live_test_refs: { ac_id: string; test_paths: string[] }[];
+      current_ac: { ac_id: string; text: string; verifiable_at: string }[] | { not_applicable: { reason: string; ruling_record_id?: string } };
+      live_test_refs: { ac_id: string; test_paths: string[] }[] | { not_applicable: { reason: string; ruling_record_id?: string } };
       dependencies?: { relies_on: string[]; relied_by: string[] };
     };
+    // Board a9280db7 (decision c48380bf): current_ac/live_test_refs may now be
+    // the structured not_applicable exemption object on a probe|tool article,
+    // not an array — every read below assumed array shape unconditionally
+    // (.map/.filter), which would THROW rather than refuse cleanly on such a
+    // parent. Normalize FOR THE OWNERSHIP/MOVE bookkeeping only (an
+    // exemption-shaped parent simply owns no ac_id entries to move, so
+    // move_ac_ids validation below refuses it by its EXISTING "not owned by
+    // parent" message, never a crash) — the PARENT UPDATE below does NOT use
+    // these arrays: it preserves the exemption object VERBATIM when present,
+    // so a file-only split of a probe/tool parent keeps its exemption and
+    // succeeds, rather than being silently flattened to an empty array (which
+    // the new schema gate would then reject outright on kind probe/tool).
+    const currentAcIsArray = Array.isArray(parentRec.current_ac);
+    const liveRefsIsArray = Array.isArray(parentRec.live_test_refs);
+    const parentAcArray = currentAcIsArray ? (parentRec.current_ac as { ac_id: string; text: string; verifiable_at: string }[]) : [];
+    const parentRefsArray = liveRefsIsArray ? (parentRec.live_test_refs as { ac_id: string; test_paths: string[] }[]) : [];
 
     // Child slugs pairwise distinct within this call, and none colliding with
     // an existing feature_article slug — the same two-records-one-slug refusal
@@ -4946,7 +4981,7 @@ export class SterlingTools {
     // of it before any write (P5): a call mixing a valid and an invalid child
     // must refuse the WHOLE call, never create the valid one first.
     const parentPaths = new Set(parentRec.files.map((f) => f.path));
-    const parentAcIds = new Set(parentRec.current_ac.map((a) => a.ac_id));
+    const parentAcIds = new Set(parentAcArray.map((a) => a.ac_id));
     const claimedPaths = new Map<string, string>();
     const claimedAcIds = new Map<string, string>();
     for (const child of children) {
@@ -5039,8 +5074,8 @@ export class SterlingTools {
     this.store.withTransaction(() => {
       for (const child of children) {
         const movedFiles = parentRec.files.filter((f) => claimedPaths.get(f.path) === child.slug);
-        const movedAc = parentRec.current_ac.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
-        const movedRefs = parentRec.live_test_refs.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
+        const movedAc = parentAcArray.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
+        const movedRefs = parentRefsArray.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
         const created = this.knowledgeCreate('feature_article', {
           slug: child.slug,
           title: child.title,
@@ -5061,8 +5096,14 @@ export class SterlingTools {
       }
 
       const remainingFiles = parentRec.files.filter((f) => !claimedPaths.has(f.path));
-      const remainingAc = parentRec.current_ac.filter((a) => !claimedAcIds.has(a.ac_id));
-      const remainingRefs = parentRec.live_test_refs.filter((r) => !claimedAcIds.has(r.ac_id));
+      // An exemption-shaped field is preserved VERBATIM (no ac_id was ever
+      // claimable from it, so filtering would be a no-op anyway) rather than
+      // flattened to []: current_ac/live_test_refs on kind probe|tool must
+      // never be re-written to an empty array by this path, or the new
+      // article_kind schema gate (board a9280db7) would reject the parent
+      // update outright on a file-only split.
+      const remainingAc = currentAcIsArray ? parentAcArray.filter((a) => !claimedAcIds.has(a.ac_id)) : parentRec.current_ac;
+      const remainingRefs = liveRefsIsArray ? parentRefsArray.filter((r) => !claimedAcIds.has(r.ac_id)) : parentRec.live_test_refs;
       const splitEvent = { date: ts, event: `split off ${childSlugs}${reason ? ` — ${reason}` : ''}` };
       parentResult = this.knowledgeUpdate(parentRec.id, {
         what_it_does: parent_what_it_does,

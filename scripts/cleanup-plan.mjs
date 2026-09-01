@@ -22,7 +22,11 @@ try {
         slug: a.slug,
         state: a.state,
         files: a.files.map((f) => f.path),
-        traced_tests: a.live_test_refs.flatMap((r) => r.test_paths),
+        // Board a9280db7 (decision c48380bf): on a probe|tool article,
+        // live_test_refs can be the structured not_applicable exemption
+        // object instead of an array — normalize to [] so this reports no
+        // traced tests rather than throwing on .flatMap.
+        traced_tests: Array.isArray(a.live_test_refs) ? a.live_test_refs.flatMap((r) => r.test_paths) : [],
         active_dependents,
         deletable: active_dependents.length === 0,
       };

@@ -40,7 +40,12 @@ interface FeatureArticleRec {
   files: { path: string }[];
   dependencies: { relies_on: string[] };
   version: number;
-  current_ac?: { ac_id: string; text: string; untestable_because?: { reason: string; blocking_record_id: string } }[];
+  // Board a9280db7 (decision c48380bf): on a probe|tool article this can now
+  // be the structured not_applicable exemption object instead of an array —
+  // widened here so the Array.isArray guard below is not fighting the type.
+  current_ac?:
+    | { ac_id: string; text: string; untestable_because?: { reason: string; blocking_record_id: string } }[]
+    | { not_applicable: { reason: string; ruling_record_id?: string } };
 }
 
 interface DecisionRec {
@@ -145,7 +150,8 @@ function baseCard(rec: unknown): Card {
       // byte-identical to before (no section at all) — only MARKED ACs ever
       // appear here, never the full current_ac list, so an ordinary article's
       // body is unaffected by this addition (review finding, S4b fixer pass).
-      const markedAcLines = (a.current_ac ?? [])
+      const acArray = Array.isArray(a.current_ac) ? a.current_ac : [];
+      const markedAcLines = acArray
         .filter((ac) => ac.untestable_because)
         .map((ac) => {
           const u = ac.untestable_because!;
